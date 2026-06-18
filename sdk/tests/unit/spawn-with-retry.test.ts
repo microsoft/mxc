@@ -28,6 +28,8 @@ function attempt(
   index: number,
   exitCode: number,
   denials: DeniedResource[] = [],
+  captureDenialsActive: boolean = true,
+  childProcessesObserved: number = 0,
 ): RetryAttemptResult {
   return {
     index,
@@ -39,6 +41,8 @@ function attempt(
       exitCode,
       totalDenials: denials.length,
       deniedResourcesTruncated: false,
+      captureDenialsActive,
+      childProcessesObserved,
     },
   };
 }
@@ -281,5 +285,41 @@ describe('driveRetryLoop', () => {
     );
     assert.strictEqual(result.stopReason, 'success');
     assert.strictEqual(calls, 1);
+  });
+
+  it('returns capture-inactive when the native side reports the collector did not attach', async () => {
+    let onDeniedFired = 0;
+    const result = await driveRetryLoop(
+      baseOptions({
+        onDenied: () => {
+          onDeniedFired += 1;
+          return { approve: [] };
+        },
+      }),
+      // Workload exits non-zero, the capture never activated, no
+      // denials surface. Without the capture-inactive check this
+      // would look identical to no-denials-no-retry and the caller
+      // would have no idea the feature wasn't working.
+      async (_p, i) => attempt(i, 1, [], /* captureDenialsActive */ false),
+    );
+    assert.strictEqual(result.stopReason, 'capture-inactive');
+    assert.strictEqual(result.attempts.length, 1, 'no retry when capture is inactive');
+    assert.strictEqual(
+      onDeniedFired,
+      0,
+      'onDenied must not fire when there is no functioning capture to act on',
+    );
+  });
+
+  it('capture-inactive trumps success when the workload exits 0 but capture never attached', async () => {
+    // Subtle: even a "successful" workload run is suspicious if the
+    // capture was supposed to be on and silently wasn't. The
+    // application asked for captureDenials for a reason; not getting
+    // it should be visible regardless of the workload's outcome.
+    const result = await driveRetryLoop(
+      baseOptions(),
+      async (_p, i) => attempt(i, 0, [], /* captureDenialsActive */ false),
+    );
+    assert.strictEqual(result.stopReason, 'capture-inactive');
   });
 });

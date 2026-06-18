@@ -153,6 +153,11 @@ describe('parseDenialStream', () => {
       exitCode: 0,
       totalDenials: 1,
       deniedResourcesTruncated: false,
+      // No captureDenialsActive in the wire fixture; parser
+      // defaults to true for forward-compat with older binaries.
+      captureDenialsActive: true,
+      // Same forward-compat policy for childProcessesObserved.
+      childProcessesObserved: 0,
     });
     assert.strictEqual(denials.length, 1, 'onDenial fired exactly once');
     assert.strictEqual(summaries.length, 1, 'onSummary fired exactly once');
@@ -399,5 +404,101 @@ describe('parseDenialStream', () => {
     const result = await parseDenialStream(stream, { filters: 'none' });
     assert.strictEqual(result.denials.length, 1);
     assert.strictEqual(result.summary, undefined);
+  });
+
+  it('surfaces captureDenialsActive=false when the native side could not attach the collector', async () => {
+    const stream = buildStream([
+      {
+        envelope: {
+          type: 'summary',
+          exitCode: 0,
+          totalDenials: 0,
+          deniedResourcesTruncated: false,
+          captureDenialsActive: false,
+        },
+      },
+    ]);
+
+    const result = await parseDenialStream(stream);
+    assert.ok(result.summary);
+    assert.strictEqual(result.summary!.captureDenialsActive, false);
+    assert.strictEqual(result.summary!.totalDenials, 0);
+  });
+
+  it('surfaces captureDenialsActive=true when the native side attached the collector', async () => {
+    const stream = buildStream([
+      {
+        envelope: {
+          type: 'summary',
+          exitCode: 0,
+          totalDenials: 3,
+          deniedResourcesTruncated: false,
+          captureDenialsActive: true,
+        },
+      },
+    ]);
+
+    const result = await parseDenialStream(stream);
+    assert.strictEqual(result.summary!.captureDenialsActive, true);
+  });
+
+  it('defaults captureDenialsActive to true when the field is absent (older native binaries)', async () => {
+    // Forward-compat: an older binary that doesn't yet know about
+    // the `captureDenialsActive` field shouldn't trip the parser.
+    // We optimistically assume "active" so its behavior matches
+    // what consumers saw before the field landed.
+    const stream = buildStream([
+      {
+        envelope: {
+          type: 'summary',
+          exitCode: 0,
+          totalDenials: 0,
+          deniedResourcesTruncated: false,
+        },
+      },
+    ]);
+
+    const result = await parseDenialStream(stream);
+    assert.strictEqual(result.summary!.captureDenialsActive, true);
+  });
+
+  it('surfaces childProcessesObserved when present in the summary', async () => {
+    const stream = buildStream([
+      {
+        envelope: {
+          type: 'summary',
+          exitCode: 0,
+          totalDenials: 2,
+          deniedResourcesTruncated: false,
+          captureDenialsActive: true,
+          childProcessesObserved: 7,
+        },
+      },
+    ]);
+
+    const result = await parseDenialStream(stream);
+    assert.strictEqual(result.summary!.childProcessesObserved, 7);
+  });
+
+  it('defaults childProcessesObserved to 0 when the field is absent (older native binaries)', async () => {
+    // Same forward-compat policy as captureDenialsActive: an older
+    // native binary that doesn't poll for children should not look
+    // like "definitely no children" -- it should look like "the
+    // field wasn't reported", and we surface that as 0 with the
+    // expectation that consumers treat 0 as "no observation made".
+    const stream = buildStream([
+      {
+        envelope: {
+          type: 'summary',
+          exitCode: 0,
+          totalDenials: 0,
+          deniedResourcesTruncated: false,
+          captureDenialsActive: true,
+        },
+      },
+    ]);
+
+    const result = await parseDenialStream(stream);
+    assert.strictEqual(result.summary!.childProcessesObserved, 0);
   });
 });

@@ -128,14 +128,31 @@ fn build_summary_envelope(
     unique_denials: usize,
     raw_event_count: usize,
     truncated: bool,
+    active: bool,
+    child_processes_observed: usize,
     verbose: bool,
 ) -> serde_json::Value {
+    // `captureDenialsActive` is always present in the summary so SDK
+    // consumers can distinguish "feature ran cleanly, no denials" from
+    // "feature couldn't be activated, no denials" -- the two look
+    // identical in `totalDenials` but mean very different things to
+    // the application's UX.
+    //
+    // `childProcessesObserved` is also always present: the per-PID
+    // ETW filter we attach only sees events for the workload root,
+    // so denials from any child process are silently dropped. This
+    // count tells the SDK consumer whether the workload is a
+    // launcher pattern (cargo, npm, cmake, ...) so they can warn
+    // the user "N child processes ran; their denials are not in
+    // this list."
     if verbose {
         serde_json::json!({
             "type": "summary",
             "exitCode": exit_code,
             "totalDenials": unique_denials,
             "deniedResourcesTruncated": truncated,
+            "captureDenialsActive": active,
+            "childProcessesObserved": child_processes_observed,
             "rawEventCount": raw_event_count,
         })
     } else {
@@ -144,6 +161,8 @@ fn build_summary_envelope(
             "exitCode": exit_code,
             "totalDenials": unique_denials,
             "deniedResourcesTruncated": truncated,
+            "captureDenialsActive": active,
+            "childProcessesObserved": child_processes_observed,
         })
     }
 }
@@ -159,17 +178,37 @@ fn build_summary_envelope(
 /// consumer parsed). `raw_event_count` is the pre-dedupe kernel
 /// event count and is only included in the wire format when the
 /// caller has opted into verbose mode (`MXC_DENIAL_VERBOSE=1`).
+///
+/// `active` is true when the runner successfully attached the ETW
+/// collector for the workload. It's false when capture was requested
+/// (`captureDenials: true` in the config) but the shim was
+/// unreachable, the session failed to start, or any other reason the
+/// collector ended up `None`. SDK consumers must check this to
+/// distinguish "no denials because the workload was well-behaved"
+/// from "no denials because we couldn't capture any" -- both produce
+/// `totalDenials: 0` otherwise.
+///
+/// `child_processes_observed` is the count of distinct child-process
+/// PIDs the workload spawned during the run, as a best-effort
+/// Toolhelp poll. Per-PID ETW filtering means we don't capture
+/// denials for these children today; the count is surfaced so SDK
+/// consumers can warn the user when the workload looks like a
+/// launcher.
 pub(crate) fn emit_denial_summary_line(
     exit_code: i32,
     unique_denials: usize,
     raw_event_count: usize,
     truncated: bool,
+    active: bool,
+    child_processes_observed: usize,
 ) {
     let envelope = build_summary_envelope(
         exit_code,
         unique_denials,
         raw_event_count,
         truncated,
+        active,
+        child_processes_observed,
         verbose_summary_enabled(),
     );
     let json = match serde_json::to_string(&envelope) {
@@ -358,12 +397,14 @@ mod tests {
 
     #[test]
     fn summary_envelope_default_mode_omits_raw_event_count() {
-        let env = build_summary_envelope(0, 8, 651, false, false);
+        let env = build_summary_envelope(0, 8, 651, false, true, 0, false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["type"], "summary");
         assert_eq!(obj["exitCode"], 0);
         assert_eq!(obj["totalDenials"], 8);
         assert_eq!(obj["deniedResourcesTruncated"], false);
+        assert_eq!(obj["captureDenialsActive"], true);
+        assert_eq!(obj["childProcessesObserved"], 0);
         assert!(
             !obj.contains_key("rawEventCount"),
             "rawEventCount must be hidden in non-verbose mode (got {:?})",
@@ -373,22 +414,85 @@ mod tests {
 
     #[test]
     fn summary_envelope_verbose_mode_includes_raw_event_count() {
-        let env = build_summary_envelope(0, 8, 651, false, true);
+        let env = build_summary_envelope(0, 8, 651, false, true, 0, true);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["totalDenials"], 8);
         assert_eq!(obj["rawEventCount"], 651);
+        assert_eq!(obj["captureDenialsActive"], true);
     }
 
     #[test]
     fn summary_envelope_propagates_non_zero_exit_and_truncation() {
-        // Confirms the summary line carries the workload's actual exit
-        // code (not always 0) and the truncation flag through to the
-        // wire — these are how SDK consumers know whether to trust
-        // the list as complete.
-        let env = build_summary_envelope(-1, 0, 0, true, false);
+        let env = build_summary_envelope(-1, 0, 0, true, true, 0, false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["exitCode"], -1);
         assert_eq!(obj["deniedResourcesTruncated"], true);
+    }
+
+    #[test]
+    fn summary_envelope_inactive_capture_surfaces_via_field() {
+        // captureDenials was requested but the runner couldn't attach
+        // the collector (shim unreachable, privilege missing, etc.).
+        // The summary line still goes out -- with active=false -- so
+        // the SDK consumer can distinguish "0 denials because the
+        // feature isn't running" from "0 denials because the workload
+        // is well-behaved". Otherwise both look like
+        // `totalDenials: 0`.
+        let env = build_summary_envelope(0, 0, 0, false, false, 0, false);
+        let obj = env.as_object().unwrap();
+        assert_eq!(obj["captureDenialsActive"], false);
+        assert_eq!(obj["totalDenials"], 0);
+    }
+
+    #[test]
+    fn summary_envelope_active_field_present_in_both_modes() {
+        for verbose in &[false, true] {
+            for active in &[false, true] {
+                let env = build_summary_envelope(0, 0, 0, false, *active, 0, *verbose);
+                let obj = env.as_object().unwrap();
+                assert!(
+                    obj.contains_key("captureDenialsActive"),
+                    "captureDenialsActive must always be present (verbose={}, active={})",
+                    verbose,
+                    active
+                );
+                assert_eq!(obj["captureDenialsActive"], *active);
+            }
+        }
+    }
+
+    #[test]
+    fn summary_envelope_child_processes_observed_propagates() {
+        // The runner ran a launcher-style workload (e.g. cargo) and
+        // observed 5 distinct child PIDs while it was alive. The
+        // count must surface in the summary so SDK consumers can
+        // warn the user that those children's denials are missing.
+        let env = build_summary_envelope(0, 2, 2, false, true, 5, false);
+        let obj = env.as_object().unwrap();
+        assert_eq!(obj["childProcessesObserved"], 5);
+        assert_eq!(obj["totalDenials"], 2);
+    }
+
+    #[test]
+    fn summary_envelope_child_processes_field_always_present() {
+        // Even when no children were observed (the common case),
+        // the field must be present so consumers don't have to
+        // distinguish "0 children" from "old binary that didn't
+        // report children" -- the SDK can rely on its presence to
+        // know it's looking at a new-format summary.
+        for verbose in &[false, true] {
+            for children in &[0_usize, 1, 5, 100] {
+                let env = build_summary_envelope(0, 0, 0, false, true, *children, *verbose);
+                let obj = env.as_object().unwrap();
+                assert!(
+                    obj.contains_key("childProcessesObserved"),
+                    "childProcessesObserved must always be present (verbose={}, children={})",
+                    verbose,
+                    children
+                );
+                assert_eq!(obj["childProcessesObserved"], *children);
+            }
+        }
     }
 }
 

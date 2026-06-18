@@ -156,7 +156,11 @@ export interface SpawnSandboxWithRetryResult {
     | 'user-cancelled'      // onDenied returned cancel=true
     | 'no-approvals'        // onDenied returned an empty approve list
     | 'still-denied'        // retried, workload still produced denials
-    | 'retry-exhausted';    // hit maxRetries
+    | 'retry-exhausted'     // hit maxRetries
+    | 'capture-inactive';   // captureDenials requested but couldn't be activated
+                            // (shim missing/unreachable on host) -- nothing the
+                            // retry loop could do, application should surface
+                            // the host-prep step to the user
   /**
    * Net policy used for the final attempt. Equal to the input
    * policy when no retry happened, otherwise the regenerated one.
@@ -221,6 +225,25 @@ export async function driveRetryLoop(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await runner(currentPolicy, attempt);
     attempts.push(result);
+
+    // captureDenials was requested but the runner couldn't attach
+    // the ETW collector. The application has nothing meaningful to
+    // prompt about (no denials are coming) and retrying won't help
+    // (the shim isn't reachable). Bail out with a distinct reason
+    // so the app can surface the host-prep step to the user.
+    //
+    // Inactive capture is only possible when a summary line was
+    // emitted *and* it carries active=false. Older native binaries
+    // that don't emit the field are treated as active=true by the
+    // wire-format parser, so this check is a no-op against them.
+    if (result.summary && result.summary.captureDenialsActive === false) {
+      return {
+        attempts,
+        stopReason: 'capture-inactive',
+        finalPolicy: currentPolicy,
+        regen,
+      };
+    }
 
     // Success: workload finished cleanly. No retry regardless of
     // whether denials surfaced (informational only).

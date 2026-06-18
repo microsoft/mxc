@@ -85,6 +85,39 @@ export interface DenialStreamSummary {
    */
   deniedResourcesTruncated: boolean;
   /**
+   * True when the runner successfully attached the per-PID ETW
+   * collector for this invocation. False when capture was requested
+   * (`captureDenials: true` on the config) but the runner couldn't
+   * activate it — e.g. the `MxcDenialShim` service isn't installed
+   * or running, the privilege grant was revoked, or the trace
+   * session failed to start.
+   *
+   * SDK consumers should check this before treating
+   * `totalDenials: 0` as "the workload didn't trip any denials"; an
+   * inactive capture also produces 0 streamed denials, but it means
+   * something completely different (the feature isn't working).
+   */
+  captureDenialsActive: boolean;
+  /**
+   * Best-effort count of distinct child-process PIDs the runner
+   * observed under the workload during the run.
+   *
+   * The captureDenials ETW collector is filtered to the workload
+   * root PID — denial events for any child process are silently
+   * dropped at the provider layer. This count gives the SDK a
+   * visible signal when the workload is a launcher pattern (cargo,
+   * npm, cmake, gh, `python -m foo`, ...) so the application can
+   * warn the user that the denial list may be incomplete.
+   *
+   * The count comes from a 500-ms Toolhelp poll loop, so very
+   * short-lived children that start and exit between polls won't
+   * appear here. It is a best-effort signal, not a guarantee. A
+   * non-zero value means "the workload definitely spawned children
+   * whose denials we missed"; a zero value means "we didn't observe
+   * any children" (not "no children existed").
+   */
+  childProcessesObserved: number;
+  /**
    * Pre-dedupe kernel event count. Only present when the workload
    * was launched with `MXC_DENIAL_VERBOSE=1` in its environment;
    * undefined otherwise. Useful for diagnosing chatty workloads.
@@ -419,10 +452,23 @@ function summaryFromWire(obj: Record<string, unknown>): DenialStreamSummary | nu
   if (typeof obj.exitCode !== 'number') return null;
   if (typeof obj.totalDenials !== 'number') return null;
   if (typeof obj.deniedResourcesTruncated !== 'boolean') return null;
+  // captureDenialsActive landed in a later native-binary version. We
+  // accept its absence (treat as true) so older binaries that don't
+  // emit the field don't trip the parser; new binaries always emit
+  // it.
+  const captureDenialsActive =
+    typeof obj.captureDenialsActive === 'boolean' ? obj.captureDenialsActive : true;
+  // Same forward-compat policy for childProcessesObserved -- older
+  // binaries that don't yet poll for children get treated as if no
+  // children were observed (the conservative answer).
+  const childProcessesObserved =
+    typeof obj.childProcessesObserved === 'number' ? obj.childProcessesObserved : 0;
   const summary: DenialStreamSummary = {
     exitCode: obj.exitCode,
     totalDenials: obj.totalDenials,
     deniedResourcesTruncated: obj.deniedResourcesTruncated,
+    captureDenialsActive,
+    childProcessesObserved,
   };
   if (typeof obj.rawEventCount === 'number') {
     summary.rawEventCount = obj.rawEventCount;

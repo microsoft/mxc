@@ -1000,7 +1000,7 @@ impl ScriptRunner for BaseContainerRunner {
         // thread that emits each captured denial to stderr as NDJSON
         // prefixed with ASCII RS (0x1E). SDK callers split stderr on
         // 0x1E and parse each segment as JSON, enabling mid-run prompts.
-        let (collector, stream_writer) = if request.capture_denials {
+        let (collector, stream_writer, child_observer) = if request.capture_denials {
             let (tx, rx) = std::sync::mpsc::channel::<denial_capture::DeniedResource>();
             let writer = std::thread::Builder::new()
                 .name("denial-stream-writer".to_string())
@@ -1035,9 +1035,21 @@ impl ScriptRunner for BaseContainerRunner {
                     None
                 }
             };
-            (collector, writer)
+
+            // Start the best-effort child-process observer alongside
+            // the collector. Per-PID ETW filtering means we miss
+            // child-process denials; this gives the SDK a visible
+            // signal (childProcessesObserved on the summary) so the
+            // application can warn the user when the workload looks
+            // like a launcher.
+            let observer = crate::child_process_observer::ChildProcessObserver::spawn(
+                pi.dwProcessId,
+                std::time::Duration::from_millis(500),
+            );
+
+            (collector, writer, observer)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         if request.capture_denials {
@@ -1146,6 +1158,14 @@ impl ScriptRunner for BaseContainerRunner {
         // DenialEvent -> public DeniedResource. Done after the child has
         // exited so trailing events that the kernel emits during process
         // teardown still get captured.
+        // Capture whether the ETW collector was actually attached
+        // *before* the `if let Some(c) = collector` below consumes
+        // the value. Needed so the summary line carries an honest
+        // `captureDenialsActive` flag instead of silently looking
+        // identical to "captureDenials off" when the shim wasn't
+        // reachable.
+        let capture_was_active = request.capture_denials && collector.is_some();
+
         let (denied_resources, denied_resources_truncated, raw_event_count) =
             if let Some(c) = collector {
                 let (events, truncated) = c.stop_and_drain();
@@ -1181,15 +1201,26 @@ impl ScriptRunner for BaseContainerRunner {
             .and_then(|h| h.join().ok())
             .unwrap_or(denied_resources.len());
 
-        // Emit the streaming-protocol summary line on stderr. SDK
-        // consumers use this as the terminator marker for the
-        // captureDenials stream of a given wxc-exec invocation.
-        emit_denial_summary_line(
-            exit_code as i32,
-            streamed_unique,
-            raw_event_count,
-            denied_resources_truncated,
-        );
+        // Emit the streaming-protocol summary line on stderr -- but
+        // only when capture was requested. Workloads that didn't ask
+        // for captureDenials should not see 0x1E sentinel bytes in
+        // their stderr (consumers may rely on stderr being
+        // workload-output-only). When capture was requested,
+        // `capture_was_active` tells the SDK whether the run actually
+        // attached an ETW session or whether it silently degraded.
+        if request.capture_denials {
+            let child_processes_observed = child_observer
+                .map(|o| o.take_observed_count())
+                .unwrap_or(0);
+            emit_denial_summary_line(
+                exit_code as i32,
+                streamed_unique,
+                raw_event_count,
+                denied_resources_truncated,
+                capture_was_active,
+                child_processes_observed,
+            );
+        }
 
         ScriptResponse {
             exit_code: exit_code as i32,

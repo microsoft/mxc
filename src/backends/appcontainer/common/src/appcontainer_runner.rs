@@ -849,7 +849,7 @@ impl AppContainerScriptRunner {
         // captured denial to stderr as NDJSON prefixed with ASCII RS
         // (0x1E). SDK callers split stderr on 0x1E and parse each
         // segment as JSON, enabling mid-run prompts.
-        let (collector, stream_writer) = if request.capture_denials {
+        let (collector, stream_writer, child_observer) = if request.capture_denials {
             let (tx, rx) = std::sync::mpsc::channel::<denial_capture::DeniedResource>();
             let writer = std::thread::Builder::new()
                 .name("denial-stream-writer".to_string())
@@ -881,9 +881,21 @@ impl AppContainerScriptRunner {
                     None
                 }
             };
-            (collector, writer)
+
+            // Best-effort child-process observer alongside the
+            // collector. Per-PID ETW filtering means we miss
+            // child-process denials; this gives the SDK a visible
+            // signal (childProcessesObserved on the summary) so the
+            // application can warn the user when the workload looks
+            // like a launcher (cargo / npm / cmake / ...).
+            let observer = crate::child_process_observer::ChildProcessObserver::spawn(
+                pi.dwProcessId,
+                std::time::Duration::from_millis(500),
+            );
+
+            (collector, writer, observer)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Resume the child now that UI restrictions are in place.
@@ -935,6 +947,14 @@ impl AppContainerScriptRunner {
         // exited so we capture everything the kernel emitted; doing it
         // before exit risks missing trailing events that haven't crossed
         // the user-mode boundary yet.
+        // Capture whether the ETW collector was actually attached
+        // *before* the `if let Some(c) = collector` below consumes
+        // the value. The summary line carries this as
+        // `captureDenialsActive` so SDK consumers can distinguish
+        // "0 denials, feature ran" from "0 denials, feature silently
+        // failed to attach".
+        let capture_was_active = request.capture_denials && collector.is_some();
+
         let (denied_resources, denied_resources_truncated, raw_event_count) =
             if let Some(c) = collector {
                 let (events, truncated) = c.stop_and_drain();
@@ -968,13 +988,23 @@ impl AppContainerScriptRunner {
             .and_then(|h| h.join().ok())
             .unwrap_or(denied_resources.len());
 
-        // Emit the terminator marker for the captureDenials stream.
-        emit_denial_summary_line(
-            exit_code as i32,
-            streamed_unique,
-            raw_event_count,
-            denied_resources_truncated,
-        );
+        // Emit the terminator marker for the captureDenials stream,
+        // but only when capture was requested -- workloads that
+        // didn't ask for the feature should not see 0x1E bytes in
+        // their stderr.
+        if request.capture_denials {
+            let child_processes_observed = child_observer
+                .map(|o| o.take_observed_count())
+                .unwrap_or(0);
+            emit_denial_summary_line(
+                exit_code as i32,
+                streamed_unique,
+                raw_event_count,
+                denied_resources_truncated,
+                capture_was_active,
+                child_processes_observed,
+            );
+        }
 
         Ok(ScriptResponse {
             exit_code: exit_code as i32,
