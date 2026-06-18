@@ -108,9 +108,9 @@ struct RawSandbox {
 #[derive(Deserialize)]
 struct RawPortMapping {
     #[serde(rename = "windowsPort")]
-    windows_port: Option<u16>,
+    windows_port: u16,
     #[serde(rename = "containerPort")]
-    container_port: Option<u16>,
+    container_port: u16,
     protocol: Option<String>,
 }
 
@@ -1213,34 +1213,14 @@ fn convert_raw_config_inner(
             if let Some(mappings) = cc.port_mappings {
                 let mut converted = Vec::with_capacity(mappings.len());
                 for (idx, m) in mappings.into_iter().enumerate() {
-                    let windows_port = match m.windows_port {
-                        Some(p) => p,
-                        None => {
-                            let msg = format!(
-                                "experimental.wslc.portMappings[{idx}]: 'windowsPort' is required"
-                            );
-                            logger.log_line(&msg);
-                            return Err(WxcError::ConfigParse(msg));
-                        }
-                    };
-                    let container_port = match m.container_port {
-                        Some(p) => p,
-                        None => {
-                            let msg = format!(
-                                "experimental.wslc.portMappings[{idx}]: 'containerPort' is required"
-                            );
-                            logger.log_line(&msg);
-                            return Err(WxcError::ConfigParse(msg));
-                        }
-                    };
-                    if windows_port == 0 {
+                    if m.windows_port == 0 {
                         let msg = format!(
                             "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
                         );
                         logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
-                    if container_port == 0 {
+                    if m.container_port == 0 {
                         let msg = format!(
                             "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
                         );
@@ -1278,8 +1258,8 @@ fn convert_raw_config_inner(
                         return Err(WxcError::ConfigParse(msg));
                     }
                     converted.push(PortMapping {
-                        windows_port,
-                        container_port,
+                        windows_port: m.windows_port,
+                        container_port: m.container_port,
                         protocol,
                     });
                 }
@@ -3220,8 +3200,8 @@ mod tests {
         let err = load_request(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
-            msg.contains("windowsPort") && msg.contains("required"),
-            "got: {msg}"
+            msg.contains("windows_port") || msg.contains("windowsPort"),
+            "expected serde missing-field error mentioning windowsPort, got: {msg}"
         );
     }
 
@@ -3234,8 +3214,8 @@ mod tests {
         let err = load_request(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
-            msg.contains("containerPort") && msg.contains("required"),
-            "got: {msg}"
+            msg.contains("container_port") || msg.contains("containerPort"),
+            "expected serde missing-field error mentioning containerPort, got: {msg}"
         );
     }
 
