@@ -69,7 +69,7 @@ Two design goals:
 | `src/backends/learning_mode_linux/` | 3 (Linux) | xplat (compiles everywhere, only meaningful on Linux) | Stub. `is_available()` returns `false`; `begin_capture()` returns `Err(NotSupported)`. Future: fanotify + audit. |
 | `src/backends/learning_mode_macos/` | 3 (macOS) | xplat | Stub. Same pattern. Future: EndpointSecurity framework. |
 | `src/host/mxc_learning_mode_shim/` | 3 (Windows host) | Windows | Privileged Windows service that loans an ETW trace handle to `wxc-exec`. Binary: `mxc-learning-mode-shim.exe`. Service name: `MxcLearningModeShim`. Pipe: `\\.\pipe\mxc-learning-mode-shim`. |
-| `src/host/wxc_host_prep/src/learning_mode_shim/` | 3 (Windows host) | Windows | Install / uninstall / inspect logic for the shim service. Invoked via the `install-denial-shim` / `uninstall-denial-shim` / `dump-denial-shim` subcommands on `wxc-host-prep`. (CLI subcommand names kept as-is for UX continuity.) |
+| `src/host/wxc_host_prep/src/learning_mode_shim/` | 3 (Windows host) | Windows | Install / uninstall / inspect logic for the shim service. Invoked via the `install-learning-mode-shim` / `uninstall-learning-mode-shim` / `dump-learning-mode-shim` subcommands on `wxc-host-prep`. |
 
 The dependency graph (omitting unrelated crates):
 
@@ -180,29 +180,23 @@ above are OS-agnostic.
 
 ---
 
-## Why CLI subcommands kept the `denial-shim` name
+## CLI subcommand names
 
-The user-facing surface on `wxc-host-prep` is:
+The user-facing surface on `wxc-host-prep` matches the internal
+naming:
 
-- `install-denial-shim`
-- `uninstall-denial-shim`
-- `dump-denial-shim`
+- `install-learning-mode-shim`
+- `uninstall-learning-mode-shim`
+- `dump-learning-mode-shim`
 
-These were intentionally **not renamed** to `install-learning-mode-shim`
-during the rearchitecture. The reasoning:
-
-- They are operator commands embedded in install scripts and CI
-  pipelines. Renaming them would silently break those workflows
-  without giving any architectural benefit.
-- The CLI surface is the natural boundary for "what users see" vs
-  "how we implement it". Internal names are free to change; CLI
-  verbs are a contract.
-
-The internal implementation (crate name `mxc_learning_mode_shim`,
-service name `MxcLearningModeShim`, pipe name
-`\\.\pipe\mxc-learning-mode-shim`) all use the new naming so
-operators reading service-control output or pipe enumeration see a
-consistent story.
+The rearchitecture initially kept the older `*-denial-shim` names
+for UX continuity, but they were renamed in a follow-up commit
+(clean break, no aliases) to keep operator-visible commands
+consistent with the internal crate / service / pipe naming
+(`mxc_learning_mode_shim`, `MxcLearningModeShim`,
+`\\.\pipe\mxc-learning-mode-shim`). Operator scripts that still
+reference the old `*-denial-shim` names must be updated to the
+new commands.
 
 ---
 

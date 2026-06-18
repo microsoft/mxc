@@ -62,15 +62,15 @@ enum Command {
     /// so unelevated callers (e.g. `wxc-exec`) can request scoped ETW
     /// sessions for per-PID denial capture. Idempotent when the
     /// binary path matches.
-    InstallDenialShim(InstallDenialShimArgs),
+    InstallLearningModeShim(InstallLearningModeShimArgs),
 
     /// Stop and deregister the `MxcLearningModeShim` service. Idempotent
     /// when the service is already absent.
-    UninstallDenialShim,
+    UninstallLearningModeShim,
 
     /// Report whether `MxcLearningModeShim` is installed, its current state,
     /// and the registered binary path.
-    DumpDenialShim(DumpDenialShimArgs),
+    DumpLearningModeShim(DumpLearningModeShimArgs),
 }
 
 #[derive(clap::Args)]
@@ -119,7 +119,7 @@ struct DumpNullDeviceArgs {
 }
 
 #[derive(clap::Args)]
-struct InstallDenialShimArgs {
+struct InstallLearningModeShimArgs {
     /// Override the path to `mxc-learning-mode-shim.exe`. Defaults to the
     /// same directory as `wxc-host-prep.exe`.
     #[arg(long = "shim-path")]
@@ -127,7 +127,7 @@ struct InstallDenialShimArgs {
 }
 
 #[derive(clap::Args)]
-struct DumpDenialShimArgs {
+struct DumpLearningModeShimArgs {
     /// Emit machine-readable JSON results on stdout.
     #[arg(long)]
     json: bool,
@@ -153,10 +153,10 @@ pub fn run() -> i32 {
         }
         Command::VerifyNullDevice(args) => crate::null_device::run_verify(args.json),
         Command::DumpNullDevice(args) => crate::null_device::run_dump(args.json),
-        Command::InstallDenialShim(args) => {
+        Command::InstallLearningModeShim(args) => {
             crate::learning_mode_shim::run_install(args.shim_path.as_deref())
         }
-        Command::UninstallDenialShim => crate::learning_mode_shim::run_uninstall(),
-        Command::DumpDenialShim(args) => crate::learning_mode_shim::run_dump(args.json),
+        Command::UninstallLearningModeShim => crate::learning_mode_shim::run_uninstall(),
+        Command::DumpLearningModeShim(args) => crate::learning_mode_shim::run_dump(args.json),
     }
 }

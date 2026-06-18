@@ -104,7 +104,7 @@ fn grant_privilege_to_well_known(
         let close_status = LsaClose(policy);
         if close_status.0 != 0 {
             eprintln!(
-                "[denial-shim] warning: LsaClose returned NTSTATUS {:#X}",
+                "[learning-mode-shim] warning: LsaClose returned NTSTATUS {:#X}",
                 close_status.0
             );
         }

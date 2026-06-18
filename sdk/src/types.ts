@@ -292,7 +292,7 @@ export interface ContainerConfig {
    *
    * Windows only. Requires the `MxcLearningModeShim` service to be
    * installed and running on the host (see
-   * `wxc-host-prep install-denial-shim`). On unsupported platforms or
+   * `wxc-host-prep install-learning-mode-shim`). On unsupported platforms or
    * when the shim isn't reachable the flag is a no-op — the workload
    * still runs, but no denials are captured.
    *

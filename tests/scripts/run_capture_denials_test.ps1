@@ -26,7 +26,7 @@ Preconditions:
   - Running on Windows.
   - The MxcLearningModeShim service is installed and running. If not present,
     the script fails fast with an actionable message pointing at
-    `wxc-host-prep install-denial-shim`.
+    `wxc-host-prep install-learning-mode-shim`.
 
 .PARAMETER Release
 Use the release build instead of debug.
@@ -111,7 +111,7 @@ if (-not (Test-Path $TestConfig)) {
 $shim = Get-Service -Name 'MxcLearningModeShim' -ErrorAction SilentlyContinue
 if (-not $shim) {
     Write-Host "ERROR: MxcLearningModeShim service is not installed." -ForegroundColor Red
-    Write-Host "Install it with: wxc-host-prep install-denial-shim" -ForegroundColor Yellow
+    Write-Host "Install it with: wxc-host-prep install-learning-mode-shim" -ForegroundColor Yellow
     Write-Host "(captureDenials requires the shim to be running as a service so" -ForegroundColor Yellow
     Write-Host " unelevated wxc-exec invocations can open ETW sessions.)" -ForegroundColor Yellow
     exit 2

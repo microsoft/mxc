@@ -16,7 +16,7 @@
 //!   services.msc).
 //! - **Account**: `NT AUTHORITY\LocalService` — least-privilege. The
 //!   account doesn't carry `SeSystemProfilePrivilege` by default, so
-//!   `install-denial-shim` grants it explicitly via the LSA
+//!   `install-learning-mode-shim` grants it explicitly via the LSA
 //!   `LsaAddAccountRights` API before creating the service. See the
 //!   `privilege` submodule.
 //! - **Start type**: `Demand` (manual). SCM idle-shutdown stops it
@@ -79,11 +79,11 @@ fn resolve_shim_path(override_path: Option<&str>) -> Result<PathBuf, String> {
     }
 }
 
-/// Implements `wxc-host-prep install-denial-shim`.
+/// Implements `wxc-host-prep install-learning-mode-shim`.
 ///
 /// Idempotent: if the service is already registered with the same
 /// binary path it returns success. Differing binary paths are an
-/// explicit conflict — caller must `uninstall-denial-shim` first.
+/// explicit conflict — caller must `uninstall-learning-mode-shim` first.
 ///
 /// Always re-applies the `SeSystemProfilePrivilege` grant to
 /// `LocalService` (no-op when already granted, per LSA semantics).
@@ -133,7 +133,7 @@ pub fn run_install(shim_path_override: Option<&str>) -> i32 {
                 eprintln!(
                     "error: service {SERVICE_NAME} already installed with a different binary:\n  \
                      existing: {existing_path}\n  requested: {new_path}\n\
-                     run `wxc-host-prep uninstall-denial-shim` first"
+                     run `wxc-host-prep uninstall-learning-mode-shim` first"
                 );
                 return 1;
             }
@@ -175,7 +175,7 @@ pub fn run_install(shim_path_override: Option<&str>) -> i32 {
     }
 }
 
-/// Implements `wxc-host-prep uninstall-denial-shim`.
+/// Implements `wxc-host-prep uninstall-learning-mode-shim`.
 ///
 /// Stops the service if it's running, then deletes the SCM record.
 /// Idempotent: a service that doesn't exist is a successful exit.
@@ -229,7 +229,7 @@ pub fn run_uninstall() -> i32 {
     }
 }
 
-/// Implements `wxc-host-prep dump-denial-shim`.
+/// Implements `wxc-host-prep dump-learning-mode-shim`.
 ///
 /// Reports installed-or-not, current state, and the registered binary
 /// path. Exits 0 when installed, 1 when not.
