@@ -30,13 +30,13 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
-use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
     is_environment_not_supported,
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
+use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
 use sandbox_spec::base_container_layout::{
     finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, IntegrityLevel,
     NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
@@ -1049,7 +1049,10 @@ impl ScriptRunner for BaseContainerRunner {
                 .spawn(move || stream_denials_to_stderr(rx))
                 .ok();
 
-            let collector = match learning_mode_windows::session::open_via_shim(pi.dwProcessId, None) {
+            let collector = match learning_mode_windows::session::open_via_shim(
+                pi.dwProcessId,
+                None,
+            ) {
                 Ok(session) => match session.start_collector_with_stream(Some(tx)) {
                     Ok(c) => {
                         let _ = writeln!(
@@ -1084,10 +1087,11 @@ impl ScriptRunner for BaseContainerRunner {
             // signal (childProcessesObserved on the summary) so the
             // application can warn the user when the workload looks
             // like a launcher.
-            let observer = learning_mode_windows::child_process_observer::ChildProcessObserver::spawn(
-                pi.dwProcessId,
-                std::time::Duration::from_millis(500),
-            );
+            let observer =
+                learning_mode_windows::child_process_observer::ChildProcessObserver::spawn(
+                    pi.dwProcessId,
+                    std::time::Duration::from_millis(500),
+                );
 
             (collector, writer, observer)
         } else {
@@ -1208,31 +1212,32 @@ impl ScriptRunner for BaseContainerRunner {
         // reachable.
         let capture_was_active = request.capture_denials && collector.is_some();
 
-        let (denied_resources, denied_resources_truncated, raw_event_count) =
-            if let Some(c) = collector {
-                let (events, truncated) = c.stop_and_drain();
-                let raw_count = events.len();
-                let _ = writeln!(
-                    logger,
-                    "captureDenials: drained {} events (truncated={})",
-                    raw_count, truncated
-                );
-                // Dedupe by (path, accessType) — same key as the
-                // stream writer — so the field returned to the SDK
-                // matches what was streamed and `totalDenials` lines
-                // up across both. The raw count goes into the
-                // summary line separately for diagnostics.
-                let mut seen: std::collections::HashSet<(String, learning_mode_windows::AccessType)> =
-                    std::collections::HashSet::new();
-                let resources: Vec<learning_mode_windows::DeniedResource> = events
-                    .into_iter()
-                    .map(learning_mode_windows::DeniedResource::from)
-                    .filter(|r| seen.insert((r.path.clone(), r.access_type)))
-                    .collect();
-                (resources, truncated, raw_count)
-            } else {
-                (Vec::new(), false, 0)
-            };
+        let (denied_resources, denied_resources_truncated, raw_event_count) = if let Some(c) =
+            collector
+        {
+            let (events, truncated) = c.stop_and_drain();
+            let raw_count = events.len();
+            let _ = writeln!(
+                logger,
+                "captureDenials: drained {} events (truncated={})",
+                raw_count, truncated
+            );
+            // Dedupe by (path, accessType) — same key as the
+            // stream writer — so the field returned to the SDK
+            // matches what was streamed and `totalDenials` lines
+            // up across both. The raw count goes into the
+            // summary line separately for diagnostics.
+            let mut seen: std::collections::HashSet<(String, learning_mode_windows::AccessType)> =
+                std::collections::HashSet::new();
+            let resources: Vec<learning_mode_windows::DeniedResource> = events
+                .into_iter()
+                .map(learning_mode_windows::DeniedResource::from)
+                .filter(|r| seen.insert((r.path.clone(), r.access_type)))
+                .collect();
+            (resources, truncated, raw_count)
+        } else {
+            (Vec::new(), false, 0)
+        };
 
         // The stream writer's mpsc channel is now closed (we dropped
         // the sender when `collector` was consumed above). Join the
@@ -1251,9 +1256,8 @@ impl ScriptRunner for BaseContainerRunner {
         // `capture_was_active` tells the SDK whether the run actually
         // attached an ETW session or whether it silently degraded.
         if request.capture_denials {
-            let child_processes_observed = child_observer
-                .map(|o| o.take_observed_count())
-                .unwrap_or(0);
+            let child_processes_observed =
+                child_observer.map(|o| o.take_observed_count()).unwrap_or(0);
             emit_denial_summary_line(
                 exit_code as i32,
                 streamed_unique,

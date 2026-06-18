@@ -129,8 +129,7 @@ impl CollectorHandle {
         let callback_truncated = self.context.truncated.load(Ordering::SeqCst);
         let events = std::mem::take(&mut *self.context.events.lock().unwrap());
 
-        let kernel_lost_any =
-            kernel_stats.events_lost > 0 || kernel_stats.buffers_lost > 0;
+        let kernel_lost_any = kernel_stats.events_lost > 0 || kernel_stats.buffers_lost > 0;
         let truncated = callback_truncated || kernel_lost_any;
 
         if kernel_lost_any {

@@ -127,7 +127,10 @@ mod tests {
 
     #[test]
     fn access_type_serialises_each_variant_to_expected_lowercase() {
-        assert_eq!(serde_json::to_string(&AccessType::Read).unwrap(), "\"read\"");
+        assert_eq!(
+            serde_json::to_string(&AccessType::Read).unwrap(),
+            "\"read\""
+        );
         assert_eq!(
             serde_json::to_string(&AccessType::Write).unwrap(),
             "\"write\""

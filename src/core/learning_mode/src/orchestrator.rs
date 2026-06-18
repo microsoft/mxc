@@ -17,9 +17,7 @@
 //!   crate still compiles.
 
 #[allow(unused_imports)]
-use crate::{
-    CaptureHandle, CaptureOptions, LearningModeBackend, LearningModeError,
-};
+use crate::{CaptureHandle, CaptureOptions, LearningModeBackend, LearningModeError};
 
 /// Returns the [`LearningModeBackend`] for the host OS.
 ///

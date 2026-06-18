@@ -12,9 +12,7 @@
 //! (for filesystem accesses) with the kernel audit subsystem (for
 //! security-relevant denials). Tracked as future work.
 
-use learning_mode_core::{
-    CaptureHandle, CaptureOptions, LearningModeBackend, LearningModeError,
-};
+use learning_mode_core::{CaptureHandle, CaptureOptions, LearningModeBackend, LearningModeError};
 
 /// Linux stub backend.
 pub struct LinuxLearningModeBackend;
@@ -47,7 +45,8 @@ impl LearningModeBackend for LinuxLearningModeBackend {
         _opts: CaptureOptions,
     ) -> Result<Box<dyn CaptureHandle>, LearningModeError> {
         Err(LearningModeError::NotSupported {
-            reason: "learning-mode capture is not yet implemented on Linux (planned: fanotify + audit)",
+            reason:
+                "learning-mode capture is not yet implemented on Linux (planned: fanotify + audit)",
         })
     }
 }

@@ -118,9 +118,7 @@ fn open_writer() -> Box<dyn std::io::Write + Send> {
 /// The channel closes when the `CollectorHandle` is dropped (the
 /// sender lives inside its `CallbackContext`). Receiving `Err` is
 /// the normal teardown signal.
-pub fn stream_denials_to_stderr(
-    rx: std::sync::mpsc::Receiver<crate::DeniedResource>,
-) -> usize {
+pub fn stream_denials_to_stderr(rx: std::sync::mpsc::Receiver<crate::DeniedResource>) -> usize {
     // Resolve the destination at thread start, not per-event. The
     // env var is process-wide and never changes mid-run, so one
     // lookup is enough. Tests inject a Vec<u8> via the
@@ -418,7 +416,14 @@ mod tests {
         assert_eq!(segments.len(), 1);
         let obj = segments[0].as_object().unwrap();
         // Required wire-format keys, all camelCase:
-        for key in &["type", "path", "resourceType", "accessType", "pid", "filetime"] {
+        for key in &[
+            "type",
+            "path",
+            "resourceType",
+            "accessType",
+            "pid",
+            "filetime",
+        ] {
             assert!(obj.contains_key(*key), "missing wire-format key '{}'", key);
         }
         // No snake_case bleed-through:
@@ -563,4 +568,3 @@ mod tests {
         }
     }
 }
-

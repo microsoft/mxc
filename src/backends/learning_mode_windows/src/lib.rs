@@ -51,8 +51,8 @@ pub mod backend;
 #[cfg(target_os = "windows")]
 pub use backend::WindowsLearningModeBackend;
 
+pub use denial_channel::{AccessType, DeniedResource, ResourceType};
 pub use extractors::{
     build_denial_from_access_check, build_denial_from_learning_mode, DecodedEventParts,
 };
 pub use model::DenialEvent;
-pub use denial_channel::{AccessType, DeniedResource, ResourceType};

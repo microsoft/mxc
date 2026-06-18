@@ -12,9 +12,7 @@
 //! framework, scoped to the workload's PID via the existing seatbelt
 //! sandbox harness. Tracked as future work.
 
-use learning_mode_core::{
-    CaptureHandle, CaptureOptions, LearningModeBackend, LearningModeError,
-};
+use learning_mode_core::{CaptureHandle, CaptureOptions, LearningModeBackend, LearningModeError};
 
 /// macOS stub backend.
 pub struct MacosLearningModeBackend;

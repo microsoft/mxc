@@ -154,9 +154,7 @@ fn snapshot_children_of(parent_pid: u32) -> Vec<u32> {
         loop {
             // Skip our own PID and the workload root -- we only
             // want descendants.
-            if entry.th32ParentProcessID == parent_pid
-                && entry.th32ProcessID != parent_pid
-            {
+            if entry.th32ParentProcessID == parent_pid && entry.th32ProcessID != parent_pid {
                 out.push(entry.th32ProcessID);
             }
             // Re-zero dwSize is not required between iterations,

@@ -30,9 +30,9 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
-use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
+use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
@@ -856,7 +856,10 @@ impl AppContainerScriptRunner {
                 .spawn(move || stream_denials_to_stderr(rx))
                 .ok();
 
-            let collector = match learning_mode_windows::session::open_via_shim(pi.dwProcessId, None) {
+            let collector = match learning_mode_windows::session::open_via_shim(
+                pi.dwProcessId,
+                None,
+            ) {
                 Ok(session) => match session.start_collector_with_stream(Some(tx)) {
                     Ok(c) => {
                         logger.log_line(&format!(
@@ -888,10 +891,11 @@ impl AppContainerScriptRunner {
             // signal (childProcessesObserved on the summary) so the
             // application can warn the user when the workload looks
             // like a launcher (cargo / npm / cmake / ...).
-            let observer = learning_mode_windows::child_process_observer::ChildProcessObserver::spawn(
-                pi.dwProcessId,
-                std::time::Duration::from_millis(500),
-            );
+            let observer =
+                learning_mode_windows::child_process_observer::ChildProcessObserver::spawn(
+                    pi.dwProcessId,
+                    std::time::Duration::from_millis(500),
+                );
 
             (collector, writer, observer)
         } else {
@@ -955,30 +959,31 @@ impl AppContainerScriptRunner {
         // failed to attach".
         let capture_was_active = request.capture_denials && collector.is_some();
 
-        let (denied_resources, denied_resources_truncated, raw_event_count) =
-            if let Some(c) = collector {
-                let (events, truncated) = c.stop_and_drain();
-                let raw_count = events.len();
-                logger.log_line(&format!(
-                    "captureDenials: drained {} events (truncated={})",
-                    raw_count, truncated
-                ));
-                // Dedupe by (path, accessType) — same key as the
-                // stream writer — so the field returned to the SDK
-                // matches what was streamed and `totalDenials` lines
-                // up across both. We pass the raw count into the
-                // summary separately for diagnostics.
-                let mut seen: std::collections::HashSet<(String, learning_mode_windows::AccessType)> =
-                    std::collections::HashSet::new();
-                let resources: Vec<learning_mode_windows::DeniedResource> = events
-                    .into_iter()
-                    .map(learning_mode_windows::DeniedResource::from)
-                    .filter(|r| seen.insert((r.path.clone(), r.access_type)))
-                    .collect();
-                (resources, truncated, raw_count)
-            } else {
-                (Vec::new(), false, 0)
-            };
+        let (denied_resources, denied_resources_truncated, raw_event_count) = if let Some(c) =
+            collector
+        {
+            let (events, truncated) = c.stop_and_drain();
+            let raw_count = events.len();
+            logger.log_line(&format!(
+                "captureDenials: drained {} events (truncated={})",
+                raw_count, truncated
+            ));
+            // Dedupe by (path, accessType) — same key as the
+            // stream writer — so the field returned to the SDK
+            // matches what was streamed and `totalDenials` lines
+            // up across both. We pass the raw count into the
+            // summary separately for diagnostics.
+            let mut seen: std::collections::HashSet<(String, learning_mode_windows::AccessType)> =
+                std::collections::HashSet::new();
+            let resources: Vec<learning_mode_windows::DeniedResource> = events
+                .into_iter()
+                .map(learning_mode_windows::DeniedResource::from)
+                .filter(|r| seen.insert((r.path.clone(), r.access_type)))
+                .collect();
+            (resources, truncated, raw_count)
+        } else {
+            (Vec::new(), false, 0)
+        };
 
         // The collector dropped above closes the stream channel (it
         // owned the sender). Join the writer thread so per-event
@@ -993,9 +998,8 @@ impl AppContainerScriptRunner {
         // didn't ask for the feature should not see 0x1E bytes in
         // their stderr.
         if request.capture_denials {
-            let child_processes_observed = child_observer
-                .map(|o| o.take_observed_count())
-                .unwrap_or(0);
+            let child_processes_observed =
+                child_observer.map(|o| o.take_observed_count()).unwrap_or(0);
             emit_denial_summary_line(
                 exit_code as i32,
                 streamed_unique,
