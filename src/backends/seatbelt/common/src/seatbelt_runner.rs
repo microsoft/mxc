@@ -31,8 +31,8 @@ use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCance
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
 use wxc_common::sandbox_process::{
-    boxed_closer, group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write,
-    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    boxed_closer, cancel_drained_stream, group_kill, join_discard, spawn_discard, take_boxed_read,
+    take_boxed_write, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::validator::validate_common;
 
@@ -461,6 +461,8 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             }
         };
 
+        cancel_drained_stream(&stdout_thread, &self.stdout_canceller);
+        cancel_drained_stream(&stderr_thread, &self.stderr_canceller);
         join_discard(stdout_thread);
         join_discard(stderr_thread);
         self.run_cleanup();

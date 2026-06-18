@@ -120,11 +120,15 @@ pub trait SandboxProcess: Send {
     /// holding open past the foreground command's exit (a plain
     /// [`kill`](SandboxProcess::kill) would also take that descendant down).
     ///
-    /// Valid whether or not stdout has been taken, and may be called
-    /// concurrently with a blocked read on it. Returns `None` when the stream
-    /// is not interruptible — e.g. inherited stdio ([`StdioMode::Inherit`]),
-    /// where the caller never reads from a handle stream. The default returns
-    /// `None`.
+    /// Intended for a stream the caller has **taken** and is reading:
+    /// [`close`](StreamCloser::close) abandons that read, and may be called
+    /// concurrently with it. [`wait`](SandboxProcess::wait) already cancels its
+    /// own internal safety-drain of any *not-taken* stream once the child exits,
+    /// so a closer is only useful on a taken stream — firing one on a not-taken
+    /// stream while the child is still producing output would stall the child on
+    /// a full pipe. Returns `None` when the stream is not interruptible — e.g.
+    /// inherited stdio ([`StdioMode::Inherit`]), where the caller never reads
+    /// from a handle stream. The default returns `None`.
     fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
         None
     }
@@ -199,6 +203,26 @@ pub fn boxed_closer<C: StreamCloser + Clone + 'static>(
     canceller
         .clone()
         .map(|c| Box::new(c) as Box<dyn StreamCloser>)
+}
+
+/// EOF a *not-taken* stdout/stderr stream that [`wait`](SandboxProcess::wait) is
+/// draining, via its stored canceller, so a backgrounded descendant holding the
+/// pipe's write end open past the child's exit can't wedge the discard
+/// [`io::copy`](std::io::copy) — and thus `wait()` — under a wait-forever
+/// (`scriptTimeout == 0`) timeout. The drained output is discarded regardless,
+/// so cutting it short is harmless. No-op when the stream was taken by the
+/// caller (`drain` is `None`, so there is no discard thread) or has no canceller.
+///
+/// Call this *after* the child has exited and *before* joining `drain`.
+pub fn cancel_drained_stream<C: StreamCloser>(
+    drain: &Option<std::thread::JoinHandle<()>>,
+    canceller: &Option<C>,
+) {
+    if drain.is_some() {
+        if let Some(canceller) = canceller {
+            canceller.close();
+        }
+    }
 }
 
 /// Process-tree kill for a Unix child that leads its own process group — the

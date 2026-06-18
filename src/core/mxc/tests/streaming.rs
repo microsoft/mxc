@@ -401,3 +401,25 @@ fn streaming_timeout_kills_process_tree() {
     }
     assert!(gone, "descendant {descendant} should be killed on timeout");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_wait_returns_when_descendant_holds_not_taken_stream_open() {
+    // The foreground command exits immediately, but a backgrounded `sleep`
+    // inherits and holds stdout's write end open. We take NOTHING, so `wait()`
+    // drains stdout/stderr itself; with no timeout (wait-forever) it must still
+    // return promptly once the foreground child exits — the held-open descendant
+    // pipe must not wedge the discard drain (cr-002 regression).
+    let mut proc =
+        spawn_sandbox(seatbelt_request("sleep 30 & exit 0", 0)).expect("spawn should succeed");
+
+    let start = std::time::Instant::now();
+    let code = proc.wait().expect("wait should return");
+    assert_eq!(code, 0, "foreground command exits 0");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "wait() must return promptly, not block on the descendant's 30s pipe hold \
+         (elapsed: {:?})",
+        start.elapsed()
+    );
+}

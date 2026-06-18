@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::error::WxcError;
 use crate::sandbox_process::StreamCloser;
@@ -52,25 +52,56 @@ impl std::io::Read for PipeReader {
 /// Cancellation state shared between an [`InterruptiblePipeReader`] and its
 /// [`PipeReadCanceller`]s. Owns the pipe handle — closed only when the **last**
 /// reference drops, so a canceller's `CancelIoEx` can never race a closed (and
-/// possibly reused) handle — plus a flag that short-circuits reads to EOF once
-/// cancelled.
+/// possibly reused) handle — plus the [`ReadGate`] the reader and cancellers
+/// hand off through.
 struct CancelablePipe {
     handle: SendOwnedHandle,
-    cancelled: AtomicBool,
+    gate: Mutex<ReadGate>,
 }
 
-// SAFETY: the field is a process-global Windows HANDLE whose value is only ever
-// copied for `ReadFile` / `CancelIoEx`; issuing `CancelIoEx` from one thread to
-// abort a `ReadFile` blocked on another is the documented, supported way to
-// interrupt synchronous pipe I/O. `cancelled` is atomic. So sharing
-// `&CancelablePipe` across threads is sound.
+/// Reader/canceller handshake, guarded by [`CancelablePipe::gate`].
+///
+/// `CancelIoEx` is *edge-triggered*: it aborts only I/O already pending when it
+/// is called. A bare `cancelled` flag + a single `CancelIoEx` therefore has a
+/// lost-wakeup race — a `close` landing between a read's flag check and its
+/// `ReadFile` entering the kernel cancels nothing and never retries, parking the
+/// read until real EOF. The mutex closes that race by ordering "a read is
+/// starting" against "cancel requested": a racing `close` either sees the read
+/// has not started (and the read then observes `cancelled`) or sees `reading`
+/// and keeps issuing `CancelIoEx` until the read is aborted.
+#[derive(Default)]
+struct ReadGate {
+    /// Set once `close` has been called; a read observing it returns EOF instead
+    /// of issuing (or while abandoning) a `ReadFile`.
+    cancelled: bool,
+    /// True while a read is in — or about to enter — its blocking `ReadFile`, so
+    /// `close` knows to keep issuing `CancelIoEx` until that read is aborted.
+    reading: bool,
+}
+
+impl CancelablePipe {
+    /// Lock the gate, tolerating a poisoned mutex (the guarded data is two
+    /// bools with no broken invariant on panic).
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReadGate> {
+        self.gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+// SAFETY: the only non-`Sync` field is a process-global Windows HANDLE whose
+// value is copied for `ReadFile` / `CancelIoEx`; issuing `CancelIoEx` from one
+// thread to abort a `ReadFile` blocked on another is the documented, supported
+// way to interrupt synchronous pipe I/O, and the reader/canceller handshake is
+// serialised by `gate`. So sharing `&CancelablePipe` across threads is sound.
 unsafe impl Sync for CancelablePipe {}
 
 /// A readable pipe end (e.g. the child's stdout/stderr) whose blocking
 /// `ReadFile` can be cancelled out-of-band via a [`PipeReadCanceller`] —
 /// reporting EOF — without closing the child or its other streams. A broken
 /// pipe (all write ends closed) still reads as EOF as usual. `Send` so it can
-/// be handed to a reader thread.
+/// be handed to a reader thread. Single-reader: at most one thread may `read` it
+/// at a time (any number of cancellers may fire concurrently).
 pub struct InterruptiblePipeReader(Arc<CancelablePipe>);
 
 impl InterruptiblePipeReader {
@@ -78,7 +109,7 @@ impl InterruptiblePipeReader {
     pub fn new(mut handle: OwnedHandle) -> Self {
         Self(Arc::new(CancelablePipe {
             handle: SendOwnedHandle::take(&mut handle),
-            cancelled: AtomicBool::new(false),
+            gate: Mutex::new(ReadGate::default()),
         }))
     }
 
@@ -92,18 +123,26 @@ impl InterruptiblePipeReader {
 impl std::io::Read for InterruptiblePipeReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED};
-        // Already cancelled: report EOF without issuing a read that would block.
-        if self.0.cancelled.load(Ordering::Acquire) {
-            return Ok(0);
+        // Announce the read under the gate: a `close` that already fired makes us
+        // EOF without touching the pipe; otherwise mark `reading` so a `close`
+        // racing us keeps issuing `CancelIoEx` until our `ReadFile` is aborted.
+        {
+            let mut gate = self.0.lock();
+            if gate.cancelled {
+                return Ok(0);
+            }
+            gate.reading = true;
         }
         let mut read: u32 = 0;
         // SAFETY: the `Arc` keeps the pipe handle valid for this call;
         // `buf`/`read` are valid local out-params.
-        match unsafe { ReadFile(self.0.handle.get(), Some(buf), Some(&mut read), None) } {
+        let result = unsafe { ReadFile(self.0.handle.get(), Some(buf), Some(&mut read), None) };
+        self.0.lock().reading = false;
+        match result {
             Ok(()) => Ok(read as usize),
             // Write ends all closed: normal end-of-stream, report EOF.
             Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
-            // A canceller's `CancelIoEx` aborted this blocked read: report EOF.
+            // A canceller's `CancelIoEx` aborted this read: report EOF.
             // `cancelled` is already set, so subsequent reads short-circuit.
             Err(e) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Ok(0),
             Err(e) => Err(std::io::Error::other(e)),
@@ -119,17 +158,30 @@ pub struct PipeReadCanceller(Arc<CancelablePipe>);
 
 impl StreamCloser for PipeReadCanceller {
     fn close(&self) {
-        // Flag first so the aborted `ReadFile` (or any later call) observes EOF,
-        // then cancel any in-flight read. If already cancelled, do nothing.
-        if self.0.cancelled.swap(true, Ordering::Release) {
-            return;
+        // Mark cancelled once (so reads short-circuit to EOF), then abort an
+        // in-flight read. Because `CancelIoEx` is edge-triggered, retry while a
+        // read is in its announce→`ReadFile` window (`reading == true`): the next
+        // iteration catches the `ReadFile` once it enters the kernel. The reader
+        // clears `reading` when its `ReadFile` returns (aborted or with data),
+        // which bounds the loop; if no read is in progress it exits at once.
+        {
+            let mut gate = self.0.lock();
+            if gate.cancelled {
+                return;
+            }
+            gate.cancelled = true;
         }
-        // SAFETY: the `Arc` keeps the handle valid; `CancelIoEx` with a null
-        // overlapped aborts all outstanding I/O (including synchronous reads) on
-        // the handle. Ignore the result — it's a benign no-op (ERROR_NOT_FOUND)
-        // when no read is pending.
-        unsafe {
-            let _ = CancelIoEx(self.0.handle.get(), None);
+        loop {
+            // SAFETY: the `Arc` keeps the handle valid; `CancelIoEx` with a null
+            // overlapped aborts all outstanding synchronous I/O on it. Ignore the
+            // result — a benign no-op (ERROR_NOT_FOUND) when none is pending.
+            unsafe {
+                let _ = CancelIoEx(self.0.handle.get(), None);
+            }
+            if !self.0.lock().reading {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 }

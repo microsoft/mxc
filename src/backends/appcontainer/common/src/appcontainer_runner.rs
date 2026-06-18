@@ -40,8 +40,8 @@ use wxc_common::process_util::{
     PipeReadCanceller, PipeWriter, SendOwnedHandle, SidAndAttributes,
 };
 use wxc_common::sandbox_process::{
-    boxed_closer, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend,
-    SandboxProcess, StdioMode, StreamCloser,
+    boxed_closer, cancel_drained_stream, join_discard, spawn_discard, take_boxed_read,
+    take_boxed_write, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
@@ -1346,6 +1346,8 @@ impl SandboxProcess for AppContainerSandboxProcess {
             _ => Ok(-1),
         };
 
+        cancel_drained_stream(&stdout_thread, &self.stdout_canceller);
+        cancel_drained_stream(&stderr_thread, &self.stderr_canceller);
         join_discard(stdout_thread);
         join_discard(stderr_thread);
         self.run_teardown();
