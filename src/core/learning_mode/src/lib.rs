@@ -14,7 +14,7 @@
 //!    import `learning_mode`.
 //! 2. **`learning_mode`** (this crate) — OS-agnostic orchestration:
 //!    re-exports the [`LearningModeBackend`] trait + shared types
-//!    from [`learning_mode_api`] (split out to break a cargo
+//!    from [`learning_mode_core`] (split out to break a cargo
 //!    dependency cycle) and provides the [`orchestrator::current_backend`]
 //!    dispatcher.
 //! 3. **`learning_mode_<os>`** — per-OS adapters that implement
@@ -29,7 +29,7 @@
 //! [`LearningModeBackend::begin_capture`] +
 //! [`CaptureHandle::stop_and_drain`].
 
-pub use learning_mode_api::{
+pub use learning_mode_core::{
     AccessType, CaptureHandle, CaptureOptions, CaptureSummary, DeniedResource, LearningModeBackend,
     LearningModeError, ResourceType,
 };

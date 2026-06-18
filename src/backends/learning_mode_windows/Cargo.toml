@@ -13,7 +13,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 denial_channel = { workspace = true }
-learning_mode_api = { workspace = true }
+learning_mode_core = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }

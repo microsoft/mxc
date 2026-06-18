@@ -12,7 +12,7 @@
 //! (for filesystem accesses) with the kernel audit subsystem (for
 //! security-relevant denials). Tracked as future work.
 
-use learning_mode_api::{
+use learning_mode_core::{
     CaptureHandle, CaptureOptions, LearningModeBackend, LearningModeError,
 };
 

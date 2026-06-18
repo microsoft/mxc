@@ -1,5 +1,5 @@
 [package]
-name = "learning_mode_api"
+name = "learning_mode_core"
 version.workspace = true
 edition.workspace = true
 
@@ -7,8 +7,8 @@ edition.workspace = true
 # `learning_mode` so that per-OS backend crates can implement the
 # trait without creating a cargo dependency cycle:
 #
-#   learning_mode  -> learning_mode_<os>  -> learning_mode_api
-#                  -> learning_mode_api
+#   learning_mode  -> learning_mode_<os>  -> learning_mode_core
+#                  -> learning_mode_core
 #
 # Consumers should depend on `learning_mode` (which re-exports
 # everything from this crate plus the OS dispatcher). This crate

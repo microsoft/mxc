@@ -3,7 +3,7 @@ members = [
     "core/wxc",
     "core/wxc_common",
     "core/denial_channel",
-    "core/learning_mode_api",
+    "core/learning_mode_core",
     "core/learning_mode",
     "core/lxc",
     "core/mxc_darwin",
@@ -97,7 +97,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 wxc_common = { path = "core/wxc_common" }
 denial_channel = { path = "core/denial_channel" }
-learning_mode_api = { path = "core/learning_mode_api" }
+learning_mode_core = { path = "core/learning_mode_core" }
 learning_mode = { path = "core/learning_mode" }
 learning_mode_windows = { path = "backends/learning_mode_windows" }
 learning_mode_linux = { path = "backends/learning_mode_linux" }

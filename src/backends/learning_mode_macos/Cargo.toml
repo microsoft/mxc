@@ -10,4 +10,4 @@ edition.workspace = true
 # EndpointSecurity framework) is tracked as future work.
 
 [dependencies]
-learning_mode_api = { workspace = true }
+learning_mode_core = { workspace = true }

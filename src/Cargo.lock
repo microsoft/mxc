@@ -1164,14 +1164,14 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "learning_mode"
 version = "0.6.1"
 dependencies = [
- "learning_mode_api",
+ "learning_mode_core",
  "learning_mode_linux",
  "learning_mode_macos",
  "learning_mode_windows",
 ]
 
 [[package]]
-name = "learning_mode_api"
+name = "learning_mode_core"
 version = "0.6.1"
 dependencies = [
  "denial_channel",
@@ -1182,14 +1182,14 @@ dependencies = [
 name = "learning_mode_linux"
 version = "0.6.1"
 dependencies = [
- "learning_mode_api",
+ "learning_mode_core",
 ]
 
 [[package]]
 name = "learning_mode_macos"
 version = "0.6.1"
 dependencies = [
- "learning_mode_api",
+ "learning_mode_core",
 ]
 
 [[package]]
@@ -1197,7 +1197,7 @@ name = "learning_mode_windows"
 version = "0.6.1"
 dependencies = [
  "denial_channel",
- "learning_mode_api",
+ "learning_mode_core",
  "serde",
  "serde_json",
  "thiserror",

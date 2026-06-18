@@ -63,8 +63,8 @@ Two design goals:
 | Crate | Box | Platform | Purpose |
 |---|---|---|---|
 | `src/core/denial_channel/` | 1 | xplat | Cross-platform `DeniedResource`, `ResourceType`, `AccessType` types + serde JSON shape. |
-| `src/core/learning_mode_api/` | 2 (split) | xplat | `LearningModeBackend` trait + `CaptureOptions` / `CaptureSummary` / `CaptureHandle` / `LearningModeError`. Split out from `learning_mode` to break a cargo dependency cycle (`learning_mode -> learning_mode_<os> -> learning_mode`). |
-| `src/core/learning_mode/` | 2 | xplat | Re-exports everything in `learning_mode_api` plus the `orchestrator::current_backend()` dispatcher. **Consumers depend on this crate.** |
+| `src/core/learning_mode_core/` | 2 (split) | xplat | `LearningModeBackend` trait + `CaptureOptions` / `CaptureSummary` / `CaptureHandle` / `LearningModeError`. Split out from `learning_mode` to break a cargo dependency cycle (`learning_mode -> learning_mode_<os> -> learning_mode`). |
+| `src/core/learning_mode/` | 2 | xplat | Re-exports everything in `learning_mode_core` plus the `orchestrator::current_backend()` dispatcher. **Consumers depend on this crate.** |
 | `src/backends/learning_mode_windows/` | 3 (Windows) | Windows | ETW kernel-audit session, TDH event decoders, shim RPC wire format, path canonicalisation, NDJSON stderr writer, child-process Toolhelp observer. Impls `LearningModeBackend` as `WindowsLearningModeBackend`. |
 | `src/backends/learning_mode_linux/` | 3 (Linux) | xplat (compiles everywhere, only meaningful on Linux) | Stub. `is_available()` returns `false`; `begin_capture()` returns `Err(NotSupported)`. Future: fanotify + audit. |
 | `src/backends/learning_mode_macos/` | 3 (macOS) | xplat | Stub. Same pattern. Future: EndpointSecurity framework. |
@@ -79,7 +79,7 @@ The dependency graph (omitting unrelated crates):
                 └──────────△─────────┘
                            │
                 ┌──────────┴──────────┐
-                │  learning_mode_api  │  (trait + types, xplat)
+                │  learning_mode_core  │  (trait + types, xplat)
                 └──────────△──────────┘
                            │
         ┌──────────────────┼─────────────────────┐
@@ -96,7 +96,7 @@ The dependency graph (omitting unrelated crates):
         └───────────────────┘
 ```
 
-The split of `learning_mode_api` from `learning_mode` is a pure
+The split of `learning_mode_core` from `learning_mode` is a pure
 cargo-cycle workaround: cargo computes cycles across all targets
 even for `cfg(target_os)`-gated deps, so `learning_mode` cannot
 both depend on the OS backends and host the trait the backends
@@ -205,7 +205,7 @@ new commands.
 **Done (this rearchitecture):**
 
 - Box 1 (`denial_channel`) extracted from former `denial_capture` crate.
-- Box 2 (`learning_mode_api` + `learning_mode`) created with trait,
+- Box 2 (`learning_mode_core` + `learning_mode`) created with trait,
   types, error, and OS dispatcher.
 - Box 3 Windows backend (`learning_mode_windows`) implements the
   trait via `WindowsLearningModeBackend`; absorbed the former

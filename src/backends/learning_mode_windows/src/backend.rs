@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use learning_mode_api::{
+use learning_mode_core::{
     CaptureHandle, CaptureOptions, CaptureSummary, LearningModeBackend, LearningModeError,
 };
 

@@ -3,16 +3,15 @@
 
 //! Trait + shared types for the learning-mode capture feature.
 //!
-//! This crate exists purely to break a cargo dependency cycle: per-
-//! OS backend crates (`learning_mode_windows`, `_linux`, `_macos`)
-//! implement [`LearningModeBackend`], and the orchestrator crate
-//! `learning_mode` depends on the backends to dispatch by
-//! `cfg(target_os)`. If the trait lived in `learning_mode` itself,
-//! the backends would need to depend back on `learning_mode`,
-//! creating a cycle.
+//! **Internal cycle-break crate. Do not import directly** — use
+//! `learning_mode`, which re-exports everything defined here.
 //!
-//! Consumers should depend on `learning_mode`, not this crate;
-//! `learning_mode` re-exports everything defined here.
+//! Exists because cargo rejects the cycle
+//! `learning_mode -> learning_mode_<os> -> learning_mode` even
+//! when the backend edge is `cfg(target_os)`-gated. Splitting the
+//! trait into a crate that depends on nothing learning-mode
+//! related breaks the cycle. If cargo ever honors `cfg` for cycle
+//! detection, this crate can be folded back into `learning_mode`.
 
 use std::sync::mpsc::Sender;
 

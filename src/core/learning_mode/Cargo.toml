@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 # Orchestration crate. Re-exports the trait + types from
-# `learning_mode_api` (split out to break a cargo cycle) and
+# `learning_mode_core` (split out to break a cargo cycle) and
 # provides the `orchestrator::current_backend()` dispatcher that
 # picks the right per-OS backend at compile time.
 
 [dependencies]
-learning_mode_api = { workspace = true }
+learning_mode_core = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 learning_mode_windows = { workspace = true }
