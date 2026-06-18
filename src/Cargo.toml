@@ -30,6 +30,7 @@ members = [
     "testing/linux_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
+    "tools/mxc_schema_gen",
 ]
 exclude = ["testing/fuzz"]
 resolver = "3"

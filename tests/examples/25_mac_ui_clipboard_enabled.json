@@ -12,8 +12,5 @@
     "ui": {
         "disable": false,
         "clipboard": "all"
-    },
-    "seatbelt": {
-        "mode": "exec"
     }
 }

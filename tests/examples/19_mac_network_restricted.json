@@ -16,8 +16,5 @@
         "allowedHosts": [
             "api.github.com"
         ]
-    },
-    "seatbelt": {
-        "mode": "exec"
     }
 }
