@@ -1,0 +1,19 @@
+[package]
+name = "learning_mode_windows"
+version.workspace = true
+edition.workspace = true
+
+# Windows-only learning_mode backend: ETW kernel-audit session + extractors,
+# pipe wire format, path canonicalization. The cross-platform public types
+# (`DeniedResource`, `ResourceType`, `AccessType`) live in the `denial_channel`
+# crate and are re-exported from here for back-compat.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+denial_channel = { workspace = true }
+learning_mode_api = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }

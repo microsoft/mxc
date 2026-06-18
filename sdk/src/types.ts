@@ -290,7 +290,7 @@ export interface ContainerConfig {
    * final summary line is also delivered through
    * `ScriptResponse.deniedResources`.
    *
-   * Windows only. Requires the `MxcDenialShim` service to be
+   * Windows only. Requires the `MxcLearningModeShim` service to be
    * installed and running on the host (see
    * `wxc-host-prep install-denial-shim`). On unsupported platforms or
    * when the shim isn't reachable the flag is a no-op — the workload
@@ -360,7 +360,7 @@ export type SandboxPolicy = {
    * "ask the user to grant access and retry" UX flows on top of
    * a default-deny policy.
    *
-   * Windows only; requires the `MxcDenialShim` service on the host.
+   * Windows only; requires the `MxcLearningModeShim` service on the host.
    * On unsupported platforms or when the shim isn't reachable the
    * flag is a no-op — the workload still runs, just without
    * denial capture. Default: false.

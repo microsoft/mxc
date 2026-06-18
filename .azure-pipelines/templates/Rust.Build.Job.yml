@@ -49,7 +49,7 @@ jobs:
         signPattern: |
             wxc-exec.exe
             wxc-host-prep.exe
-            mxc-denial-shim.exe
+            mxc-learning-mode-shim.exe
             winhttp-proxy-shim.exe
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe

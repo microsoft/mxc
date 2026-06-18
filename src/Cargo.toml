@@ -2,13 +2,18 @@
 members = [
     "core/wxc",
     "core/wxc_common",
-    "core/denial_capture",
+    "core/denial_channel",
+    "core/learning_mode_api",
+    "core/learning_mode",
     "core/lxc",
     "core/mxc_darwin",
     "core/mxc_pty",
     "core/mxc_build_common",
     "core/generated/base_container_specification",
     "backends/appcontainer/common",
+    "backends/learning_mode_windows",
+    "backends/learning_mode_linux",
+    "backends/learning_mode_macos",
     "backends/windows_sandbox/daemon",
     "backends/windows_sandbox/guest",
     "backends/windows_sandbox/common",
@@ -24,7 +29,7 @@ members = [
     "backends/seatbelt/common",
     "host/wxc_host_prep",
     "host/wxc_winhttp_proxy_shim",
-    "host/mxc_denial_shim",
+    "host/mxc_learning_mode_shim",
     "tools/denial_capture_test",
     "testing/wxc_e2e_tests",
     "testing/wxc_test_driver",
@@ -91,6 +96,12 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 wxc_common = { path = "core/wxc_common" }
+denial_channel = { path = "core/denial_channel" }
+learning_mode_api = { path = "core/learning_mode_api" }
+learning_mode = { path = "core/learning_mode" }
+learning_mode_windows = { path = "backends/learning_mode_windows" }
+learning_mode_linux = { path = "backends/learning_mode_linux" }
+learning_mode_macos = { path = "backends/learning_mode_macos" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
 isolation_session_common = { path = "backends/isolation_session/common" }

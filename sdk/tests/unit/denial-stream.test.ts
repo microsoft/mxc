@@ -11,7 +11,7 @@ import {
   DENIAL_STREAM_MARKER,
   DeniedResource,
   DenialStreamSummary,
-} from '../../src/denial-stream.js';
+} from '../../src/denial-channel/stream.js';
 
 // ---------- helpers ---------------------------------------------------------
 

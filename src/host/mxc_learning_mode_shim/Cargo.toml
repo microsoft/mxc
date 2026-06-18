@@ -1,0 +1,23 @@
+[package]
+name = "mxc_learning_mode_shim"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mxc-learning-mode-shim"
+path = "src/main.rs"
+
+# Windows-only binary: a privileged service that loans ETW-session
+# creation privilege to unelevated callers (e.g. wxc-exec) for a single
+# scoped denial-capture session per request. See
+# `docs/contoso-integration.md` (Phase 2 of the per-PID denial-capture
+# prototype) for the full design.
+
+[target.'cfg(target_os = "windows")'.dependencies]
+learning_mode_windows = { workspace = true }
+windows = { workspace = true }
+windows-service = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

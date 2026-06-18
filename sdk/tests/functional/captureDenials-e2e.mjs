@@ -5,7 +5,7 @@
  * captureDenials end-to-end functional test, consuming the published
  * @microsoft/mxc-sdk package exactly like a real downstream caller
  * would. Drives spawnSandboxFromConfig + parseDenialStream against a
- * live wxc-exec on Windows with the MxcDenialShim service installed.
+ * live wxc-exec on Windows with the MxcLearningModeShim service installed.
  *
  * Usage (after `npm install <sdk-tarball>` next to this file):
  *   node captureDenials-e2e.mjs --target <absolute-path-the-workload-should-try-to-read>
@@ -152,7 +152,7 @@ if (denialResult.summary && denialResult.summary.exitCode !== exitInfo.code) {
   );
 }
 if (denialResult.summary && denialResult.summary.captureDenialsActive !== true) {
-  // The host has the MxcDenialShim installed (precondition for this
+  // The host has the MxcLearningModeShim installed (precondition for this
   // functional test to be meaningful), so the run-side capture
   // *should* report active=true. active=false means the shim wasn't
   // reachable -- treat as a hard failure here so we don't ship a

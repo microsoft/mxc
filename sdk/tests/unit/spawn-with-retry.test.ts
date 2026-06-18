@@ -7,8 +7,8 @@ import {
   driveRetryLoop,
   type RetryAttemptResult,
   type SpawnSandboxWithRetryOptions,
-} from '../../src/spawn-with-retry.js';
-import type { DeniedResource } from '../../src/denial-stream.js';
+} from '../../src/learning-mode/spawn-with-retry.js';
+import type { DeniedResource } from '../../src/denial-channel/stream.js';
 import type { SandboxPolicy } from '../../src/types.js';
 
 // ---- fixtures -------------------------------------------------------------

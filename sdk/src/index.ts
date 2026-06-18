@@ -60,7 +60,7 @@ export {
 export {
   createDenialPipeServer,
   DenialPipeServer,
-} from './denial-side-channel.js';
+} from './denial-channel/transports/named-pipe.js';
 
 // Export captureDenials streaming consumer
 export {
@@ -75,7 +75,7 @@ export {
   DenialStreamResult,
   ParseDenialStreamOptions,
   parseDenialStream,
-} from './denial-stream.js';
+} from './denial-channel/stream.js';
 
 // Export captureDenials retry orchestration
 export {
@@ -83,7 +83,7 @@ export {
   isSystemCritical,
   RegenInput,
   RegenResult,
-} from './policy-regen.js';
+} from './learning-mode/policy-regen.js';
 export {
   spawnSandboxWithRetry,
   OnDeniedDecision,
@@ -91,7 +91,7 @@ export {
   SpawnSandboxWithRetryOptions,
   SpawnSandboxWithRetryResult,
   RetryAttemptResult,
-} from './spawn-with-retry.js';
+} from './learning-mode/spawn-with-retry.js';
 
 // Export policy discovery functions
 export {

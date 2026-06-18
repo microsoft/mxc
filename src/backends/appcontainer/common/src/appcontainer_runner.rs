@@ -30,7 +30,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
-use crate::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
+use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
@@ -834,7 +834,7 @@ impl AppContainerScriptRunner {
         };
 
         // Per-PID denial capture: now that the child PID is fixed and the
-        // process is still suspended, ask the mxc-denial-shim service for
+        // process is still suspended, ask the mxc-learning-mode-shim service for
         // a privileged ETW session scoped to that PID, then start the
         // ProcessTrace consumer worker. The kernel begins emitting
         // AccessCheckLog / LearningModeViolation events as soon as the
@@ -850,13 +850,13 @@ impl AppContainerScriptRunner {
         // (0x1E). SDK callers split stderr on 0x1E and parse each
         // segment as JSON, enabling mid-run prompts.
         let (collector, stream_writer, child_observer) = if request.capture_denials {
-            let (tx, rx) = std::sync::mpsc::channel::<denial_capture::DeniedResource>();
+            let (tx, rx) = std::sync::mpsc::channel::<learning_mode_windows::DeniedResource>();
             let writer = std::thread::Builder::new()
                 .name("denial-stream-writer".to_string())
                 .spawn(move || stream_denials_to_stderr(rx))
                 .ok();
 
-            let collector = match denial_capture::session::open_via_shim(pi.dwProcessId, None) {
+            let collector = match learning_mode_windows::session::open_via_shim(pi.dwProcessId, None) {
                 Ok(session) => match session.start_collector_with_stream(Some(tx)) {
                     Ok(c) => {
                         logger.log_line(&format!(
@@ -888,7 +888,7 @@ impl AppContainerScriptRunner {
             // signal (childProcessesObserved on the summary) so the
             // application can warn the user when the workload looks
             // like a launcher (cargo / npm / cmake / ...).
-            let observer = crate::child_process_observer::ChildProcessObserver::spawn(
+            let observer = learning_mode_windows::child_process_observer::ChildProcessObserver::spawn(
                 pi.dwProcessId,
                 std::time::Duration::from_millis(500),
             );
@@ -968,11 +968,11 @@ impl AppContainerScriptRunner {
                 // matches what was streamed and `totalDenials` lines
                 // up across both. We pass the raw count into the
                 // summary separately for diagnostics.
-                let mut seen: std::collections::HashSet<(String, denial_capture::AccessType)> =
+                let mut seen: std::collections::HashSet<(String, learning_mode_windows::AccessType)> =
                     std::collections::HashSet::new();
-                let resources: Vec<denial_capture::DeniedResource> = events
+                let resources: Vec<learning_mode_windows::DeniedResource> = events
                     .into_iter()
-                    .map(denial_capture::DeniedResource::from)
+                    .map(learning_mode_windows::DeniedResource::from)
                     .filter(|r| seen.insert((r.path.clone(), r.access_type)))
                     .collect();
                 (resources, truncated, raw_count)

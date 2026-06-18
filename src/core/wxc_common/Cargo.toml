@@ -14,7 +14,7 @@ base64 = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
-denial_capture = { path = "../denial_capture" }
+learning_mode_windows = { workspace = true }
 nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
 

@@ -25,7 +25,7 @@ flatbuffers = { workspace = true }
 sandbox_spec = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
-denial_capture = { path = "../../../core/denial_capture" }
+learning_mode_windows = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

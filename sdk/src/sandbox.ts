@@ -10,7 +10,7 @@ import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } f
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromCode } from './errors.js';
-import { createDenialPipeServer } from './denial-side-channel.js';
+import { createDenialPipeServer } from './denial-channel/transports/named-pipe.js';
 
 const SUPPORTED_VERSION = '0.7.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';

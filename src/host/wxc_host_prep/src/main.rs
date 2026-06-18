@@ -23,7 +23,7 @@
 #[cfg(target_os = "windows")]
 mod cli;
 #[cfg(target_os = "windows")]
-mod denial_shim;
+mod learning_mode_shim;
 #[cfg(target_os = "windows")]
 mod elevation_check;
 #[cfg(target_os = "windows")]

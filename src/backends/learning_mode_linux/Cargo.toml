@@ -1,0 +1,13 @@
+[package]
+name = "learning_mode_linux"
+version.workspace = true
+edition.workspace = true
+
+# Linux stub for the learning-mode feature. Implements the
+# `LearningModeBackend` trait with `Err(NotSupported)` so the
+# orchestrator can dispatch by `cfg(target_os = "linux")` without
+# losing type-safety. The real Linux implementation (likely
+# fanotify + audit) is tracked as future work.
+
+[dependencies]
+learning_mode_api = { workspace = true }

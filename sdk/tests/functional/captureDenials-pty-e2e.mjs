@@ -17,7 +17,7 @@
  *   - The summary terminator arrives (captureDenialsActive: true).
  *   - The workload's PTY output reaches the consumer.
  *
- * Run on a VM with MxcDenialShim installed:
+ * Run on a VM with MxcLearningModeShim installed:
  *   node sdk/tests/functional/captureDenials-pty-e2e.mjs \
  *     --target C:\Users\AdminUser\Documents\file_x.txt
  */

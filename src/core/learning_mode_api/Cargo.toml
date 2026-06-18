@@ -1,0 +1,19 @@
+[package]
+name = "learning_mode_api"
+version.workspace = true
+edition.workspace = true
+
+# Trait + shared types for the learning-mode feature. Split out from
+# `learning_mode` so that per-OS backend crates can implement the
+# trait without creating a cargo dependency cycle:
+#
+#   learning_mode  -> learning_mode_<os>  -> learning_mode_api
+#                  -> learning_mode_api
+#
+# Consumers should depend on `learning_mode` (which re-exports
+# everything from this crate plus the OS dispatcher). This crate
+# is the layer that backend crates target.
+
+[dependencies]
+denial_channel = { workspace = true }
+thiserror = { workspace = true }

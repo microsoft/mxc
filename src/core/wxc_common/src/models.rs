@@ -587,9 +587,9 @@ pub struct ExecutionRequest {
     ///    denials.
     /// 2. Spawns the sandboxed child *suspended* so the PID is known
     ///    before any code runs.
-    /// 3. Asks `mxc-denial-shim` for a privileged ETW session scoped to
+    /// 3. Asks `mxc-learning-mode-shim` for a privileged ETW session scoped to
     ///    that PID.
-    /// 4. Consumes events on a worker thread (`denial_capture::session`)
+    /// 4. Consumes events on a worker thread (`learning_mode_windows::session`)
     ///    until the child exits.
     /// 5. Surfaces the resulting `DeniedResource`s on
     ///    `ScriptResponse.denied_resources`.
@@ -658,12 +658,12 @@ pub struct ScriptResponse {
     pub failure_phase: FailurePhase,
     /// Per-PID denial capture results. Populated only when the request had
     /// `capture_denials: true` AND the runner successfully attached an ETW
-    /// session via `mxc-denial-shim`. Otherwise an empty `Vec`. Omitted
+    /// session via `mxc-learning-mode-shim`. Otherwise an empty `Vec`. Omitted
     /// from the wire when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub denied_resources: Vec<denial_capture::DeniedResource>,
+    pub denied_resources: Vec<learning_mode_windows::DeniedResource>,
     /// Set to true when the denial-capture buffer hit its cap
-    /// (`MAX_CAPTURED_EVENTS` in `denial_capture::session`) and at least
+    /// (`MAX_CAPTURED_EVENTS` in `learning_mode_windows::session`) and at least
     /// one event was dropped. SDK consumers should treat
     /// `denied_resources` as a representative sample rather than a
     /// complete enumeration when this is true.

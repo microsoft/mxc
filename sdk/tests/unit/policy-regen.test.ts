@@ -6,8 +6,8 @@ import assert from 'node:assert';
 import {
   regenerateSandboxPolicy,
   isSystemCritical,
-} from '../../src/policy-regen.js';
-import type { DeniedResource } from '../../src/denial-stream.js';
+} from '../../src/learning-mode/policy-regen.js';
+import type { DeniedResource } from '../../src/denial-channel/stream.js';
 import type { SandboxPolicy } from '../../src/types.js';
 
 // ---- fixtures -------------------------------------------------------------

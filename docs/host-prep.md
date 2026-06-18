@@ -28,9 +28,9 @@ privilege-requiring setup work lives in `wxc-host-prep.exe` instead.
 | `prepare-null-device` | Apply MXC's managed security descriptor to `\Device\Null`. |
 | `verify-null-device` | Check `\Device\Null` SD against the target without modifying it. |
 | `dump-null-device` | Print the current `\Device\Null` SD as SDDL. |
-| `install-denial-shim` | Register `mxc-denial-shim.exe` as a Manual-start `LocalSystem` service so unelevated callers can request scoped ETW sessions for per-PID denial capture. |
-| `uninstall-denial-shim` | Stop and deregister the `MxcDenialShim` service. Idempotent. |
-| `dump-denial-shim` | Report whether the `MxcDenialShim` service is installed, its current state, and the registered binary path. |
+| `install-denial-shim` | Register `mxc-learning-mode-shim.exe` as a Manual-start `LocalSystem` service so unelevated callers can request scoped ETW sessions for per-PID denial capture. |
+| `uninstall-denial-shim` | Stop and deregister the `MxcLearningModeShim` service. Idempotent. |
+| `dump-denial-shim` | Report whether the `MxcLearningModeShim` service is installed, its current state, and the registered binary path. |
 
 All subcommands require elevation. The binary aborts with exit code
 `65` and a clear message if launched without an elevated token (e.g.
@@ -220,8 +220,8 @@ current SD.
 wxc-host-prep install-denial-shim [--shim-path <path>]
 ```
 
-Registers `mxc-denial-shim.exe` as a Windows service named
-`MxcDenialShim`:
+Registers `mxc-learning-mode-shim.exe` as a Windows service named
+`MxcLearningModeShim`:
 
 - **Account**: `NT AUTHORITY\LocalService` — least-privilege built-in
   account. `LocalService` does **not** carry
@@ -257,7 +257,7 @@ See the per-PID denial-capture prototype plan for design notes.
 wxc-host-prep uninstall-denial-shim
 ```
 
-Stops the `MxcDenialShim` service if running, then
+Stops the `MxcLearningModeShim` service if running, then
 `DeleteService`s it. Idempotent — exits 0 with a "no change"
 message when the service is already absent. Failures during the
 best-effort stop are non-fatal; the delete still proceeds and
@@ -269,7 +269,7 @@ the OS reaps the service on its next service restart.
 wxc-host-prep dump-denial-shim [--json]
 ```
 
-Reports whether `MxcDenialShim` is installed, its current state
+Reports whether `MxcLearningModeShim` is installed, its current state
 (`Running` / `Stopped` / etc.), and the registered binary path.
 Exit code 0 when installed, 1 when not installed. With `--json`
 emits a single-line JSON object for machine consumption; without

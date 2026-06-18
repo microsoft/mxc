@@ -4,7 +4,7 @@
 //! End-to-end smoke harness for per-PID denial capture.
 //!
 //! Drives the full client path:
-//!   1. `open_via_shim(pid)` — handshake with the mxc-denial-shim service
+//!   1. `open_via_shim(pid)` — handshake with the mxc-learning-mode-shim service
 //!   2. `start_collector()`  — OpenTraceW + ProcessTrace worker
 //!   3. sleep N seconds (operator runs the target workload during this window)
 //!   4. `stop_and_drain()`   — ControlTrace(STOP) + drain
@@ -20,12 +20,12 @@ use std::thread;
 use std::time::Duration;
 
 use clap::Parser;
-use denial_capture::session::{open_via_shim, SessionError};
+use learning_mode_windows::session::{open_via_shim, SessionError};
 
 #[derive(Parser)]
 #[command(
     name = "denial-capture-test",
-    about = "End-to-end smoke harness for per-PID denial capture via the mxc-denial-shim service."
+    about = "End-to-end smoke harness for per-PID denial capture via the mxc-learning-mode-shim service."
 )]
 struct Cli {
     /// PID of the target process whose denials should be captured.
@@ -52,7 +52,7 @@ fn main() {
     let cli = Cli::parse();
 
     println!(
-        "[1/5] Connecting to mxc-denial-shim and requesting session for PID {}…",
+        "[1/5] Connecting to mxc-learning-mode-shim and requesting session for PID {}…",
         cli.pid
     );
     let session = match open_via_shim(cli.pid, cli.package_sid.as_deref()) {

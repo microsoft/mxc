@@ -97,9 +97,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "appcontainer_common"
 version = "0.6.1"
 dependencies = [
- "denial_capture",
  "flatbuffers",
  "getrandom 0.2.17",
+ "learning_mode_windows",
  "sandbox_spec",
  "serde",
  "serde_json",
@@ -469,21 +469,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6b926516df9c60bfa16e107b21086399f8285a44ca9711344b9e553c5146e2"
 
 [[package]]
-name = "denial_capture"
-version = "0.6.1"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "windows",
-]
-
-[[package]]
 name = "denial_capture_test"
 version = "0.6.1"
 dependencies = [
  "clap",
- "denial_capture",
+ "learning_mode_windows",
+ "serde_json",
+]
+
+[[package]]
+name = "denial_channel"
+version = "0.6.1"
+dependencies = [
+ "serde",
  "serde_json",
 ]
 
@@ -1163,6 +1161,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "learning_mode"
+version = "0.6.1"
+dependencies = [
+ "learning_mode_api",
+ "learning_mode_linux",
+ "learning_mode_macos",
+ "learning_mode_windows",
+]
+
+[[package]]
+name = "learning_mode_api"
+version = "0.6.1"
+dependencies = [
+ "denial_channel",
+ "thiserror",
+]
+
+[[package]]
+name = "learning_mode_linux"
+version = "0.6.1"
+dependencies = [
+ "learning_mode_api",
+]
+
+[[package]]
+name = "learning_mode_macos"
+version = "0.6.1"
+dependencies = [
+ "learning_mode_api",
+]
+
+[[package]]
+name = "learning_mode_windows"
+version = "0.6.1"
+dependencies = [
+ "denial_channel",
+ "learning_mode_api",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "windows",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1407,19 +1449,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_denial_shim"
-version = "0.6.1"
-dependencies = [
- "denial_capture",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
- "windows",
- "windows-service",
-]
-
-[[package]]
 name = "mxc_diagnostic_console"
 version = "0.6.1"
 dependencies = [
@@ -1430,6 +1459,19 @@ dependencies = [
  "windows",
  "windows-core",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_learning_mode_shim"
+version = "0.6.1"
+dependencies = [
+ "learning_mode_windows",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+ "windows",
+ "windows-service",
 ]
 
 [[package]]
@@ -2911,8 +2953,8 @@ name = "wxc_common"
 version = "0.6.1"
 dependencies = [
  "base64",
- "denial_capture",
  "getrandom 0.2.17",
+ "learning_mode_windows",
  "libc",
  "nanvix_common",
  "semver",

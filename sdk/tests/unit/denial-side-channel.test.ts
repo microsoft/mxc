@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { createConnection } from 'node:net';
 import * as os from 'os';
-import { createDenialPipeServer } from '../../src/denial-side-channel.js';
+import { createDenialPipeServer } from '../../src/denial-channel/transports/named-pipe.js';
 
 // All tests in this file require Windows named-pipe semantics. The
 // module itself throws on non-Windows, and a Unix host has no
