@@ -57,7 +57,7 @@ pub use policy::{
 // on `wxc_common` directly.
 pub use wxc_common::models::ExecutionRequest;
 pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
-pub use wxc_common::sandbox_process::SandboxProcess;
+pub use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 
 use wxc_common::logger::{Logger, Mode};
 

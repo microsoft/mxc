@@ -27,16 +27,17 @@
 
 use std::fmt::Write as FmtWrite;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use lxc_common::network_iptables::NetworkIptablesManager;
+use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::sandbox_process::{
-    group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend,
-    SandboxProcess, StdioMode,
+    boxed_closer, group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::validator::validate_common;
 
@@ -240,6 +241,28 @@ impl BubblewrapScriptRunner {
             StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
             StdioMode::Inherit => (None, None, None),
         };
+        // Wrap the pipe reads so the caller can abandon a stream a backgrounded
+        // descendant is holding open (see `SandboxProcess::stdout_closer`)
+        // without killing the child. On failure, tear down the per-run network
+        // state we already set up before returning the error.
+        let (stdout, stdout_canceller, stderr, stderr_canceller) =
+            match (wrap_pipe(stdout), wrap_pipe(stderr)) {
+                (Ok((out, out_canceller)), Ok((err, err_canceller))) => {
+                    (out, out_canceller, err, err_canceller)
+                }
+                (out_result, err_result) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let mut fw_manager = fw_manager;
+                    cleanup_iptables(&mut fw_manager, logger);
+                    proxy.stop(logger);
+                    let error = out_result.err().or(err_result.err());
+                    return Err(ScriptResponse::error(&format!(
+                        "Bubblewrap: failed to wrap stdio pipes: {}",
+                        error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
+                    )));
+                }
+            };
         let timeout = if request.script_timeout == 0 {
             None
         } else {
@@ -251,6 +274,8 @@ impl BubblewrapScriptRunner {
             stdin,
             stdout,
             stderr,
+            stdout_canceller,
+            stderr_canceller,
             proxy,
             fw_manager,
             timeout,
@@ -263,8 +288,12 @@ impl BubblewrapScriptRunner {
 struct BwrapChild {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
-    stderr: Option<ChildStderr>,
+    stdout: Option<InterruptibleReader>,
+    stderr: Option<InterruptibleReader>,
+    /// Cancellers for the stdout/stderr reads, kept so the `SandboxProcess`
+    /// closers can mint a [`StreamCloser`] even after the stream is taken.
+    stdout_canceller: Option<ReadCanceller>,
+    stderr_canceller: Option<ReadCanceller>,
     proxy: LinuxProxyCoordinator,
     fw_manager: Option<NetworkIptablesManager>,
     timeout: Option<Duration>,
@@ -316,6 +345,14 @@ impl SandboxProcess for BubblewrapSandboxProcess {
 
     fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         take_boxed_read(&mut self.inner.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.inner.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.inner.stderr_canceller)
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {

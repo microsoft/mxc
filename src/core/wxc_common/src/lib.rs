@@ -35,6 +35,10 @@ pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod string_util;
 
+// Unix-specific modules (shared by the Seatbelt and Bubblewrap backends).
+#[cfg(unix)]
+pub mod interruptible_reader;
+
 // Linux-specific modules
 #[cfg(target_os = "linux")]
 pub mod linux_proxy_coordinator;

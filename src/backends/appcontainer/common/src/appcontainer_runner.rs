@@ -36,12 +36,12 @@ use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use wxc_common::process_util::{
-    create_std_pipes, get_capability_sid_from_name, OwnedHandle, PipeReader, PipeWriter,
-    SendOwnedHandle, SidAndAttributes,
+    create_std_pipes, get_capability_sid_from_name, InterruptiblePipeReader, OwnedHandle,
+    PipeReadCanceller, PipeWriter, SendOwnedHandle, SidAndAttributes,
 };
 use wxc_common::sandbox_process::{
-    join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend, SandboxProcess,
-    StdioMode,
+    boxed_closer, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend,
+    SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
@@ -1195,8 +1195,12 @@ struct AppContainerSandboxProcess {
     job: crate::job_object::UiJobObject,
     pid: u32,
     stdin: Option<PipeWriter>,
-    stdout: Option<PipeReader>,
-    stderr: Option<PipeReader>,
+    stdout: Option<InterruptiblePipeReader>,
+    stderr: Option<InterruptiblePipeReader>,
+    /// Cancellers for the stdout/stderr reads, kept so the `SandboxProcess`
+    /// closers can mint a [`StreamCloser`] even after the stream is taken.
+    stdout_canceller: Option<PipeReadCanceller>,
+    stderr_canceller: Option<PipeReadCanceller>,
     prepared: Prepared,
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
@@ -1220,8 +1224,10 @@ impl AppContainerSandboxProcess {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
         let stdin = child.stdin_write.take().map(PipeWriter::new);
-        let stdout = child.stdout_read.take().map(PipeReader::new);
-        let stderr = child.stderr_read.take().map(PipeReader::new);
+        let stdout = child.stdout_read.take().map(InterruptiblePipeReader::new);
+        let stderr = child.stderr_read.take().map(InterruptiblePipeReader::new);
+        let stdout_canceller = stdout.as_ref().map(InterruptiblePipeReader::canceller);
+        let stderr_canceller = stderr.as_ref().map(InterruptiblePipeReader::canceller);
         Self {
             process,
             _thread: thread,
@@ -1230,6 +1236,8 @@ impl AppContainerSandboxProcess {
             stdin,
             stdout,
             stderr,
+            stdout_canceller,
+            stderr_canceller,
             prepared,
             filesystem_mode,
             preserve_policy: request.lifecycle.preserve_policy,
@@ -1267,6 +1275,14 @@ impl SandboxProcess for AppContainerSandboxProcess {
 
     fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         take_boxed_read(&mut self.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stderr_canceller)
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {

@@ -133,6 +133,63 @@ fn streaming_try_wait_reports_exit_after_completion() {
     assert_eq!(code, 0, "quick command should exit 0");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_stdout_closer_unblocks_parked_read_without_killing() {
+    use std::io::Read;
+
+    // `sleep` produces no output yet holds its stdout pipe write-end open, so a
+    // read parks indefinitely (mirroring a backgrounded descendant that keeps a
+    // pipe open past the foreground command's exit). The stdout closer must EOF
+    // that read promptly *without* terminating the still-running child — a plain
+    // `kill()` would defeat the point.
+    let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 0)).expect("spawn");
+
+    let mut stdout = proc.take_stdout().expect("stdout available");
+    // The closer is valid even though stdout has already been taken.
+    let closer = proc.stdout_closer().expect("stdout closer available");
+    assert!(
+        proc.stderr_closer().is_some(),
+        "stderr closer should also be available in pipes mode"
+    );
+
+    // Park a blocking read on a worker thread; with the writer held open it
+    // cannot return on its own.
+    let reader = std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        let start = std::time::Instant::now();
+        let n = stdout.read(&mut buf).expect("read returns");
+        (n, start.elapsed())
+    });
+
+    // Let the read park, confirm the child is still running, then close.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        proc.try_wait().expect("try_wait").is_none(),
+        "child should still be running while the read is parked"
+    );
+    closer.close();
+
+    let (n, elapsed) = reader.join().expect("reader thread");
+    assert_eq!(n, 0, "closed stream reports EOF");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "read should return promptly after close (elapsed: {elapsed:?})"
+    );
+
+    // The closer must not have terminated the child.
+    assert!(
+        proc.try_wait().expect("try_wait").is_none(),
+        "stdout_closer must not terminate the child"
+    );
+
+    // A second close is a harmless no-op.
+    closer.close();
+
+    proc.kill().expect("kill");
+    let _ = proc.wait();
+}
+
 // ---------------------------------------------------------------------------
 // Windows ProcessContainer streaming — integration test. Requires an elevated,
 // host-prepped Windows host (see docs/host-prep.md), so it is `#[ignore]`d.

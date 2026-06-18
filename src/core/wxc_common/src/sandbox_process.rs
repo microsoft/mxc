@@ -35,6 +35,21 @@ use crate::script_runner::ScriptRunner;
 ///
 /// No pty is ever allocated; the streams are ordinary pipes.
 ///
+/// # Abandoning a held-open stream (stdout/stderr closers)
+///
+/// A read on a taken stdout/stderr only ends at EOF — when **every** write end
+/// closes. A backgrounded descendant that inherited the pipe can hold its write
+/// end open long after the foreground command exits, so a caller blocked on
+/// such a read would hang until that descendant finally exits. A plain
+/// [`kill`](SandboxProcess::kill) would unblock it but also tear the descendant
+/// down, defeating any grace window for backgrounded work.
+///
+/// [`stdout_closer`](SandboxProcess::stdout_closer) /
+/// [`stderr_closer`](SandboxProcess::stderr_closer) hand back a
+/// [`StreamCloser`] for exactly this case: calling
+/// [`close`](StreamCloser::close) makes an in-flight or subsequent read on that
+/// stream return EOF (`Ok(0)`) promptly **without** terminating the child.
+///
 /// # Pipe-deadlock contract (read both ends concurrently)
 ///
 /// stdout and stderr are independent OS pipes with bounded kernel buffers. If
@@ -98,6 +113,44 @@ pub trait SandboxProcess: Send {
     /// Implementors must drain the not-taken stdout and stderr **concurrently**
     /// (not one then the other) — see the type-level pipe-deadlock contract.
     fn wait(&mut self) -> std::io::Result<i32>;
+
+    /// A closer that EOFs the stdout stream returned by
+    /// [`take_stdout`](SandboxProcess::take_stdout), on demand, **without**
+    /// killing the child — for abandoning a stream a backgrounded descendant is
+    /// holding open past the foreground command's exit (a plain
+    /// [`kill`](SandboxProcess::kill) would also take that descendant down).
+    ///
+    /// Valid whether or not stdout has been taken, and may be called
+    /// concurrently with a blocked read on it. Returns `None` when the stream
+    /// is not interruptible — e.g. inherited stdio ([`StdioMode::Inherit`]),
+    /// where the caller never reads from a handle stream. The default returns
+    /// `None`.
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        None
+    }
+
+    /// A closer for the stderr stream — see
+    /// [`stdout_closer`](SandboxProcess::stdout_closer). The default returns
+    /// `None`.
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        None
+    }
+}
+
+/// Abandons reads on one of a [`SandboxProcess`]'s standard streams: a call to
+/// [`close`](StreamCloser::close) makes an in-flight or subsequent read on the
+/// corresponding [`take_stdout`](SandboxProcess::take_stdout) /
+/// [`take_stderr`](SandboxProcess::take_stderr) stream return EOF (`Ok(0)`)
+/// promptly, **without** terminating the child.
+///
+/// Obtained from [`stdout_closer`](SandboxProcess::stdout_closer) /
+/// [`stderr_closer`](SandboxProcess::stderr_closer). `Send + Sync` so a
+/// watchdog thread (separate from the one blocked on the read) can hold and
+/// fire it.
+pub trait StreamCloser: Send + Sync {
+    /// Promptly EOF the stream this closer was minted for. Idempotent and safe
+    /// to call after the reader has already reached EOF or been dropped.
+    fn close(&self);
 }
 
 /// Spawn a thread that reads `reader` to EOF and discards it, so a stream the
@@ -135,6 +188,17 @@ pub fn take_boxed_write<W: Write + Send + 'static>(
     slot: &mut Option<W>,
 ) -> Option<Box<dyn Write + Send>> {
     slot.take().map(|w| Box::new(w) as Box<dyn Write + Send>)
+}
+
+/// Clone a stored stream canceller and box it as a [`StreamCloser`], for the
+/// [`SandboxProcess::stdout_closer`] / [`SandboxProcess::stderr_closer`]
+/// accessors. Returns `None` when there is no canceller (non-streamed stdio).
+pub fn boxed_closer<C: StreamCloser + Clone + 'static>(
+    canceller: &Option<C>,
+) -> Option<Box<dyn StreamCloser>> {
+    canceller
+        .clone()
+        .map(|c| Box::new(c) as Box<dyn StreamCloser>)
 }
 
 /// Process-tree kill for a Unix child that leads its own process group — the

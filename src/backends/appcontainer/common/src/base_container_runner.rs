@@ -50,11 +50,12 @@ use wxc_common::models::{
     ScriptResponse,
 };
 use wxc_common::process_util::{
-    create_std_pipes, OwnedHandle, PipeReader, PipeWriter, SendOwnedHandle,
+    create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
+    SendOwnedHandle,
 };
 use wxc_common::sandbox_process::{
-    join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend, SandboxProcess,
-    StdioMode,
+    boxed_closer, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend,
+    SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
@@ -1159,8 +1160,12 @@ struct BaseContainerSandboxProcess {
     job: Option<UiJobObject>,
     pid: u32,
     stdin: Option<PipeWriter>,
-    stdout: Option<PipeReader>,
-    stderr: Option<PipeReader>,
+    stdout: Option<InterruptiblePipeReader>,
+    stderr: Option<InterruptiblePipeReader>,
+    /// Cancellers for the stdout/stderr reads, kept so the `SandboxProcess`
+    /// closers can mint a [`StreamCloser`] even after the stream is taken.
+    stdout_canceller: Option<PipeReadCanceller>,
+    stderr_canceller: Option<PipeReadCanceller>,
     timeout_ms: u32,
     destroy_on_exit: bool,
     proxy_enabled: bool,
@@ -1181,8 +1186,10 @@ impl BaseContainerSandboxProcess {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
         let stdin = child.stdin_write.take().map(PipeWriter::new);
-        let stdout = child.stdout_read.take().map(PipeReader::new);
-        let stderr = child.stderr_read.take().map(PipeReader::new);
+        let stdout = child.stdout_read.take().map(InterruptiblePipeReader::new);
+        let stderr = child.stderr_read.take().map(InterruptiblePipeReader::new);
+        let stdout_canceller = stdout.as_ref().map(InterruptiblePipeReader::canceller);
+        let stderr_canceller = stderr.as_ref().map(InterruptiblePipeReader::canceller);
         Self {
             process,
             _thread: thread,
@@ -1191,6 +1198,8 @@ impl BaseContainerSandboxProcess {
             stdin,
             stdout,
             stderr,
+            stdout_canceller,
+            stderr_canceller,
             timeout_ms: child.timeout_ms,
             destroy_on_exit: child.destroy_on_exit,
             proxy_enabled: child.proxy_enabled,
@@ -1231,6 +1240,14 @@ impl SandboxProcess for BaseContainerSandboxProcess {
 
     fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         take_boxed_read(&mut self.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stderr_canceller)
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {

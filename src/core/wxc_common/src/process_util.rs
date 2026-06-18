@@ -2,8 +2,11 @@
 // Licensed under the MIT License.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::error::WxcError;
+use crate::sandbox_process::StreamCloser;
 use crate::string_util;
 
 use windows::Win32::Foundation::{
@@ -14,6 +17,7 @@ use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTR
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::WaitForSingleObject;
+use windows::Win32::System::IO::CancelIoEx;
 use windows_core::BOOL;
 use windows_core::PCWSTR;
 
@@ -41,6 +45,91 @@ impl std::io::Read for PipeReader {
             // Write ends all closed: normal end-of-stream, report EOF.
             Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
             Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+}
+
+/// Cancellation state shared between an [`InterruptiblePipeReader`] and its
+/// [`PipeReadCanceller`]s. Owns the pipe handle — closed only when the **last**
+/// reference drops, so a canceller's `CancelIoEx` can never race a closed (and
+/// possibly reused) handle — plus a flag that short-circuits reads to EOF once
+/// cancelled.
+struct CancelablePipe {
+    handle: SendOwnedHandle,
+    cancelled: AtomicBool,
+}
+
+// SAFETY: the field is a process-global Windows HANDLE whose value is only ever
+// copied for `ReadFile` / `CancelIoEx`; issuing `CancelIoEx` from one thread to
+// abort a `ReadFile` blocked on another is the documented, supported way to
+// interrupt synchronous pipe I/O. `cancelled` is atomic. So sharing
+// `&CancelablePipe` across threads is sound.
+unsafe impl Sync for CancelablePipe {}
+
+/// A readable pipe end (e.g. the child's stdout/stderr) whose blocking
+/// `ReadFile` can be cancelled out-of-band via a [`PipeReadCanceller`] —
+/// reporting EOF — without closing the child or its other streams. A broken
+/// pipe (all write ends closed) still reads as EOF as usual. `Send` so it can
+/// be handed to a reader thread.
+pub struct InterruptiblePipeReader(Arc<CancelablePipe>);
+
+impl InterruptiblePipeReader {
+    /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
+    pub fn new(mut handle: OwnedHandle) -> Self {
+        Self(Arc::new(CancelablePipe {
+            handle: SendOwnedHandle::take(&mut handle),
+            cancelled: AtomicBool::new(false),
+        }))
+    }
+
+    /// Mint a closer that EOFs this reader's `read` on demand. Several closers
+    /// may be minted; they share one cancellation state.
+    pub fn canceller(&self) -> PipeReadCanceller {
+        PipeReadCanceller(Arc::clone(&self.0))
+    }
+}
+
+impl std::io::Read for InterruptiblePipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED};
+        // Already cancelled: report EOF without issuing a read that would block.
+        if self.0.cancelled.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        let mut read: u32 = 0;
+        // SAFETY: the `Arc` keeps the pipe handle valid for this call;
+        // `buf`/`read` are valid local out-params.
+        match unsafe { ReadFile(self.0.handle.get(), Some(buf), Some(&mut read), None) } {
+            Ok(()) => Ok(read as usize),
+            // Write ends all closed: normal end-of-stream, report EOF.
+            Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
+            // A canceller's `CancelIoEx` aborted this blocked read: report EOF.
+            // `cancelled` is already set, so subsequent reads short-circuit.
+            Err(e) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Ok(0),
+            Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+}
+
+/// A [`StreamCloser`] for an [`InterruptiblePipeReader`]. Cloneable and
+/// `Send + Sync` so a watchdog thread can hold and fire it; all clones share
+/// one cancellation state and [`close`](StreamCloser::close) is idempotent.
+#[derive(Clone)]
+pub struct PipeReadCanceller(Arc<CancelablePipe>);
+
+impl StreamCloser for PipeReadCanceller {
+    fn close(&self) {
+        // Flag first so the aborted `ReadFile` (or any later call) observes EOF,
+        // then cancel any in-flight read. If already cancelled, do nothing.
+        if self.0.cancelled.swap(true, Ordering::Release) {
+            return;
+        }
+        // SAFETY: the `Arc` keeps the handle valid; `CancelIoEx` with a null
+        // overlapped aborts all outstanding I/O (including synchronous reads) on
+        // the handle. Ignore the result — it's a benign no-op (ERROR_NOT_FOUND)
+        // when no read is pending.
+        unsafe {
+            let _ = CancelIoEx(self.0.handle.get(), None);
         }
     }
 }

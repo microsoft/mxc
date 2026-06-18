@@ -98,6 +98,12 @@ The handle is modelled on [`std::process::Child`]:
   forever), drains and discards any **untaken** stdout/stderr so the child
   can't block on a full pipe, and returns the exit code (`ErrorKind::TimedOut`
   if the timeout elapses).
+- `stdout_closer()` / `stderr_closer()` → `Option<Box<dyn StreamCloser>>`: a
+  closer that makes an in-flight or subsequent read on the taken stream return
+  EOF promptly **without** killing the child — for abandoning a stream a
+  backgrounded descendant is holding open past the foreground command's exit (a
+  plain `kill()` would also take that descendant down). Returns `None` for
+  non-streamed stdio.
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**, and
 **Windows ProcessContainer (AppContainer + BaseContainer)** — i.e. every

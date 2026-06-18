@@ -27,11 +27,12 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
 use wxc_common::sandbox_process::{
-    group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write, SandboxBackend,
-    SandboxProcess, StdioMode,
+    boxed_closer, group_kill, join_discard, spawn_discard, take_boxed_read, take_boxed_write,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::validator::validate_common;
 
@@ -191,11 +192,23 @@ fn spawn_exec(
         StdioMode::Inherit => (None, None, None),
     };
 
+    // Wrap the pipe reads so the caller can abandon a stream a backgrounded
+    // descendant is holding open (see `SandboxProcess::stdout_closer`), without
+    // killing the child.
+    let (stdout, stdout_canceller) = wrap_pipe(stdout).map_err(|error| {
+        error_response(format!("Seatbelt: failed to wrap stdout pipe: {error}"))
+    })?;
+    let (stderr, stderr_canceller) = wrap_pipe(stderr).map_err(|error| {
+        error_response(format!("Seatbelt: failed to wrap stderr pipe: {error}"))
+    })?;
+
     Ok(Box::new(SeatbeltSandboxProcess {
         child,
         stdin,
         stdout,
         stderr,
+        stdout_canceller,
+        stderr_canceller,
         timeout: timeout_from(request),
         group: new_session,
         cleanup: Vec::new(),
@@ -320,6 +333,8 @@ fn spawn_open(
         stdin: None,
         stdout: None,
         stderr: None,
+        stdout_canceller: None,
+        stderr_canceller: None,
         timeout: timeout_from(request),
         group: false,
         cleanup: vec![profile_path, helper_path, command_path],
@@ -331,10 +346,18 @@ fn spawn_open(
 struct SeatbeltSandboxProcess {
     child: std::process::Child,
     /// Pipe ends — `Some` only for [`StdioMode::Pipes`]; `None` for inherited
-    /// stdio / Open mode (the streams are the binary's own, or detached).
+    /// stdio / Open mode (the streams are the binary's own, or detached). The
+    /// reads are wrapped so they can be cancelled out-of-band (see the
+    /// `*_canceller` fields).
     stdin: Option<std::process::ChildStdin>,
-    stdout: Option<std::process::ChildStdout>,
-    stderr: Option<std::process::ChildStderr>,
+    stdout: Option<InterruptibleReader>,
+    stderr: Option<InterruptibleReader>,
+    /// Cancellers for the stdout/stderr reads (`Some` alongside the pipe ends),
+    /// kept so [`stdout_closer`](SandboxProcess::stdout_closer) /
+    /// [`stderr_closer`](SandboxProcess::stderr_closer) can mint closers even
+    /// after the stream has been taken.
+    stdout_canceller: Option<ReadCanceller>,
+    stderr_canceller: Option<ReadCanceller>,
     timeout: Option<Duration>,
     /// The child leads its own process group (`setsid`), so termination signals
     /// the whole group; `false` for inherited / Open mode (a single process).
@@ -368,6 +391,14 @@ impl SandboxProcess for SeatbeltSandboxProcess {
 
     fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         take_boxed_read(&mut self.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stderr_canceller)
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
