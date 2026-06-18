@@ -430,7 +430,6 @@ impl<'de> serde::Deserialize<'de> for ProxySpec {
         enum Repr {
             Builtin {
                 #[serde(rename = "builtinTestServer")]
-                #[allow(dead_code)]
                 builtin_test_server: bool,
             },
             Localhost {
@@ -441,7 +440,19 @@ impl<'de> serde::Deserialize<'de> for ProxySpec {
             },
         }
         Ok(match Repr::deserialize(deserializer)? {
-            Repr::Builtin { .. } => ProxySpec::BuiltinTestServer,
+            // The SDK union type is `{ builtinTestServer: true }`, so an explicit
+            // `false` is malformed. Reject it rather than silently selecting the
+            // (experimental, deliberately-permissive) built-in proxy — fail closed.
+            Repr::Builtin {
+                builtin_test_server: true,
+            } => ProxySpec::BuiltinTestServer,
+            Repr::Builtin {
+                builtin_test_server: false,
+            } => {
+                return Err(serde::de::Error::custom(
+                    "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
+                ))
+            }
             Repr::Localhost { localhost } => ProxySpec::Localhost(localhost),
             Repr::Url { url } => ProxySpec::Url(url),
         })
@@ -693,5 +704,41 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
             .unwrap_or(false);
     if has_host_rules && !has_proxy {
         network["enforcementMode"] = json!("firewall");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxySpec;
+
+    #[test]
+    fn proxy_builtin_test_server_true_is_accepted() {
+        let spec: ProxySpec =
+            serde_json::from_str(r#"{ "builtinTestServer": true }"#).expect("true is valid");
+        assert!(matches!(spec, ProxySpec::BuiltinTestServer));
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_false_is_rejected() {
+        // An explicit `false` must not silently select the (experimental,
+        // deliberately-permissive) built-in proxy — it is rejected as malformed.
+        let err = serde_json::from_str::<ProxySpec>(r#"{ "builtinTestServer": false }"#)
+            .expect_err("false must be rejected");
+        assert!(
+            err.to_string().contains("builtinTestServer must be true"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_localhost_and_url_still_parse() {
+        assert!(matches!(
+            serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080 }"#).expect("localhost"),
+            ProxySpec::Localhost(8080)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ProxySpec>(r#"{ "url": "http://proxy" }"#).expect("url"),
+            ProxySpec::Url(_)
+        ));
     }
 }
