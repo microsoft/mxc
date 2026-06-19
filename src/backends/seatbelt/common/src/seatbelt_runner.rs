@@ -71,7 +71,10 @@ impl SeatbeltScriptRunner {
     }
 }
 
-const POLL_INTERVAL_MS: u64 = 500;
+/// Exit-detection poll interval (ms) for the timeout path. Short enough to keep
+/// exit-detection latency low; the per-iteration sleep is additionally clamped
+/// to the time remaining so even sub-interval timeouts are honored precisely.
+const POLL_INTERVAL_MS: u64 = 50;
 
 impl SandboxBackend for SeatbeltScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
@@ -84,15 +87,6 @@ impl SandboxBackend for SeatbeltScriptRunner {
                  defaultPolicy: \"block\" to deny all network."
                     .to_string(),
             ));
-        }
-
-        // Reject timeouts that are too small for our polling interval to
-        // enforce accurately.
-        if request.script_timeout > 0 && u64::from(request.script_timeout) < POLL_INTERVAL_MS {
-            return Err(error_response(format!(
-                "scriptTimeout {}ms is below the minimum of {}ms",
-                request.script_timeout, POLL_INTERVAL_MS
-            )));
         }
 
         Ok(())
@@ -152,7 +146,20 @@ fn spawn_exec(
     // the host. Inherit/GUI → keep the binary's session and controlling
     // terminal so the child sees a TTY exactly when the binary does.
     let new_session = stdio == StdioMode::Pipes;
-    let mut command = build_sandbox_command(profile, &request.script_code, new_session, logger)?;
+    // Inherit mode with a finite timeout: put the child in its own process group
+    // (same session, so it keeps the controlling terminal) so the timeout branch
+    // can tree-kill its descendants instead of only the direct `/bin/sh`. A
+    // backgrounded group reading the inherited TTY can be SIGTTIN-stopped, so
+    // this is limited to timeout-bounded runs, which are inherently
+    // non-interactive.
+    let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
+    let mut command = build_sandbox_command(
+        profile,
+        &request.script_code,
+        new_session,
+        new_group,
+        logger,
+    )?;
 
     // Always start from a cleared environment so untrusted sandboxed code never
     // inherits the host's env.
@@ -194,13 +201,23 @@ fn spawn_exec(
 
     // Wrap the pipe reads so the caller can abandon a stream a backgrounded
     // descendant is holding open (see `SandboxProcess::stdout_closer`), without
-    // killing the child.
-    let (stdout, stdout_canceller) = wrap_pipe(stdout).map_err(|error| {
-        error_response(format!("Seatbelt: failed to wrap stdout pipe: {error}"))
-    })?;
-    let (stderr, stderr_canceller) = wrap_pipe(stderr).map_err(|error| {
-        error_response(format!("Seatbelt: failed to wrap stderr pipe: {error}"))
-    })?;
+    // killing the child. On failure, don't orphan the already-spawned sandboxed
+    // process — kill and reap it before returning the error.
+    let (stdout, stdout_canceller, stderr, stderr_canceller) =
+        match (wrap_pipe(stdout), wrap_pipe(stderr)) {
+            (Ok((out, out_canceller)), Ok((err, err_canceller))) => {
+                (out, out_canceller, err, err_canceller)
+            }
+            (out_result, err_result) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let error = out_result.err().or(err_result.err());
+                return Err(error_response(format!(
+                    "Seatbelt: failed to wrap stdio pipes: {}",
+                    error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
+                )));
+            }
+        };
 
     Ok(Box::new(SeatbeltSandboxProcess {
         child,
@@ -210,7 +227,7 @@ fn spawn_exec(
         stdout_canceller,
         stderr_canceller,
         timeout: timeout_from(request),
-        group: new_session,
+        group: new_session || new_group,
         cleanup: Vec::new(),
     }))
 }
@@ -495,6 +512,7 @@ fn build_sandbox_command(
     profile: &str,
     script_code: &str,
     new_session: bool,
+    new_group: bool,
     logger: &mut Logger,
 ) -> Result<Command, ScriptResponse> {
     let profile_cstr = CString::new(profile)
@@ -518,6 +536,20 @@ fn build_sandbox_command(
         unsafe {
             command.pre_exec(|| {
                 libc::setsid();
+                Ok(())
+            });
+        }
+    } else if new_group {
+        // Inherit-with-timeout: a new process group within the *existing*
+        // session, so the child keeps the controlling terminal yet can be
+        // tree-killed via `killpg(-pgid)` on timeout.
+        //
+        // SAFETY: `setpgid` is async-signal-safe and runs after fork(), before
+        // exec(); the child is not yet a group leader, so it succeeds. Failure
+        // is non-fatal (the timeout kill then targets the direct child only).
+        unsafe {
+            command.pre_exec(|| {
+                libc::setpgid(0, 0);
                 Ok(())
             });
         }
@@ -595,13 +627,17 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
     if !request.working_directory.is_empty() {
         return request.working_directory.clone();
     }
-    request
+    let default = request
         .policy
         .readwrite_paths
         .first()
         .or_else(|| request.policy.readonly_paths.first())
         .cloned()
-        .unwrap_or_else(|| "/".to_string())
+        .unwrap_or_else(|| "/".to_string());
+    // The default may be a `~`/`~/…` policy path; expand it exactly as the
+    // sandbox profile does so `Command::current_dir` never gets a literal `~`
+    // (which would fail). Fall back to the unexpanded value if `HOME` is unset.
+    crate::profile_builder::expand_tilde(&default).unwrap_or(default)
 }
 
 /// Baseline `PATH` for the sandboxed child. We always start from a cleared
@@ -644,10 +680,15 @@ fn wait_with_timeout(
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
-                if Instant::now() >= deadline {
+                let now = Instant::now();
+                if now >= deadline {
                     return Err(WaitError::Timeout);
                 }
-                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                // Poll at a short interval for low exit-detection latency, but
+                // never sleep past the deadline so even sub-interval timeouts are
+                // honored.
+                let remaining = deadline - now;
+                std::thread::sleep(remaining.min(Duration::from_millis(POLL_INTERVAL_MS)));
             }
             Err(error) => return Err(WaitError::Io(error)),
         }

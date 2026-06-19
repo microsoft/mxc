@@ -423,3 +423,20 @@ fn streaming_wait_returns_when_descendant_holds_not_taken_stream_open() {
         start.elapsed()
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_honors_sub_500ms_timeout() {
+    // A sub-500ms timeout used to be rejected outright; it must now be accepted
+    // and enforced (cr-011), and fire with low latency (cr-016). `sleep 30`
+    // exceeds it, so wait() reports a timeout promptly.
+    let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 200)).expect("spawn");
+    let start = std::time::Instant::now();
+    let err = proc.wait().expect_err("sub-500ms timeout should fire");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "timeout should fire near 200ms, not wait out the 30s sleep (elapsed: {:?})",
+        start.elapsed()
+    );
+}

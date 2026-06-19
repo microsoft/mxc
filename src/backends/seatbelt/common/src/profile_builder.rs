@@ -422,7 +422,7 @@ fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
 
 /// Expand a leading `~` or `~/` to the current user's home directory.
 /// Returns an error if `HOME` is not set and the path requires expansion.
-fn expand_tilde(path: &str) -> Result<String, String> {
+pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
     if path == "~" || path.starts_with("~/") {
         let home = std::env::var("HOME").map_err(|_| {
             format!("HOME environment variable not set; cannot expand '{path}' in seatbelt profile")
