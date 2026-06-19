@@ -844,14 +844,24 @@ export function spawnSandboxWithSideChannel(
 
   const pipeServer = createDenialPipeServer();
 
-  // Pass the pipe name to wxc-exec via env. The Rust side reads
-  // MXC_DENIALS_PIPE and reroutes its captureDenials NDJSON
-  // writers from stderr to the pipe. Without the env var, wxc-exec
-  // behaves as before (writes to stderr).
-  const wxcEnv: { [k: string]: string | undefined } = {
-    ...(env ?? {}),
-    MXC_DENIALS_PIPE: pipeServer.pipeName,
-  };
+  // MXC_DENIALS_PIPE is a runtime hint that wxc-exec itself reads (via
+  // std::env::var_os) to reroute its captureDenials NDJSON writers from
+  // stderr to the named pipe. It must NOT travel through the
+  // `env` parameter of `spawnSandboxFromConfig`, because that parameter
+  // gets injected into `config.process.env` -- i.e. it becomes the
+  // **workload's** environment block inside the sandbox. Pushing a
+  // single-entry env block (just MXC_DENIALS_PIPE, no PATH /
+  // SystemRoot / ComSpec / etc.) into Experimental_CreateProcessInSandbox
+  // makes the API fail with Win32 error 203 (ERROR_ENVVAR_NOT_FOUND).
+  //
+  // Instead, set the var on the SDK process's own env so the spawned
+  // wxc-exec inherits it (both pty.spawn and child_process.spawn
+  // inherit process.env when no explicit env is provided). The
+  // workload's env stays governed by `config.process.env` and any
+  // caller-provided `env` map -- both unaffected by this transport
+  // hint.
+  const savedDenialPipe = process.env.MXC_DENIALS_PIPE;
+  process.env.MXC_DENIALS_PIPE = pipeServer.pipeName;
 
   // Forward to the regular spawner. PTY/non-PTY choice is the
   // caller's; the side channel is orthogonal -- it works for both.
@@ -860,14 +870,21 @@ export function spawnSandboxWithSideChannel(
   // consumer wants stderr left clean for the workload.)
   let processHandle: pty.IPty | ChildProcess;
   try {
-    if (options.usePty === false) {
-      processHandle = spawnSandboxFromConfig(config, options, workingDirectory, wxcEnv);
-    } else {
-      processHandle = spawnSandboxFromConfig(config, options, workingDirectory, wxcEnv);
-    }
+    processHandle = spawnSandboxFromConfig(config, options, workingDirectory, env);
   } catch (err) {
     pipeServer.close();
     throw err;
+  } finally {
+    // Restore the parent env after spawn. The child has already
+    // inherited MXC_DENIALS_PIPE at this point, so removing it from
+    // the parent only affects subsequent spawns -- which is exactly
+    // the behaviour we want for concurrent sandboxes (each gets its
+    // own pipe name, no leakage between them).
+    if (savedDenialPipe === undefined) {
+      delete process.env.MXC_DENIALS_PIPE;
+    } else {
+      process.env.MXC_DENIALS_PIPE = savedDenialPipe;
+    }
   }
 
   return {
