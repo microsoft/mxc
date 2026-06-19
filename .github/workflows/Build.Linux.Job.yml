@@ -54,6 +54,27 @@ jobs:
         run: cargo test --locked --release --target ${{ matrix.target }}
              --no-default-features --features hyperlight
 
+      # Bubblewrap is required to run the executor characterization tests in
+      # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
+      # always includes the Bubblewrap backend (bwrap_common is a non-optional
+      # dependency), so the binary built above can drive it.
+      - name: Install Bubblewrap
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+          # AppArmor, which blocks `bwrap --unshare-user`. Relax it so the
+          # sandbox can start (no-op on kernels without this knob).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # Runs the Bubblewrap executor characterization tests. lxc-exec was built
+      # into src/target/<triple>/release above, where find_binary() locates it.
+      - name: Test executor characterization (wxc_e2e_tests)
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p wxc_e2e_tests
+
       # linux_test_proxy is a separate workspace member, not a dep of lxc.
       - name: Build linux-test-proxy
         working-directory: src

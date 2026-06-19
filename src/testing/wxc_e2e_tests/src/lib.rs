@@ -66,6 +66,10 @@ fn current_triple() -> &'static str {
         "x86_64-unknown-linux-gnu"
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
     } else {
         ""
     }
@@ -480,6 +484,113 @@ pub fn run_wxc_config_value(
     args.push(encoded);
 
     run_executable(label, &exe, args)
+}
+
+// ---------------------------------------------------------------------------
+// Cross-platform executor characterization helpers
+//
+// These drive the *native* one-shot executor binary for the current OS
+// (`mxc-exec-mac` on macOS, `lxc-exec` on Linux, `wxc-exec.exe` on Windows)
+// with an in-memory config, optionally setting the child process's environment
+// and working directory. They exist to lock in the current run-to-completion
+// behavior (exit code, stdout, env/cwd inheritance, timeout) before the
+// unified `SandboxBackend`/`Runner` refactor lands.
+// ---------------------------------------------------------------------------
+
+/// The native one-shot executor binary name for the current platform.
+pub fn platform_exec_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "wxc-exec.exe"
+    } else if cfg!(target_os = "macos") {
+        "mxc-exec-mac"
+    } else {
+        "lxc-exec"
+    }
+}
+
+/// Locate the native one-shot executor binary for the current platform.
+pub fn find_platform_exec() -> Option<PathBuf> {
+    find_binary(platform_exec_binary_name())
+}
+
+/// Whether the native executor binary for this platform is available.
+pub fn has_platform_exec() -> bool {
+    match find_platform_exec() {
+        Some(p) => {
+            println!("Using {} at {}", platform_exec_binary_name(), p.display());
+            true
+        }
+        None => {
+            println!(
+                "SKIPPED: {} not found — build the native executor first",
+                platform_exec_binary_name()
+            );
+            false
+        }
+    }
+}
+
+/// Whether `bwrap` (Bubblewrap) is installed and runnable on this Linux host.
+/// Bubblewrap characterization tests skip cleanly when it is absent (e.g. a CI
+/// runner without `bubblewrap` installed).
+pub fn has_bwrap() -> bool {
+    let available = Command::new("bwrap")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !available {
+        println!("SKIPPED: bwrap not found on PATH — install `bubblewrap` to run these tests");
+    }
+    available
+}
+
+/// Opt-in switch for the Windows ProcessContainer characterization tests.
+///
+/// AppContainer/BaseContainer execution requires an elevated, host-prepped
+/// Windows host (see `docs/host-prep.md`). Standard CI runners are NOT capable,
+/// so these tests are skipped unless a host-prepped lane explicitly sets
+/// `MXC_E2E_HOST_PREPPED=1`. This keeps them from ever red-failing on incapable
+/// CI while still being runnable on a prepared box.
+pub fn host_prepped_optin() -> bool {
+    let enabled = std::env::var("MXC_E2E_HOST_PREPPED").as_deref() == Ok("1");
+    if !enabled {
+        println!(
+            "SKIPPED: ProcessContainer characterization requires a host-prepped Windows host; \
+             set MXC_E2E_HOST_PREPPED=1 on a prepared lane to enable"
+        );
+    }
+    enabled
+}
+
+/// Run the current platform's native executor binary with an in-memory config
+/// value (serialised + base64-encoded via `--config-base64`), optionally
+/// setting environment variables and a working directory on the *executor*
+/// process. `extra_env`/`cwd` are how the inheritance characterization tests
+/// observe whether the sandboxed child picks up the launcher's env/cwd.
+pub fn run_platform_config_value(
+    label: &str,
+    config: &serde_json::Value,
+    extra_env: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> CommandResult {
+    let exe = find_platform_exec().expect("native executor binary should be available");
+    let encoded = STANDARD.encode(config.to_string().as_bytes());
+
+    let start = Instant::now();
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--config-base64").arg(encoded);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let output = cmd
+        .output()
+        .unwrap_or_else(|error| panic!("failed to execute {label}: {error}"));
+
+    command_result(label, output, start.elapsed().as_millis())
 }
 
 /// Run `wxc-test-driver.exe` against a directory or a single config file.
