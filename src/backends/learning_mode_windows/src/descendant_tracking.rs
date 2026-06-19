@@ -61,18 +61,20 @@
 use core::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, NTSTATUS};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
     SetInformationJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
 };
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::SystemServices::{
     JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, JOB_OBJECT_MSG_EXIT_PROCESS, JOB_OBJECT_MSG_NEW_PROCESS,
 };
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_SUSPEND_RESUME};
 use windows::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus, OVERLAPPED,
 };
@@ -311,13 +313,32 @@ where
         match msg_id {
             JOB_OBJECT_MSG_NEW_PROCESS => {
                 if pid != root_pid {
+                    // Phase D: suspend the descendant before calling
+                    // the user callback (which extends the ETW filter
+                    // via the shim RPC), then resume. This tightens
+                    // the race window between "process joins job" and
+                    // "ETW filter covers the process" — code that
+                    // would otherwise run unaudited during the
+                    // ~milliseconds the RPC takes is held at zero
+                    // instructions executed.
+                    //
+                    // The kernel posts JOB_OBJECT_MSG_NEW_PROCESS as
+                    // the process is being created; there's still a
+                    // tiny window before user-mode wakes up to handle
+                    // it, during which the process can run a few
+                    // syscalls (NT image loader work, before any
+                    // user-mode code). Eliminating that final window
+                    // requires either a kernel driver or DLL
+                    // injection — out of scope.
+                    let guard = SuspendedDescendant::open(pid);
                     on_new_pid(pid);
+                    drop(guard); // Resume + close handle, in this order.
                 }
             }
             JOB_OBJECT_MSG_EXIT_PROCESS => {
-                // No-op for Phase B. Phase C / Phase E may want to
-                // remove the PID from the ETW filter or fold the
-                // descendant's denials into a "child denials" bucket.
+                // No-op for Phase B. Phase E may want to remove the
+                // PID from the ETW filter or fold the descendant's
+                // denials into a "child denials" bucket.
             }
             JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO => {
                 // Workload tree fully exited. Listener exits.
@@ -369,6 +390,148 @@ impl Drop for DescendantTrackingJob {
 // are themselves thread-safe (they are, for the calls we make).
 unsafe impl Send for DescendantTrackingJob {}
 unsafe impl Sync for DescendantTrackingJob {}
+
+// -----------------------------------------------------------------------
+// Phase D: NtSuspendProcess / NtResumeProcess
+// -----------------------------------------------------------------------
+//
+// We need to freeze the descendant at zero instructions executed during
+// the small window the shim takes to extend the ETW filter. The cleanest
+// Win32 primitive is the pair `NtSuspendProcess` /
+// `NtResumeProcess` in ntdll: they take a process HANDLE and
+// suspend/resume **all** of its threads atomically. The pair is not
+// declared in any official public header (it's a hidden NT API used by
+// debuggers and process freezers like Process Explorer), but it has been
+// stable since Vista and is documented widely enough.
+//
+// Loaded once via `GetProcAddress` and cached for the listener thread's
+// lifetime.
+
+type NtSuspendProcessFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+type NtResumeProcessFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+struct NtProcessControl {
+    suspend: NtSuspendProcessFn,
+    resume: NtResumeProcessFn,
+}
+
+// SAFETY: function pointers into ntdll.dll are stable for the process
+// lifetime; ntdll is always loaded.
+unsafe impl Send for NtProcessControl {}
+unsafe impl Sync for NtProcessControl {}
+
+static NT_PROCESS_CONTROL: OnceLock<Option<NtProcessControl>> = OnceLock::new();
+
+/// Resolves `NtSuspendProcess` + `NtResumeProcess` from ntdll. Returns
+/// `None` if either symbol cannot be found (extremely rare; would mean
+/// a very stripped-down NT kernel).
+fn nt_process_control() -> Option<&'static NtProcessControl> {
+    NT_PROCESS_CONTROL
+        .get_or_init(|| {
+            // SAFETY: ntdll.dll is always loaded in every Windows process.
+            unsafe {
+                let module = GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
+                let suspend_ptr = GetProcAddress(module, windows::core::s!("NtSuspendProcess"))?;
+                let resume_ptr = GetProcAddress(module, windows::core::s!("NtResumeProcess"))?;
+                Some(NtProcessControl {
+                    suspend: std::mem::transmute::<
+                        unsafe extern "system" fn() -> isize,
+                        NtSuspendProcessFn,
+                    >(suspend_ptr),
+                    resume: std::mem::transmute::<
+                        unsafe extern "system" fn() -> isize,
+                        NtResumeProcessFn,
+                    >(resume_ptr),
+                })
+            }
+        })
+        .as_ref()
+}
+
+/// RAII guard that holds a descendant process suspended for the lifetime
+/// of the guard. `Drop` resumes the process and closes the handle.
+///
+/// If `open` fails (process already exited, access denied, etc.), the
+/// guard is still constructed but holds nothing — `Drop` is a no-op.
+/// This keeps the listener's hot path simple: it just constructs the
+/// guard, calls the user callback (extend the ETW filter), and lets
+/// `Drop` clean up. A failed-to-suspend descendant degrades the
+/// race-window mitigation but doesn't break the rest of the flow.
+struct SuspendedDescendant {
+    handle: Option<HANDLE>,
+}
+
+impl SuspendedDescendant {
+    fn open(pid: u32) -> Self {
+        let Some(ctrl) = nt_process_control() else {
+            // ntdll lookup failed; cannot suspend. Degrade silently —
+            // the IOCP callback still runs, just without the
+            // race-window mitigation.
+            return Self { handle: None };
+        };
+
+        // SAFETY: standard OpenProcess. Bare PROCESS_SUSPEND_RESUME
+        // access is the minimum the Nt suspend/resume pair needs.
+        let handle = match unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, false, pid) } {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!(
+                    "[learning_mode_windows] suspend race-mitigation: OpenProcess({pid}) \
+                     failed: {e}; descendant may run unaudited briefly"
+                );
+                return Self { handle: None };
+            }
+        };
+
+        // SAFETY: `handle` is a valid process handle with
+        // PROCESS_SUSPEND_RESUME access. `ctrl.suspend` is the
+        // resolved ntdll function pointer.
+        let status = unsafe { (ctrl.suspend)(handle) };
+        if status.0 < 0 {
+            eprintln!(
+                "[learning_mode_windows] suspend race-mitigation: NtSuspendProcess({pid}) \
+                 returned NTSTATUS {:#X}; descendant may run unaudited briefly",
+                status.0
+            );
+            // Close the handle — we won't be resuming since the
+            // suspend failed.
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Self { handle: None };
+        }
+
+        Self {
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for SuspendedDescendant {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        // SAFETY: handle is owned by this guard and only released here.
+        // `ctrl.resume` is valid; we already verified ntdll on the
+        // suspend path.
+        if let Some(ctrl) = nt_process_control() {
+            unsafe {
+                let status = (ctrl.resume)(handle);
+                if status.0 < 0 {
+                    eprintln!(
+                        "[learning_mode_windows] suspend race-mitigation: NtResumeProcess \
+                         returned NTSTATUS {:#X}; descendant may be stuck suspended",
+                        status.0
+                    );
+                }
+            }
+        }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
