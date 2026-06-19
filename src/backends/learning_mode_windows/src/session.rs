@@ -262,6 +262,9 @@ pub enum SessionError {
 
     #[error("OpenTraceW(`{0}`) failed: Win32 error {1}")]
     OpenTrace(String, u32),
+
+    #[error("Job Object operation failed: {0}")]
+    JobObject(String),
 }
 
 /// `FILE_FLAG_OVERLAPPED` is not set; we want blocking sync I/O for the

@@ -46,6 +46,9 @@ pub mod denial_stream;
 pub mod child_process_observer;
 
 #[cfg(target_os = "windows")]
+pub mod descendant_tracking;
+
+#[cfg(target_os = "windows")]
 pub mod backend;
 
 #[cfg(target_os = "windows")]

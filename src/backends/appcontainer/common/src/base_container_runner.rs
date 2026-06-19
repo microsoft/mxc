@@ -1056,6 +1056,49 @@ impl ScriptRunner for BaseContainerRunner {
         // thread that emits each captured denial to stderr as NDJSON
         // prefixed with ASCII RS (0x1E). SDK callers split stderr on
         // 0x1E and parse each segment as JSON, enabling mid-run prompts.
+        //
+        // Descendant tracking (Phase A): when capture is on, wrap the
+        // workload in a Job Object with breakaway-OK unset so
+        // descendants automatically inherit job membership and cannot
+        // escape via `CREATE_BREAKAWAY_FROM_JOB`. This is the
+        // foundation for the upcoming
+        // `Microsoft-Windows-Kernel-Process` ETW subscription that
+        // will extend the ETW PID filter to each new descendant
+        // (Phase B). For now the job exists purely to scope the
+        // sandbox-tree boundary; ETW per-PID filtering still misses
+        // descendants and the `childProcessesObserved` warning still
+        // applies until Phase B lands.
+        let _descendant_job = if request.capture_denials {
+            match learning_mode_windows::descendant_tracking::DescendantTrackingJob::new() {
+                Ok(job) => match job.attach_root(pi.hProcess) {
+                    Ok(()) => {
+                        let _ = writeln!(
+                            logger,
+                            "captureDenials: descendant-tracking job attached to PID {}",
+                            pi.dwProcessId
+                        );
+                        Some(job)
+                    }
+                    Err(e) => {
+                        let _ = writeln!(
+                            logger,
+                            "captureDenials: AssignProcessToJobObject failed (continuing without descendant-tracking job): {e}"
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    let _ = writeln!(
+                        logger,
+                        "captureDenials: CreateJobObjectW failed (continuing without descendant-tracking job): {e}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (collector, stream_writer, child_observer) = if request.capture_denials {
             let (tx, rx) = std::sync::mpsc::channel::<learning_mode_windows::DeniedResource>();
             let writer = std::thread::Builder::new()
