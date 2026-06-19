@@ -17,11 +17,12 @@
 //! - **3.3 (follow-up):** stop + drain semantics + bounded buffer +
 //!   truncated flag.
 
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -58,7 +59,14 @@ const MAX_CAPTURED_EVENTS: usize = 10_000;
 /// `EVENT_RECORD.UserContext` (which we populated via
 /// `EVENT_TRACE_LOGFILEW.Context`).
 struct CallbackContext {
-    target_pid: u32,
+    /// Set of PIDs whose events the user-mode callback accepts. Initially
+    /// just the root workload PID; the IOCP descendant tracker calls
+    /// `CollectorHandle::add_allowed_pid` to extend it whenever a
+    /// descendant joins the job and is added to the kernel-side ETW
+    /// filter via `extend_via_shim`. Without this, descendant events
+    /// the kernel correctly delivers to user-mode would be dropped by
+    /// the "defense in depth" check below.
+    allowed_pids: Arc<Mutex<HashSet<u32>>>,
     events: Mutex<Vec<DenialEvent>>,
     truncated: AtomicBool,
     /// Optional sender: when set, the callback also pushes a public
@@ -85,9 +93,24 @@ pub struct CollectorHandle {
     context: Box<CallbackContext>,
     /// Session name so we can `ControlTraceW(STOP)` it at drain time.
     session_name: String,
+    /// Shared handle to the allowed-PID set inside `context`. Held
+    /// here so the descendant tracker can extend it (via
+    /// `add_allowed_pid`) without going through the boxed context.
+    allowed_pids: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl CollectorHandle {
+    /// Returns a clonable handle to the user-mode allowed-PID set.
+    ///
+    /// The descendant tracker calls this once at wire-up time and then
+    /// inserts each new descendant PID into the set after a successful
+    /// `extend_via_shim` call. Without this, descendant events the
+    /// kernel-side filter delivers to user-mode would be silently
+    /// dropped by the `event_record_callback` defense-in-depth check.
+    pub fn allowed_pids(&self) -> Arc<Mutex<HashSet<u32>>> {
+        Arc::clone(&self.allowed_pids)
+    }
+
     /// Stops the consumer and returns the captured denials.
     ///
     /// Order matters: we call `ControlTraceW(STOP)` first so the ETW
@@ -314,8 +337,13 @@ impl ScopedTraceSession {
     ) -> Result<CollectorHandle, SessionError> {
         // Allocate the callback context. It MUST outlive all callbacks,
         // so we Box it and hand its raw pointer to ETW.
+        let allowed_pids = Arc::new(Mutex::new({
+            let mut set = HashSet::new();
+            set.insert(self.target_pid);
+            set
+        }));
         let context = Box::new(CallbackContext {
-            target_pid: self.target_pid,
+            allowed_pids: Arc::clone(&allowed_pids),
             events: Mutex::new(Vec::new()),
             truncated: AtomicBool::new(false),
             event_stream,
@@ -376,6 +404,7 @@ impl ScopedTraceSession {
             worker: Some(worker),
             context,
             session_name: self.session_name.clone(),
+            allowed_pids,
         })
     }
 }
@@ -403,9 +432,19 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
 
     // Defense in depth: the kernel-side PID filter should already have
     // dropped events for other processes, but check anyway in case the
-    // provider ignored the filter.
-    if event_pid != context.target_pid {
-        return;
+    // provider ignored the filter. The allowed-PID set starts with the
+    // root workload PID and grows as the descendant tracker adds new
+    // PIDs to the kernel-side filter — we mirror those additions here
+    // via `CollectorHandle::add_allowed_pid` so descendant events are
+    // not silently dropped.
+    {
+        let pids = match context.allowed_pids.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if !pids.contains(&event_pid) {
+            return;
+        }
     }
 
     let parts = match unsafe { decode_event_parts(event_record) } {

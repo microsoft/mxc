@@ -1133,13 +1133,20 @@ impl ScriptRunner for BaseContainerRunner {
                     // list (root + descendants); the shim REPLACES the
                     // EVENT_FILTER_TYPE_PID list on each extend call, so we
                     // hand it the complete snapshot every time.
-                    if collector_result.is_ok() {
+                    //
+                    // The user-mode ETW callback also enforces a per-PID
+                    // allow-list as defense in depth. We must extend THAT
+                    // set in lockstep with the kernel-side filter, or the
+                    // callback will silently drop descendant events even
+                    // after the kernel correctly delivers them.
+                    if let Ok(ref collector) = collector_result {
                         if let Some(job) = descendant_job.as_mut() {
                             use std::sync::{Arc, Mutex};
                             let pid_list = Arc::new(Mutex::new(vec![pi.dwProcessId]));
                             let pid_list_cb = Arc::clone(&pid_list);
                             let session_name_cb = session_name.clone();
                             let descendant_count_cb = Arc::clone(&descendant_count);
+                            let allowed_pids_cb = collector.allowed_pids();
                             match job.subscribe_to_new_processes(move |new_pid| {
                                 let snapshot = {
                                     let mut pids = pid_list_cb.lock().unwrap();
@@ -1151,6 +1158,13 @@ impl ScriptRunner for BaseContainerRunner {
                                     &snapshot,
                                 ) {
                                     Ok(()) => {
+                                        // Mirror the kernel-filter extension
+                                        // into the user-mode allow-list so
+                                        // the callback accepts events from
+                                        // this descendant PID.
+                                        if let Ok(mut pids) = allowed_pids_cb.lock() {
+                                            pids.insert(new_pid);
+                                        }
                                         descendant_count_cb.fetch_add(
                                             1,
                                             std::sync::atomic::Ordering::SeqCst,
