@@ -274,6 +274,7 @@ pub enum NetworkEnforcement {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Proxy {
     /// External localhost proxy port.
+    #[schemars(range(min = 1, max = 65535))]
     pub localhost: Option<u16>,
     /// Have wxc launch its own built-in test proxy.
     pub builtin_test_server: Option<bool>,
@@ -400,8 +401,10 @@ pub struct Wslc {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortMapping {
     /// Host (Windows) port.
+    #[schemars(range(min = 1, max = 65535))]
     pub windows_port: u16,
     /// Container port.
+    #[schemars(range(min = 1, max = 65535))]
     pub container_port: u16,
     /// Transport protocol for the mapping. Only `tcp` is currently supported.
     pub protocol: Option<TransportProtocol>,

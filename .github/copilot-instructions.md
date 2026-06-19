@@ -122,7 +122,7 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 ### Schema system
 
 - **Stable schemas**: released, immutable schemas live in [`schemas/stable/`](../schemas/stable) (one file per released version, plus a `-strict` view) — never edit them after release.
-- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev). It is **generated** from the Rust wire model (`src/core/wxc_common/src/wire.rs`) by the `mxc_schema_gen` tool — **do not hand-edit it**. To change the dev schema, edit the wire model and regenerate with `cargo run -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`. `scripts/versioning/check-schema-codegen.js` is a CI gate that regenerates and fails if the committed schema drifts. See [`docs/schema-codegen.md`](../docs/schema-codegen.md).
+- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev). It is **generated** from the Rust wire model (`src/core/wxc_common/src/wire.rs`) by the `mxc_schema_gen` tool — **do not hand-edit it**. To change the dev schema, edit the wire model and regenerate with `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`. `scripts/versioning/check-schema-codegen.js` is a CI gate that regenerates and fails if the committed schema drifts. See [`docs/schema-codegen.md`](../docs/schema-codegen.md).
 - **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file. See [`docs/versioning.md`](../docs/versioning.md) for the full design.
 - Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
@@ -162,7 +162,7 @@ State-aware lifecycle:
 
 New features go under the `experimental` JSON section and are only active when `--experimental` is passed. See `docs/authoring-a-new-feature.md` for the full checklist. The pattern:
 
-1. Add the field to the Rust wire model (`src/core/wxc_common/src/wire.rs`) under the `Experimental` section, then regenerate the dev schema (`cargo run -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`) — do not hand-edit the generated schema
+1. Add the field to the Rust wire model (`src/core/wxc_common/src/wire.rs`) under the `Experimental` section, then regenerate the dev schema (`cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`) — do not hand-edit the generated schema
 2. Add Rust structs to `models.rs` (`ExperimentalConfig`) and `config_parser.rs` (`RawExperimental`)
 3. Guard execution behind `if request.experimental_enabled` in the runner
 4. Never modify files in `schemas/stable/` — those are immutable release artifacts

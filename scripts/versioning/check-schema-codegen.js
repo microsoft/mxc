@@ -69,8 +69,8 @@ try {
         `    First difference at line ${line + 1}:\n` +
         `      committed:  ${JSON.stringify(c[line])}\n` +
         `      generated:  ${JSON.stringify(g[line])}\n` +
-        `    Regenerate with:\n` +
-        `      cargo run -p mxc_schema_gen -- schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`
+        `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
+        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`
     );
   }
 } finally {

@@ -556,7 +556,8 @@
       "properties": {
         "containerPort": {
           "description": "Container port.",
-          "minimum": 0.0,
+          "maximum": 65535.0,
+          "minimum": 1.0,
           "type": "integer"
         },
         "protocol": {
@@ -572,7 +573,8 @@
         },
         "windowsPort": {
           "description": "Host (Windows) port.",
-          "minimum": 0.0,
+          "maximum": 65535.0,
+          "minimum": 1.0,
           "type": "integer"
         }
       },
@@ -676,7 +678,8 @@
         },
         "localhost": {
           "description": "External localhost proxy port.",
-          "minimum": 0.0,
+          "maximum": 65535.0,
+          "minimum": 1.0,
           "type": [
             "integer",
             "null"

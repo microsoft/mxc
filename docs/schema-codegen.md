@@ -22,7 +22,7 @@ nested types). It is precise by construction:
 ## Generating
 
 ```
-cargo run -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json
 ```
 
 `mxc_schema_gen` calls `wxc_common::wire::generate_config_schema_json()`, which
