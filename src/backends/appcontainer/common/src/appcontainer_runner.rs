@@ -1209,9 +1209,21 @@ struct AppContainerSandboxProcess {
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
-// strings. HANDLEs are process-global and safe to use from any single thread;
-// this handle is owned exclusively by the caller (not shared), so moving it
-// across threads is sound.
+// strings. HANDLEs are process-global and safe to use from any single thread,
+// and this handle is owned exclusively by the caller (not shared), so it is
+// only ever touched from one thread at a time.
+//
+// The one historically thread-affine field was the `NetworkManager` inside
+// `prepared`: it used to cache an STA `INetFwPolicy2` interface plus its
+// `CoInitializeEx` state and reuse them at teardown, which is unsound when
+// `wait()`/`kill()`/`Drop` run on a different thread (e.g. a tokio
+// `spawn_blocking` worker) than `spawn`. That no longer happens: each firewall
+// apply/remove is apartment-self-contained (it opens its own COM apartment,
+// creates a fresh interface, and uninitializes — all on whichever thread runs
+// it), so no COM interface or apartment state is moved across threads. The only
+// remaining OS state the manager keeps is the process-global Winsock refcount,
+// which is thread-agnostic. Moving this handle across threads is therefore
+// sound.
 unsafe impl Send for AppContainerSandboxProcess {}
 
 impl AppContainerSandboxProcess {
