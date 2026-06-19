@@ -1,0 +1,11 @@
+[package]
+name = "shim_security_test"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "shim-security-test"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+learning_mode_windows = { workspace = true }

@@ -31,6 +31,7 @@ members = [
     "host/wxc_winhttp_proxy_shim",
     "host/mxc_learning_mode_shim",
     "tools/denial_capture_test",
+    "tools/shim_security_test",
     "testing/wxc_e2e_tests",
     "testing/wxc_test_driver",
     "testing/wxc_test_proxy",
