@@ -133,8 +133,9 @@ executor binaries for those.
 ## No pty
 
 The child's stdio is always wired to ordinary pipes — the library never
-allocates a pty (the executor binaries, by contrast, stream live: Seatbelt/LXC
-via a pty, AppContainer by inheriting the host fds). Output the caller doesn't
+allocates a pty (the executor binaries, by contrast, stream live: LXC via a
+pty, Seatbelt/Bubblewrap/AppContainer by inheriting the executor's stdio
+directly — a TTY when the executor has one). Output the caller doesn't
 take is drained and discarded by `wait()`.
 
 ## Relationship to the executor binaries

@@ -207,6 +207,21 @@ SDK rejects it with a clear error, mirroring the Linux behavior.
 | `ui.clipboard: "none"` (default) | `(deny mach-lookup (global-name "com.apple.pasteboard.1"))` |
 | `ui.injection: false` (default) | `(deny iokit-open (iokit-user-client-class "IOHIDLibUserClient"))` |
 
+### Process environment
+
+The host environment is **never** inherited — the sandboxed child always starts
+from a cleared environment, so host secrets (cloud credentials, API tokens) can
+never leak into untrusted code. `PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin`,
+and each `process.env` entry adds to / overrides that baseline. (This is
+unconditional; it applies whether or not `process.env` is provided.)
+
+### Working directory
+
+If `process.cwd` is omitted it resolves to `readwritePaths[0]`, else
+`readonlyPaths[0]`, else `/`; a `~`/`~/…` default is tilde-expanded the same way
+the sandbox profile expands policy paths. `PWD` is exported to the resolved
+directory so the child's `getcwd()` takes its fast `$PWD` path.
+
 ## Usage
 
 ### Command line
