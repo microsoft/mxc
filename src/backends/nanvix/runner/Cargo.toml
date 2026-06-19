@@ -2,6 +2,7 @@
 name = "nanvix_runner"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 wxc_common = { workspace = true, features = ["microvm"] }

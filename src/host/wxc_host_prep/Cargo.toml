@@ -2,6 +2,7 @@
 name = "wxc_host_prep"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # Binary name uses hyphens (`wxc-host-prep`) to match the rest of the MXC
 # CLI surface (`wxc-exec`, `lxc-exec`, `mxc-exec-mac`).

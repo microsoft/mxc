@@ -47,6 +47,7 @@ strip = "debuginfo"
 [workspace.package]
 version = "0.7.0"
 edition = "2021"
+license = "MIT"
 
 [workspace.dependencies]
 windows = { version = "0.62", features = [
