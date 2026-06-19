@@ -1325,27 +1325,30 @@ impl SandboxProcess for AppContainerSandboxProcess {
             WAIT_OBJECT_0 => {
                 let mut code: u32 = 0;
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
-                    Ok(-1)
+                    Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
                     Ok(code as i32)
                 }
             }
-            WAIT_TIMEOUT => {
-                // Tree-kill via the job so descendants die too and release the
-                // pipe write-ends; terminating only the root would leave the
-                // drain threads below blocked forever.
-                self.job.terminate(u32::MAX);
-                unsafe {
-                    let _ = WaitForSingleObject(self.process.get(), u32::MAX);
-                }
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("script timed out after {}ms", self.timeout_ms),
-                ))
-            }
-            _ => Ok(-1),
+            WAIT_TIMEOUT => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("script timed out after {}ms", self.timeout_ms),
+            )),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
+        // Tree-kill the job so any backgrounded descendant dies *before*
+        // `run_teardown()` removes the firewall / BFS enforcement (keyed to the
+        // shared AppContainer package SID) — upholding the same invariant as
+        // `Drop`. The foreground child has already exited on the success path; on
+        // a timeout or wait failure this also terminates it. Then reap the root
+        // (immediate once it has exited) before releasing the pipe drains — and
+        // killing the tree closes the descendant's pipe write-ends, so the drains
+        // can finish.
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
         self.run_teardown();

@@ -172,17 +172,21 @@ fn build_request_host_rules_require_outbound() {
         timeout_ms: None,
     };
 
-    // On macOS/Linux the abstract Process backend supports host filtering, so
-    // this is accepted; on Windows it must be rejected. Either way it must not
-    // panic and the result must be consistent with the platform.
+    // Only Linux has a real host-filtering backend (iptables + cooperative
+    // proxy); Seatbelt (macOS) and the Windows backends cannot enforce
+    // hostnames, so host rules without `allowOutbound` must be rejected there
+    // rather than silently becoming allow-all. Either way it must not panic.
     let result = build_request(&policy, None);
-    if cfg!(target_os = "windows") {
+    if cfg!(target_os = "linux") {
         assert!(
-            result.is_err(),
-            "Windows requires allowOutbound for host rules"
+            result.is_ok(),
+            "Linux host-filtering backend accepts host rules"
         );
     } else {
-        assert!(result.is_ok(), "host-filtering backends accept host rules");
+        assert!(
+            result.is_err(),
+            "non-host-filtering backends require allowOutbound for host rules"
+        );
     }
 }
 
