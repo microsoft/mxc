@@ -1025,32 +1025,90 @@ impl BaseContainerRunner {
             None => (None, None),
         };
 
-        // Best-effort: assign the child to a job object so the streaming
-        // handle's `kill()` can tree-kill it (the child and every descendant
-        // it spawns after assignment). Unlike the AppContainer path we cannot
-        // create the child suspended, so a descendant spawned in the brief
-        // window before assignment could escape; in practice the child is a
-        // shell that has not yet run the user command. Failure is non-fatal —
-        // `kill()` then falls back to terminating the root process.
-        let job = (|| -> Option<UiJobObject> {
-            let job = UiJobObject::new().ok()?;
+        // Assign the child to a job object so the streaming handle's `kill()`
+        // (and the timeout / `Drop` paths) can tree-kill it — the child plus
+        // every descendant it spawns after assignment. This backend *is* a
+        // security boundary, so fail **closed**: if the job cannot be created
+        // or the process cannot be assigned, terminate the just-launched child
+        // and reject the spawn rather than run a sandbox that cannot be
+        // reliably torn down. (Previously this was best-effort: a failed
+        // assignment left `job = None`, after which `kill()`/timeout/`Drop`
+        // could only `TerminateProcess` the root and no descendant was
+        // tree-killed at all.)
+        //
+        // The child is created running: the BaseContainer create API
+        // (`Experimental_CreateProcessInSandbox`) does not, on the builds
+        // validated to date, honor a suspended/paused start the way the
+        // AppContainer path does (create suspended → assign → resume), so a
+        // descendant spawned in the brief window between `CreateProcessInSandbox`
+        // returning and `assign_process` completing could still escape the job.
+        // In practice the child is a shell that has not yet run the user
+        // command, so that window is empty; fully closing it would require a
+        // create-suspended path verified on a host-prepped build.
+        let job = match UiJobObject::new().and_then(|job| {
             // Pass the raw handle — `assign_process` borrows it and does not
             // take ownership. Wrapping it in a temporary `OwnedHandle` here
             // would close `pi.hProcess` when the temporary dropped, leaving the
             // owned handle on the `BaseChild` below pointing at a closed (and
             // possibly reused) handle. Sole ownership stays with that field.
-            job.assign_process(pi.hProcess).ok()?;
-            Some(job)
-        })();
+            job.assign_process(pi.hProcess)?;
+            Ok(job)
+        }) {
+            Ok(job) => job,
+            Err(e) => {
+                let _ = writeln!(
+                    logger,
+                    "Error: BaseContainer job-object setup failed ({e}); terminating \
+                     the child and failing closed — a sandbox that cannot be \
+                     tree-killed must not run."
+                );
+                // The child is already running and there is no job to tree-kill
+                // through, so terminate the root directly and reap it before
+                // tearing down sandbox / proxy state, upholding the same
+                // "enforcement never outlives a live child" invariant as the
+                // normal teardown paths.
+                unsafe {
+                    let _ = TerminateProcess(pi.hProcess, u32::MAX);
+                    let _ = WaitForSingleObject(pi.hProcess, u32::MAX);
+                    let _ = CloseHandle(pi.hProcess);
+                    let _ = CloseHandle(pi.hThread);
+                }
+                if request.lifecycle.destroy_on_exit {
+                    run_sandbox_cleanup(
+                        &identity,
+                        &sid_string,
+                        request.policy.network_proxy.is_enabled(),
+                        logger,
+                    );
+                    sandbox_tracking::unregister_ctrl_c_cleanup();
+                }
+                self.proxy_coordinator.stop(logger);
+
+                const JOB_SETUP_FAILED_MSG: &str =
+                    "BaseContainer sandbox could not be placed in a job object, so it \
+                     could not be reliably terminated; the launch was rejected to \
+                     avoid running an uncontainable sandbox.";
+                return Err(ScriptResponse {
+                    exit_code: -1,
+                    error_message: JOB_SETUP_FAILED_MSG.to_string(),
+                    standard_err: JOB_SETUP_FAILED_MSG.to_string(),
+                    extended_error: format!("BaseContainer job-object setup failed: {e}"),
+                    failure_phase: FailurePhase::LaunchFailed,
+                    ..Default::default()
+                });
+            }
+        };
 
         // The child runs immediately (no suspend); hand ownership to the
         // caller via `BaseChild`, which performs sandbox/proxy teardown after
-        // the child exits.
+        // the child exits. `job` is always present here (we failed closed
+        // above); the `Option` and the root-only fallback in `kill()` remain
+        // purely as defense-in-depth.
         Ok(BaseChild {
             process: OwnedHandle::new(pi.hProcess),
             thread: OwnedHandle::new(pi.hThread),
             pid: pi.dwProcessId,
-            job,
+            job: Some(job),
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
@@ -1072,7 +1130,10 @@ struct BaseChild {
     process: OwnedHandle,
     thread: OwnedHandle,
     pid: u32,
-    /// Job object the child is assigned to (best-effort), used to tree-kill.
+    /// Job object the child is assigned to, used to tree-kill it. Always
+    /// `Some` on a successfully spawned child (`spawn_base` fails closed when
+    /// the job cannot be set up); the `Option` is retained so `kill()` can keep
+    /// a root-only fallback as defense-in-depth.
     job: Option<UiJobObject>,
     stdin_write: Option<OwnedHandle>,
     stdout_read: Option<OwnedHandle>,
