@@ -321,9 +321,43 @@ fn empty_session_properties(_session_name: &str) -> EtwSessionProperties {
     p.base.Wnode.BufferSize = size_of::<EtwSessionProperties>() as u32;
     p.base.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
     p.base.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-    // Defaults that work for most consumers; tune later if needed.
+    // Buffer tuning for descendant-tracking workloads. A single
+    // `cmd /c …` workload at the root produces hundreds of kernel-audit
+    // events during process init (locale setup, registry probes,
+    // default-user noise that the SDK filters out later). Each
+    // descendant added to the PID filter (Phases A-E of the
+    // captureDenials descendant-tracking work) generates its own
+    // init storm, so a launcher-shaped workload like `cmd /c findstr X`
+    // or `cmd /c npm run …` scales the event volume linearly with the
+    // number of descendants.
+    //
+    // Two knobs:
+    //   - `BufferSize` (per-buffer size in KB; default 64 KB)
+    //   - `Maximum/MinimumBuffers` (count of buffers)
+    //
+    // Total kernel-side capacity = BufferSize × MaximumBuffers.
+    // Raising the ceiling does not allocate more memory upfront — the
+    // kernel only allocates buffers on demand up to the cap. Bigger
+    // per-buffer size means the user-mode consumer gets more headroom
+    // per drain cycle, which matters when the consumer thread is the
+    // bottleneck (TDH decode + dedupe done synchronously on the ETW
+    // callback thread, which is the current architecture).
+    //
+    // Empirical: defaults (64 KB × 64) lost ~1300 events on a 2-PID
+    // test workload. Bumping the count to 256 alone did not help —
+    // the kernel buffer count wasn't the binding constraint;
+    // user-mode consumer throughput was. We additionally double the
+    // per-buffer size to 128 KB, giving the consumer ~2× longer
+    // between buffer fills.
+    //
+    // The real fix is a faster ETW consumer (decode + dedupe off the
+    // callback thread, into a worker pool). Tracked as a separate
+    // follow-up. This tuning is a pragmatic capacity bump in the
+    // meantime; it can be undone freely once the consumer refactor
+    // lands.
+    p.base.BufferSize = 128;
     p.base.MinimumBuffers = 4;
-    p.base.MaximumBuffers = 64;
+    p.base.MaximumBuffers = 256;
     p.base.LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES_V2>() as u32;
     p.base.LogFileNameOffset =
         (size_of::<EVENT_TRACE_PROPERTIES_V2>() + NAME_BUF_WCHARS * size_of::<u16>()) as u32;
