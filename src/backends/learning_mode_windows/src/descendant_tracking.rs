@@ -331,19 +331,7 @@ where
                     // requires either a kernel driver or DLL
                     // injection — out of scope.
                     let guard = SuspendedDescendant::open(pid);
-                    let suspended = guard.is_suspended();
-                    eprintln!(
-                        "[learning_mode_windows] suspend race-mitigation: descendant PID {pid} \
-                         suspend={}; calling extend_via_shim",
-                        if suspended { "OK" } else { "SKIPPED" }
-                    );
-                    let extend_start = std::time::Instant::now();
                     on_new_pid(pid);
-                    let extend_ms = extend_start.elapsed().as_millis();
-                    eprintln!(
-                        "[learning_mode_windows] suspend race-mitigation: extend RPC for PID {pid} \
-                         took {extend_ms} ms; resuming"
-                    );
                     drop(guard); // Resume + close handle, in this order.
                 }
             }
@@ -516,12 +504,6 @@ impl SuspendedDescendant {
         Self {
             handle: Some(handle),
         }
-    }
-}
-
-impl SuspendedDescendant {
-    fn is_suspended(&self) -> bool {
-        self.handle.is_some()
     }
 }
 
