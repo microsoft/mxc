@@ -39,7 +39,8 @@ use crate::extractors::{build_denial_from_access_check, build_denial_from_learni
 use crate::model::DenialEvent;
 use crate::tdh_decode::decode_event_parts;
 use crate::wire::{
-    OpenDenialSessionRequest, OpenDenialSessionResponse, PIPE_NAME, PROTOCOL_VERSION,
+    ExtendDenialSessionRequest, ExtendDenialSessionResponse, OpenDenialSessionRequest,
+    OpenDenialSessionResponse, ShimRequest, ShimResponse, PIPE_NAME, PROTOCOL_VERSION,
 };
 
 /// LearningModeViolation event ID from Kernel-General.
@@ -468,11 +469,11 @@ pub fn open_via_shim(
     // Connect — retry on ERROR_PIPE_BUSY up to PIPE_OPEN_TIMEOUT.
     let mut pipe = open_pipe_with_retry(pipe_path)?;
 
-    let request = OpenDenialSessionRequest {
+    let request = ShimRequest::OpenDenialSession(OpenDenialSessionRequest {
         protocol_version: PROTOCOL_VERSION,
         target_pid,
         package_sid: package_sid.map(str::to_string),
-    };
+    });
     let request_bytes = serde_json::to_vec(&request).map_err(SessionError::SerializeRequest)?;
 
     pipe.write_all(&request_bytes)
@@ -492,15 +493,80 @@ pub fn open_via_shim(
         return Err(SessionError::EmptyResponse);
     }
 
-    let parsed: OpenDenialSessionResponse =
+    let parsed: ShimResponse =
         serde_json::from_slice(&response_bytes).map_err(SessionError::ParseResponse)?;
 
-    match parsed {
+    let open_response = match parsed {
+        ShimResponse::OpenDenialSession(r) => r,
+        ShimResponse::ExtendDenialSession(_) => {
+            return Err(SessionError::ShimError {
+                code: "protocolMismatch".into(),
+                message: "shim returned ExtendDenialSession to an OpenDenialSession request".into(),
+            });
+        }
+    };
+
+    match open_response {
         OpenDenialSessionResponse::Ok { session_name } => Ok(ScopedTraceSession {
             session_name,
             target_pid,
         }),
         OpenDenialSessionResponse::Error { code, message } => {
+            Err(SessionError::ShimError { code, message })
+        }
+    }
+}
+
+/// Ask the shim to replace the PID filter on `session_name` with `pids`.
+///
+/// `pids` must contain the full intended PID set (root + all known
+/// descendants); the shim REPLACES the filter rather than appending.
+/// The PID list is bounded by the runner-side cap (currently
+/// `MAX_CAPTURED_EVENTS`-equivalent: a reasonable number that fits in
+/// one ETW filter blob).
+pub fn extend_via_shim(session_name: &str, pids: &[u32]) -> Result<(), SessionError> {
+    if pids.is_empty() {
+        return Err(SessionError::ShimError {
+            code: "badRequest".into(),
+            message: "extend_via_shim requires a non-empty pid list".into(),
+        });
+    }
+
+    let pipe_path = PIPE_NAME;
+    let mut pipe = open_pipe_with_retry(pipe_path)?;
+
+    let request = ShimRequest::ExtendDenialSession(ExtendDenialSessionRequest {
+        protocol_version: PROTOCOL_VERSION,
+        session_name: session_name.to_string(),
+        pids: pids.to_vec(),
+    });
+    let request_bytes = serde_json::to_vec(&request).map_err(SessionError::SerializeRequest)?;
+
+    pipe.write_all(&request_bytes)
+        .map_err(SessionError::PipeWrite)?;
+    pipe.flush().map_err(SessionError::PipeWrite)?;
+
+    let response_bytes = read_until_eof_or_disconnect(&mut pipe)?;
+    if response_bytes.is_empty() {
+        return Err(SessionError::EmptyResponse);
+    }
+
+    let parsed: ShimResponse =
+        serde_json::from_slice(&response_bytes).map_err(SessionError::ParseResponse)?;
+
+    let extend_response = match parsed {
+        ShimResponse::ExtendDenialSession(r) => r,
+        ShimResponse::OpenDenialSession(_) => {
+            return Err(SessionError::ShimError {
+                code: "protocolMismatch".into(),
+                message: "shim returned OpenDenialSession to an ExtendDenialSession request".into(),
+            });
+        }
+    };
+
+    match extend_response {
+        ExtendDenialSessionResponse::Ok => Ok(()),
+        ExtendDenialSessionResponse::Error { code, message } => {
             Err(SessionError::ShimError { code, message })
         }
     }

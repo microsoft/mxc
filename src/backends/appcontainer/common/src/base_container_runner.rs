@@ -1069,6 +1069,12 @@ impl ScriptRunner for BaseContainerRunner {
         // descendants and the `childProcessesObserved` warning still
         // applies until Phase B lands.
         let _descendant_job = if request.capture_denials {
+            // Create the job + attach root early so descendants inherit
+            // job membership as soon as the workload resumes. Subscription
+            // to JOB_OBJECT_MSG_NEW_PROCESS is deferred until *after*
+            // `open_via_shim` succeeds below — the IOCP callback needs the
+            // session name to call `extend_via_shim`, so we can't wire it
+            // until we have one.
             match learning_mode_windows::descendant_tracking::DescendantTrackingJob::new() {
                 Ok(mut job) => match job.attach_root(pi.hProcess, pi.dwProcessId) {
                     Ok(()) => {
@@ -1076,20 +1082,6 @@ impl ScriptRunner for BaseContainerRunner {
                             "[learning_mode_windows] descendant-tracking job attached to PID {}",
                             pi.dwProcessId
                         );
-                        match job.subscribe_to_new_processes(|new_pid| {
-                            eprintln!("[learning_mode_windows] descendant spawned: PID {new_pid}");
-                        }) {
-                            Ok(()) => {
-                                eprintln!(
-                                    "[learning_mode_windows] descendant IOCP subscription active"
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[learning_mode_windows] descendant IOCP subscription failed (continuing): {e}"
-                                );
-                            }
-                        }
                         Some(job)
                     }
                     Err(e) => {
@@ -1110,6 +1102,9 @@ impl ScriptRunner for BaseContainerRunner {
             None
         };
 
+        // Keep the job mutable so the subscribe-IOCP call below can fire.
+        let mut descendant_job = _descendant_job;
+
         let (collector, stream_writer, child_observer) = if request.capture_denials {
             let (tx, rx) = std::sync::mpsc::channel::<learning_mode_windows::DeniedResource>();
             let writer = std::thread::Builder::new()
@@ -1121,24 +1116,70 @@ impl ScriptRunner for BaseContainerRunner {
                 pi.dwProcessId,
                 None,
             ) {
-                Ok(session) => match session.start_collector_with_stream(Some(tx)) {
-                    Ok(c) => {
-                        let _ = writeln!(
-                            logger,
-                            "captureDenials: ETW collector attached to PID {} via session {}",
-                            pi.dwProcessId, session.session_name
-                        );
-                        Some(c)
+                Ok(session) => {
+                    let session_name = session.session_name.clone();
+                    let collector_result = session.start_collector_with_stream(Some(tx));
+
+                    // Phase C: wire the descendant IOCP listener to call
+                    // `extend_via_shim` whenever a new descendant joins the
+                    // job. The runner-side `pid_list` tracks the full filter
+                    // list (root + descendants); the shim REPLACES the
+                    // EVENT_FILTER_TYPE_PID list on each extend call, so we
+                    // hand it the complete snapshot every time.
+                    if collector_result.is_ok() {
+                        if let Some(job) = descendant_job.as_mut() {
+                            use std::sync::{Arc, Mutex};
+                            let pid_list = Arc::new(Mutex::new(vec![pi.dwProcessId]));
+                            let pid_list_cb = Arc::clone(&pid_list);
+                            let session_name_cb = session_name.clone();
+                            match job.subscribe_to_new_processes(move |new_pid| {
+                                let snapshot = {
+                                    let mut pids = pid_list_cb.lock().unwrap();
+                                    pids.push(new_pid);
+                                    pids.clone()
+                                };
+                                match learning_mode_windows::session::extend_via_shim(
+                                    &session_name_cb,
+                                    &snapshot,
+                                ) {
+                                    Ok(()) => eprintln!(
+                                        "[learning_mode_windows] extended ETW filter to include PID {new_pid} (total {} PIDs)",
+                                        snapshot.len()
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "[learning_mode_windows] extend_via_shim failed for PID {new_pid}: {e}"
+                                    ),
+                                }
+                            }) {
+                                Ok(()) => eprintln!(
+                                    "[learning_mode_windows] descendant IOCP subscription active for session {session_name}"
+                                ),
+                                Err(e) => eprintln!(
+                                    "[learning_mode_windows] descendant IOCP subscription failed (continuing): {e}"
+                                ),
+                            }
+                        }
                     }
-                    Err(e) => {
-                        let _ = writeln!(
-                            logger,
-                            "captureDenials: start_collector failed (continuing without capture): {}",
-                            e
-                        );
-                        None
+
+                    match collector_result {
+                        Ok(c) => {
+                            let _ = writeln!(
+                                logger,
+                                "captureDenials: ETW collector attached to PID {} via session {}",
+                                pi.dwProcessId, session_name
+                            );
+                            Some(c)
+                        }
+                        Err(e) => {
+                            let _ = writeln!(
+                                logger,
+                                "captureDenials: start_collector failed (continuing without capture): {}",
+                                e
+                            );
+                            None
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     let _ = writeln!(
                         logger,

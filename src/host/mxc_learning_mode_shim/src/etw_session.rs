@@ -34,9 +34,9 @@ use windows::core::{GUID, PCWSTR};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, WIN32_ERROR};
 use windows::Win32::System::Diagnostics::Etw::{
     ControlTraceW, EnableTraceEx2, StartTraceW, CONTROLTRACE_HANDLE, ENABLE_TRACE_PARAMETERS,
-    EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_FILTER_DESCRIPTOR, EVENT_TRACE_CONTROL_STOP,
-    EVENT_TRACE_PROPERTIES, EVENT_TRACE_PROPERTIES_V2, EVENT_TRACE_REAL_TIME_MODE,
-    TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
+    EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_FILTER_DESCRIPTOR, EVENT_TRACE_CONTROL_QUERY,
+    EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_PROPERTIES, EVENT_TRACE_PROPERTIES_V2,
+    EVENT_TRACE_REAL_TIME_MODE, TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
 
 /// `Microsoft-Windows-Kernel-General` provider GUID.
@@ -243,6 +243,64 @@ fn stop_partial(name: &str, handle: CONTROLTRACE_HANDLE) -> Result<(), EtwError>
             code: status.0,
         });
     }
+    Ok(())
+}
+
+/// Extends the PID filter of an already-open denial session.
+///
+/// Looks up the session's `CONTROLTRACE_HANDLE` by name via
+/// `ControlTraceW(NULL, name, QUERY)` (the shim does not retain
+/// per-session state across requests), then re-enables both providers
+/// with the new PID list. `EnableTraceEx2` replaces the existing filter
+/// for the provider, so the caller must supply the **full** PID list
+/// (root + all known descendants).
+pub fn extend_denial_session(session_name: &str, pids: &[u32]) -> Result<(), EtwError> {
+    if pids.is_empty() {
+        return Err(EtwError {
+            op: "extend_denial_session: empty PID list",
+            code: 0,
+        });
+    }
+
+    // 1. Recover the CONTROLTRACE_HANDLE for this session by querying it
+    //    by name. ControlTraceW with EVENT_TRACE_CONTROL_QUERY accepts a
+    //    NULL handle when the session name is provided, and populates
+    //    `props.Wnode.HistoricalContext` (which IS the trace handle).
+    let mut name_wide: Vec<u16> = session_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut props = empty_session_properties(session_name);
+
+    // SAFETY: name_wide is a valid null-terminated UTF-16 buffer alive
+    // for the duration of the call. props is a properly-sized
+    // EVENT_TRACE_PROPERTIES_V2 block.
+    let status = unsafe {
+        ControlTraceW(
+            CONTROLTRACE_HANDLE::default(),
+            PCWSTR(name_wide.as_mut_ptr()),
+            &mut props as *mut _ as *mut EVENT_TRACE_PROPERTIES,
+            EVENT_TRACE_CONTROL_QUERY,
+        )
+    };
+    if status != WIN32_ERROR(0) {
+        return Err(EtwError {
+            op: "ControlTraceW(QUERY) for extend",
+            code: status.0,
+        });
+    }
+
+    // SAFETY: After a successful EVENT_TRACE_CONTROL_QUERY,
+    // `Wnode.Anonymous1.HistoricalContext` is the active variant of the
+    // union and contains the trace handle.
+    let handle = CONTROLTRACE_HANDLE {
+        Value: unsafe { props.base.Wnode.Anonymous1.HistoricalContext },
+    };
+
+    // 2. Re-enable both providers with the new PID filter. EnableTraceEx2
+    //    replaces the previous filter.
+    enable_provider_for_pid(handle, &KERNEL_GENERAL_PROVIDER, pids)?;
+    enable_provider_for_pid(handle, &MXC_OS_PROVIDER, pids)?;
     Ok(())
 }
 

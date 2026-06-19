@@ -35,7 +35,8 @@ use windows::Win32::System::Pipes::{
 };
 
 use learning_mode_windows::wire::{
-    error_code, OpenDenialSessionRequest, OpenDenialSessionResponse, PIPE_NAME, PROTOCOL_VERSION,
+    error_code, ExtendDenialSessionRequest, ExtendDenialSessionResponse, OpenDenialSessionRequest,
+    OpenDenialSessionResponse, ShimRequest, ShimResponse, PIPE_NAME, PROTOCOL_VERSION,
 };
 
 /// Shape of the security descriptor in SDDL form.
@@ -149,20 +150,35 @@ fn handle_connection(pipe: HANDLE) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Handles a parsed request: opens an ETW session via the privileged
-/// `etw_session` module and returns its name. On any failure tears
-/// down the partially-created session so we don't leak ETW slots.
-fn handle_request(bytes: &[u8]) -> OpenDenialSessionResponse {
-    let req: OpenDenialSessionRequest = match serde_json::from_slice(bytes) {
+/// Handles a parsed request: dispatches on the [`ShimRequest`] variant.
+/// For `OpenDenialSession`, creates an ETW session via the privileged
+/// `etw_session` module and returns its name. For `ExtendDenialSession`,
+/// updates the running session's PID filter.
+///
+/// On any failure tears down (or refuses to extend) without leaking ETW
+/// slots.
+fn handle_request(bytes: &[u8]) -> ShimResponse {
+    let req: ShimRequest = match serde_json::from_slice(bytes) {
         Ok(r) => r,
         Err(e) => {
-            return OpenDenialSessionResponse::Error {
+            return ShimResponse::OpenDenialSession(OpenDenialSessionResponse::Error {
                 code: error_code::BAD_REQUEST.to_string(),
                 message: format!("malformed request: {e}"),
-            };
+            });
         }
     };
 
+    match req {
+        ShimRequest::OpenDenialSession(open_req) => {
+            ShimResponse::OpenDenialSession(handle_open(open_req))
+        }
+        ShimRequest::ExtendDenialSession(ext_req) => {
+            ShimResponse::ExtendDenialSession(handle_extend(ext_req))
+        }
+    }
+}
+
+fn handle_open(req: OpenDenialSessionRequest) -> OpenDenialSessionResponse {
     if req.protocol_version != PROTOCOL_VERSION {
         return OpenDenialSessionResponse::Error {
             code: error_code::VERSION_MISMATCH.to_string(),
@@ -193,6 +209,48 @@ fn handle_request(bytes: &[u8]) -> OpenDenialSessionResponse {
                 req.target_pid, e
             ),
         },
+    }
+}
+
+fn handle_extend(req: ExtendDenialSessionRequest) -> ExtendDenialSessionResponse {
+    if req.protocol_version != PROTOCOL_VERSION {
+        return ExtendDenialSessionResponse::Error {
+            code: error_code::VERSION_MISMATCH.to_string(),
+            message: format!(
+                "client protocol version {} does not match server {PROTOCOL_VERSION}",
+                req.protocol_version
+            ),
+        };
+    }
+
+    if req.pids.is_empty() {
+        return ExtendDenialSessionResponse::Error {
+            code: error_code::BAD_REQUEST.to_string(),
+            message: "extendDenialSession requires a non-empty pids list".into(),
+        };
+    }
+
+    match crate::etw_session::extend_denial_session(&req.session_name, &req.pids) {
+        Ok(()) => ExtendDenialSessionResponse::Ok,
+        Err(e) => {
+            // Distinguish "session doesn't exist" (caller passed a bad
+            // name) from generic Win32 failures so SDK consumers can
+            // surface a clearer error.
+            let code = if e.code == windows::Win32::Foundation::ERROR_WMI_INSTANCE_NOT_FOUND.0 {
+                error_code::UNKNOWN_SESSION
+            } else {
+                error_code::WIN32_FAILURE
+            };
+            ExtendDenialSessionResponse::Error {
+                code: code.to_string(),
+                message: format!(
+                    "failed to extend denial session `{}` to {} PID(s): {}",
+                    req.session_name,
+                    req.pids.len(),
+                    e
+                ),
+            }
+        }
     }
 }
 
@@ -267,11 +325,27 @@ fn create_pipe_instance(first: bool) -> Result<HANDLE, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_windows::wire::{OpenDenialSessionRequest, PROTOCOL_VERSION};
+    use learning_mode_windows::wire::{
+        ExtendDenialSessionRequest, OpenDenialSessionRequest, ShimRequest, PROTOCOL_VERSION,
+    };
+
+    fn extract_open(resp: ShimResponse) -> OpenDenialSessionResponse {
+        match resp {
+            ShimResponse::OpenDenialSession(r) => r,
+            other => panic!("expected OpenDenialSession variant, got {other:?}"),
+        }
+    }
+
+    fn extract_extend(resp: ShimResponse) -> ExtendDenialSessionResponse {
+        match resp {
+            ShimResponse::ExtendDenialSession(r) => r,
+            other => panic!("expected ExtendDenialSession variant, got {other:?}"),
+        }
+    }
 
     #[test]
     fn handle_request_rejects_bad_json() {
-        match handle_request(b"not json at all") {
+        match extract_open(handle_request(b"not json at all")) {
             OpenDenialSessionResponse::Error { code, .. } => {
                 assert_eq!(code, error_code::BAD_REQUEST);
             }
@@ -280,16 +354,48 @@ mod tests {
     }
 
     #[test]
-    fn handle_request_rejects_version_mismatch() {
-        let req = OpenDenialSessionRequest {
+    fn handle_open_rejects_version_mismatch() {
+        let req = ShimRequest::OpenDenialSession(OpenDenialSessionRequest {
             protocol_version: PROTOCOL_VERSION + 99,
             target_pid: 1,
             package_sid: None,
-        };
+        });
         let bytes = serde_json::to_vec(&req).unwrap();
-        match handle_request(&bytes) {
+        match extract_open(handle_request(&bytes)) {
             OpenDenialSessionResponse::Error { code, .. } => {
                 assert_eq!(code, error_code::VERSION_MISMATCH);
+            }
+            _ => panic!("expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn handle_extend_rejects_version_mismatch() {
+        let req = ShimRequest::ExtendDenialSession(ExtendDenialSessionRequest {
+            protocol_version: PROTOCOL_VERSION + 99,
+            session_name: "mxc-denials-xxx".into(),
+            pids: vec![1, 2],
+        });
+        let bytes = serde_json::to_vec(&req).unwrap();
+        match extract_extend(handle_request(&bytes)) {
+            ExtendDenialSessionResponse::Error { code, .. } => {
+                assert_eq!(code, error_code::VERSION_MISMATCH);
+            }
+            _ => panic!("expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn handle_extend_rejects_empty_pid_list() {
+        let req = ShimRequest::ExtendDenialSession(ExtendDenialSessionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            session_name: "mxc-denials-xxx".into(),
+            pids: vec![],
+        });
+        let bytes = serde_json::to_vec(&req).unwrap();
+        match extract_extend(handle_request(&bytes)) {
+            ExtendDenialSessionResponse::Error { code, .. } => {
+                assert_eq!(code, error_code::BAD_REQUEST);
             }
             _ => panic!("expected Error variant"),
         }
