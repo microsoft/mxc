@@ -1,0 +1,81 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Seeds the public MxcDependencies cargo feed from src/Cargo.lock.
+#
+# Why: fork PRs lose System.AccessToken and so only run the GitHub Actions
+# gates, which build against real crates.io — they never exercise the
+# network-isolated MXC-PR-Build ADO pipeline that redirects crates.io to the
+# anonymous-read MxcDependencies feed (.azure-pipelines/.cargo/config.public.toml).
+# A fork-PR lockfile bump can therefore merge a brand-new transitive crate that
+# was never cached in the public feed, and the next in-repo PR / `main` push
+# then 401s in `cargo fetch`. This pipeline closes that gap by pulling every
+# locked crate into the feed via an authenticated fetch whenever Cargo.lock
+# changes (plus a daily safety-net run).
+#
+# Setup: requires a variable group `MXC-Public-Feed-Seeding` defining the secret
+# `publicFeedPat` — a PAT with Packaging (Read) scope on the dev.azure.com/shine-oss
+# org that backs the public feed. Manage it in Dart alongside MXC-ESRP-Signing.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/Cargo.lock
+      - scripts/ci/seed-cargo-feed.ps1
+      - .azure-pipelines/Seed.Cargo.Feed.yml
+      - .azure-pipelines/.cargo/config.public.toml
+
+pr: none
+
+schedules:
+  - cron: "0 6 * * *"
+    displayName: Daily feed seed (safety net)
+    branches:
+      include:
+        - main
+    always: true
+
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+resources:
+  repositories:
+    - repository: 1ESPipelineTemplates
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+
+variables:
+  - group: MXC-Public-Feed-Seeding
+
+extends:
+  template: v1/1ES.Unofficial.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+
+    customBuildTags:
+      - ES365AIMigrationTooling
+
+    stages:
+      - stage: Seed
+        displayName: 'Seed public cargo feed'
+        jobs:
+          - job: seed
+            displayName: 'Seed MxcDependencies from Cargo.lock'
+            steps:
+              - checkout: self
+
+              - task: PowerShell@2
+                displayName: 'Seed cargo feed from Cargo.lock'
+                inputs:
+                  pwsh: true
+                  filePath: scripts/ci/seed-cargo-feed.ps1
+                env:
+                  # Secret variables are not auto-exported to the environment;
+                  # map it explicitly so the PAT never appears on a command line.
+                  CARGO_FEED_PAT: $(publicFeedPat)
