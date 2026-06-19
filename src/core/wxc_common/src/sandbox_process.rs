@@ -234,23 +234,26 @@ pub fn cancel_and_join_discard<C: StreamCloser>(
 /// in-tree backends arrange this via `setsid()` (Seatbelt) or
 /// `process_group(0)` (Bubblewrap), so the child's pgid equals its pid: a
 /// graceful `SIGTERM` to the whole group, then a `SIGKILL` sweep after `grace`.
-/// Signalling the negative pgid targets only that group — never the host's —
-/// and is a no-op once the child has exited.
+/// Signalling the negative pgid targets only that group — never the host's.
 ///
-/// The final `SIGKILL` is sent unconditionally so a descendant forked around
-/// the `SIGTERM` (and thus never signalled) can't survive and leave a later
-/// `wait()` blocking for its full runtime; while such a descendant exists it
-/// keeps the group alive (pgid still valid), and if none remains the sweep is a
-/// harmless `ESRCH`. Shared by the Unix backends' streaming `kill()` and their
+/// The group is signalled even when the leader itself has already exited: a
+/// dead leader does **not** mean the group is empty — descendants sharing the
+/// pgid must still be reaped. The pgid is captured before any `try_wait`, so the
+/// leader is still alive or an un-reaped zombie (its pid, and thus the pgid, not
+/// yet recyclable) when the `SIGTERM` is sent. The final `SIGKILL` is sent
+/// unconditionally (tolerating `ESRCH` once the group is empty) so a descendant
+/// forked around the `SIGTERM` can't survive and leave a later `wait()` blocking
+/// for its full runtime — even if a transient `try_wait` error occurs during the
+/// grace loop. Shared by the Unix backends' streaming `kill()` and their
 /// run-to-completion timeout branches.
 #[cfg(unix)]
 pub fn group_kill(
     child: &mut std::process::Child,
     grace: std::time::Duration,
 ) -> std::io::Result<()> {
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
+    // Capture the pgid up front, before any `try_wait` reaps the leader: while
+    // the leader is unreaped its pid (== pgid) cannot be recycled, so `-pgid`
+    // reliably targets this child's group.
     let pgid = child.id() as i32;
     // SAFETY: `kill(2)` with a negative pgid signals the child's own process
     // group; the arguments are plain integers with no memory safety concerns.
@@ -259,7 +262,10 @@ pub fn group_kill(
     }
     let deadline = std::time::Instant::now() + grace;
     loop {
-        if child.try_wait()?.is_some() || std::time::Instant::now() >= deadline {
+        // Reap the direct child once it exits; a transient `try_wait` error must
+        // not skip the `SIGKILL` below, so treat anything but a clean exit as
+        // "still running" and keep waiting out the grace window.
+        if matches!(child.try_wait(), Ok(Some(_))) || std::time::Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));

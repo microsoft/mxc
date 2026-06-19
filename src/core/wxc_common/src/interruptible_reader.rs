@@ -143,6 +143,11 @@ pub fn wrap_pipe<T: Into<OwnedFd>>(
 
 impl Read for InterruptibleReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // A zero-length read must return `Ok(0)` immediately (the `Read`
+        // contract), never block in `poll`.
+        if buf.is_empty() {
+            return Ok(0);
+        }
         // Already cancelled: report EOF without touching the data pipe.
         if self.state.cancelled.load(Ordering::Acquire) {
             return Ok(0);
@@ -239,6 +244,15 @@ mod tests {
         let n = reader.read(&mut buf).expect("read data");
         assert_eq!(&buf[..n], b"hello");
         assert_eq!(reader.read(&mut buf).expect("read eof"), 0);
+    }
+
+    #[test]
+    fn zero_length_read_returns_ok_zero_without_blocking() {
+        // The write end stays open, so a normal read would block; a zero-length
+        // read must still return Ok(0) immediately per the `Read` contract.
+        let (mut reader, _write_end) = reader_with_writer();
+        let mut empty: [u8; 0] = [];
+        assert_eq!(reader.read(&mut empty).expect("zero-length read"), 0);
     }
 
     #[test]

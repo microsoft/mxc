@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use crate::error::WxcError;
@@ -114,9 +114,11 @@ impl InterruptiblePipeReader {
     }
 
     /// Mint a closer that EOFs this reader's `read` on demand. Several closers
-    /// may be minted; they share one cancellation state.
+    /// may be minted; they share one cancellation state. The closer holds only a
+    /// [`Weak`] reference, so it never keeps the read handle open past this
+    /// reader's lifetime.
     pub fn canceller(&self) -> PipeReadCanceller {
-        PipeReadCanceller(Arc::clone(&self.0))
+        PipeReadCanceller(Arc::downgrade(&self.0))
     }
 }
 
@@ -137,13 +139,22 @@ impl std::io::Read for InterruptiblePipeReader {
         // SAFETY: the `Arc` keeps the pipe handle valid for this call;
         // `buf`/`read` are valid local out-params.
         let result = unsafe { ReadFile(self.0.handle.get(), Some(buf), Some(&mut read), None) };
-        self.0.lock().reading = false;
+        let cancelled = {
+            let mut gate = self.0.lock();
+            gate.reading = false;
+            gate.cancelled
+        };
+        // If `close` fired while this read was in flight, drop any
+        // completed-but-undelivered chunk and report EOF — matching the Unix
+        // reader, which never delivers data once cancelled.
+        if cancelled {
+            return Ok(0);
+        }
         match result {
             Ok(()) => Ok(read as usize),
             // Write ends all closed: normal end-of-stream, report EOF.
             Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
             // A canceller's `CancelIoEx` aborted this read: report EOF.
-            // `cancelled` is already set, so subsequent reads short-circuit.
             Err(e) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Ok(0),
             Err(e) => Err(std::io::Error::other(e)),
         }
@@ -153,11 +164,19 @@ impl std::io::Read for InterruptiblePipeReader {
 /// A [`StreamCloser`] for an [`InterruptiblePipeReader`]. Cloneable and
 /// `Send + Sync` so a watchdog thread can hold and fire it; all clones share
 /// one cancellation state and [`close`](StreamCloser::close) is idempotent.
+/// Holds a [`Weak`] reference so a stored canceller never keeps the reader's
+/// data-pipe handle open after the reader is dropped.
 #[derive(Clone)]
-pub struct PipeReadCanceller(Arc<CancelablePipe>);
+pub struct PipeReadCanceller(Weak<CancelablePipe>);
 
 impl StreamCloser for PipeReadCanceller {
     fn close(&self) {
+        // Upgrade to a temporary strong ref for the duration of the cancel. If
+        // the reader has already been dropped there is nothing to cancel (and
+        // its handle is already closed), so this is a no-op.
+        let Some(pipe) = self.0.upgrade() else {
+            return;
+        };
         // Mark cancelled once (so reads short-circuit to EOF), then abort an
         // in-flight read. Because `CancelIoEx` is edge-triggered, retry while a
         // read is in its announce→`ReadFile` window (`reading == true`): the next
@@ -165,20 +184,21 @@ impl StreamCloser for PipeReadCanceller {
         // clears `reading` when its `ReadFile` returns (aborted or with data),
         // which bounds the loop; if no read is in progress it exits at once.
         {
-            let mut gate = self.0.lock();
+            let mut gate = pipe.lock();
             if gate.cancelled {
                 return;
             }
             gate.cancelled = true;
         }
         loop {
-            // SAFETY: the `Arc` keeps the handle valid; `CancelIoEx` with a null
-            // overlapped aborts all outstanding synchronous I/O on it. Ignore the
-            // result — a benign no-op (ERROR_NOT_FOUND) when none is pending.
+            // SAFETY: the upgraded `Arc` keeps the handle valid; `CancelIoEx`
+            // with a null overlapped aborts all outstanding synchronous I/O on
+            // it. Ignore the result — a benign no-op (ERROR_NOT_FOUND) when none
+            // is pending.
             unsafe {
-                let _ = CancelIoEx(self.0.handle.get(), None);
+                let _ = CancelIoEx(pipe.handle.get(), None);
             }
-            if !self.0.lock().reading {
+            if !pipe.lock().reading {
                 return;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -200,11 +220,18 @@ impl PipeWriter {
 
 impl std::io::Write for PipeWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
         let mut written: u32 = 0;
         // SAFETY: `self.0` owns a valid pipe handle for the lifetime of this
         // `PipeWriter`; `buf`/`written` are valid local params for the call.
         match unsafe { WriteFile(self.0.get(), Some(buf), Some(&mut written), None) } {
             Ok(()) => Ok(written as usize),
+            // The read end is gone (child exited / closed its stdin): surface the
+            // standard `BrokenPipe` kind so callers' graceful handling fires
+            // instead of an opaque OS error.
+            Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
             Err(e) => Err(std::io::Error::other(e)),
         }
     }
