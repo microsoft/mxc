@@ -43,8 +43,10 @@ use wxc_common::validator::validate_common;
 
 use crate::bwrap_command;
 
-/// Polling interval for timeout enforcement.
-const POLL_INTERVAL_MS: u64 = 500;
+/// Exit-detection poll interval (ms) for the timeout path. Short enough to keep
+/// exit-detection latency low; the per-iteration sleep is additionally clamped
+/// to the time remaining so even sub-interval timeouts are honored precisely.
+const POLL_INTERVAL_MS: u64 = 50;
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -89,14 +91,6 @@ impl SandboxBackend for BubblewrapScriptRunner {
                  --experimental. For production, point network.proxy at a real HTTP \
                  proxy via 'localhost' or 'url'.",
             ));
-        }
-
-        // Reject timeouts smaller than our polling interval.
-        if request.script_timeout > 0 && u64::from(request.script_timeout) < POLL_INTERVAL_MS {
-            return Err(ScriptResponse::error(&format!(
-                "script_timeout {}ms is below the minimum of {}ms",
-                request.script_timeout, POLL_INTERVAL_MS
-            )));
         }
 
         if !Self::is_bwrap_available() {
@@ -218,11 +212,16 @@ impl BubblewrapScriptRunner {
                     .stderr(Stdio::inherit());
             }
         }
-        // Put bwrap in its own process group so a timeout / `kill()` can
-        // tree-kill it with a single `killpg` (bwrap is PID 1 of the new pid
-        // namespace via `--unshare-pid`, so this takes the whole sandbox down)
-        // without touching the host's process group.
-        command.process_group(0);
+        // Pipes mode: put bwrap in its own process group so a timeout / `kill()`
+        // can tree-kill it with a single `killpg` without touching the host's
+        // group. Inherit mode keeps bwrap in the executor's group (so it retains
+        // the controlling terminal and can't be SIGTTIN-stopped reading it); it's
+        // PID 1 of the new pid namespace (`--unshare-pid`), so killing the root
+        // process alone tears the whole sandbox down.
+        let group = stdio == StdioMode::Pipes;
+        if group {
+            command.process_group(0);
+        }
 
         let mut child = match command.spawn() {
             Ok(process) => process,
@@ -276,6 +275,7 @@ impl BubblewrapScriptRunner {
             stderr,
             stdout_canceller,
             stderr_canceller,
+            group,
             proxy,
             fw_manager,
             timeout,
@@ -294,6 +294,10 @@ struct BwrapChild {
     /// closers can mint a [`StreamCloser`] even after the stream is taken.
     stdout_canceller: Option<ReadCanceller>,
     stderr_canceller: Option<ReadCanceller>,
+    /// `true` when bwrap leads its own process group (`Pipes` mode), so
+    /// termination signals the whole group; `false` for `Inherit` mode, where
+    /// killing bwrap (pid 1 of the namespace) alone tears the sandbox down.
+    group: bool,
     proxy: LinuxProxyCoordinator,
     fw_manager: Option<NetworkIptablesManager>,
     timeout: Option<Duration>,
@@ -368,7 +372,19 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        group_kill(&mut self.inner.child, Duration::from_secs(2))
+        if self.inner.group {
+            // Pipes mode: bwrap leads its own process group — tree-kill it.
+            group_kill(&mut self.inner.child, Duration::from_secs(2))
+        } else {
+            // Inherit mode: bwrap shares the executor's group (no
+            // `process_group(0)`), so a group-kill would hit the executor.
+            // bwrap is pid 1 of the sandbox pid namespace, so killing the root
+            // alone tears the whole namespace (every descendant) down.
+            if self.inner.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            self.inner.child.kill()
+        }
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -384,10 +400,10 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         let result = match wait_with_timeout(&mut self.inner.child, self.inner.timeout) {
             Ok(status) => Ok(status.code().unwrap_or(-1)),
             Err(WaitError::Timeout) => {
-                // Tree-kill (process group) so descendants die too and release
-                // any stdout/stderr pipe write-ends, matching `kill()`'s
-                // contract; terminating only the root could leave the drain
-                // threads blocked. bwrap is PID 1 of the pid namespace.
+                // Tree-kill so descendants die too and release any stdout/stderr
+                // pipe write-ends (else the drain threads below could block).
+                // `kill()` group-kills in Pipes mode, and in Inherit mode kills
+                // bwrap (pid 1 of the namespace), which tears the sandbox down.
                 let _ = self.kill();
                 let _ = self.inner.child.wait();
                 Err(std::io::Error::new(
@@ -468,10 +484,15 @@ fn wait_with_timeout(
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
-                if Instant::now() >= deadline {
+                let now = Instant::now();
+                if now >= deadline {
                     return Err(WaitError::Timeout);
                 }
-                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                // Poll at a short interval for low exit-detection latency, but
+                // never sleep past the deadline so even sub-interval timeouts are
+                // honored.
+                let remaining = deadline - now;
+                std::thread::sleep(remaining.min(Duration::from_millis(POLL_INTERVAL_MS)));
             }
             Err(e) => return Err(WaitError::Io(e)),
         }
