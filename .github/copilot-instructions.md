@@ -27,7 +27,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ```
 ./build.sh                 # Release build
 ./build.sh --debug         # Debug build
-./build.sh --rust-only     # Only Rust binaries, skip SDK/CLI
+./build.sh --rust-only     # Only Rust binaries, skip SDK
 ```
 
 ### Full build (macOS)
@@ -52,9 +52,6 @@ cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS only 
 
 # SDK (from sdk/)
 npm install && npm run build
-
-# CLI (from cli/)
-npm install && npm run build
 ```
 
 ### Lint and format
@@ -63,9 +60,6 @@ npm install && npm run build
 # Rust (from src/)
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-
-# CLI (from cli/)
-npx eslint src --ext .ts
 ```
 
 ### Tests
@@ -79,9 +73,6 @@ cargo test -p wxc_common -- config_parser   # Filter by test name
 # SDK (from sdk/)
 npm test
 npm run test:integration
-
-# CLI (from cli/) — requires build first
-node --test dist/cli.test.js
 
 # Local PowerShell helpers — run from repo root, require built binaries
 tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
@@ -98,7 +89,7 @@ cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repea
 
 ## Architecture
 
-MXC is a **sandboxed code execution system** with a Rust core and TypeScript SDK/CLI layer.
+MXC is a **sandboxed code execution system** with a Rust core and TypeScript SDK layer.
 
 ### Containment backends
 
@@ -203,10 +194,8 @@ The parser uses two layers of structs: `Raw*` structs (matching JSON with `#[ser
 
 ### TypeScript conventions
 
-- Target ES2020, CommonJS modules, strict mode
-- SDK and CLI each have their own `tsconfig.json` with `declaration: true`
+- Target ES2022, ESM modules (`module`/`moduleResolution: NodeNext`, `"type": "module"`), strict mode — relative imports use explicit `.js` extensions
 - Tests use Node.js built-in test runner (`node --test`)
-- CLI uses flat ESLint config (`eslint.config.js`) with `typescript-eslint`
 
 ### Binary naming
 
@@ -226,7 +215,6 @@ When changing behavior covered by existing documentation, update the relevant do
 - **Schema changes** (adding/removing/renaming config fields) → update `docs/schema.md` and the appropriate JSON schema in `schemas/dev/` or `schemas/stable/`
 - **New experimental features** → follow `docs/authoring-a-new-feature.md`, which includes schema, Rust, and test config steps
 - **SDK API changes** (new exports, changed signatures, new options) → update `sdk/README.md` and the JSDoc in `sdk/src/index.ts`
-- **CLI command changes** → update `cli/README.md` and `cli/ARCHITECTURE.md`
 - **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-support/lxc-backend.md`, `windows-sandbox/windows-sandbox.md`)
 - **Versioning or promotion changes** → update `docs/versioning.md`
 
