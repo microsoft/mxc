@@ -2,7 +2,7 @@
 
 Forward-looking work items for the three Linux-side containment backends: **LXC**, **Bubblewrap**, and **WSLC**.
 
-Each item is prioritized within its backend and tagged with an effort tier and a category.
+Each item is prioritized within its backend and tagged with an effort tier.
 
 **Effort tiers:**
 
@@ -10,15 +10,7 @@ Each item is prioritized within its backend and tagged with an effort tier and a
 - **M** — medium, days to a week (one feature surface with tests)
 - **L** — large, multi-week (new subsystem, schema changes, cross-crate refactor)
 
-**Categories:**
-
-- 🔴 **Correctness papercuts** — silent-contract violations, user-visible bugs (must fix first)
-- 🟠 **Schema honesty** — fields declared in schema but ignored at runtime
-- 🟡 **Feature gaps** — missing capability the backend should have
-- 🟢 **Diagnostics & DX** — observability, error reporting, developer experience
-- 📚 **Docs / Test / CI** — documentation drift, test coverage, pipeline gating
-- 🚧 **In-flight** *(WSLC only)* — work already on a branch
-- 🔥 **High-value next features** *(WSLC only)* — top priorities driven by explicit user asks
+**Filesystem policy reference:** items tagged with **(D1)**–**(D8)** trace to the [MXC FS-policy semantics v1](https://github.com/microsoft/mxc/blob/user/gudge/downlevel-fs-projection-plan/docs/proposals/downlevel_support/policy_semantics_v1_summary.md) decisions. Items shared across backends note where the implementation lives (typically `wxc_common`).
 
 **Naming:** the backend is "Bubblewrap" (used in headers and proper nouns like the `BubblewrapConfig` type or `Container-Bubblewrap` label); **Bwrap** is used as the short reference in tables and cross-cutting themes.
 
@@ -28,144 +20,192 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 ## 🐧 LXC
 
-### 🔴 Correctness papercuts (do first)
+### Filesystem
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 1 | **(D1) Default-deny** | ✅ Addressed | Unlisted host paths are inaccessible inside the LXC container (rootfs isolation). No gap. | — |
+| 2 | **(D8) Subtree-implicit** | ✅ Addressed | A directory bind-mount exposes the full subtree. No gap. | — |
+| 3 | **(D7) Implicit traversal** | ✅ Addressed | Container rootfs has a full directory tree; ancestors of a mounted path are always resolvable. No gap. | — |
+| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | No path-specificity engine. Mount ordering determines behavior, not longest-prefix match. Shared path-tree resolver needed in `wxc_common`. | M |
+
+> **Example (D4).** Policy: `RW /workspace`, `RO /workspace/.git`, `D /workspace/.env`. The spec says writes to `.git/config` are denied (inner RO wins) and reads of `.env` are denied (inner D wins). Today LXC applies three independent `lxc.mount.entry` lines — the result depends on which mount comes last, not specificity.
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 5 | **(D6) Object-based policy — validation** | 🟡 Actionable | Same object reachable via multiple paths (bind mounts, symlinks) should be detected as a conflict. Add `stat()` + `(st_dev, st_ino)` comparison at config time in `wxc_common`. | S |
+
+> **Example (D6).** If `/data` is a bind mount of `/mnt/storage/data` and the policy says `RW /mnt/storage/data`, `D /data`, the agent can access the same files through the RW path — bypassing the deny. The validator should reject this as a conflict.
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 6 | **(D3) Delegation check** | 🟡 Actionable | Policy grants should be bounded by the invoking user's access. Add `access_check()` in `wxc_common` that verifies the user can read/write each listed path before accepting the config. | M |
+
+> **Example (D3).** User "alice" has no read access to `/root/secrets`. Policy: `{ readonlyPaths: ["/root/secrets"] }`. Today: accepted silently. If the container runs as root, the mount succeeds and the agent reads the secrets. Spec: validator rejects at load time.
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 7 | **Same-path conflict detection** | 🟡 Actionable | Same path appearing in both `readwritePaths` and `deniedPaths` (or `readonlyPaths`) is silently accepted. Shared check in `wxc_common` should reject as a validation error. | S |
+| 8 | **Paths must exist at policy-load time** | 🟡 Actionable | No existence check today. Non-existent paths cause opaque failures at container start. Add `path_exists()` check at config parse time in `wxc_common`. | S |
+| 9 | **Denied-path masking is heuristic** | 🟡 Actionable | `is_file()` probes the rootfs to choose `/dev/null` (file) vs `tmpfs` (dir) masking. Suffers TOCTOU, symlink-follow, missing-path ambiguity, silent error swallowing. `filesystem_mounts.rs:74-97`. | M |
+
+> **Example (item 9).** Policy: `deniedPaths: ["/etc/shadow"]`. If `/etc/shadow` doesn't exist in the rootfs yet, `is_file()` returns `false` → mounts a tmpfs **directory** where a file should be. If it's a symlink, `is_file()` follows the link and masks the target, not the link itself. **Fix:** add `type: "file" | "dir"` discriminator to schema; harden fallback with `symlink_metadata()`.
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 10 | **(D5) Deny = ACCESS_DENIED, not hidden** | ⛔ Non-actionable | Spec says denied paths remain visible in parent listings but operations fail. LXC mounts `/dev/null` or `tmpfs` over denied paths, which **hides** them entirely. Linux mount namespaces have no mechanism to show a path but deny all operations on it. | — |
+| 11 | **(D6) Object-based policy — enforcement** | ⛔ Non-actionable | Even with validation, Linux mount namespaces are path-based. Denying access via one path doesn't affect access via another path to the same inode. Full enforcement would require LSM or eBPF. | — |
+| 12 | **Rename across regions** | ⛔ Non-actionable | Spec says `rename()` from a denied region should fail with ACCESS_DENIED. Linux returns EXDEV (cross-device) for cross-mount renames, which prevents the operation but with a different error code. The copy+delete fallback path can leak access. | — |
+
+### Network
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 1 | ~~**`process.cwd` is silently ignored**~~ ✅ | User-specified working directory never reaches `lxc-attach`; process starts in container default cwd (`/`). `src/backends/lxc/common/src/lxc_bindings.rs:188-209`. *Shipped in [#494](https://github.com/microsoft/mxc/pull/494) — `attach_run` now wraps the user command with a `cd -- "$1" && exec /bin/sh -c "$2"` prelude that passes cwd as a positional argument (no shell escaping needed).* | S |
-| 2 | ~~**`process.env` is silently ignored**~~ ✅ | User-specified environment variables are dropped before execution; only container default env reaches the process. `src/backends/lxc/common/src/lxc_runner.rs:209-229`. *Shipped in [#494](https://github.com/microsoft/mxc/pull/494) — each `KEY=VAL` becomes a `--set-var=KEY=VAL` flag; when env is non-empty, `--clear-env` is also passed so the host env doesn't leak (matches Seatbelt's `env_clear()`-on-non-empty contract). Malformed entries (no `=`, empty key) are silently skipped.* | S |
+| 13 | **Apply `network.proxy`** | Schema advertises proxy support but LXC backend doesn't inject `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars or set up iptables redirect for raw sockets. | M |
+| 14 | **Apply `allowLocalNetwork`** | Inbound `bind()`/`listen()` policy is silently dropped; add iptables `INPUT` rules on the container's veth. Shared design with Bwrap and WSLC. | M |
 
-### 🟠 Schema fields not honored
-
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 3 | **Apply `network.proxy`** | Schema advertises proxy support but LXC backend doesn't inject `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` env vars or set up iptables redirect for raw sockets. | M |
-| 4 | **Apply `allowLocalNetwork`** | Inbound `bind()`/`listen()` policy is silently dropped; add iptables `INPUT` rules on the container's veth. | M |
-
-> **Context for item #4.** `allowLocalNetwork` is the inbound-traffic axis of network policy (governs the sandboxed process's `bind()` / `listen()` / `accept()`), independent of `defaultPolicy` which only governs outbound `connect()`. It's currently honored by exactly one backend out of ten — **Seatbelt** (`backends/seatbelt/common/src/profile_builder.rs` lines 217 + 226–237 + tests 586–616). All three Linux backends (LXC, Bubblewrap, WSLC) and every Windows backend silently drop it — the field is in the schema, parsed into `ContainerPolicy`, and then ignored. **Why fix it on LXC:** (a) silent-contract violation — same bug class as items #1, #2, #3 — either we honor it or remove it from the schema; (b) Seatbelt established the semantic and Linux needs parity for the increasingly common "sandboxed agent server, host orchestrator talks in" pattern (MCP servers, Jupyter kernels, language servers); (c) without it, users must couple inbound to outbound, which is the wrong contract. **Defer-or-build check:** as with item #7 (nftables), if a GitHub search for user demand returns zero hits, the alternate disposition is to update the docs to say "Linux backends ignore `allowLocalNetwork`; honored by Seatbelt only" and leave implementation behind a real user ask. **Shared infrastructure opportunity:** the inbound-filter primitive should be designed once and reused by Bwrap #2 and WSLC #4 (see cross-cutting theme #2).
-
-### 🟡 Feature gaps
+> **Context for item #14.** `allowLocalNetwork` is honored by exactly one backend — **Seatbelt**. All three Linux backends and every Windows backend silently drop it. Either honor it or remove it from the schema.
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 5 | **State-aware lifecycle** | Implement `StatefulSandboxBackend` (provision/start/exec/stop/deprovision) so callers can reuse a container across multiple invocations. | L |
-| 6 | **Expand `LxcConfig` + implement resource limits (cgroups v2)** | Add a per-backend config surface (`rootfsTarPath`, `storagePath`, `cpuCount`, `memoryMb`, `cgroupProfile`, `extraConfigPath`) AND the runtime enforcement (cgroups v2) so CPU / memory / PID / IO governance actually applies. Schema + enforcement ship together. *(see [Ext-Dep E9](#external-dependencies))* | L |
+| 15 | **nftables backend** | Docs claim nftables support but only iptables is implemented. `docs/lxc-support/lxc-backend.md:11,108,180`. **Deferred** — no concrete user ask. Default action: update docs to say "iptables" only. | S |
+| 16 | **Hostname re-resolution for `allowedHosts`** | DNS is resolved once at policy install time; subsequent DNS changes silently bypass the firewall. Add periodic refresh. `network_iptables.rs:84-96`. *(see [Ext-Dep E11](#external-dependencies))* | M |
 
-> **More context for item #6.** This item bundles two halves that must ship together — the **config surface** (where users express resource limits) and the **runtime enforcement** (where the kernel applies them) — to avoid the silent-contract-violation bug class we're already fixing in items #1, #2, #3, #4. On the config side, LXC's per-backend block is anemic compared to peers: it exposes only `distribution` and `release` (2 fields), while WSLC exposes 8 (`image`, `imageTarPath`, `cpuCount`, `memoryMb`, `gpu`, `storagePath`, `portMappings`, `targetOs`); LXC users have no way to specify a rootfs source, resource caps, storage path, or raw `lxc.conf` snippets, and a reasonable target mirrors WSLC's surface. On the enforcement side, cgroups v2 is the Linux kernel mechanism that actually constrains CPU / memory / PID / IO — the runner needs to write to `/sys/fs/cgroup/.../{cpu.max,memory.max,pids.max,io.max}` at container start, propagate failures, and clean up on teardown. **Shared infrastructure opportunity:** the cgroups controller code would also serve Bubblewrap (see cross-cutting theme #4).
+### Misc
 
-| 7 | **nftables backend** | Docs claim nftables support but only iptables is implemented; add nftables path and let the user select per-host. `network_iptables.rs:98-115` + `docs/lxc-support/lxc-backend.md:108`. | M |
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 17 | ~~**`process.cwd` is silently ignored**~~ | ✅ Shipped | *Shipped in [#494](https://github.com/microsoft/mxc/pull/494).* `attach_run` now wraps the user command with a `cd` prelude. | S |
+| 18 | ~~**`process.env` is silently ignored**~~ | ✅ Shipped | *Shipped in [#494](https://github.com/microsoft/mxc/pull/494).* Each `KEY=VAL` becomes `--set-var`; `--clear-env` prevents host leak. | S |
+| 19 | **State-aware lifecycle** | 🟡 Actionable | Implement `StatefulSandboxBackend` (provision/start/exec/stop/deprovision). | L |
+| 20 | **Expand `LxcConfig` + resource limits (cgroups v2)** | 🟡 Actionable | Add per-backend config surface and cgroups v2 enforcement. Schema + enforcement ship together. *(see [Ext-Dep E10](#external-dependencies))* | L |
 
-> **Disposition for item #7.** As of June 2026 there is no concrete user-driven ask for nftables. The four documentation hits all use "iptables/nftables" generically as a Linux netfilter category, not as a commitment. **Default action: do not build the nftables code path — instead, update the docs (`docs/lxc-support/lxc-backend.md` lines 11, 108, 180 and `docs/macos-support/seatbelt-backend.md` line 328) to say "iptables" only. Effort drops from M to S.** Promote this item back to the full nftables implementation only if a real user ask surfaces — e.g. an Azure Linux / RHEL 9+ partner reporting the `iptables-nft` shim breaking, or a deployment with thousands of `allowedHosts` rules where iptables' O(n) traversal is measurably hurting them.
-
-| 8 | **Hostname re-resolution for `allowedHosts`** | DNS is resolved once at policy install time; subsequent DNS changes silently bypass the firewall. Add periodic refresh. `network_iptables.rs:84-96`. *(see [Ext-Dep E10](#external-dependencies))* | M |
-
-### 🟢 Diagnostics & DX
-
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 9 | **Structured denied-resource diagnostics** | Process Container surfaces structured denial reasons; LXC returns opaque "execution failed" strings — wire equivalent telemetry. | M |
-| 10 | **Filesystem denied-path masking is heuristic** | Code probes the rootfs to choose between `/dev/null` and `tmpfs` overlay strategies; make the choice explicit and deterministic. `src/backends/lxc/common/src/filesystem_mounts.rs:74-97`. | M |
-
-> **More context for item #10.** LXC masks a `deniedPaths` entry by mounting either `/dev/null` (for files) or an empty `tmpfs` (for directories) over the path inside the container. Today the runner picks between the two by calling `std::path::Path::is_file()` against the rootfs at config time — a heuristic with five real problems: (a) **TOCTOU race** between probe and mount (worsens once state-aware containers, item #5, exist); (b) `is_file()` returns `false` for both directories *and* missing paths, so a path the user denied but the image doesn't ship silently falls into the tmpfs branch; (c) `is_file()` collapses all I/O errors (permission denied, broken symlink, unreadable parent) into `false` with no diagnostic; (d) it follows symlinks, so masking applies to the target rather than the link the policy actually named; (e) the user has no schema field to express intent — the runner makes a policy decision based on filesystem state, the exact silent-contract violation pattern items #1, #2, #3, #4 are already fixing. **Likely fix:** add a `type: "file" | "dir" | "auto"` discriminator to `deniedPaths` entries; default `"auto"` preserves current behavior with a warning log, explicit values skip the probe entirely. Shape carries to Bwrap / WSLC for cross-backend parity.
-
-### 📚 Docs / Test / CI
+> **More context for item #20.** LXC's per-backend config block exposes only 2 fields (`distribution`, `release`) vs WSLC's 8. Shared cgroups controller code would also serve Bubblewrap.
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 11 | **Doc drift cleanup** | `docs/lxc-support/lxc-backend.md:38-49,102-103` references `containerName` and `removeRulesOnExit` fields that don't exist in code — remove or implement. | S |
-| 12 | **Un-gate LXC network tests in CI** | Done for GHA (`user/sodas/lxc-ci-enablement` removes `MXC_SKIP_LXC_TESTS=1` from `.github/workflows/SDK.Integration.Test.Job.yml`; `MXC_SKIP_LXC_NETWORK_TESTS=1` is kept on both GHA and ADO). **Will NOT be flipped on ADO** — the 1ES Hosted Pool's egress firewall blocks `lxcbr0` NAT'd traffic from reaching the public Internet (probe confirmed). ADO continues to give us LXC core coverage; GHA covers the LXC network half. *(see [Ext-Dep E3](#external-dependencies))* | M |
+| 21 | **Structured denied-resource diagnostics** | Process Container surfaces structured denial reasons; LXC returns opaque "execution failed" strings — wire equivalent telemetry. | M |
+| 22 | **Doc drift cleanup** | `docs/lxc-support/lxc-backend.md:38-49,102-103` references `containerName` and `removeRulesOnExit` fields that don't exist in code. | S |
+| 23 | **Un-gate LXC network tests in CI** | Done for GHA (PR `user/sodas/lxc-ci-enablement`). `MXC_SKIP_LXC_NETWORK_TESTS=1` kept on both GHA and ADO. ADO egress blocks `lxcbr0` NAT'd traffic. *(see [Ext-Dep E4](#external-dependencies))* | M |
 
 ---
 
 ## 🫧 Bubblewrap
 
-### 🟠 Schema honesty
+### Filesystem
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 1 | **(D1) Default-deny** | ✅ Addressed | No `--bind` = no access. Bwrap namespace isolation enforces default-deny. | — |
+| 2 | **(D8) Subtree-implicit** | ✅ Addressed | `--bind` mounts the full subtree. No gap. | — |
+| 3 | **(D7) Implicit traversal** | ⚠️ Partial | If policy lists `RW /home/user/project/src` but `/home/user/project` isn't bound, the path doesn't exist inside the namespace. User must manually list ancestor dirs today. | S |
+
+> **Example (D7).** Policy: `readwritePaths: ["/home/user/project/src"]`. Today `bwrap` fails because `/home/user/project` doesn't exist. Fix: auto-add `--dir` entries for ancestor paths (empty dirs, not host content — avoids the security risk of exposing `/home`).
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | Bwrap processes `--bind`, `--ro-bind`, `--tmpfs` left-to-right. Last matching arg wins, not longest-prefix. Shared path-tree resolver needed in `wxc_common`. | M |
+| 5 | **(D6) Object-based — validation** | 🟡 Actionable | Same as LXC — `stat()` + inode comparison in `wxc_common`. | S |
+| 6 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC — shared `access_check()` in `wxc_common`. | M |
+| 7 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC — shared check in `wxc_common`. | S |
+| 8 | **Paths must exist at policy-load time** | 🟡 Actionable | Non-existent `--bind` paths fail at runtime with unclear errors. Shared `path_exists()` in `wxc_common`. | S |
+| 9 | **Denied-path file masking** | 🟡 Actionable | `--tmpfs` always treats the path as a directory. A denied *file* gets a tmpfs directory mounted over it (wrong type). Fix: use `--ro-bind /dev/null <path>` for files. | S |
+
+> **Example (item 9).** Policy: `deniedPaths: ["/etc/shadow"]`. Today: `--tmpfs /etc/shadow` creates a directory at `/etc/shadow` — wrong. Fix: detect file vs dir (or accept `type` from schema) and use `--ro-bind /dev/null /etc/shadow` for files.
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 10 | **(D5) Deny = ACCESS_DENIED, not hidden** | ⛔ Non-actionable | `--tmpfs` replaces the directory entirely — original is hidden. Same Linux mount-namespace limitation as LXC. | — |
+| 11 | **(D6) Object-based — enforcement** | ⛔ Non-actionable | Path-based mount namespace. Same limitation as LXC. | — |
+| 12 | **Rename across regions** | ⛔ Non-actionable | Same as LXC — Linux returns EXDEV, not ACCESS_DENIED. | — |
+
+### Network
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 1 | **Schema overstates network enforcement** | Schema claims Bwrap enforces `allowedHosts` / `blockedHosts` directly, but reality is cooperative-only (env-var hints to clients). Update wording or close the gap. `schemas/dev/mxc-config.schema.0.8.0-dev.json:180-187`. | M |
-| 2 | **Apply `allowLocalNetwork`** | Field exists in schema; backend never applies it to its network namespace. | M |
-| 3 | **Add backend-specific `BubblewrapConfig`** | Bwrap currently consumes only shared fields; no surface for seccomp profile, custom binds, or `bwrap`-native knobs. | M |
+| 13 | **Schema overstates network enforcement** | Schema claims Bwrap enforces `allowedHosts` / `blockedHosts` directly, but reality is cooperative-only (env-var hints). Update wording or close the gap. `schemas/dev/mxc-config.schema.0.8.0-dev.json:180-187`. | M |
+| 14 | **Apply `allowLocalNetwork`** | Field exists in schema; backend never applies it to its network namespace. Shared design with LXC and WSLC. | M |
+| 15 | **Real network enforcement** | Today's path is env-var injection that clients politely honor. Pick one real-enforcement strategy (iptables+netns, eBPF, or proxy+raw-socket-redirect) and ship it. Bundles raw-socket leak, `NO_PROXY` exception, and root-requirement gaps. *(see [Ext-Dep E9](#external-dependencies) — applies only if eBPF option is chosen)* | L |
+| 16 | **Policy expressiveness in `allowedHosts`** | Subdomain wildcards (e.g. `*.github.com`) and DNS-aware IPv6 paths. | M |
 
-> **More context for item #3.** Confirmed by schema inspection: every other backend has a per-backend config block (`lxc:` at `schemas/dev/mxc-config.schema.0.8.0-dev.json:324`, `wslc:` at line 373, plus dedicated blocks for `seatbelt`, `windows_sandbox`, `isolation_session`) — Bwrap has **none**. Users can only set what's in the shared `process` / `filesystem` / `network` / `ui` sections, so every `bwrap`-native knob is unreachable: `seccompProfile` (item #7), cgroups v2 caps (item #8), `customBinds` / `tmpfsMounts` / `symlinks` for mount fixups, `dropCaps` / `keepCaps`, individual `unshare-*` toggles, `dieWithParent`, `newSession`, `argv0` / `chdir` overrides. **This is table-stakes infrastructure for items #7, #8, and #9** — seccomp needs `bubblewrap.seccompProfile`, cgroups needs `bubblewrap.resources.*`, and the promote-to-stable work (#9) gates on having a stable shape for this block. Despite its placement under "Schema honesty," practically it should land **early** in the Bwrap order. Same shape as the `LxcConfig` expansion (LXC item #6): schema entry, `RawBubblewrap` in `config_parser.rs`, validated `BubblewrapConfig` in `models.rs`, plumbing through `bwrap_command.rs`, SDK type, docs — ~10-15 file PR.
+> **Context for item #16.** The IPv6 half is **security-critical**: on dual-stack hosts, `api.github.com` resolves to both A and AAAA records; MXC installs iptables rules only for IPv4, so IPv6 traffic passes unfiltered. Ship IPv6 first as a correctness fix; wildcards can follow as a usability improvement.
 
-### 🟡 Feature gaps
-
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 4 | **State-aware lifecycle** | Implement `StatefulSandboxBackend` for the bwrap backend. | L |
-| 5 | **Real network enforcement (replace cooperative-only path)** | Today's path is env-var injection that clients politely honor; the iptables fallback exists but is unreachable in normal config. Pick one real-enforcement strategy (iptables+netns, eBPF, or proxy+raw-socket-redirect) and ship it end-to-end. **Bundles three previously-separate gaps:** raw-socket `connect()` leak past proxy env vars (`src/backends/bubblewrap/common/src/bwrap_command.rs:116-135`); no `NO_PROXY` / loopback exception (`docs/bwrap-support/bubblewrap-backend.md:162-169`); iptables-vs-proxy mutual exclusion (root requirement). All three have the same root cause and must be solved together. *(see [Ext-Dep E8](#external-dependencies) — applies only if eBPF option is chosen)* | L |
-| 6 | **Policy expressiveness in `allowedHosts`** | Bundle of matcher-layer gaps: subdomain wildcards (e.g. `*.github.com`) and DNS-aware IPv6 paths (schema normalizes IPv6 literals today, but there's no IPv6-resolved-from-DNS policy path). Both land in the same parser/matcher PR. | M |
-
-> **More context for item #6.** The two halves of this bundle have **very different severity** — keep that in mind when slicing reviewer scope. The **IPv6 half is security-critical**: on any modern dual-stack Linux host (default on Azure, AWS, GCP cloud VMs), `api.github.com` resolves to both A and AAAA records; today MXC installs an iptables rule only for the IPv4 address, while glibc's `getaddrinfo` prefers IPv6 — so the sandboxed `connect()` lands on a v6 address with **no firewall rule covering it** and the packet sails through unfiltered. Silent allowlist bypass, same bug class as items #2 (`allowLocalNetwork`) and LXC items #1/#2. The **wildcards half is usability only**: without `*.example.com` support, users enumerate today's subdomains and silently lose access when a new one appears (or just set `defaultPolicy: allow` and give up). Annoying, not unsafe. **Recommendation:** if reviewer bandwidth forces a split, ship IPv6 first as a standalone correctness fix; wildcards can land separately as a usability follow-up.
-
-| 7 | **Seccomp profile support** | No syscall filtering today; adding a default-deny seccomp profile would meaningfully close attack surface. *(see [Ext-Dep E7](#external-dependencies))* | L |
-
-> **More context for item #7.** Bwrap's isolation today comes from Linux namespaces alone (`--unshare-user`/`pid`/`ipc`/`uts`/`net` in `bwrap_command.rs:41-44`) — no syscall filter. Unlike LXC, which inherits an upstream-LXC default seccomp profile (`/usr/share/lxc/config/common.seccomp`, ~7 blocked syscalls), `bwrap` ships **no** built-in profile and only applies one when the caller passes `--seccomp <fd>` with a pre-compiled BPF program — which the MXC runner never does. That leaves Bwrap below every shipped peer (Docker / Podman / Flatpak / Firejail all enable seccomp by default, ~40+ blocked syscalls) and exposes the full ~400-syscall surface to sandboxed code, including the historically vulnerable family (`io_uring_setup`, `keyctl`, `bpf`, `userfaultfd`, `clone3` with namespace flags) that's driven most recent kernel-CVE sandbox escapes. **L tier** because the cost isn't compiling a profile (mature crates exist — `seccompiler`, `libseccomp-rs`) but designing one that doesn't break legitimate `node`/`python`/`io_uring` workloads, plus user-override plumbing on `BubblewrapConfig` (item #3). **Shared infrastructure opportunity:** a `wxc_seccomp` crate would also let LXC narrow/extend its inherited default (today MXC has no surface to do that either).
-
-| 8 | **Resource limits (cgroups v2)** | No CPU / memory / PID / IO governance — same gap as LXC. *(see [Ext-Dep E9](#external-dependencies))* | L |
-| 9 | **Promote bubblewrap from `experimental` → stable in 0.8.0-dev** | Move config under the stable surface per `docs/versioning.md:91-93,182-203`; includes parser migration, schema bump, single-backend-section rule update, and doc cleanup. | L |
-| 10 | **Update plan doc to reflect shipped state** | `docs/bwrap-support/bubblewrap-backend-plan.md:42-60,295-324` still describes core implementation as "planned" even though it's shipped — rewrite to match reality. | M |
-
-### 🟢 Diagnostics & DX
+### Misc
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 11 | **Structured per-host network decision trace** | Surface why each connection attempt was allowed/denied so users can debug policy without packet captures. | M |
-| 12 | **Structured denied-resource diagnostics** | Parity with Process Container's structured denial reporting. | M |
+| 17 | **Add backend-specific `BubblewrapConfig`** | No per-backend config block today (every other backend has one). Needed for seccomp, cgroups, custom binds. `schemas/dev/mxc-config.schema.0.8.0-dev.json` — Bwrap has no entry at `lxc:` (line 324) / `wslc:` (line 373) equivalent. | M |
 
-### 📚 Test / CI
+> **More context for item #17.** Table-stakes infrastructure for seccomp (#18), cgroups (#19), and promote-to-stable (#20). Same shape as `LxcConfig` expansion: schema entry, `RawBubblewrap` in `config_parser.rs`, validated `BubblewrapConfig` in `models.rs`, plumbing through `bwrap_command.rs`, SDK type — ~10-15 file PR.
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 13 | **CI job for `tests/scripts/run_bwrap_all_tests.sh`** | The bwrap E2E suite is manual-only today; add a Linux pipeline job that runs it. *(see [Ext-Dep E5](#external-dependencies))* | M |
-| 14 | **Add `Container-Bubblewrap` label to repo** | Repo has `Container-WSLC`, `Container-Hyperlight`, etc. but no Bubblewrap label — prerequisite for issue triage. *(see [Ext-Dep E6](#external-dependencies))* | S |
+| 18 | **Seccomp profile support** | No syscall filtering today. Adding a default-deny profile would close attack surface meaningfully. *(see [Ext-Dep E8](#external-dependencies))* | L |
+
+> **More context for item #18.** Bwrap's isolation comes from namespaces only — no seccomp. Docker/Podman/Flatpak all enable seccomp by default (~40+ blocked syscalls). MXC exposes the full ~400-syscall surface including `io_uring_setup`, `keyctl`, `bpf`, `userfaultfd`.
+
+| # | Item | Description | Effort |
+|---|---|---|---|
+| 19 | **Resource limits (cgroups v2)** | No CPU / memory / PID / IO governance. Same gap as LXC. *(see [Ext-Dep E10](#external-dependencies))* | L |
+| 20 | **Promote bubblewrap from `experimental` → stable in 0.8.0-dev** | Move config under the stable surface per `docs/versioning.md:91-93,182-203`. | L |
+| 21 | **State-aware lifecycle** | Implement `StatefulSandboxBackend` for bwrap. | L |
+| 22 | **Update plan doc** | `docs/bwrap-support/bubblewrap-backend-plan.md:42-60,295-324` still describes core implementation as "planned" even though it's shipped. | M |
+| 23 | **Structured per-host network decision trace** | Surface why each connection attempt was allowed/denied. | M |
+| 24 | **Structured denied-resource diagnostics** | Parity with Process Container's structured denial reporting. | M |
+| 25 | **CI job for `tests/scripts/run_bwrap_all_tests.sh`** | Bwrap E2E suite is manual-only today. *(see [Ext-Dep E6](#external-dependencies))* | M |
+| 26 | **Add `Container-Bubblewrap` label** | Parity with `Container-WSLC`, `Container-Hyperlight`. *(see [Ext-Dep E7](#external-dependencies))* | S |
 
 ---
 
 ## 🪟🐧 WSLC
 
-### 🚧 In-flight
+### Filesystem
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 1 | **(D1) Default-deny** | ✅ Addressed | Unmounted host paths are invisible inside the WSL container. No gap. | — |
+| 2 | **(D8) Subtree-implicit** | ✅ Addressed | Volume mounts expose the full subtree. No gap. | — |
+| 3 | **(D7) Implicit traversal** | ✅ Addressed | WSL distro has a full directory tree; `/mnt/<drive>/` ancestors exist naturally. | — |
+| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | Flat volume-mount list with no nesting awareness. Shared path-tree resolver needed in `wxc_common`. | M |
+
+> **Example (D4).** Policy: `RW C:\project`, `RO C:\project\.git`. WSLC generates two independent volume mounts. Whether the RO mount of `.git` actually restricts writes through the parent RW mount is undefined by the WSLC SDK — likely the parent RW mount wins and `.git` remains writable.
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 5 | **`deniedPaths` overlap validation** | 🟡 Actionable | At parse time, reject configs where a `deniedPaths` entry is a child of a mounted path (since the WSLC SDK cannot enforce the deny). Accept non-overlapping denied paths as implicitly enforced (unmounted = invisible). | S |
+
+> **Example (item 5).** Policy: `readwritePaths: ["C:\\project"]`, `deniedPaths: ["C:\\project\\secrets"]`. Today: `deniedPaths` silently ignored; `secrets` is fully accessible through the parent mount. Fix: reject at config time with "denied path is a child of a mounted path; WSLC cannot enforce this."
+
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 6 | **(D6) Object-based — validation** | 🟡 Actionable | Same as LXC/Bwrap — `stat()` + inode comparison in `wxc_common`. | S |
+| 7 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC/Bwrap — shared `access_check()` in `wxc_common`. | M |
+| 8 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC/Bwrap — shared check in `wxc_common`. | S |
+| 9 | **Paths must exist at policy-load time** | 🟡 Actionable | Same as LXC/Bwrap — shared `path_exists()` in `wxc_common`. | S |
+| 10 | **Explicit `{ windowsPath, containerPath }` mount control** | 🟡 Actionable | Host paths always mounted at `/mnt/<drive>/`; let users specify the in-container mount point. `policy_mapping.rs:23-60`. | M |
+| 11 | **Handle UNC / non-drive paths** | 🟡 Actionable | UNC paths (`\\server\share`) silently dropped with a warning; plan is to hard-error. Branch `user/sodas/wslc-reject-unc-paths`. | S |
+| 12 | **(D5) Deny = ACCESS_DENIED, not hidden** | ⛔ Blocked | No deny-mount primitive in the WSLC SDK. Unmounted paths are invisible (not ACCESS_DENIED). **Depends on WSLC SDK team** for a deny-mount API. | — |
+| 13 | **(D6) Object-based — enforcement** | ⛔ Non-actionable | WSLC SDK is path-based. Same limitation as Linux backends. | — |
+| 14 | **Rename across regions** | ⛔ Non-actionable | WSL uses Linux VFS — returns EXDEV, not ACCESS_DENIED. Same as LXC/Bwrap. | — |
+
+### Network
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 1 | **Finish & merge port-mapping support** | Branch `user/sodas/WslcPortMappingSupport` (commit `debeb90`) has work in progress; runner at `src/backends/wslc/common/src/wsl_container_runner.rs:520-534` says `portMappings` is "parsed but not yet applied." | M |
+| 15 | **Apply `network.proxy`** | Schema advertises proxy support; WSLC ignores it — needs env injection plus iptables redirect. | M |
+| 16 | **Apply `allowLocalNetwork`** | Inbound listen policy silently dropped; add distro-side iptables `INPUT` rules. Shared design with LXC and Bwrap. | M |
+| 17 | **Per-host filtering (`allowedHosts`/`blockedHosts`)** | `WslcContainerFlags::Privileged` does not grant `CAP_NET_ADMIN`, so iptables cannot manipulate netfilter inside the container. Host-side `nsenter -n` into the container's netns is a fragile workaround. **Depends on WSLC SDK team** to either grant `CAP_NET_ADMIN` with Privileged mode or expose a per-host network filtering API. *(see [Ext-Dep E3](#external-dependencies))* | M |
 
-### 🔥 High-value next features
+### Misc
 
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 2 | **Private registry auth** *(blocked on WSLC SDK)* | WSLC can only pull from public registries today; add credential plumbing for private / authenticated registries. The SDK's `WslcPullImageOptions` already reserves an `auth_info` slot (`src/backends/wslc/common/src/wslc_bindings.rs:208`) typed for `WslcRegistryAuthenticationInformation`, but the underlying implementation is not yet shipped — per `docs/wsl/wsl-container-support-plan.md:408-410`, "private registry auth is planned for a future WSLC SDK release." MXC-side work (model the auth struct, add `experimental.wslc.registryAuth` schema field, replace `auth_info: ptr::null()` at `wsl_container_runner.rs:605`) is ~M but cannot ship until WSLC SDK delivers the registry-auth handshake (Basic / Bearer / ACR / GHCR / ECR), token caching, and custom-CA HTTPS. Track as a coordination item — not unilaterally schedulable. *(see [Ext-Dep E1](#external-dependencies))* | M (post-SDK) |
-
-### 🟠 Schema fields not honored
-
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 3 | **Apply `network.proxy`** | Schema advertises proxy support; WSLC ignores it — needs env injection into the distro plus iptables redirect for raw sockets. | M |
-| 4 | **Apply `allowLocalNetwork`** | Inbound listen policy silently dropped; add distro-side iptables `INPUT` rules. | M |
-
-### 🟡 Feature gaps
-
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 5 | **State-aware lifecycle** | Implement `StatefulSandboxBackend`. WSLC bears the largest startup cost of the three (distro boot, image hydration), so session reuse is the highest-value win here. | L |
-| 6 | **Explicit `{ windowsPath, containerPath }` mount control** | Host paths are always mounted at `/mnt/<drive>`; let users specify the in-container mount point. `src/backends/wslc/common/src/policy_mapping.rs:23-60`. | M |
-| 7 | **Handle UNC / non-drive paths explicitly** | UNC paths in policy (e.g. `\\fileserver\team\report.docx`, `\\wsl$\Ubuntu\home\user`, `\\?\C:\very\long\path`) are silently dropped with only a warning; plan is to hard-error so users know the path cannot be mounted. `src/backends/wslc/common/src/policy_mapping.rs:23-60`. | S |
-| 8 | **Add a real `deniedPaths` primitive** | Today `deniedPaths` means "not mounted" — there's no overlay-based deny ACE, so a sibling mount could leak access. | M |
-| 9 | **Per-host filtering requires iptables-in-image** | Images without iptables silently fall back to coarse allow/deny; add a fallback (sidecar netns or host-side filter) so policy is honored regardless of image contents. | M |
-
-### 🟢 Diagnostics & DX
-
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 10 | **Structured denied-resource diagnostics** | Parity with Process Container's structured denial reporting. | M |
-
-### 📚 Build / Test / CI
-
-| # | Item | Description | Effort |
-|---|---|---|---|
-| 11 | **Self-contained WSLC SDK build** | Build currently pulls from `external/wslc-sdk/`; vendor or fetch deterministically so a fresh clone can build without out-of-band setup. *(see [Ext-Dep E2](#external-dependencies))* | M |
-| 12 | **Un-gate WSLC tests in CI** | Pipeline runs with `MXC_ENABLE_WSLC_TESTS=1` unset; pipeline builds the binary but never exercises it. *(see [Ext-Dep E4](#external-dependencies))* | M |
+| # | Item | Status | Description | Effort |
+|---|---|---|---|---|
+| 18 | **Finish & merge port-mapping support** | 🟡 In progress | Branch `user/sodas/wslc-port-mapping`. | M |
+| 19 | **Private registry auth** | ⛔ Blocked | Needs WSLC SDK to ship registry-auth handshake. *(see [Ext-Dep E1](#external-dependencies))* | M (post-SDK) |
+| 20 | **State-aware lifecycle** | 🟡 Actionable | Implement `StatefulSandboxBackend`. WSLC bears the largest startup cost — session reuse is the highest-value win. | L |
+| 21 | **Structured denied-resource diagnostics** | 🟡 Actionable | Parity with Process Container's structured denial reporting. | M |
+| 22 | **Self-contained WSLC SDK build** | ⛔ Blocked | Needs deterministic distribution channel for `wslcsdk.dll`. *(see [Ext-Dep E2](#external-dependencies))* | M |
+| 23 | **Un-gate WSLC tests in CI** | ⛔ Blocked | Needs `wslcsdk.dll` public NuGet. *(see [Ext-Dep E5](#external-dependencies))* | M |
 
 ---
 
@@ -173,12 +213,14 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 These show up on multiple backends and are worth coordinating to avoid divergent designs:
 
-1. **State-aware lifecycle** — LXC #5, Bwrap #4, WSLC #5. None of the three implement `StatefulSandboxBackend` today; only IsolationSession does. WSLC has the largest payoff (slowest cold start).
-2. **`allowLocalNetwork` enforcement** — LXC #4, Bwrap #2, WSLC #4. Schema-declared, silently dropped on all three. Inbound-traffic primitive design should be shared.
-3. **`network.proxy` enforcement** — LXC #3, WSLC #3. (Bwrap has cooperative-only support, item #5.) Proxy injection + raw-socket redirect should be a shared utility.
-4. **Resource limits (cgroups v2)** — LXC #6 (combined with `LxcConfig` expansion), Bwrap #8. Same kernel API; build a shared `cgroup_controller` crate rather than per-backend implementations.
-5. **Structured denied-resource diagnostics** — LXC #9, Bwrap #12, WSLC #10. Replicate Process Container's structured denial reporting on Linux.
-6. **CI gating** — LXC #12, Bwrap #13, WSLC #12. None of the three has a dedicated CI job that actually exercises the backend; quality drift grows each release.
+1. **Filesystem policy alignment** — D4 (path-tree resolver), D3 (delegation check), D6 (object validation), same-path conflict detection, paths-must-exist validation all belong in `wxc_common` and serve all three backends.
+2. **State-aware lifecycle** — LXC #19, Bwrap #21, WSLC #20. None of the three implement `StatefulSandboxBackend` today. WSLC has the largest payoff (slowest cold start).
+3. **`allowLocalNetwork` enforcement** — LXC #14, Bwrap #14, WSLC #16. Schema-declared, silently dropped on all three. Inbound-traffic primitive design should be shared.
+4. **`network.proxy` enforcement** — LXC #13, WSLC #15. (Bwrap has cooperative-only support, item #15.) Proxy injection + raw-socket redirect should be a shared utility.
+5. **Resource limits (cgroups v2)** — LXC #20, Bwrap #19. Same kernel API; build a shared `cgroup_controller` crate.
+6. **Structured denied-resource diagnostics** — LXC #21, Bwrap #24, WSLC #21. Replicate Process Container's structured denial reporting on Linux.
+7. **CI gating** — LXC #23, Bwrap #25, WSLC #23.
+8. **Denied-path type discriminator** — LXC #9, Bwrap #9. Add `type: "file" | "dir"` to `deniedPaths` schema entries so backends don't have to guess.
 
 ---
 
@@ -190,30 +232,31 @@ These items have dependencies outside the MXC repo. Listed here so roadmap plann
 
 | Ref | Affected | External owner | Description |
 |---|---|---|---|
-| **E1** | WSLC #2 | WSLC SDK team | Registry-auth handshake (Basic / Bearer / ACR / GHCR / ECR), token caching, custom-CA HTTPS. The SDK ABI reserves the `auth_info` slot but the implementation isn't shipped yet. |
-| **E2** | WSLC #11 | WSLC SDK team | Deterministic / vendored / signed distribution channel for `wslcsdk.dll` — today MXC pulls from `external/wslc-sdk/` which isn't reproducible from a fresh clone. |
+| **E1** | WSLC #19 | WSLC SDK team | Registry-auth handshake (Basic / Bearer / ACR / GHCR / ECR), token caching, custom-CA HTTPS. The SDK ABI reserves the `auth_info` slot but the implementation isn't shipped yet. |
+| **E2** | WSLC #22 | WSLC SDK team | Deterministic / vendored / signed distribution channel for `wslcsdk.dll` — today MXC pulls from `external/wslc-sdk/` which isn't reproducible from a fresh clone. |
+| **E3** | WSLC #17 | WSLC SDK team | Per-host network filtering. `WslcContainerFlags::Privileged` does not grant `CAP_NET_ADMIN` inside the container, so iptables-based `allowedHosts`/`blockedHosts` enforcement is impossible. Need either: (a) `CAP_NET_ADMIN` granted with Privileged, or (b) a host-side per-host filtering API in the SDK. |
 
 ### 🏗️ Infra & pipeline (needs build-agent or repo changes outside the source tree)
 
 | Ref | Affected | External owner | Description |
 |---|---|---|---|
-| **E3** | LXC #12 | 1ES / pipeline agents | **Updated 2026-06-15 after on-runner probe** — GH-hosted `ubuntu-latest` (24.04), `ubuntu-22.04`, and `ubuntu-24.04-arm` runners all (a) install the `lxc lxc-utils dnsmasq-base iptables bridge-utils` stack cleanly in ≤ 8 s, (b) successfully `lxc-create -t download -d alpine -r 3.21` and run `lxc-start` + `lxc-attach` to a shell in ≤ 4 s, (c) start `lxc-net.service`, bring up the default `lxcbr0` bridge with `dnsmasq` listening on 10.0.3.1, and (d) accept full `iptables` (filter + nat, including custom chain create / append / flush / delete) under `sudo`. The probe container booted with only `lo` (the probe didn't configure a veth interface in the LXC config) — but mxc's `lxc_runner` does request `lxc.net.0.type = veth + lxc.net.0.link = lxcbr0`, and `NetworkIptablesManager` writes the per-veth allowlist via the same `iptables` calls the probe exercised. Both halves of the long-skipped network test should therefore work end-to-end on stock GHA Linux runners; the "Classic LXC is unreliable on the GHA ubuntu-latest (24.04) runner" comment in `.github/workflows/SDK.Integration.Test.Job.yml` is stale and `MXC_SKIP_LXC_TESTS=1` + `MXC_SKIP_LXC_NETWORK_TESTS=1` are both candidates to remove (with a Linux-only matrix entry that runs under `sudo`, mirroring the existing Bwrap path). Probe workflow preserved on branch `user/sodas/linux-runtime-probe` (run id 27576588204). **Addendum 2026-06-15 (ADO 1ES Hosted Pool probe)** — re-ran the same probe against `Azure-Pipelines-1ESPT-ExDShared` (ubuntu-22.04 image `Prod-Ubuntu22.04-Gen2`, Standard_D2ads_v5) on branch `user/sodas/ado-lxc-probe` (build id 149800070): LXC install + `lxc-create -t download alpine 3.21` + `lxc-start` + `lxc-attach` echo all succeed, custom-chain `iptables` writes (filter + nat) succeed, but `lxc-attach … wget https://api.github.com/zen` returns `NETWORK-FAILED` after the 10 s timeout — i.e. outbound from inside the LXC container is blocked at the host. The full SDK integration suite, run with the network-skip env var **off**, confirmed the same shape: every LXC test that does **not** need the network passes (hello, exit-code, sysinfo, backend-select, multi-cmd pipeline, mount-rw, mount-ro), and the three that **do** need it fail (`should allow outbound network access`, `should download file to writable mount`, `should access HTTPS endpoint`) after a 6 s timeout each on both `0.4.0-alpha` and `0.5.0-alpha` schema lanes. The 1ES Hosted Pool advertises eight different `Public Outgoing IP(s)` (managed NAT pool) and `Network Isolation Policy: None` at the agent level, but `lxcbr0`'s `MASQUERADE`d traffic still doesn't make it past the pool egress — most likely the same pool-level allowlist that gates `pkgs.dev.azure.com` / `feeds.dev.azure.com` access. Conclusion: keep `MXC_SKIP_LXC_NETWORK_TESTS=1` on ADO; GHA covers the LXC network half, ADO covers the LXC core half. Two complementary slices, no further work needed on the ADO side. |
-| **E4** | WSLC #12 | 1ES / pipeline agents | **Updated 2026-06-15 after on-runner probe** — GH-hosted `windows-latest` and `windows-2025` both expose `HypervisorPlatform`, `VirtualMachinePlatform`, and `Microsoft-Windows-Subsystem-Linux` as `Enabled`; `wsl --install -d Ubuntu --no-launch` succeeds in ~21–25 s and `wsl -d Ubuntu -- uname -a` returns a real `6.18.x-microsoft-standard-WSL2` kernel in ~7–8 s on top of that, so total zero-to-shell is ~28–33 s. ARM64 (`windows-11-arm`) is **not** capable (`HypervisorPlatform: Disabled`, WSL not preinstalled). The "likely a new dedicated agent pool" hedge was pessimistic — stock GH-hosted x64 runners are sufficient for the WSL2 + nested-virt half, and the only remaining gate is the `wslcsdk.dll` distribution channel that **E2** (public NuGet) is on track to close. ADO 1ES Windows pool is still untested but should reuse the same approach once E2 lands. Probe workflow preserved on branch `user/sodas/wslc-probe` for re-dispatch the moment the NuGet ships. |
-| **E5** | Bwrap #13 | 1ES / pipeline agents | **Updated 2026-06-15 after on-runner probe** — `kernel.unprivileged_userns_clone=1` is present on every Ubuntu runner we probed, but Ubuntu 24.04 additionally sets `kernel.apparmor_restrict_unprivileged_userns=1` (added in 24.04, absent on 22.04) which silently breaks unprivileged `bwrap` with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` on both `ubuntu-latest` and `ubuntu-24.04-arm`. Two confirmed workarounds for CI: (a) keep running bwrap under `sudo -E` (the current GHA `SDK.Integration.Test.Job.yml` posture — root bypasses the AppArmor profile), or (b) `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` once in the workflow setup, which restores the unprivileged path (verified in the probe: `hello-from-bwrap-after-aa-flip` returned `uid=1001(runner)`). The codebase's bwrap test fleet does (a) today and is unaffected. **New observation from the same probe**: every GHA Linux runner is **IPv6 dual-stack** (`net.ipv6.conf.all.disable_ipv6=0`, eth0 carries a `fe80::/64` link-local, `getent ahostsv6 ipv6.google.com` resolves to `2607:f8b0:4004:c23::8b`), which makes **Bwrap #6-IPv6** (silent allowlist bypass on dual-stack hosts) a real exposure on the same runners we use for CI, not a hypothetical. Probe workflow preserved on branch `user/sodas/linux-runtime-probe`. |
-| **E6** | Bwrap #14 | Repo admin | Create `Container-Bubblewrap` label (parity with `Container-WSLC`, `Container-Hyperlight`). |
+| **E4** | LXC #23 | 1ES / pipeline agents | **Updated 2026-06-15 after on-runner probe** — GH-hosted `ubuntu-latest` (24.04), `ubuntu-22.04`, and `ubuntu-24.04-arm` runners all install the LXC stack cleanly, successfully create + run containers, start `lxc-net.service`, and accept full `iptables` under `sudo`. **Addendum (ADO probe)** — 1ES Hosted Pool probe confirmed LXC core works but outbound from `lxcbr0` is blocked by pool egress. Conclusion: `MXC_SKIP_LXC_NETWORK_TESTS=1` on ADO; GHA covers the network half, ADO covers core. |
+| **E5** | WSLC #23 | 1ES / pipeline agents | **Updated 2026-06-15** — GH-hosted `windows-latest` / `windows-2025` support WSL2 (zero-to-shell ~28–33 s). ARM64 not capable. Only remaining gate is `wslcsdk.dll` distribution (E2). |
+| **E6** | Bwrap #25 | 1ES / pipeline agents | **Updated 2026-06-15** — Ubuntu 24.04's `kernel.apparmor_restrict_unprivileged_userns=1` breaks unprivileged bwrap. Workaround: run under `sudo -E` (current posture). Every GHA Linux runner is IPv6 dual-stack, confirming Bwrap #16-IPv6 is a real exposure. |
+| **E7** | Bwrap #26 | Repo admin | Create `Container-Bubblewrap` label (parity with `Container-WSLC`, `Container-Hyperlight`). |
 
-### ⚠️ Upstream / kernel-evolution tracking (not a ship-blocker, but design must track external moving parts)
+### ⚠️ Upstream / kernel-evolution tracking
 
 | Ref | Affected | What to track |
 |---|---|---|
-| **E7** | Bwrap #7 | Linux kernel keeps adding syscalls (`io_uring_*`, `clone3`, `pidfd_*`, `landlock_*`); the seccomp profile needs an upstream-syscall watch + refresh cadence, or it silently allows new attack surface and/or breaks new workloads. |
-| **E8** | Bwrap #5 (eBPF option) | eBPF / CO-RE requires kernel ≥5.x with BTF — choosing eBPF over iptables/proxy locks in a kernel-version floor. The other two enforcement strategies have no such constraint. |
-| **E9** | LXC #6, Bwrap #8 | cgroups v2 unified hierarchy — default on modern distros but Ubuntu < 22.04 / RHEL < 9 may still mount v1; need a fallback or a documented minimum-distro declaration. |
-| **E10** | LXC #8 | System resolver semantics (`systemd-resolved` / `nscd` / DNS TTL) constrain how often hostnames can be re-resolved without thrashing the host resolver. |
+| **E8** | Bwrap #18 | Linux kernel keeps adding syscalls (`io_uring_*`, `clone3`, `pidfd_*`, `landlock_*`); seccomp profile needs refresh cadence. |
+| **E9** | Bwrap #15 (eBPF option) | eBPF / CO-RE requires kernel ≥5.x with BTF. Other enforcement strategies have no such constraint. |
+| **E10** | LXC #20, Bwrap #19 | cgroups v2 unified hierarchy — default on modern distros but Ubuntu < 22.04 / RHEL < 9 may still mount v1. |
+| **E11** | LXC #16 | System resolver semantics (`systemd-resolved` / `nscd` / DNS TTL) constrain hostname re-resolution frequency. |
 
 ### ⏳ Deferred pending external user demand
 
-Items **LXC #4** (`allowLocalNetwork`) and **LXC #7** (nftables backend) are gated on a real user signal rather than an external party — see each item's own context blockquote for the deferral criteria.
+Item **LXC #15** (nftables backend) is gated on a real user signal — see its inline note for deferral criteria.
 
 ---
 
@@ -221,4 +264,4 @@ Items **LXC #4** (`allowLocalNetwork`) and **LXC #7** (nftables backend) are gat
 
 - **Issue tracking**: [open issues](https://github.com/microsoft/mxc/issues?q=is%3Aissue+is%3Aopen). None of the above are filed yet.
 - **Promotion path**: Bubblewrap and WSLC are both still under `experimental` in the schema; see `docs/versioning.md` for the migration mechanics required for each promotion.
-- **Labels**: re-use `Container-WSLC` and `Area-Executor-LXC`; propose adding `Container-Bubblewrap` (item Bwrap #14).
+- **Labels**: re-use `Container-WSLC` and `Area-Executor-LXC`; propose adding `Container-Bubblewrap` (Bwrap #26).
