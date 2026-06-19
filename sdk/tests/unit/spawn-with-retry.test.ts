@@ -30,6 +30,7 @@ function attempt(
   denials: DeniedResource[] = [],
   captureDenialsActive: boolean = true,
   childProcessesObserved: number = 0,
+  descendantPidsCovered: number = 0,
 ): RetryAttemptResult {
   return {
     index,
@@ -43,6 +44,7 @@ function attempt(
       deniedResourcesTruncated: false,
       captureDenialsActive,
       childProcessesObserved,
+      descendantPidsCovered,
     },
   };
 }

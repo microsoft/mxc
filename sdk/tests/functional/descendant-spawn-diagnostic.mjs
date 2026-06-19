@@ -54,11 +54,17 @@ const policy = {
 
 const config = createConfigFromPolicy(policy, 'process');
 config.captureDenials = true;
-// Outer cmd is the root workload; `whoami.exe` is an external
-// executable cmd MUST spawn via CreateProcess (it's not an
-// internal command). That spawn triggers the IOCP
-// JOB_OBJECT_MSG_NEW_PROCESS we're trying to verify.
-config.process.commandLine = `cmd /c whoami`;
+// Outer cmd is the root workload; `findstr.exe` is an external
+// executable cmd MUST spawn via CreateProcess. findstr opens the
+// target file directly, so if Phase E is wired correctly the
+// access-denied event surfaces with the findstr PID
+// (the descendant), not cmd's. We use findstr (rather than another
+// cmd / whoami / powershell) because:
+//  - it lives in System32 (compatible with our minimal sandbox profile);
+//  - it actually opens the file via CreateFile so we get a real denial;
+//  - it survives the sandbox (it has small DLL deps and exits cleanly
+//    when CreateFile fails, unlike whoami which crashes during init).
+config.process.commandLine = `cmd /c findstr abc "${target}"`;
 
 const startedAt = Date.now();
 const ptyProc = spawnSandboxFromConfig(

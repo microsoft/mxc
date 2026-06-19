@@ -186,6 +186,7 @@ fn verbose_summary_enabled_from(value: Option<&str>) -> bool {
 
 /// Builds the summary envelope as serde_json::Value. Split out so
 /// the formatting can be exercised by tests without touching stderr.
+#[allow(clippy::too_many_arguments)]
 fn build_summary_envelope(
     exit_code: i32,
     unique_denials: usize,
@@ -193,6 +194,7 @@ fn build_summary_envelope(
     truncated: bool,
     active: bool,
     child_processes_observed: usize,
+    descendant_pids_covered: usize,
     verbose: bool,
 ) -> serde_json::Value {
     // `captureDenialsActive` is always present in the summary so SDK
@@ -201,13 +203,19 @@ fn build_summary_envelope(
     // identical in `totalDenials` but mean very different things to
     // the application's UX.
     //
-    // `childProcessesObserved` is also always present: the per-PID
-    // ETW filter we attach only sees events for the workload root,
-    // so denials from any child process are silently dropped. This
-    // count tells the SDK consumer whether the workload is a
-    // launcher pattern (cargo, npm, cmake, ...) so they can warn
-    // the user "N child processes ran; their denials are not in
-    // this list."
+    // `childProcessesObserved` is the Toolhelp-poll count of distinct
+    // child-process PIDs the workload spawned during the run. It is a
+    // best-effort signal kept for back-compat; with the descendant-
+    // tracking work (Phases A-D of captureDenials), denials from
+    // descendants now flow into the same stream as the root's, so this
+    // count is no longer a "the denial list is incomplete" warning.
+    //
+    // `descendantPidsCovered` is the count of descendant PIDs the IOCP
+    // listener attached to the live ETW filter via `extend_via_shim`.
+    // This is the authoritative metric for "how many descendants
+    // contributed to the denial stream", and SDK consumers should use
+    // it (not childProcessesObserved) when deciding whether to surface
+    // a "captured M denials across N descendants" message in the UI.
     if verbose {
         serde_json::json!({
             "type": "summary",
@@ -216,6 +224,7 @@ fn build_summary_envelope(
             "deniedResourcesTruncated": truncated,
             "captureDenialsActive": active,
             "childProcessesObserved": child_processes_observed,
+            "descendantPidsCovered": descendant_pids_covered,
             "rawEventCount": raw_event_count,
         })
     } else {
@@ -226,6 +235,7 @@ fn build_summary_envelope(
             "deniedResourcesTruncated": truncated,
             "captureDenialsActive": active,
             "childProcessesObserved": child_processes_observed,
+            "descendantPidsCovered": descendant_pids_covered,
         })
     }
 }
@@ -253,10 +263,17 @@ fn build_summary_envelope(
 ///
 /// `child_processes_observed` is the count of distinct child-process
 /// PIDs the workload spawned during the run, as a best-effort
-/// Toolhelp poll. Per-PID ETW filtering means we don't capture
-/// denials for these children today; the count is surfaced so SDK
-/// consumers can warn the user when the workload looks like a
-/// launcher.
+/// Toolhelp poll. With the descendant-tracking work (Phases A-D),
+/// denials from descendants flow into the same stream as the root's,
+/// so this count is now a Toolhelp-side cross-check rather than a
+/// "denials are missing" warning. See `descendant_pids_covered` for
+/// the authoritative metric.
+///
+/// `descendant_pids_covered` is the count of descendant PIDs the
+/// IOCP listener added to the live ETW filter via `extend_via_shim`.
+/// SDK consumers should treat this as the "how many descendants
+/// contributed to the captured denial list" metric.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_denial_summary_line(
     exit_code: i32,
     unique_denials: usize,
@@ -264,6 +281,7 @@ pub fn emit_denial_summary_line(
     truncated: bool,
     active: bool,
     child_processes_observed: usize,
+    descendant_pids_covered: usize,
 ) {
     let envelope = build_summary_envelope(
         exit_code,
@@ -272,6 +290,7 @@ pub fn emit_denial_summary_line(
         truncated,
         active,
         child_processes_observed,
+        descendant_pids_covered,
         verbose_summary_enabled(),
     );
     let json = match serde_json::to_string(&envelope) {
@@ -470,7 +489,7 @@ mod tests {
 
     #[test]
     fn summary_envelope_default_mode_omits_raw_event_count() {
-        let env = build_summary_envelope(0, 8, 651, false, true, 0, false);
+        let env = build_summary_envelope(0, 8, 651, false, true, 0, 0, false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["type"], "summary");
         assert_eq!(obj["exitCode"], 0);
@@ -487,7 +506,7 @@ mod tests {
 
     #[test]
     fn summary_envelope_verbose_mode_includes_raw_event_count() {
-        let env = build_summary_envelope(0, 8, 651, false, true, 0, true);
+        let env = build_summary_envelope(0, 8, 651, false, true, 0, 0, true);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["totalDenials"], 8);
         assert_eq!(obj["rawEventCount"], 651);
@@ -496,7 +515,7 @@ mod tests {
 
     #[test]
     fn summary_envelope_propagates_non_zero_exit_and_truncation() {
-        let env = build_summary_envelope(-1, 0, 0, true, true, 0, false);
+        let env = build_summary_envelope(-1, 0, 0, true, true, 0, 0, false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["exitCode"], -1);
         assert_eq!(obj["deniedResourcesTruncated"], true);
@@ -511,7 +530,7 @@ mod tests {
         // feature isn't running" from "0 denials because the workload
         // is well-behaved". Otherwise both look like
         // `totalDenials: 0`.
-        let env = build_summary_envelope(0, 0, 0, false, false, 0, false);
+        let env = build_summary_envelope(0, 0, 0, false, false, 0, 0, false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["captureDenialsActive"], false);
         assert_eq!(obj["totalDenials"], 0);
@@ -521,7 +540,7 @@ mod tests {
     fn summary_envelope_active_field_present_in_both_modes() {
         for verbose in &[false, true] {
             for active in &[false, true] {
-                let env = build_summary_envelope(0, 0, 0, false, *active, 0, *verbose);
+                let env = build_summary_envelope(0, 0, 0, false, *active, 0, 0, *verbose);
                 let obj = env.as_object().unwrap();
                 assert!(
                     obj.contains_key("captureDenialsActive"),
@@ -540,7 +559,7 @@ mod tests {
         // observed 5 distinct child PIDs while it was alive. The
         // count must surface in the summary so SDK consumers can
         // warn the user that those children's denials are missing.
-        let env = build_summary_envelope(0, 2, 2, false, true, 5, false);
+        let env = build_summary_envelope(0, 2, 2, false, true, 5, 0, false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["childProcessesObserved"], 5);
         assert_eq!(obj["totalDenials"], 2);
@@ -555,7 +574,7 @@ mod tests {
         // know it's looking at a new-format summary.
         for verbose in &[false, true] {
             for children in &[0_usize, 1, 5, 100] {
-                let env = build_summary_envelope(0, 0, 0, false, true, *children, *verbose);
+                let env = build_summary_envelope(0, 0, 0, false, true, *children, 0, *verbose);
                 let obj = env.as_object().unwrap();
                 assert!(
                     obj.contains_key("childProcessesObserved"),

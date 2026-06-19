@@ -158,6 +158,9 @@ describe('parseDenialStream', () => {
       captureDenialsActive: true,
       // Same forward-compat policy for childProcessesObserved.
       childProcessesObserved: 0,
+      // Same for descendantPidsCovered (Phase E of descendant
+      // tracking — landed after captureDenials shipped).
+      descendantPidsCovered: 0,
     });
     assert.strictEqual(denials.length, 1, 'onDenial fired exactly once');
     assert.strictEqual(summaries.length, 1, 'onSummary fired exactly once');

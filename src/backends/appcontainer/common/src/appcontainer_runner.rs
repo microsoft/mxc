@@ -1000,6 +1000,13 @@ impl AppContainerScriptRunner {
         if request.capture_denials {
             let child_processes_observed =
                 child_observer.map(|o| o.take_observed_count()).unwrap_or(0);
+            // AppContainer runner does not yet wire descendant-tracking
+            // (Phases A-D of the descendant work landed in
+            // base_container_runner only; AppContainer is the T2
+            // fallback path). Report 0 here so the summary surface
+            // stays uniform; consumers see no descendants covered
+            // because the IOCP listener was never attached.
+            let descendant_pids_covered = 0usize;
             emit_denial_summary_line(
                 exit_code as i32,
                 streamed_unique,
@@ -1007,6 +1014,7 @@ impl AppContainerScriptRunner {
                 denied_resources_truncated,
                 capture_was_active,
                 child_processes_observed,
+                descendant_pids_covered,
             );
         }
 

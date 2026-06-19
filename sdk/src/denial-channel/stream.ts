@@ -100,23 +100,40 @@ export interface DenialStreamSummary {
   captureDenialsActive: boolean;
   /**
    * Best-effort count of distinct child-process PIDs the runner
-   * observed under the workload during the run.
+   * observed under the workload during the run, via a 500-ms
+   * Toolhelp poll loop.
    *
-   * The captureDenials ETW collector is filtered to the workload
-   * root PID — denial events for any child process are silently
-   * dropped at the provider layer. This count gives the SDK a
-   * visible signal when the workload is a launcher pattern (cargo,
-   * npm, cmake, gh, `python -m foo`, ...) so the application can
-   * warn the user that the denial list may be incomplete.
+   * With the descendant-tracking work (Phases A-D of captureDenials),
+   * denials from descendant PIDs flow into the same stream as the
+   * root's, so this count is no longer a "the denial list is
+   * incomplete" warning — see `descendantPidsCovered` for the
+   * authoritative metric of "how many descendants contributed to the
+   * captured list". `childProcessesObserved` remains a useful
+   * Toolhelp-side cross-check (it can sometimes catch descendants the
+   * IOCP path missed due to start/exit races, since the two
+   * mechanisms have different timing).
    *
-   * The count comes from a 500-ms Toolhelp poll loop, so very
-   * short-lived children that start and exit between polls won't
-   * appear here. It is a best-effort signal, not a guarantee. A
-   * non-zero value means "the workload definitely spawned children
-   * whose denials we missed"; a zero value means "we didn't observe
-   * any children" (not "no children existed").
+   * Very short-lived children that start and exit between Toolhelp
+   * polls won't appear here. It is a best-effort signal, not a
+   * guarantee.
    */
   childProcessesObserved: number;
+  /**
+   * Authoritative count of descendant PIDs the runner attached to the
+   * live ETW filter via the shim's `extendDenialSession` RPC. Each
+   * descendant that successfully joined the filter is counted once;
+   * descendants the IOCP listener saw but failed to extend (shim
+   * unreachable, etc.) are excluded.
+   *
+   * Use this rather than `childProcessesObserved` when surfacing a
+   * "captured M denials across N descendants" message to the user.
+   *
+   * Always present in summary lines emitted by `wxc-exec` builds that
+   * include the descendant-tracking work (Phases A-D); older
+   * `wxc-exec` builds may omit the field, in which case the parser
+   * defaults it to 0.
+   */
+  descendantPidsCovered: number;
   /**
    * Pre-dedupe kernel event count. Only present when the workload
    * was launched with `MXC_DENIAL_VERBOSE=1` in its environment;
@@ -463,12 +480,19 @@ function summaryFromWire(obj: Record<string, unknown>): DenialStreamSummary | nu
   // children were observed (the conservative answer).
   const childProcessesObserved =
     typeof obj.childProcessesObserved === 'number' ? obj.childProcessesObserved : 0;
+  // descendantPidsCovered landed in Phase E of the descendant-tracking
+  // work. Older `wxc-exec` builds (everything before Phase E) don't
+  // emit the field; treat its absence as 0 so a recent SDK against an
+  // older runner stays sane.
+  const descendantPidsCovered =
+    typeof obj.descendantPidsCovered === 'number' ? obj.descendantPidsCovered : 0;
   const summary: DenialStreamSummary = {
     exitCode: obj.exitCode,
     totalDenials: obj.totalDenials,
     deniedResourcesTruncated: obj.deniedResourcesTruncated,
     captureDenialsActive,
     childProcessesObserved,
+    descendantPidsCovered,
   };
   if (typeof obj.rawEventCount === 'number') {
     summary.rawEventCount = obj.rawEventCount;

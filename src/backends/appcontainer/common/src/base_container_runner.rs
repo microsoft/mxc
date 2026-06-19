@@ -1105,6 +1105,13 @@ impl ScriptRunner for BaseContainerRunner {
         // Keep the job mutable so the subscribe-IOCP call below can fire.
         let mut descendant_job = _descendant_job;
 
+        // Phase E: count of descendant PIDs the IOCP listener
+        // successfully wires into the live ETW filter. Read at summary
+        // time. Lives outside the `if request.capture_denials` block
+        // below so the summary path can see it.
+        let descendant_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let descendant_count_for_summary = std::sync::Arc::clone(&descendant_count);
+
         let (collector, stream_writer, child_observer) = if request.capture_denials {
             let (tx, rx) = std::sync::mpsc::channel::<learning_mode_windows::DeniedResource>();
             let writer = std::thread::Builder::new()
@@ -1132,6 +1139,7 @@ impl ScriptRunner for BaseContainerRunner {
                             let pid_list = Arc::new(Mutex::new(vec![pi.dwProcessId]));
                             let pid_list_cb = Arc::clone(&pid_list);
                             let session_name_cb = session_name.clone();
+                            let descendant_count_cb = Arc::clone(&descendant_count);
                             match job.subscribe_to_new_processes(move |new_pid| {
                                 let snapshot = {
                                     let mut pids = pid_list_cb.lock().unwrap();
@@ -1142,10 +1150,16 @@ impl ScriptRunner for BaseContainerRunner {
                                     &session_name_cb,
                                     &snapshot,
                                 ) {
-                                    Ok(()) => eprintln!(
-                                        "[learning_mode_windows] extended ETW filter to include PID {new_pid} (total {} PIDs)",
-                                        snapshot.len()
-                                    ),
+                                    Ok(()) => {
+                                        descendant_count_cb.fetch_add(
+                                            1,
+                                            std::sync::atomic::Ordering::SeqCst,
+                                        );
+                                        eprintln!(
+                                            "[learning_mode_windows] extended ETW filter to include PID {new_pid} (total {} PIDs)",
+                                            snapshot.len()
+                                        );
+                                    }
                                     Err(e) => eprintln!(
                                         "[learning_mode_windows] extend_via_shim failed for PID {new_pid}: {e}"
                                     ),
@@ -1367,6 +1381,8 @@ impl ScriptRunner for BaseContainerRunner {
         if request.capture_denials {
             let child_processes_observed =
                 child_observer.map(|o| o.take_observed_count()).unwrap_or(0);
+            let descendant_pids_covered =
+                descendant_count_for_summary.load(std::sync::atomic::Ordering::SeqCst);
             emit_denial_summary_line(
                 exit_code as i32,
                 streamed_unique,
@@ -1374,6 +1390,7 @@ impl ScriptRunner for BaseContainerRunner {
                 denied_resources_truncated,
                 capture_was_active,
                 child_processes_observed,
+                descendant_pids_covered,
             );
         }
 
