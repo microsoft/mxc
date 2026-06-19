@@ -338,7 +338,7 @@ pub trait SandboxBackend {
 ///
 /// This is the *only* run-to-completion logic for these backends; the backends
 /// themselves expose just [`SandboxBackend::spawn`].
-pub struct Runner<B>(pub B);
+pub struct Runner<B>(B);
 
 impl<B> Runner<B> {
     /// Wrap a [`SandboxBackend`] so it can be dispatched as a [`ScriptRunner`].

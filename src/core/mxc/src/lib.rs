@@ -23,9 +23,9 @@
 //! let mut request = build_request(&policy, None)?;
 //! request.script_code = "echo hi".to_string();
 //! let mut proc = spawn_sandbox(request)?;
-//! let exit_code = proc.wait().expect("wait for the sandboxed child");
+//! let exit_code = proc.wait()?;
 //! println!("exit={exit_code}");
-//! # Ok::<(), mxc::MxcError>(())
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! ## Backend support
