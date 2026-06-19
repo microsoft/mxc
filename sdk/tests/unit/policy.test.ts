@@ -46,14 +46,20 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         }
     });
 
-    it('should add system root to readonlyPaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should add scoped PowerShell dirs (not the whole drive) to readonlyPaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
         const result = getAvailableToolsPolicy(env);
+        // $PSHOME (the directory containing pwsh.exe) is granted read-only...
         assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root (e.g. C:\\) should be in readonlyPaths when pwsh.exe is on PATH',
+            result.readonlyPaths.some(p => p.toLowerCase() === path.resolve(pwshDir).toLowerCase()),
+            '$PSHOME should be in readonlyPaths when pwsh.exe is on PATH',
+        );
+        // ...but the whole system-drive root must NOT be (the regression we fixed).
+        assert.ok(
+            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
+            'System-drive root (e.g. C:\\) must not be granted',
         );
     });
 
@@ -103,10 +109,17 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir };
         const result = getAvailableToolsPolicy(env);
+        // $PSHOME is still granted (it does not depend on USERPROFILE)...
         assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root should still be in readonlyPaths',
+            result.readonlyPaths.some(p => p.toLowerCase() === path.resolve(pwshDir).toLowerCase()),
+            '$PSHOME should still be in readonlyPaths',
         );
+        // ...the whole system-drive root is never granted...
+        assert.ok(
+            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
+            'System-drive root must not be granted',
+        );
+        // ...and without USERPROFILE there is no PSReadLine history grant.
         assert.strictEqual(result.readwritePaths.length, 0,
             'readwritePaths should be empty without USERPROFILE',
         );

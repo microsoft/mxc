@@ -193,16 +193,24 @@ function deduplicatePaths(paths: string[]): string[] {
  * Check whether PowerShell (pwsh.exe) is available on the machine by scanning
  * the supplied PATH directories for a `pwsh.exe` binary.
  *
- * When PowerShell is found, return a policy fragment with:
- * - `C:\` in `readonlyPaths` — pwsh.exe enumerates the drive root on startup.
+ * When PowerShell is found, return a policy fragment scoped to just the
+ * directories PowerShell needs to start and run:
+ * - `$PSHOME` (the install dir containing pwsh.exe, its self-contained .NET
+ *   runtime, and the shipped modules), the System32 system DLLs, and the
+ *   module search roots — all read-only.
  * - The PSReadLine history directory in `readwritePaths` so the PSReadLine
  *   module can persist command history.
+ *
+ * This used to grant read-only access to the **entire** system drive (`C:\`),
+ * which exposed far more of the host than PowerShell requires; the grant is now
+ * scoped. The Rust port (`powershell_policy` in `core/mxc`) was narrowed in the
+ * same change to keep the two in parity.
  *
  * On non-Windows platforms or when pwsh.exe is not found on PATH, returns an
  * empty policy.
  *
  * @param pathDirs - The list of PATH directories already collected by the caller.
- * @param env - Environment variable map (used to resolve `%USERPROFILE%`).
+ * @param env - Environment variable map (used to resolve `%USERPROFILE%` and `%PSModulePath%`).
  */
 function getPowerShellPolicy(
     pathDirs: string[],
@@ -212,7 +220,8 @@ function getPowerShellPolicy(
         return { readonlyPaths: [], readwritePaths: [] };
     }
 
-    const pwshFound = pathDirs.some(dir => {
+    // `$PSHOME` is the directory that actually contains pwsh.exe.
+    const psHome = pathDirs.find(dir => {
         try {
             return fs.existsSync(path.join(dir, 'pwsh.exe'));
         } catch {
@@ -220,22 +229,50 @@ function getPowerShellPolicy(
         }
     });
 
-    if (!pwshFound) {
+    if (!psHome) {
         return { readonlyPaths: [], readwritePaths: [] };
     }
 
-    const systemDrive = process.env["SystemDrive"] || 'C:';
-    const systemRoot = systemDrive + "\\";
-    const readonlyPaths: string[] = [systemRoot];
-    const readwritePaths: string[] = [];
+    const readonlyCandidates: string[] = [];
 
+    // 1. The PowerShell install tree: pwsh.exe, its self-contained .NET runtime,
+    //    and the shipped modules under `$PSHOME\Modules`.
+    readonlyCandidates.push(psHome);
+    readonlyCandidates.push(path.join(psHome, 'Modules'));
+
+    // 2. System DLLs the loader and the .NET runtime resolve from System32.
+    readonlyCandidates.push(path.join(getWindowsDirectory(), 'System32'));
+
+    // 3. Module search roots: `$PSModulePath` plus the well-known per-machine
+    //    module directories PowerShell probes on startup.
+    const psModulePath = env['PSModulePath'];
+    if (psModulePath) {
+        readonlyCandidates.push(...splitPathList(psModulePath));
+    }
+    for (const programFilesVar of ['ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)']) {
+        const programFiles = process.env[programFilesVar];
+        if (programFiles) {
+            readonlyCandidates.push(path.join(programFiles, 'PowerShell', 'Modules'));
+            readonlyCandidates.push(path.join(programFiles, 'WindowsPowerShell', 'Modules'));
+        }
+    }
+
+    const readwritePaths: string[] = [];
     const userProfile = env['USERPROFILE'];
     if (userProfile) {
-        const psReadLineDir = path.join(
-            userProfile, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine',
+        // Per-user module directory (read-only).
+        readonlyCandidates.push(path.join(userProfile, 'Documents', 'PowerShell', 'Modules'));
+        // PSReadLine command-history directory (read-write); left unfiltered so
+        // the module can create it on first use.
+        readwritePaths.push(
+            path.join(userProfile, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine'),
         );
-        readwritePaths.push(psReadLineDir);
     }
+
+    // Keep the grant minimal: drop nonexistent read-only candidates (the
+    // brokered filesystem rejects paths it cannot resolve). The caller
+    // deduplicates the merged set.
+    const readonlyPaths = readonlyCandidates.filter(directoryExists);
 
     return { readonlyPaths, readwritePaths };
 }
@@ -257,10 +294,11 @@ function getPowerShellPolicy(
  *    already grant access to `ALL_APPLICATION_PACKAGES` are removed because
  *    AppContainer processes can see them without explicit brokering.
  *
- * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the drive root
- * (`C:\`) is added to `readonlyPaths` and the PSReadLine history directory
- * is added to `readwritePaths` so that interactive PowerShell sessions work
- * correctly inside the container.
+ * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, a scoped set of
+ * PowerShell directories (its install dir `$PSHOME`, the System32 system DLLs,
+ * and the module search roots) is added to `readonlyPaths` and the PSReadLine
+ * history directory is added to `readwritePaths` so that interactive PowerShell
+ * sessions work correctly inside the container.
  *
  * @param env - Environment variable map. Defaults to `process.env`.
  * @param options - Filtering options.
