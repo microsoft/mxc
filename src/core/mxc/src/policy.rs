@@ -16,7 +16,6 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use wxc_common::config_parser::{load_request_with_options, LoadOptions};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
@@ -416,46 +415,42 @@ pub enum ProxySpec {
     Url(String),
 }
 
-// Custom `Deserialize` matching the SDK's object union. serde's default
-// externally-tagged derive would only accept the bare string
-// `"builtinTestServer"` for the unit variant, never the SDK's
-// `{ "builtinTestServer": true }`, so we map through an untagged intermediate.
+// Custom `Deserialize` matching the SDK's object union
+// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
+// serde's default derive can't express it, and an untagged enum would silently
+// keep the first matching variant when several conflicting keys are present, so
+// we parse all recognised modes and require exactly one — rejecting conflicts
+// the way the shared wire-config parser does.
 impl<'de> serde::Deserialize<'de> for ProxySpec {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         #[derive(serde::Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Builtin {
-                #[serde(rename = "builtinTestServer")]
-                builtin_test_server: bool,
-            },
-            Localhost {
-                localhost: u16,
-            },
-            Url {
-                url: String,
-            },
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Raw {
+            #[serde(default)]
+            builtin_test_server: Option<bool>,
+            #[serde(default)]
+            localhost: Option<u16>,
+            #[serde(default)]
+            url: Option<String>,
         }
-        Ok(match Repr::deserialize(deserializer)? {
+        let raw = Raw::deserialize(deserializer)?;
+        match (raw.builtin_test_server, raw.localhost, raw.url) {
+            (Some(true), None, None) => Ok(ProxySpec::BuiltinTestServer),
             // The SDK union type is `{ builtinTestServer: true }`, so an explicit
             // `false` is malformed. Reject it rather than silently selecting the
             // (experimental, deliberately-permissive) built-in proxy — fail closed.
-            Repr::Builtin {
-                builtin_test_server: true,
-            } => ProxySpec::BuiltinTestServer,
-            Repr::Builtin {
-                builtin_test_server: false,
-            } => {
-                return Err(serde::de::Error::custom(
-                    "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
-                ))
-            }
-            Repr::Localhost { localhost } => ProxySpec::Localhost(localhost),
-            Repr::Url { url } => ProxySpec::Url(url),
-        })
+            (Some(false), None, None) => Err(serde::de::Error::custom(
+                "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
+            )),
+            (None, Some(port), None) => Ok(ProxySpec::Localhost(port)),
+            (None, None, Some(url)) => Ok(ProxySpec::Url(url)),
+            _ => Err(serde::de::Error::custom(
+                "network.proxy must set exactly one of builtinTestServer, localhost, or url",
+            )),
+        }
     }
 }
 
@@ -519,18 +514,12 @@ pub fn build_request(
         return Err(MxcError::malformed_request("Policy version is required"));
     }
     let config = build_wire_config(policy, container_name)?;
-    let json = serde_json::to_string(&config)
-        .map_err(|e| MxcError::malformed_request(format!("failed to serialise config: {e}")))?;
-    let encoded = wxc_common::encoding::base64_encode(json.as_bytes());
 
     let mut logger = Logger::new(Mode::Buffer);
-    // The command line is intentionally empty here — the caller fills
-    // `script_code` before running — so tolerate a missing command.
-    let opts = LoadOptions {
-        is_base64: true,
-        allow_missing_command: true,
-    };
-    load_request_with_options(&encoded, &mut logger, opts)
+    // Map the wire config straight to a request — no base64/file round-trip.
+    // The command line is intentionally empty here (the caller fills
+    // `script_code` before running), so tolerate a missing command.
+    wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
         .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))
 }
 
@@ -566,7 +555,12 @@ fn build_wire_config(
         },
     });
 
-    let targets_host_filtering_backend = cfg!(target_os = "linux") || cfg!(target_os = "macos");
+    // Only Linux has a real host-filtering backend (iptables + cooperative
+    // proxy). Seatbelt cannot enforce hostnames — `profile_builder` turns any
+    // non-empty `allowedHosts` into a blanket `(allow network-outbound)` — so
+    // macOS must fall through to the fail-closed guard below rather than silently
+    // granting allow-all outbound.
+    let targets_host_filtering_backend = cfg!(target_os = "linux");
 
     if let Some(net) = &policy.network {
         if net.proxy.is_some() && cfg!(target_os = "macos") {
@@ -731,6 +725,20 @@ mod tests {
     }
 
     #[test]
+    fn proxy_conflicting_modes_are_rejected() {
+        // Several modes at once must be rejected (cr-005), not silently reduced
+        // to the first matching one.
+        let err = serde_json::from_str::<ProxySpec>(
+            r#"{ "builtinTestServer": true, "localhost": 8080 }"#,
+        )
+        .expect_err("conflicting proxy modes must be rejected");
+        assert!(
+            err.to_string().contains("exactly one"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn proxy_localhost_and_url_still_parse() {
         assert!(matches!(
             serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080 }"#).expect("localhost"),
@@ -740,5 +748,56 @@ mod tests {
             serde_json::from_str::<ProxySpec>(r#"{ "url": "http://proxy" }"#).expect("url"),
             ProxySpec::Url(_)
         ));
+    }
+
+    // macOS Seatbelt cannot enforce hostnames, so the host-filtering guard must
+    // apply there (cr-003). These assert the fail-closed behavior on macOS.
+    #[cfg(target_os = "macos")]
+    use super::{build_request, NetworkSection, SandboxPolicy};
+
+    #[cfg(target_os = "macos")]
+    fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: Some(network),
+            ui: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_allowed_hosts_without_outbound_is_rejected() {
+        // allowedHosts + allowOutbound=false ("only these hosts") would silently
+        // become allow-all on Seatbelt; it must be rejected instead.
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: false,
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        });
+        let err = build_request(&policy, None).expect_err("must reject host filter w/o outbound");
+        assert!(
+            err.message
+                .contains("allowedHosts/blockedHosts require allowOutbound"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_allowed_hosts_with_outbound_is_accepted() {
+        // allowOutbound=true is the caller explicitly allowing outbound, so it
+        // builds (allowedHosts simply isn't enforceable on Seatbelt).
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        });
+        assert!(
+            build_request(&policy, None).is_ok(),
+            "outbound-allowed host filter should build"
+        );
     }
 }
