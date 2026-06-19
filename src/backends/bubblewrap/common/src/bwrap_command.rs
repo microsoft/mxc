@@ -49,6 +49,12 @@ const PROXY_ENV_KEYS: &[&str] = &[
 ///   ssh-agent socket. We only bind the well-known DNS stub-resolver
 ///   directories so name resolution still works when `/etc/resolv.conf`
 ///   is a symlink (the default on systemd-resolved hosts).
+/// - To keep DNS working when `/etc/resolv.conf` points *outside* those
+///   dirs, we also synthesise a `/var/run -> /run` compat symlink (for
+///   `/var/run/...`-routed targets — older RHEL/CentOS-era and some
+///   container images) and `--ro-bind-try` `/mnt/wsl/resolv.conf` (for
+///   WSL). Neither exposes host `/var` or `/mnt` contents — only the
+///   resolver path itself.
 /// - `/etc` is bound whole because cherry-picking files (`passwd`,
 ///   `nsswitch.conf`, `ssl/`, `ld.so.conf*`, …) is fragile and breaks
 ///   tools that read other config files. Files with sensitive contents
@@ -83,6 +89,11 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/run/systemd/resolve",
     "/run/NetworkManager",
     "/run/resolvconf",
+    // WSL generates its resolv.conf here and points /etc/resolv.conf at
+    // it. Bind just this single file (not /mnt) so DNS works under WSL
+    // without exposing the Windows drive mounts. Skipped on non-WSL hosts
+    // because the baseline is emitted via `--ro-bind-try`.
+    "/mnt/wsl/resolv.conf",
 ];
 
 /// Build the complete argument list for `bwrap` from the given request.
@@ -134,6 +145,15 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
     for path in BASELINE_RO_BIND_PATHS {
         args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]);
     }
+
+    // Recreate the standard `/var/run -> /run` compatibility symlink. Some
+    // distros (older RHEL/CentOS-era, some container images) write
+    // `/etc/resolv.conf` as a symlink routed through `/var/run/...` (e.g.
+    // `/var/run/NetworkManager/resolv.conf`). We never mount `/var`, so that
+    // intermediate path would dangle inside the sandbox and DNS would
+    // silently fail. The symlink rescues the whole `/var/run/...` family and
+    // pulls no host `/var` contents in (bwrap synthesises an empty `/var`).
+    args.extend(["--symlink".into(), "/run".into(), "/var/run".into()]);
 
     // Standard virtual filesystems (applied before policy mounts so policy
     // paths under /dev, /proc, or /tmp survive).
@@ -588,6 +608,60 @@ mod tests {
                 path, path
             );
         }
+    }
+
+    /// Regression test for the `/etc/resolv.conf -> /var/run/.../resolv.conf`
+    /// symlink case (older RHEL/CentOS-era, some container images). We never
+    /// mount `/var`, so without a `/var/run -> /run` compat symlink the
+    /// target dangles and DNS silently breaks. Assert the symlink is emitted
+    /// so `/var/run/NetworkManager/resolv.conf` resolves into the bound
+    /// `/run/NetworkManager`.
+    #[test]
+    fn baseline_recreates_var_run_compat_symlink() {
+        let args = build_args(&base_request(), None);
+        let found = args
+            .windows(3)
+            .any(|w| w[0] == "--symlink" && w[1] == "/run" && w[2] == "/var/run");
+        assert!(
+            found,
+            "baseline must emit `--symlink /run /var/run` so /etc/resolv.conf \
+             symlinks routed through /var/run/... resolve; got: {:?}",
+            args
+        );
+        // The compat symlink must not drag a host /var bind in with it.
+        let var_bound = args.windows(2).any(|w| {
+            matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try") && w[1] == "/var"
+        });
+        assert!(!var_bound, "compat symlink must not bind host /var");
+    }
+
+    /// Regression test for WSL, where `/etc/resolv.conf` points at
+    /// `/mnt/wsl/resolv.conf`. We bind that single file (via `--ro-bind-try`,
+    /// so it is skipped on non-WSL hosts) without exposing the rest of
+    /// `/mnt`.
+    #[test]
+    fn baseline_includes_wsl_resolv_conf() {
+        let args = build_args(&base_request(), None);
+        let found = args.windows(3).any(|w| {
+            w[0] == "--ro-bind-try"
+                && w[1] == "/mnt/wsl/resolv.conf"
+                && w[2] == "/mnt/wsl/resolv.conf"
+        });
+        assert!(
+            found,
+            "baseline must emit `--ro-bind-try /mnt/wsl/resolv.conf ...` so DNS \
+             works under WSL; got: {:?}",
+            args
+        );
+        // Only the single resolv.conf file — never /mnt or /mnt/wsl wholesale.
+        let mnt_whole = args.windows(2).any(|w| {
+            matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try")
+                && (w[1] == "/mnt" || w[1] == "/mnt/wsl")
+        });
+        assert!(
+            !mnt_whole,
+            "baseline must not expose /mnt or /mnt/wsl wholesale"
+        );
     }
 
     /// Baseline mounts must come before policy mounts so the user's

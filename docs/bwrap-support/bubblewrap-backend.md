@@ -97,9 +97,13 @@ Common consequences of this default:
 - `working_directory` must live under the baseline or a policy path — a
   `cwd` of `~/project` without a matching `readonlyPaths` entry will fail.
 - DNS works on systemd-resolved, NetworkManager, and resolvconf hosts
-  because the corresponding `/run/...` directories are bound. Hosts where
-  `/etc/resolv.conf` symlinks somewhere else need that target listed in
-  `readonlyPaths`.
+  because the corresponding `/run/...` directories are bound. The common
+  symlink targets *outside* `/run` are covered too: `/var/run/...`-routed
+  `/etc/resolv.conf` symlinks resolve via a synthesised `/var/run -> /run`
+  compat symlink, and WSL's `/mnt/wsl/resolv.conf` is bound directly.
+  Neither exposes host `/var` or `/mnt` contents. Hosts that point
+  `/etc/resolv.conf` at some other custom location still need that target
+  listed in `readonlyPaths`.
 
 Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
 `/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain
