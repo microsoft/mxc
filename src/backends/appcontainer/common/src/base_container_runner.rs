@@ -1070,27 +1070,38 @@ impl ScriptRunner for BaseContainerRunner {
         // applies until Phase B lands.
         let _descendant_job = if request.capture_denials {
             match learning_mode_windows::descendant_tracking::DescendantTrackingJob::new() {
-                Ok(job) => match job.attach_root(pi.hProcess) {
+                Ok(mut job) => match job.attach_root(pi.hProcess, pi.dwProcessId) {
                     Ok(()) => {
-                        let _ = writeln!(
-                            logger,
-                            "captureDenials: descendant-tracking job attached to PID {}",
+                        eprintln!(
+                            "[learning_mode_windows] descendant-tracking job attached to PID {}",
                             pi.dwProcessId
                         );
+                        match job.subscribe_to_new_processes(|new_pid| {
+                            eprintln!("[learning_mode_windows] descendant spawned: PID {new_pid}");
+                        }) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[learning_mode_windows] descendant IOCP subscription active"
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[learning_mode_windows] descendant IOCP subscription failed (continuing): {e}"
+                                );
+                            }
+                        }
                         Some(job)
                     }
                     Err(e) => {
-                        let _ = writeln!(
-                            logger,
-                            "captureDenials: AssignProcessToJobObject failed (continuing without descendant-tracking job): {e}"
+                        eprintln!(
+                            "[learning_mode_windows] AssignProcessToJobObject failed (continuing without descendant-tracking job): {e}"
                         );
                         None
                     }
                 },
                 Err(e) => {
-                    let _ = writeln!(
-                        logger,
-                        "captureDenials: CreateJobObjectW failed (continuing without descendant-tracking job): {e}"
+                    eprintln!(
+                        "[learning_mode_windows] CreateJobObjectW failed (continuing without descendant-tracking job): {e}"
                     );
                     None
                 }
