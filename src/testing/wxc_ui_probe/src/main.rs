@@ -243,7 +243,18 @@ fn probe_globalatoms(args: &ProbeArgs) {
         }
     }
     if let Some(release) = args.release_file.as_deref() {
-        let _ = wait_for_file(release, Duration::from_secs(15));
+        // Wait comfortably longer than the harness's readiness window (30s) so a
+        // loaded host can't make us delete the atom before its GlobalFindAtomW
+        // check runs — which would otherwise read as a false "isolated". On
+        // timeout, surface a DIAG so the (otherwise silent) stall is diagnosable
+        // rather than being misread as a pass.
+        let released = wait_for_file(release, Duration::from_secs(60));
+        if !released {
+            emit_diag(
+                "GLOBALATOMS_GUEST_TO_HOST",
+                "release file not seen within 60s; host check may be unreliable",
+            );
+        }
     }
 
     unsafe {

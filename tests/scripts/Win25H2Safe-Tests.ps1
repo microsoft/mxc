@@ -1130,10 +1130,16 @@ function Invoke-GlobalAtomProbe {
     $sbErr = New-Object System.Text.StringBuilder
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $psi
-    $outEvt = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -MessageData $sbOut -Action {
+    # Use explicit SourceIdentifiers so the finally block can unregister the
+    # subscriptions AND remove the backing PSEventJobs unambiguously.
+    # Unregister-Event removes only the subscription, not the job it created,
+    # so without Remove-Job the jobs accumulate across same-session re-runs.
+    $outSid = "MxcGAOut_$suffix"
+    $errSid = "MxcGAErr_$suffix"
+    $outEvt = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -SourceIdentifier $outSid -MessageData $sbOut -Action {
         if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
     }
-    $errEvt = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -MessageData $sbErr -Action {
+    $errEvt = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -SourceIdentifier $errSid -MessageData $sbErr -Action {
         if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
     }
 
@@ -1168,8 +1174,12 @@ function Invoke-GlobalAtomProbe {
     finally {
         # Remove the host-planted atom regardless of outcome.
         [void][Mxc.AtomNative]::GlobalDeleteAtom($hostAtom)
-        if ($outEvt) { Unregister-Event -SourceIdentifier $outEvt.Name -ErrorAction SilentlyContinue }
-        if ($errEvt) { Unregister-Event -SourceIdentifier $errEvt.Name -ErrorAction SilentlyContinue }
+        # Unregister the subscriptions, then remove the PSEventJobs they
+        # created (Unregister-Event leaves the job behind).
+        foreach ($sid in @($outSid, $errSid)) {
+            Unregister-Event -SourceIdentifier $sid -ErrorAction SilentlyContinue
+            Remove-Job -Name $sid -Force -ErrorAction SilentlyContinue
+        }
     }
 
     $stdout = $sbOut.ToString()
