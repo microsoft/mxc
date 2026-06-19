@@ -296,9 +296,13 @@ pub enum SessionError {
 const PIPE_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `ERROR_PIPE_BUSY` from winnt.h. When all pipe instances are busy,
-/// `OpenOptions::open` returns this and the canonical Win32 retry path
-/// is to wait briefly and try again.
+/// the client retries with a brief sleep.
 const ERROR_PIPE_BUSY: i32 = 231;
+
+/// `ERROR_FILE_NOT_FOUND`. The pipe momentarily doesn't exist because
+/// the shim closed one instance and hasn't yet created the next one in
+/// its serial accept loop. Retried with the same backoff as PIPE_BUSY.
+const ERROR_FILE_NOT_FOUND: i32 = 2;
 
 /// A handle to the privileged ETW session created by the shim.
 ///
@@ -611,17 +615,35 @@ pub fn extend_via_shim(session_name: &str, pids: &[u32]) -> Result<(), SessionEr
     }
 }
 
+/// `SECURITY_SQOS_PRESENT` from winbase.h: opt the file open into
+/// providing a SECURITY_QUALITY_OF_SERVICE level. Required so the
+/// shim can call `ImpersonateNamedPipeClient` on the server end.
+const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+/// `SECURITY_IMPERSONATION` level on the client side of a named pipe.
+/// Lets the server's `ImpersonateNamedPipeClient` actually adopt the
+/// caller's token so it can read the caller's user SID.
+const SECURITY_IMPERSONATION: u32 = 0x0002_0000;
+
 fn open_pipe_with_retry(path: &str) -> Result<std::fs::File, SessionError> {
     let start = Instant::now();
     loop {
         match OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(0) // no FILE_FLAG_OVERLAPPED
+            // The shim impersonates the connecting client to validate
+            // caller SID + PID ownership before doing the privileged
+            // ETW work. Without SECURITY_SQOS_PRESENT |
+            // SECURITY_IMPERSONATION, the default impersonation level
+            // is anonymous and `ImpersonateNamedPipeClient` returns
+            // ERROR_CANNOT_IMPERSONATE (0x558).
+            .custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION)
             .open(path)
         {
             Ok(f) => return Ok(f),
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+            Err(e)
+                if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    || e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) =>
+            {
                 if start.elapsed() >= PIPE_OPEN_TIMEOUT {
                     return Err(SessionError::PipeConnect(path.to_string(), e));
                 }

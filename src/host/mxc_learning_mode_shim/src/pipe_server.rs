@@ -12,9 +12,10 @@
 //! `LocalSystem` and would be vulnerable to confused-deputy attacks if
 //! the pipe were world-accessible.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -38,6 +39,16 @@ use learning_mode_windows::wire::{
     error_code, ExtendDenialSessionRequest, ExtendDenialSessionResponse, OpenDenialSessionRequest,
     OpenDenialSessionResponse, ShimRequest, ShimResponse, PIPE_NAME, PROTOCOL_VERSION,
 };
+
+use crate::caller_context::{self, CallerContext};
+
+/// Maps session names to the SID that opened them. Populated by
+/// `handle_open` and consulted by `handle_extend` to enforce that
+/// only the original creator can extend a session's PID filter.
+/// Without this, any interactive user could enumerate session names
+/// (e.g. via `logman query -ets`) and call `ExtendDenialSession` to
+/// add their own PID to someone else's filter.
+type OwnershipMap = Arc<Mutex<HashMap<String, String>>>;
 
 /// Shape of the security descriptor in SDDL form.
 ///
@@ -76,6 +87,7 @@ pub fn run_until_signal() -> Result<(), Box<dyn Error>> {
 /// thread-per-connection.
 pub fn run_until_stop_flag(stop_flag: Arc<AtomicBool>) -> Result<(), Box<dyn Error>> {
     let mut first = true;
+    let ownership: OwnershipMap = Arc::new(Mutex::new(HashMap::new()));
 
     while !stop_flag.load(Ordering::SeqCst) {
         let pipe = create_pipe_instance(first)?;
@@ -109,7 +121,7 @@ pub fn run_until_stop_flag(stop_flag: Arc<AtomicBool>) -> Result<(), Box<dyn Err
 
         // Handle the request synchronously, then disconnect + close +
         // loop back to create a fresh instance.
-        if let Err(e) = handle_connection(pipe) {
+        if let Err(e) = handle_connection(pipe, &ownership) {
             eprintln!("[mxc-learning-mode-shim] handler error: {e}");
         }
         unsafe {
@@ -121,7 +133,29 @@ pub fn run_until_stop_flag(stop_flag: Arc<AtomicBool>) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-fn handle_connection(pipe: HANDLE) -> Result<(), Box<dyn Error>> {
+fn handle_connection(pipe: HANDLE, ownership: &OwnershipMap) -> Result<(), Box<dyn Error>> {
+    // Identify the caller *before* reading the request so a malformed
+    // or oversized message can't bypass the security check.
+    let caller = match caller_context::from_pipe(pipe) {
+        Ok(c) => c,
+        Err(e) => {
+            // Without a verified identity we can't safely service this
+            // connection. Reply with a generic permission error and
+            // drop the connection.
+            let resp = ShimResponse::OpenDenialSession(OpenDenialSessionResponse::Error {
+                code: error_code::UNAUTHORIZED.to_string(),
+                message: format!("caller identification failed: {e}"),
+            });
+            let body = serde_json::to_vec(&resp)?;
+            let mut written = 0u32;
+            unsafe {
+                let _ = WriteFile(pipe, Some(&body), Some(&mut written), None);
+                let _ = FlushFileBuffers(pipe);
+            }
+            return Err(format!("caller_context: {e}").into());
+        }
+    };
+
     let mut buf = vec![0u8; PIPE_BUFFER_SIZE as usize];
     let mut bytes_read = 0u32;
 
@@ -137,7 +171,7 @@ fn handle_connection(pipe: HANDLE) -> Result<(), Box<dyn Error>> {
     }
 
     let request_bytes = &buf[..bytes_read as usize];
-    let response = handle_request(request_bytes);
+    let response = handle_request(request_bytes, &caller, pipe, ownership);
     let response_bytes = serde_json::to_vec(&response)?;
 
     let mut written = 0u32;
@@ -157,7 +191,12 @@ fn handle_connection(pipe: HANDLE) -> Result<(), Box<dyn Error>> {
 ///
 /// On any failure tears down (or refuses to extend) without leaking ETW
 /// slots.
-fn handle_request(bytes: &[u8]) -> ShimResponse {
+fn handle_request(
+    bytes: &[u8],
+    caller: &CallerContext,
+    pipe: HANDLE,
+    ownership: &OwnershipMap,
+) -> ShimResponse {
     let req: ShimRequest = match serde_json::from_slice(bytes) {
         Ok(r) => r,
         Err(e) => {
@@ -170,15 +209,20 @@ fn handle_request(bytes: &[u8]) -> ShimResponse {
 
     match req {
         ShimRequest::OpenDenialSession(open_req) => {
-            ShimResponse::OpenDenialSession(handle_open(open_req))
+            ShimResponse::OpenDenialSession(handle_open(open_req, caller, pipe, ownership))
         }
         ShimRequest::ExtendDenialSession(ext_req) => {
-            ShimResponse::ExtendDenialSession(handle_extend(ext_req))
+            ShimResponse::ExtendDenialSession(handle_extend(ext_req, caller, pipe, ownership))
         }
     }
 }
 
-fn handle_open(req: OpenDenialSessionRequest) -> OpenDenialSessionResponse {
+fn handle_open(
+    req: OpenDenialSessionRequest,
+    caller: &CallerContext,
+    pipe: HANDLE,
+    ownership: &OwnershipMap,
+) -> OpenDenialSessionResponse {
     if req.protocol_version != PROTOCOL_VERSION {
         return OpenDenialSessionResponse::Error {
             code: error_code::VERSION_MISMATCH.to_string(),
@@ -189,9 +233,28 @@ fn handle_open(req: OpenDenialSessionRequest) -> OpenDenialSessionResponse {
         };
     }
 
+    // Security check #1: under the caller's impersonation token, the
+    // caller must be able to OpenProcess the target. This delegates
+    // "who can audit whom" to Windows' own ACL system, which already
+    // models sandboxed-workload tokens correctly.
+    if !caller_context::caller_can_query_pid(pipe, req.target_pid) {
+        return OpenDenialSessionResponse::Error {
+            code: error_code::UNAUTHORIZED.to_string(),
+            message: format!(
+                "caller cannot open target PID {} (no PROCESS_QUERY_LIMITED_INFORMATION access)",
+                req.target_pid
+            ),
+        };
+    }
+
     match crate::etw_session::create_denial_session(req.target_pid, req.package_sid.as_deref()) {
         Ok(session) => {
             let name = session.name.clone();
+            // Record session ownership so a later ExtendDenialSession
+            // can only be honoured for the same caller SID.
+            if let Ok(mut map) = ownership.lock() {
+                map.insert(name.clone(), caller.sid.clone());
+            }
             // Phase 2.2: shim hands ownership of the session lifecycle
             // to the caller. By dropping `session` here without calling
             // `.stop()` we leave the ETW session active in the kernel —
@@ -212,7 +275,12 @@ fn handle_open(req: OpenDenialSessionRequest) -> OpenDenialSessionResponse {
     }
 }
 
-fn handle_extend(req: ExtendDenialSessionRequest) -> ExtendDenialSessionResponse {
+fn handle_extend(
+    req: ExtendDenialSessionRequest,
+    caller: &CallerContext,
+    pipe: HANDLE,
+    ownership: &OwnershipMap,
+) -> ExtendDenialSessionResponse {
     if req.protocol_version != PROTOCOL_VERSION {
         return ExtendDenialSessionResponse::Error {
             code: error_code::VERSION_MISMATCH.to_string(),
@@ -227,6 +295,48 @@ fn handle_extend(req: ExtendDenialSessionRequest) -> ExtendDenialSessionResponse
         return ExtendDenialSessionResponse::Error {
             code: error_code::BAD_REQUEST.to_string(),
             message: "extendDenialSession requires a non-empty pids list".into(),
+        };
+    }
+
+    // Security check #2: the SID that opened this session must match
+    // the SID extending it. Without this, an attacker who enumerated
+    // session names (e.g. via `logman query -ets`) could call
+    // ExtendDenialSession to add their PID to someone else's filter
+    // and observe their denials.
+    let recorded_sid = ownership
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&req.session_name).cloned());
+    match recorded_sid {
+        Some(sid) if sid == caller.sid => {}
+        Some(_) => {
+            return ExtendDenialSessionResponse::Error {
+                code: error_code::UNAUTHORIZED.to_string(),
+                message: format!(
+                    "caller is not the owner of session `{}`",
+                    req.session_name
+                ),
+            };
+        }
+        None => {
+            return ExtendDenialSessionResponse::Error {
+                code: error_code::UNKNOWN_SESSION.to_string(),
+                message: format!(
+                    "session `{}` is not known to this shim instance",
+                    req.session_name
+                ),
+            };
+        }
+    }
+
+    // Security check #3: each PID being added to the filter must be
+    // queryable by the caller. Same rationale as the open check.
+    if !caller_context::caller_can_query_all_pids(pipe, &req.pids) {
+        return ExtendDenialSessionResponse::Error {
+            code: error_code::UNAUTHORIZED.to_string(),
+            message:
+                "one or more PIDs in the extend request are not accessible to the caller's token"
+                    .into(),
         };
     }
 
@@ -343,9 +453,34 @@ mod tests {
         }
     }
 
+    /// Synthetic caller context for unit tests. Real callers come from
+    /// `caller_context::from_pipe`.
+    fn test_caller() -> CallerContext {
+        CallerContext {
+            pid: std::process::id(),
+            sid: "S-1-5-21-test-caller".to_string(),
+        }
+    }
+
+    /// Dummy pipe handle for unit tests that don't exercise the
+    /// impersonate-then-OpenProcess check (those are covered on the
+    /// VM since they need a real impersonation token).
+    fn dummy_pipe() -> HANDLE {
+        HANDLE::default()
+    }
+
+    fn empty_ownership() -> OwnershipMap {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
     #[test]
     fn handle_request_rejects_bad_json() {
-        match extract_open(handle_request(b"not json at all")) {
+        match extract_open(handle_request(
+            b"not json at all",
+            &test_caller(),
+            dummy_pipe(),
+            &empty_ownership(),
+        )) {
             OpenDenialSessionResponse::Error { code, .. } => {
                 assert_eq!(code, error_code::BAD_REQUEST);
             }
@@ -361,11 +496,40 @@ mod tests {
             package_sid: None,
         });
         let bytes = serde_json::to_vec(&req).unwrap();
-        match extract_open(handle_request(&bytes)) {
+        match extract_open(handle_request(
+            &bytes,
+            &test_caller(),
+            dummy_pipe(),
+            &empty_ownership(),
+        )) {
             OpenDenialSessionResponse::Error { code, .. } => {
                 assert_eq!(code, error_code::VERSION_MISMATCH);
             }
             _ => panic!("expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn handle_open_rejects_inaccessible_target_pid() {
+        // PID 0 (the idle process) can't be opened by anyone. With a
+        // dummy pipe handle the impersonation will also fail-closed,
+        // so we expect a UNAUTHORIZED error.
+        let req = ShimRequest::OpenDenialSession(OpenDenialSessionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            target_pid: 0,
+            package_sid: None,
+        });
+        let bytes = serde_json::to_vec(&req).unwrap();
+        match extract_open(handle_request(
+            &bytes,
+            &test_caller(),
+            dummy_pipe(),
+            &empty_ownership(),
+        )) {
+            OpenDenialSessionResponse::Error { code, .. } => {
+                assert_eq!(code, error_code::UNAUTHORIZED);
+            }
+            _ => panic!("expected Error variant for inaccessible PID"),
         }
     }
 
@@ -377,7 +541,12 @@ mod tests {
             pids: vec![1, 2],
         });
         let bytes = serde_json::to_vec(&req).unwrap();
-        match extract_extend(handle_request(&bytes)) {
+        match extract_extend(handle_request(
+            &bytes,
+            &test_caller(),
+            dummy_pipe(),
+            &empty_ownership(),
+        )) {
             ExtendDenialSessionResponse::Error { code, .. } => {
                 assert_eq!(code, error_code::VERSION_MISMATCH);
             }
@@ -393,11 +562,65 @@ mod tests {
             pids: vec![],
         });
         let bytes = serde_json::to_vec(&req).unwrap();
-        match extract_extend(handle_request(&bytes)) {
+        match extract_extend(handle_request(
+            &bytes,
+            &test_caller(),
+            dummy_pipe(),
+            &empty_ownership(),
+        )) {
             ExtendDenialSessionResponse::Error { code, .. } => {
                 assert_eq!(code, error_code::BAD_REQUEST);
             }
             _ => panic!("expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn handle_extend_rejects_unknown_session() {
+        let req = ShimRequest::ExtendDenialSession(ExtendDenialSessionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            session_name: "mxc-denials-i-was-never-opened".into(),
+            pids: vec![std::process::id()],
+        });
+        let bytes = serde_json::to_vec(&req).unwrap();
+        match extract_extend(handle_request(
+            &bytes,
+            &test_caller(),
+            dummy_pipe(),
+            &empty_ownership(),
+        )) {
+            ExtendDenialSessionResponse::Error { code, .. } => {
+                assert_eq!(code, error_code::UNKNOWN_SESSION);
+            }
+            _ => panic!("expected Error variant for unknown session"),
+        }
+    }
+
+    #[test]
+    fn handle_extend_rejects_different_caller_sid() {
+        let ownership = empty_ownership();
+        ownership
+            .lock()
+            .unwrap()
+            .insert(
+                "mxc-denials-shared".to_string(),
+                "S-1-5-21-other-user".to_string(),
+            );
+        let req = ShimRequest::ExtendDenialSession(ExtendDenialSessionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            session_name: "mxc-denials-shared".into(),
+            pids: vec![std::process::id()],
+        });
+        let bytes = serde_json::to_vec(&req).unwrap();
+        match extract_extend(handle_request(&bytes, &test_caller(), dummy_pipe(), &ownership)) {
+            ExtendDenialSessionResponse::Error { code, message } => {
+                assert_eq!(code, error_code::UNAUTHORIZED);
+                assert!(
+                    message.contains("not the owner"),
+                    "unexpected message: {message}"
+                );
+            }
+            _ => panic!("expected Error for SID mismatch"),
         }
     }
 }

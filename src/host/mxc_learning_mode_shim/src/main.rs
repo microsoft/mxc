@@ -33,6 +33,7 @@
 
 #![cfg(target_os = "windows")]
 
+mod caller_context;
 mod etw_session;
 mod pipe_server;
 mod service;
