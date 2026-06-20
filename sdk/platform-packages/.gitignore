@@ -1,0 +1,16 @@
+# Native binaries are staged into these packages at build time
+# (build.bat / build.sh / build-mac.sh) and published from CI.
+# They are build artifacts and must never be committed. Only the
+# package manifests and READMEs are tracked here.
+#
+# Note: this ignore rule is a source-control hygiene measure only. It does
+# NOT define the npm publish boundary — each package.json carries an explicit
+# "files" allowlist of the exact binaries it ships, so stray artifacts (logs,
+# .pdb symbols, .env, prior *.tgz) are never published even though they are
+# untracked. A "prepack" guard in each manifest additionally refuses to pack a
+# package whose primary binary was not staged.
+**
+!*/
+!*/package.json
+!*/README.md
+!.gitignore
