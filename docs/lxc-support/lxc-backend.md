@@ -39,13 +39,17 @@ The LXC backend uses the same JSON configuration schema as the Windows backends,
 
 ```json
 {
-    "script": "echo 'Hello from container'",
+    "containerId": "my-sandbox",
     "containment": "lxc",
-    "lxc": {
-        "containerName": "my-sandbox",
-        "distribution": "alpine",
-        "release": "3.20",
+    "process": {
+        "commandLine": "echo 'Hello from container'"
+    },
+    "lifecycle": {
         "destroyOnExit": true
+    },
+    "lxc": {
+        "distribution": "alpine",
+        "release": "3.20"
     },
     "filesystem": {
         "readwritePaths": ["/tmp/output"],
