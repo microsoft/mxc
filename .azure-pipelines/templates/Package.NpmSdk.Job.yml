@@ -6,12 +6,16 @@ parameters:
   type: object
   default:
     - artifact: wxc-binaries-x86_64-pc-windows-msvc
+      os: win32
       sdkArch: x64
     - artifact: wxc-binaries-aarch64-pc-windows-msvc
+      os: win32
       sdkArch: arm64
     - artifact: lxc-binaries-x86_64-unknown-linux-gnu
+      os: linux
       sdkArch: x64
     - artifact: lxc-binaries-aarch64-unknown-linux-gnu
+      os: linux
       sdkArch: arm64
 - name: ESRPInfo
   type: object
@@ -27,7 +31,11 @@ jobs:
   variables:
     outputDirectory: $(Build.SourcesDirectory)/out
     sdkDirectory: $(Build.SourcesDirectory)/sdk/node
+    platformPackagesDir: $(Build.SourcesDirectory)/sdk/node/platform-packages
+    # Artifact carrying the meta @microsoft/mxc-sdk tarball (no binaries).
     artifactBaseName: mxc-npm-sdk-package
+    # Artifact carrying the five per-platform binary package tarballs.
+    platformArtifactName: mxc-npm-sdk-platform-packages
     # Cache npm package downloads across runs to avoid re-fetching every dependency
     # tarball from the Azure Artifacts feed on each pipeline invocation.
     npm_config_cache: $(Pipeline.Workspace)/.npm
@@ -48,32 +56,31 @@ jobs:
           npm | "$(Agent.OS)"
         path: $(npm_config_cache)
 
-    # Download all artifacts dynamically
+    # Download each platform's binaries straight into its platform package
+    # directory: sdk/node/platform-packages/<os>-<arch>/.
     - ${{ each target in parameters.targets }}:
       - task: DownloadPipelineArtifact@2
         displayName: Download ${{ target.artifact }}
         inputs:
           artifact: ${{ target.artifact }}
-          path: $(sdkDirectory)/bin/${{ target.sdkArch }}
+          path: $(platformPackagesDir)/${{ target.os }}-${{ target.sdkArch }}
 
     # Pipeline artifact downloads strip Unix execute permissions.
-    # Restore +x on Linux and macOS binaries so the tarball preserves them.
-    - script: chmod +x $(sdkDirectory)/bin/*/lxc-exec
-      displayName: Restore execute permission on lxc-exec
-
+    # Restore +x on Linux and macOS binaries so the tarballs preserve them.
     - script: |
         set -euo pipefail
-        find $(sdkDirectory)/bin -name unix-test-proxy -exec chmod +x {} +
-      displayName: Restore execute permission on unix-test-proxy
+        find $(platformPackagesDir) -name lxc-exec -exec chmod +x {} +
+        find $(platformPackagesDir) -name mxc-exec-mac -exec chmod +x {} +
+      displayName: Restore execute permission on native binaries
 
-    # Drop symbol files from the npm package — symbols ship separately.
-    - script: rm -rf $(sdkDirectory)/bin/*/symbols
-      displayName: Strip symbols/ from npm package
-
+    # Symbols ship separately, and dev/test-only proxies are not shipped in the
+    # per-platform packages.
     - script: |
         set -euo pipefail
-        find $(sdkDirectory)/bin -name mxc-exec-mac -exec chmod +x {} +
-      displayName: Restore execute permission on mxc-exec-mac
+        rm -rf $(platformPackagesDir)/*/symbols
+        rm -f $(platformPackagesDir)/*/wxc-test-proxy.exe
+        rm -f $(platformPackagesDir)/*/unix-test-proxy
+      displayName: Strip symbols and dev/test-only binaries
 
     # Copy .npmrc to the SDK directory so Azure artifacts feed is used for npm install.
     - task: CopyFiles@2
@@ -96,20 +103,64 @@ jobs:
       workingDirectory: $(sdkDirectory)
       displayName: npm run build
 
-    - script: npm pack
-      workingDirectory: $(sdkDirectory)
-      displayName: npm pack
+    # Verify platform package versions and pins are in sync before packing
+    # (CI must not silently mutate tracked files — fail on drift instead).
+    - script: node scripts/sync-platform-package-versions.js --check
+      workingDirectory: $(Build.SourcesDirectory)
+      displayName: Check platform package versions
 
-    - task: CopyFiles@2
-      displayName: Copy npm package
-      inputs:
-        sourceFolder: $(sdkDirectory)
-        contents: |
-          *.tgz
-        targetFolder: '$(outputDirectory)/packages'
+    # Pack the meta package (no native binaries) into out/packages.
+    - script: |
+        set -euo pipefail
+        mkdir -p $(outputDirectory)/packages
+        npm pack --pack-destination $(outputDirectory)/packages
+      workingDirectory: $(sdkDirectory)
+      displayName: npm pack (meta package)
+
+    # Pack each per-platform package, gated on the presence of its expected
+    # primary executor (an allowlist, not an "any extra file" denylist), so a
+    # stray file can never cause a broken/partial package to be packed.
+    - script: |
+        set -euo pipefail
+        mkdir -p $(outputDirectory)/platform-packages
+        for d in $(platformPackagesDir)/*/; do
+          name=$(basename "$d")
+          case "$name" in
+            win32-*)  primary="wxc-exec.exe" ;;
+            linux-*)  primary="lxc-exec" ;;
+            darwin-*) primary="mxc-exec-mac" ;;
+            *) echo "Unknown platform package dir: $name" >&2; exit 1 ;;
+          esac
+          if [ -f "$d/$primary" ]; then
+            (cd "$d" && npm pack --pack-destination $(outputDirectory)/platform-packages)
+            echo "Packed platform package: $name"
+          else
+            echo "Skipping $name: primary binary $primary not staged (not built this run)"
+          fi
+        done
+        ls -la $(outputDirectory)/platform-packages
+      displayName: npm pack (platform packages)
+
+    # Release-completeness gate. The on-disk platform-packages dir is the
+    # canonical source: the set must be non-empty, the meta package must pin
+    # exactly those packages at their versions, every expected platform tarball
+    # must be packed, and NO stray/extra .tgz (mxc or otherwise) may be present.
+    - script: |
+        set -euo pipefail
+        META_PKG="$(sdkDirectory)/package.json" \
+        PLATFORM_PACKAGES_DIR="$(sdkDirectory)/platform-packages" \
+        TARBALL_DIR="$(outputDirectory)/platform-packages" \
+        node "$(Build.SourcesDirectory)/scripts/check-release-completeness.js"
+      displayName: Verify release completeness (canonical platform-packages set)
 
     - task: 1ES.PublishPipelineArtifact@1
-      displayName: Upload SDK as pipeline artifact
+      displayName: Upload meta SDK package
       inputs:
         path: '$(outputDirectory)/packages'
         artifactName: $(artifactBaseName)
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Upload platform binary packages
+      inputs:
+        path: '$(outputDirectory)/platform-packages'
+        artifactName: $(platformArtifactName)
