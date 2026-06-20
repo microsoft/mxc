@@ -21,9 +21,6 @@
 const { readFileSync, writeFileSync, readdirSync, existsSync } = require("fs");
 const { join } = require("path");
 
-/** Platform package directory names we manage: `<os>-<arch>`. */
-const PLATFORM_DIR_RE = /^(win32|linux|darwin)-(x64|arm64)$/;
-
 /**
  * Permissive semver check (x.y.z with optional -prerelease / +build). Avoids a
  * dependency on the `semver` package, which this scripts/ tree does not carry.
@@ -48,6 +45,8 @@ function syncPlatformPackageVersions({ repoRoot, check = false }) {
     errors: [],
     drifted: [],
     stamped: [],
+    pinDrift: [],
+    pinStamped: [],
     checked: 0,
   };
 
@@ -55,13 +54,16 @@ function syncPlatformPackageVersions({ repoRoot, check = false }) {
   const platformPackagesDir = join(sdkDir, "platform-packages");
   const metaPkgPath = join(sdkDir, "package.json");
 
-  let metaVersion;
+  let metaRaw;
+  let metaPkg;
   try {
-    metaVersion = JSON.parse(readFileSync(metaPkgPath, "utf8")).version;
+    metaRaw = readFileSync(metaPkgPath, "utf8");
+    metaPkg = JSON.parse(metaRaw);
   } catch (e) {
     result.errors.push(`Cannot read ${metaPkgPath}: ${e.message}`);
     return result;
   }
+  const metaVersion = metaPkg.version;
   if (typeof metaVersion !== "string" || metaVersion.length === 0) {
     result.errors.push("sdk/package.json has no version field");
     return result;
@@ -139,8 +141,61 @@ function syncPlatformPackageVersions({ repoRoot, check = false }) {
     }
   }
 
-  // In check mode, any drift is failure; in stamp mode, success once written.
-  result.ok = check ? result.drifted.length === 0 : true;
+  // Reconcile the meta package's optionalDependencies. It must pin EXACTLY the
+  // on-disk platform packages, each at the meta version. The filesystem is the
+  // single source of truth, so a missing pin (deleted/empty block), a stale
+  // "zombie" pin with no backing package, a wrong version, or a non-exact range
+  // are all flagged — not merely value drift among whichever keys happen to
+  // already exist.
+  const SCOPE_RE = /^@microsoft\/mxc-sdk-/;
+  const optDeps = metaPkg.optionalDependencies || {};
+  const expectedNames = pending.map((p) => p.pkg.name).sort();
+  let metaDirty = false;
+
+  // Missing or mis-pinned expected packages (exact pin required).
+  for (const name of expectedNames) {
+    if (optDeps[name] === metaVersion) {
+      continue;
+    }
+    if (check) {
+      result.pinDrift.push(
+        optDeps[name] === undefined
+          ? `optionalDependencies is missing "${name}" (expected exact "${metaVersion}")`
+          : `optionalDependencies["${name}"] is "${optDeps[name]}" but expected exact "${metaVersion}"`,
+      );
+    } else {
+      optDeps[name] = metaVersion;
+      metaDirty = true;
+      result.pinStamped.push(name);
+    }
+  }
+
+  // Stale/zombie @microsoft/mxc-sdk-* pins not backed by a platform package dir.
+  for (const name of Object.keys(optDeps)) {
+    if (SCOPE_RE.test(name) && !expectedNames.includes(name)) {
+      if (check) {
+        result.pinDrift.push(
+          `optionalDependencies has stale pin "${name}" with no platform package`,
+        );
+      } else {
+        delete optDeps[name];
+        metaDirty = true;
+        result.pinStamped.push(`-${name}`);
+      }
+    }
+  }
+
+  if (metaDirty) {
+    metaPkg.optionalDependencies = optDeps;
+    const trailing = metaRaw.endsWith("\n") ? "\n" : "";
+    writeFileSync(metaPkgPath, JSON.stringify(metaPkg, null, 2) + trailing);
+  }
+
+  // In check mode, any version or pin drift is failure; in stamp mode, success
+  // once the writes are applied.
+  result.ok = check
+    ? result.drifted.length === 0 && result.pinDrift.length === 0
+    : true;
   return result;
 }
 
@@ -160,28 +215,41 @@ if (require.main === module) {
   }
 
   if (check) {
-    if (result.drifted.length > 0) {
-      for (const name of result.drifted) {
-        console.error(`DRIFT: ${name} != meta version ${result.metaVersion}`);
-      }
+    const issues = result.drifted.length + result.pinDrift.length;
+    for (const name of result.drifted) {
+      console.error(`DRIFT: ${name} != meta version ${result.metaVersion}`);
+    }
+    for (const msg of result.pinDrift) {
+      console.error(`DRIFT: ${msg}`);
+    }
+    if (issues > 0) {
       console.error(
-        `\n${result.drifted.length} platform package version(s) drifted from ` +
-          `meta version ${result.metaVersion}.`,
+        `\n${issues} version/pin issue(s) vs meta version ${result.metaVersion}.`,
       );
       console.error("Run: node scripts/sync-platform-package-versions.js");
       process.exit(1);
     }
     console.log(
-      `Platform package versions OK: ${result.checked} package(s) match ` +
-        `meta version ${result.metaVersion}`,
+      `Platform package versions OK: ${result.checked} package(s) and the meta ` +
+        `optionalDependencies pins all match ${result.metaVersion}`,
     );
   } else {
     for (const name of result.stamped) {
       console.log(`Stamped ${name} -> ${result.metaVersion}`);
     }
+    for (const name of result.pinStamped) {
+      console.log(`Stamped optionalDependencies ${name} -> ${result.metaVersion}`);
+    }
+    const changed = result.stamped.length + result.pinStamped.length;
     console.log(
-      `Done: ${result.stamped.length} stamped to ${result.metaVersion} ` +
+      `Done: ${changed} change(s) at ${result.metaVersion} ` +
         `(${result.checked} platform package(s) checked)`,
     );
+    if (changed > 0) {
+      console.warn(
+        "Note: sdk/package.json changed — run `npm install --package-lock-only` " +
+          "in sdk/ to refresh package-lock.json.",
+      );
+    }
   }
 }
