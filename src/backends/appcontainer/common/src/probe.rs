@@ -58,6 +58,13 @@ pub struct ProbeFacts {
     /// 11 25H2 where `bfscfg.exe` locks `bfs.sys`) should refuse to
     /// run a binary that reports `true` here.
     pub bfs_compiled_in: bool,
+    /// Whether the BaseContainer (Tier 1) tier can enforce
+    /// `filesystem.deniedPaths` on this host (the `SANDBOX_CAP_DENY_PATHS` bit
+    /// from `Experimental_QuerySandboxSupport`). `false` on builds where deny
+    /// support has not yet shipped, where `deniedPaths` is rejected at launch.
+    /// Tier 3 (AppContainer + DACL) enforces `deniedPaths` via DENY ACEs
+    /// regardless of this bit; it is meaningful only for the BaseContainer tier.
+    pub base_container_supports_deny_paths: bool,
     /// Platform-agnostic UI restrictions this host can enforce.
     pub ui_capabilities: UiCapabilitySupport,
 }
@@ -117,6 +124,8 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
+        base_container_supports_deny_paths:
+            crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths(),
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
     match fallback_detector::detect(policy, /* prefer_base_container */ true) {
@@ -191,6 +200,7 @@ mod tests {
                 base_container_api_present: true,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
+                base_container_supports_deny_paths: false,
                 ui_capabilities: all_ui_capabilities(),
             },
             error: None,
@@ -225,6 +235,7 @@ mod tests {
                 base_container_api_present: false,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
+                base_container_supports_deny_paths: false,
                 ui_capabilities: UiCapabilitySupport {
                     can_block_input_injection: false,
                     can_block_input_method_changes: false,

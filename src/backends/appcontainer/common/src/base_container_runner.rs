@@ -99,6 +99,13 @@ type PfnQuerySandboxSupport = unsafe extern "system" fn(capabilities: *mut u64) 
 /// `SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX`: when clear, Tier 1 is unusable.
 const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 
+/// `SANDBOX_CAP_DENY_PATHS`: when set, the BaseContainer (Tier 1) backend can
+/// enforce `filesystem.deniedPaths`. Bit 0 reports whether the create API is
+/// callable; deny support is expected to light up on a separate bit (currently
+/// assumed bit 1). When clear, `deniedPaths` is rejected at launch and callers
+/// must rely on default-deny plus explicit `readwrite`/`readonly` grants.
+const SANDBOX_CAP_DENY_PATHS: u64 = 0x0000_0000_0000_0002;
+
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
 pub(crate) fn is_api_not_implemented(err: u32) -> bool {
@@ -162,6 +169,34 @@ impl BaseContainerRunner {
             Some(enabled) => enabled,
             None => Self::probe_create_process_feature_enabled(),
         }
+    }
+
+    /// Whether the BaseContainer (Tier 1) backend can enforce
+    /// `filesystem.deniedPaths` on this host.
+    ///
+    /// Reads the `SANDBOX_CAP_DENY_PATHS` bit from
+    /// `Experimental_QuerySandboxSupport`. Returns `false` when the query
+    /// export is absent or the bit is clear — the behavior on builds where
+    /// BaseContainer deny support has not yet shipped, where `deniedPaths` is
+    /// rejected at launch. Tier 3 (AppContainer + DACL) enforces `deniedPaths`
+    /// via DENY ACEs independently of this bit.
+    pub fn base_container_supports_deny_paths() -> bool {
+        let Some(query) = Self::load_query_sandbox_support() else {
+            return false;
+        };
+        let mut capabilities: u64 = 0;
+        // SAFETY: `query` is the resolved export; `capabilities` is a valid
+        // out-param.
+        let succeeded = unsafe { query(&mut capabilities) };
+        Self::decode_deny_capability(succeeded, capabilities)
+    }
+
+    /// Decode a `QuerySandboxSupport` result for the deny-paths capability.
+    /// `succeeded` is the export's Win32 `BOOL` return (TRUE = nonzero = the
+    /// query call succeeded), NOT an HRESULT. The capability is present only
+    /// when the call succeeded and the bit is set.
+    fn decode_deny_capability(succeeded: i32, capabilities: u64) -> bool {
+        succeeded != 0 && (capabilities & SANDBOX_CAP_DENY_PATHS) != 0
     }
 
     /// Query `Experimental_QuerySandboxSupport` for the create-process bit.
@@ -1115,6 +1150,23 @@ mod tests {
         assert!(!BaseContainerRunner::decode_create_capability(1, 0)); // bit clear
         assert!(BaseContainerRunner::decode_create_capability(1, cap)); // enabled
         assert!(BaseContainerRunner::decode_create_capability(1, cap | 0x4)); // extra bits ok
+    }
+
+    #[test]
+    fn decode_deny_capability_table() {
+        // create bit alone does not imply deny support, and vice versa.
+        let cap = SANDBOX_CAP_DENY_PATHS;
+        assert!(!BaseContainerRunner::decode_deny_capability(0, cap)); // FALSE return
+        assert!(!BaseContainerRunner::decode_deny_capability(1, 0)); // bit clear
+        assert!(BaseContainerRunner::decode_deny_capability(1, cap)); // enabled
+        assert!(!BaseContainerRunner::decode_deny_capability(
+            1,
+            SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
+        ));
+        assert!(BaseContainerRunner::decode_deny_capability(
+            1,
+            cap | SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
+        ));
     }
 
     #[test]

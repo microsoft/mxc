@@ -51,11 +51,12 @@ struct ProbeArgs {
     /// HWND (as an integer) of a window owned by the host process — i.e. a
     /// USER handle owned by a process *outside* the job. Under
     /// `JOB_OBJECT_UILIMIT_HANDLES` the contained probe must NOT be able to
-    /// use it (e.g. read its text).
+    /// use it (e.g. query its owning thread/process).
     handle_hwnd: Option<usize>,
-    /// The window title the host set on `handle_hwnd`. If the probe manages to
-    /// read this back, the handle restriction failed.
-    handle_title: Option<String>,
+    /// The process id that owns `handle_hwnd` (the host process). If the probe
+    /// can read the owner back via `GetWindowThreadProcessId` and it matches,
+    /// the handle restriction failed.
+    handle_pid: Option<u32>,
 }
 
 #[repr(C)]
@@ -85,6 +86,67 @@ struct SecurityAttributes {
     b_inherit_handle: Bool,
 }
 
+/// `MOUSEINPUT` payload of `INPUT`. Retained as the largest union member so
+/// the `INPUT` struct is sized correctly (`SendInput` validates `cbSize`); the
+/// probe only ever fills the keyboard variant, so its fields are never read.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+#[allow(dead_code)]
+struct MouseInput {
+    dx: i32,
+    dy: i32,
+    mouse_data: u32,
+    dw_flags: u32,
+    time: u32,
+    dw_extra_info: usize,
+}
+
+/// `KEYBDINPUT` payload of `INPUT`.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct KeybdInput {
+    w_vk: u16,
+    w_scan: u16,
+    dw_flags: u32,
+    time: u32,
+    dw_extra_info: usize,
+}
+
+/// Union of the `INPUT` payloads (sized by the largest member, `MOUSEINPUT`).
+#[repr(C)]
+union InputUnion {
+    mi: MouseInput,
+    ki: KeybdInput,
+}
+
+/// `INPUT` for `SendInput`.
+#[repr(C)]
+struct Input {
+    input_type: u32,
+    u: InputUnion,
+}
+
+/// `WNDCLASSEXW` for registering the probe's own transient window class. The
+/// INJECTION probe creates and foregrounds its own top-level window so the
+/// kernel's GPQ-foreground-accessible check (which precedes the injection job
+/// limit and silently skips input when the foreground belongs to another
+/// inaccessible process) passes and the injection limit is actually evaluated.
+#[repr(C)]
+struct WndClassExW {
+    cb_size: u32,
+    style: u32,
+    lpfn_wnd_proc: *const c_void,
+    cb_cls_extra: i32,
+    cb_wnd_extra: i32,
+    h_instance: Hmodule,
+    h_icon: *mut c_void,
+    h_cursor: *mut c_void,
+    hbr_background: *mut c_void,
+    lpsz_menu_name: *const u16,
+    lpsz_class_name: *const u16,
+    h_icon_sm: *mut c_void,
+}
+
 const CF_TEXT: u32 = 1;
 const SPI_SETMOUSESPEED: u32 = 0x0071;
 const SPIF_SENDCHANGE: u32 = 0x0002;
@@ -92,6 +154,21 @@ const EWX_LOGOFF: u32 = 0x00000000;
 const EWX_FORCEIFHUNG: u32 = 0x00000010;
 const DESKTOP_CREATEWINDOW: u32 = 0x0002;
 const GENERIC_ALL: u32 = 0x10000000;
+const INPUT_KEYBOARD: u32 = 1;
+const KEYEVENTF_KEYUP: u32 = 0x0002;
+/// `VK_NONAME` — a reserved no-op virtual key. Injecting a lone key-up of it is
+/// a real synthetic-input event with no side effect on any focused window.
+const VK_NONAME: u16 = 0xFC;
+/// `ERROR_ACCESS_DENIED` (Win32). The kernel's injection job-limit denial path
+/// (`DoInputCheck` → `xxxSendInput`) sets this via `UserSetLastError` when it
+/// blocks an injection, so a genuine INJECTION block is distinguishable from a
+/// zero-insert caused by some unrelated condition.
+const ERROR_ACCESS_DENIED: u32 = 5;
+/// Window styles for the probe's own transient foreground window.
+const WS_VISIBLE: u32 = 0x1000_0000;
+const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
+const SW_SHOW: i32 = 5;
+const PM_REMOVE: u32 = 0x0001;
 
 extern "system" {
     fn LoadLibraryW(name: LpcWstr) -> Hmodule;
@@ -100,6 +177,8 @@ extern "system" {
     fn GlobalFindAtomW(name: LpcWstr) -> Atom;
     fn GlobalDeleteAtom(atom: Atom) -> Atom;
     fn GetLastError() -> Dword;
+    fn GetModuleHandleW(name: LpcWstr) -> Hmodule;
+    fn GetCurrentProcessId() -> Dword;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -158,6 +237,15 @@ fn refuse_destructive(tag: &str) {
 
 fn emit_fail(tag: &str) {
     println!("{}=FAIL", tag);
+}
+
+/// Emitted when a probe could not actually exercise its restriction, so neither
+/// PASS nor FAIL would be truthful. The harness records this as a skip rather
+/// than a verdict. Used by INJECTION when the contained process cannot acquire
+/// the foreground (so `SendInput`'s foreground-accessible check pre-empts the
+/// injection job-limit check and the limit is never evaluated).
+fn emit_inconclusive(tag: &str) {
+    println!("{}=INCONCLUSIVE", tag);
 }
 
 fn emit_diag(tag: &str, reason: &str) {
@@ -472,12 +560,13 @@ fn probe_exitwindows(user32: Hmodule) {
 /// Probe the HANDLES UI restriction (`JOB_OBJECT_UILIMIT_HANDLES`).
 ///
 /// This limit does NOT stop `FindWindow` from returning HWNDs — it blocks
-/// *using* USER handles owned by processes outside the job. So isolation is
-/// verified by attempting to read the title of a window the host created
-/// (a USER handle owned by a process outside the job): `GetWindowTextW`
-/// reaches an external window via `WM_GETTEXT`, which the limit rejects at
-/// the sender. PASS means we could NOT read it (empty / blocked); FAIL means
-/// we read back the host's sentinel title.
+/// *using* USER handles owned by processes outside the job. Isolation is
+/// verified by calling `GetWindowThreadProcessId` on a window the host created
+/// (a USER handle owned by a process outside the job). Unlike `GetWindowTextW`
+/// it does not send `WM_GETTEXT`, so it is not confounded by UIPI / message
+/// filtering / the target pumping messages — it reads window-manager state
+/// directly. PASS means we could NOT resolve the owner (the limit blocked the
+/// handle use); FAIL means we read back the host's owning process id.
 fn probe_handles(user32: Hmodule, args: &ProbeArgs) {
     let hwnd_val = match args.handle_hwnd {
         Some(h) => h,
@@ -486,34 +575,281 @@ fn probe_handles(user32: Hmodule, args: &ProbeArgs) {
             return;
         }
     };
-    type GetWindowTextWFn = unsafe extern "system" fn(Hwnd, *mut u16, i32) -> i32;
-    let get_text = match get_proc(user32, "GetWindowTextW") {
-        Some(p) => unsafe { std::mem::transmute::<FarProc, GetWindowTextWFn>(p) },
+    type GetWindowThreadProcessIdFn = unsafe extern "system" fn(Hwnd, *mut Dword) -> Dword;
+    let get_wtpid = match get_proc(user32, "GetWindowThreadProcessId") {
+        Some(p) => unsafe { std::mem::transmute::<FarProc, GetWindowThreadProcessIdFn>(p) },
         None => {
-            emit_diag("HANDLES", "GetWindowTextW not resolvable");
+            emit_diag("HANDLES", "GetWindowThreadProcessId not resolvable");
             emit_fail("HANDLES");
             return;
         }
     };
 
     let hwnd = hwnd_val as Hwnd;
-    let mut buf = [0u16; 256];
-    let len = unsafe { get_text(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
-    if len <= 0 {
-        // Could not read the external window's text -> the cross-job
-        // WM_GETTEXT was blocked.
+    let mut pid: Dword = 0;
+    let tid = unsafe { get_wtpid(hwnd, &mut pid as *mut Dword) };
+    if tid == 0 {
+        // Could not access the external window handle -> the limit blocked it.
         emit_pass("HANDLES");
         return;
     }
 
-    let text = String::from_utf16_lossy(&buf[..len as usize]);
-    match args.handle_title.as_deref() {
-        Some(expected) if text == expected => emit_fail("HANDLES"),
-        Some(_) => {
-            emit_diag("HANDLES", "read unexpected window text");
+    match args.handle_pid {
+        Some(expected) if pid == expected => emit_fail("HANDLES"),
+        Some(expected) => {
+            emit_diag(
+                "HANDLES",
+                &format!("resolved owner pid {pid} != expected {expected}"),
+            );
             emit_fail("HANDLES");
         }
-        None => emit_fail("HANDLES"),
+        // We resolved an owner but have no expected pid to compare against, so
+        // we can't make an isolation verdict. Per the tool's contract (missing
+        // harness args -> DIAG + skip), emit a diagnostic instead of a FAIL that
+        // would look like a real "handle restriction failed" result. The harness
+        // always passes --handle-pid, so this only affects ad-hoc runs.
+        None => emit_diag(
+            "HANDLES",
+            &format!("resolved owner pid {pid} but no --handle-pid provided to compare (run via the harness)"),
+        ),
+    }
+}
+
+/// Probe the INJECTION UI restriction (`JOB_OBJECT_UILIMIT_INJECTION`, build
+/// 26100+). The limit blocks a job process from injecting synthetic input via
+/// `SendInput`, enforced in the kernel against the caller.
+///
+/// Subtlety that this probe must work around: in the kernel's input check
+/// (`DoInputCheck`), the **foreground-accessible** test runs *before* the
+/// injection job-limit test, and `xxxSendInput` silently `continue`s (skips the
+/// input, returns success, leaves `GetLastError` untouched) when the foreground
+/// window belongs to another process the caller cannot access. A contained
+/// (AppContainer) process on an interactive desktop almost always sees an
+/// inaccessible foreground, so a naive `SendInput` returns `inserted=1, gle=0`
+/// *without the injection limit ever being evaluated* — which would read as a
+/// false "not enforced". The kernel deliberately allows a process to inject
+/// into its **own** foreground window, so we create and foreground our own
+/// top-level window first; only then does `SendInput` reach the injection
+/// limit.
+///
+/// Outcomes:
+/// * `PASS`  — we owned the foreground and `SendInput` injected 0 of 1 with
+///   `gle=ERROR_ACCESS_DENIED`: the injection limit blocked it (enforced).
+/// * `FAIL`  — we owned the foreground but the event went through
+///   (`inserted=1, gle=0`): the limit did not block (genuinely not enforced).
+/// * `INCONCLUSIVE` — either we could not create/own a foreground window (so the
+///   foreground-accessible check would pre-empt the limit), or the injection was
+///   dropped with a `gle` other than `ERROR_ACCESS_DENIED` (blocked for some
+///   unrelated reason, not the job limit). Both are ambiguous, so the harness
+///   records a skip rather than a verdict.
+///
+/// A DIAG line always reports `inserted`/expected and `GetLastError`.
+fn probe_injection(user32: Hmodule) {
+    type RegisterClassExWFn = unsafe extern "system" fn(*const WndClassExW) -> u16;
+    #[allow(clippy::type_complexity)]
+    type CreateWindowExWFn = unsafe extern "system" fn(
+        u32,
+        *const u16,
+        *const u16,
+        u32,
+        i32,
+        i32,
+        i32,
+        i32,
+        Hwnd,
+        *mut c_void,
+        Hmodule,
+        *mut c_void,
+    ) -> Hwnd;
+    type ShowWindowFn = unsafe extern "system" fn(Hwnd, i32) -> Bool;
+    type SetForegroundWindowFn = unsafe extern "system" fn(Hwnd) -> Bool;
+    type BringWindowToTopFn = unsafe extern "system" fn(Hwnd) -> Bool;
+    type GetForegroundWindowFn = unsafe extern "system" fn() -> Hwnd;
+    type GetWindowThreadProcessIdFn = unsafe extern "system" fn(Hwnd, *mut Dword) -> Dword;
+    type DestroyWindowFn = unsafe extern "system" fn(Hwnd) -> Bool;
+    type UnregisterClassWFn = unsafe extern "system" fn(*const u16, Hmodule) -> Bool;
+    type PeekMessageWFn = unsafe extern "system" fn(*mut Msg, Hwnd, u32, u32, u32) -> Bool;
+    type TranslateMessageFn = unsafe extern "system" fn(*const Msg) -> Bool;
+    type DispatchMessageWFn = unsafe extern "system" fn(*const Msg) -> isize;
+    type SendInputFn = unsafe extern "system" fn(u32, *const Input, i32) -> u32;
+
+    macro_rules! resolve {
+        ($name:literal, $ty:ty) => {
+            match get_proc(user32, $name) {
+                Some(p) => unsafe { std::mem::transmute::<FarProc, $ty>(p) },
+                None => {
+                    emit_diag("INJECTION", concat!($name, " not resolvable"));
+                    emit_inconclusive("INJECTION");
+                    return;
+                }
+            }
+        };
+    }
+
+    let register_class = resolve!("RegisterClassExW", RegisterClassExWFn);
+    let create_window = resolve!("CreateWindowExW", CreateWindowExWFn);
+    let show_window = resolve!("ShowWindow", ShowWindowFn);
+    let set_foreground = resolve!("SetForegroundWindow", SetForegroundWindowFn);
+    let bring_to_top = resolve!("BringWindowToTop", BringWindowToTopFn);
+    let get_foreground = resolve!("GetForegroundWindow", GetForegroundWindowFn);
+    let get_wtpid = resolve!("GetWindowThreadProcessId", GetWindowThreadProcessIdFn);
+    let destroy_window = resolve!("DestroyWindow", DestroyWindowFn);
+    let unregister_class = resolve!("UnregisterClassW", UnregisterClassWFn);
+    let peek_message = resolve!("PeekMessageW", PeekMessageWFn);
+    let translate_message = resolve!("TranslateMessage", TranslateMessageFn);
+    let dispatch_message = resolve!("DispatchMessageW", DispatchMessageWFn);
+    let send_input = resolve!("SendInput", SendInputFn);
+    // DefWindowProcW is used directly as the class window procedure.
+    let def_window_proc: FarProc = match get_proc(user32, "DefWindowProcW") {
+        Some(p) => p,
+        None => {
+            emit_diag("INJECTION", "DefWindowProcW not resolvable");
+            emit_inconclusive("INJECTION");
+            return;
+        }
+    };
+
+    let class_name = to_wide("MxcInjectionProbeWindow");
+    let title = to_wide("MxcInjectionProbe");
+    let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let wc = WndClassExW {
+        cb_size: std::mem::size_of::<WndClassExW>() as u32,
+        style: 0,
+        lpfn_wnd_proc: def_window_proc,
+        cb_cls_extra: 0,
+        cb_wnd_extra: 0,
+        h_instance: hinstance,
+        h_icon: std::ptr::null_mut(),
+        h_cursor: std::ptr::null_mut(),
+        hbr_background: std::ptr::null_mut(),
+        lpsz_menu_name: std::ptr::null(),
+        lpsz_class_name: class_name.as_ptr(),
+        h_icon_sm: std::ptr::null_mut(),
+    };
+    let class_atom = unsafe { register_class(&wc as *const WndClassExW) };
+    if class_atom == 0 {
+        emit_diag(
+            "INJECTION",
+            &format!("RegisterClassExW failed gle={}", unsafe { GetLastError() }),
+        );
+        emit_inconclusive("INJECTION");
+        return;
+    }
+    let hwnd = unsafe {
+        create_window(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            0,
+            0,
+            200,
+            100,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hinstance,
+            std::ptr::null_mut(),
+        )
+    };
+    if hwnd.is_null() {
+        emit_diag(
+            "INJECTION",
+            &format!("CreateWindowExW failed gle={}", unsafe { GetLastError() }),
+        );
+        unsafe { unregister_class(class_name.as_ptr(), hinstance) };
+        emit_inconclusive("INJECTION");
+        return;
+    }
+
+    // Acquire the foreground (retry: activation can require a message pump).
+    let self_pid = unsafe { GetCurrentProcessId() };
+    let mut msg = Msg::default();
+    let mut owns_foreground = false;
+    let mut fg_pid: Dword = 0;
+    for _ in 0..20 {
+        unsafe {
+            show_window(hwnd, SW_SHOW);
+            bring_to_top(hwnd);
+            set_foreground(hwnd);
+            while peek_message(&mut msg as *mut Msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                translate_message(&msg as *const Msg);
+                dispatch_message(&msg as *const Msg);
+            }
+        }
+        let fg = unsafe { get_foreground() };
+        fg_pid = 0;
+        if !fg.is_null() {
+            unsafe { get_wtpid(fg, &mut fg_pid as *mut Dword) };
+        }
+        if !fg.is_null() && fg_pid == self_pid {
+            owns_foreground = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    if !owns_foreground {
+        emit_diag(
+            "INJECTION",
+            &format!(
+                "inconclusive: could not own foreground (fg owner pid {fg_pid} != self {self_pid}); \
+                 SendInput's foreground-accessible check pre-empts the injection limit"
+            ),
+        );
+        unsafe {
+            destroy_window(hwnd);
+            unregister_class(class_name.as_ptr(), hinstance);
+        }
+        emit_inconclusive("INJECTION");
+        return;
+    }
+
+    // We own the foreground -> the kernel reaches the injection job-limit check.
+    let input = Input {
+        input_type: INPUT_KEYBOARD,
+        u: InputUnion {
+            ki: KeybdInput {
+                w_vk: VK_NONAME,
+                w_scan: 0,
+                dw_flags: KEYEVENTF_KEYUP,
+                time: 0,
+                dw_extra_info: 0,
+            },
+        },
+    };
+    let inserted = unsafe {
+        send_input(
+            1,
+            &input as *const Input,
+            std::mem::size_of::<Input>() as i32,
+        )
+    };
+    let gle = if inserted < 1 {
+        unsafe { GetLastError() }
+    } else {
+        0
+    };
+
+    unsafe {
+        destroy_window(hwnd);
+        unregister_class(class_name.as_ptr(), hinstance);
+    }
+
+    emit_diag(
+        "INJECTION",
+        &format!("SendInput injected {inserted}/1 gle={gle} (owns foreground)"),
+    );
+    if inserted == 0 {
+        // Blocked. Only a denial by the injection job limit sets
+        // ERROR_ACCESS_DENIED; a zero-insert with any other gle was blocked for
+        // some unrelated reason, so the limit was not what we observed.
+        if gle == ERROR_ACCESS_DENIED {
+            emit_pass("INJECTION");
+        } else {
+            emit_inconclusive("INJECTION");
+        }
+    } else {
+        emit_fail("INJECTION");
     }
 }
 
@@ -588,6 +924,13 @@ fn run_probe(tag: &str, user32: Option<Hmodule>, probe_args: &ProbeArgs) {
                 emit_fail("HANDLES");
             }
         },
+        "INJECTION" => match user32 {
+            Some(h) => probe_injection(h),
+            None => {
+                emit_diag("INJECTION", "user32.dll not loadable");
+                emit_fail("INJECTION");
+            }
+        },
         "WIN32K" => match user32 {
             Some(h) if destructive_probe_allowed() => probe_win32k(h),
             Some(_) => refuse_destructive("WIN32K"),
@@ -646,7 +989,7 @@ fn parse_args(raw: Vec<String>) -> (Vec<String>, ProbeArgs) {
             Some(("atom-ready-file", value)) => args.ready_file = Some(value.to_string()),
             Some(("atom-release-file", value)) => args.release_file = Some(value.to_string()),
             Some(("handle-hwnd", value)) => args.handle_hwnd = value.parse::<usize>().ok(),
-            Some(("handle-title", value)) => args.handle_title = Some(value.to_string()),
+            Some(("handle-pid", value)) => args.handle_pid = value.parse::<u32>().ok(),
             Some(_) => {} // unknown flag: ignore
             None => tags.push(arg),
         }
@@ -660,10 +1003,10 @@ fn main() {
         eprintln!(
             "usage: wxc-ui-probe <TAG>... (or MXC_UI_PROBE_TAGS=TAG,TAG); \
              valid tags: GLOBALATOMS READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS \
-             DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES WIN32K. \
+             DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES INJECTION WIN32K. \
              GLOBALATOMS accepts --atom-host-name=, --atom-guest-name=, \
              --atom-ready-file=, --atom-release-file= for the host/guest \
-             isolation handshake; HANDLES accepts --handle-hwnd=, --handle-title= \
+             isolation handshake; HANDLES accepts --handle-hwnd=, --handle-pid= \
              for the external-window access check."
         );
         std::process::exit(2);
