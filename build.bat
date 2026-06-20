@@ -85,35 +85,30 @@ echo   Check linting
 cargo clippy --workspace --all-targets -- -D warnings || goto :error
 popd
 
-:: Copy binaries into SDK package
+:: Copy binaries into the per-platform SDK packages
 echo.
-echo Copying binaries into SDK package...
+echo Copying binaries into SDK platform packages...
 for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     set "BIN_DIR=src\target\%%T\%BUILD_CONFIG%"
     if "%%T"=="x86_64-pc-windows-msvc" (set "SDK_ARCH=x64") else (set "SDK_ARCH=arm64")
+    set "DEST=sdk\node\platform-packages\win32-!SDK_ARCH!"
     if exist "!BIN_DIR!\wxc-exec.exe" (
-        if not exist "sdk\node\bin\!SDK_ARCH!" mkdir "sdk\node\bin\!SDK_ARCH!"
-        copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-        echo   Copied !SDK_ARCH!\wxc-exec.exe
-        if exist "!BIN_DIR!\wxc-windows-sandbox-guest.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-windows-sandbox-guest.exe
+        if not exist "!DEST!" mkdir "!DEST!"
+        :: Clean previously-staged binaries so stale/flag-toggled artifacts never
+        :: persist into the package; keep only the tracked metadata files.
+        for %%F in ("!DEST!\*") do (
+            if /I not "%%~nxF"=="package.json" if /I not "%%~nxF"=="README.md" del /Q "%%F" >nul 2>&1
         )
-        if exist "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-windows-sandbox-daemon.exe
-        )
-        if exist "!BIN_DIR!\winhttp-proxy-shim.exe" (
-            copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\winhttp-proxy-shim.exe
-        )
-        if exist "!BIN_DIR!\wxc-test-proxy.exe" (
-            copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-test-proxy.exe
-        )
-        if exist "!BIN_DIR!\wxc-host-prep.exe" (
-            copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-host-prep.exe
+        if exist "!DEST!\bin" rmdir /S /Q "!DEST!\bin"
+        if exist "!DEST!\snapshots" rmdir /S /Q "!DEST!\snapshots"
+        copy /Y "!BIN_DIR!\wxc-exec.exe" "!DEST!\" >nul || goto :error
+        echo   Copied win32-!SDK_ARCH!\wxc-exec.exe
+        :: These components are always built for both Windows arches, so a missing
+        :: one is a real build failure — copy unguarded and let it fail-fast
+        :: rather than silently shipping an incomplete platform package.
+        for %%B in (wxc-windows-sandbox-guest.exe wxc-windows-sandbox-daemon.exe winhttp-proxy-shim.exe wxc-host-prep.exe) do (
+            copy /Y "!BIN_DIR!\%%B" "!DEST!\" >nul || goto :error
+            echo   Copied win32-!SDK_ARCH!\%%B
         )
         if exist "!BIN_DIR!\plm.exe" (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
@@ -122,27 +117,27 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if "%WITH_NANVIX%"=="1" (
             for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
                 if exist "!BIN_DIR!\%%B" (
-                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
-                    echo   Copied !SDK_ARCH!\%%B
+                    copy /Y "!BIN_DIR!\%%B" "!DEST!\" >nul || goto :error
+                    echo   Copied win32-!SDK_ARCH!\%%B
                 )
             )
             if exist "!BIN_DIR!\bin\kernel.elf" (
-                if not exist "sdk\node\bin\!SDK_ARCH!\bin" mkdir "sdk\node\bin\!SDK_ARCH!\bin"
-                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\node\bin\!SDK_ARCH!\bin\" >nul
-                echo   Copied !SDK_ARCH!\bin\kernel.elf
+                if not exist "!DEST!\bin" mkdir "!DEST!\bin"
+                copy /Y "!BIN_DIR!\bin\kernel.elf" "!DEST!\bin\" >nul || goto :error
+                echo   Copied win32-!SDK_ARCH!\bin\kernel.elf
             )
             for %%S in (kernel.vmem kernel.whp.cbor) do (
                 if exist "!BIN_DIR!\snapshots\%%S" (
-                    if not exist "sdk\node\bin\!SDK_ARCH!\snapshots" mkdir "sdk\node\bin\!SDK_ARCH!\snapshots"
-                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\node\bin\!SDK_ARCH!\snapshots\" >nul
-                    echo   Copied !SDK_ARCH!\snapshots\%%S
+                    if not exist "!DEST!\snapshots" mkdir "!DEST!\snapshots"
+                    copy /Y "!BIN_DIR!\snapshots\%%S" "!DEST!\snapshots\" >nul || goto :error
+                    echo   Copied win32-!SDK_ARCH!\snapshots\%%S
                 )
             )
         )
         if "%WITH_WSLC%"=="1" (
             if exist "!BIN_DIR!\wslcsdk.dll" (
-                copy /Y "!BIN_DIR!\wslcsdk.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
-                echo   Copied !SDK_ARCH!\wslcsdk.dll
+                copy /Y "!BIN_DIR!\wslcsdk.dll" "!DEST!\" >nul || goto :error
+                echo   Copied win32-!SDK_ARCH!\wslcsdk.dll
             )
         )
     )
@@ -159,9 +154,19 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
 
 :: Build npm packages
 echo.
+if defined CI (
+    echo Checking platform package versions ^(CI^)...
+    call node scripts\sync-platform-package-versions.js --check || goto :error
+) else (
+    echo Stamping platform package versions...
+    call node scripts\sync-platform-package-versions.js || goto :error
+)
+
+echo.
 echo Building npm SDK package...
 pushd sdk\node
-call npm install & call npm run build
+call npm install || goto :error
+call npm run build || goto :error
 popd
 
 echo.
@@ -172,7 +177,8 @@ pushd sdk\node\tests\integration
 :: stale packed copy. Force a refresh of the @microsoft/mxc-sdk link so
 :: type-checking sees the dist we just rebuilt above.
 if exist node_modules\@microsoft\mxc-sdk rmdir /s /q node_modules\@microsoft\mxc-sdk
-call npm install & call npm run build
+call npm install || goto :error
+call npm run build || goto :error
 popd
 
 echo.
