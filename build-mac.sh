@@ -108,7 +108,7 @@ done
 
 echo "Rust build complete."
 
-# Copy binaries to SDK bin directory.
+# Copy binaries into the per-platform SDK packages.
 copy_binary_for_target() {
     local triple="$1"
     local sdk_arch
@@ -118,17 +118,28 @@ copy_binary_for_target() {
         *) echo "Skipping unknown triple $triple"; return ;;
     esac
 
-    local bin_dir="$SDK_DIR/bin/$sdk_arch"
-    mkdir -p "$bin_dir"
+    local bin_dir="$SDK_DIR/platform-packages/darwin-$sdk_arch"
+
+    # Only stage into shipped platform packages. darwin-x64 (Intel) is not a
+    # shipped package (no manifest); its binary stays in src/target for local
+    # dev resolution via the monorepo fallback.
+    if [ ! -f "$bin_dir/package.json" ]; then
+        echo "Skipping darwin-$sdk_arch: no platform package; binary remains in src/target."
+        return
+    fi
+
+    # Clean previously-staged binaries so stale artifacts never persist into the
+    # package; keep only the tracked metadata files.
+    find "$bin_dir" -mindepth 1 ! -name package.json ! -name README.md -delete
 
     local src="$SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-mac"
-    if [ -f "$src" ]; then
-        cp "$src" "$bin_dir/mxc-exec-mac"
-        chmod +x "$bin_dir/mxc-exec-mac"
-        echo "Copied $src -> $bin_dir/mxc-exec-mac"
-    else
-        echo "Warning: $src not found, skipping copy"
+    if [ ! -f "$src" ]; then
+        echo "Error: mxc-exec-mac not found at $src — cannot stage an incomplete darwin-$sdk_arch package." >&2
+        exit 1
     fi
+    cp "$src" "$bin_dir/mxc-exec-mac"
+    chmod +x "$bin_dir/mxc-exec-mac"
+    echo "Copied $src -> $bin_dir/mxc-exec-mac"
 }
 
 for triple in "${TARGETS[@]}"; do
@@ -139,6 +150,13 @@ done
 if [ "$BUILD_SDK" = true ]; then
     echo ""
     echo "=== Building TypeScript SDK ==="
+    if [ -n "${CI:-}" ]; then
+        echo "Checking platform package versions (CI)..."
+        node "$SCRIPT_DIR/scripts/sync-platform-package-versions.js" --check
+    else
+        echo "Stamping platform package versions..."
+        node "$SCRIPT_DIR/scripts/sync-platform-package-versions.js"
+    fi
     cd "$SDK_DIR"
     npm install --ignore-scripts
     npm run build

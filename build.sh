@@ -100,7 +100,7 @@ cargo clippy "${LXC_PACKAGES[@]}" --all-targets "${CARGO_FEATURES[@]}" -- -D war
 
 echo "Rust build complete."
 
-# Copy binaries to SDK bin directory
+# Stage the Linux binary into its per-platform package dir (sdk/platform-packages/linux-<arch>)
 ARCH=$(uname -m)
 case $ARCH in
     x86_64)
@@ -119,30 +119,44 @@ case $ARCH in
 esac
 
 if [ -n "$TARGET_TRIPLE" ]; then
-    BIN_DIR="$SDK_DIR/bin/$SDK_ARCH"
+    BIN_DIR="$SDK_DIR/platform-packages/linux-$SDK_ARCH"
     mkdir -p "$BIN_DIR"
 
-    if [ "$BUILD_TYPE" = "release" ]; then
-        cp "$SRC_DIR/target/release/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/release/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find lxc-exec binary to copy"
-        cp "$SRC_DIR/target/release/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/release/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find linux-test-proxy binary to copy"
-    else
-        cp "$SRC_DIR/target/debug/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find lxc-exec binary to copy"
-        cp "$SRC_DIR/target/debug/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find linux-test-proxy binary to copy"
+    # Clean previously-staged binaries so stale/flag-toggled artifacts never
+    # persist into the package; keep only the tracked metadata files.
+    find "$BIN_DIR" -mindepth 1 ! -name package.json ! -name README.md -delete
+
+    # Resolve the lxc-exec build output (explicit --target dir or default dir).
+    LXC_SRC=""
+    for candidate in \
+        "$SRC_DIR/target/$TARGET_TRIPLE/$BUILD_TYPE/lxc-exec" \
+        "$SRC_DIR/target/$BUILD_TYPE/lxc-exec"; do
+        if [ -f "$candidate" ]; then
+            LXC_SRC="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$LXC_SRC" ]; then
+        echo "Error: lxc-exec ($BUILD_TYPE) was not found in src/target — cannot stage an incomplete linux-$SDK_ARCH package." >&2
+        exit 1
     fi
+
+    cp "$LXC_SRC" "$BIN_DIR/"
+    echo "Copied $LXC_SRC -> $BIN_DIR/lxc-exec"
 fi
 
 # Build SDK
 if [ "$BUILD_SDK" = true ]; then
     echo ""
     echo "=== Building TypeScript SDK ==="
+    if [ -n "${CI:-}" ]; then
+        echo "Checking platform package versions (CI)..."
+        node "$SCRIPT_DIR/scripts/sync-platform-package-versions.js" --check
+    else
+        echo "Stamping platform package versions..."
+        node "$SCRIPT_DIR/scripts/sync-platform-package-versions.js"
+    fi
     cd "$SDK_DIR"
     npm install --ignore-scripts 2>/dev/null || true
     npm run build
