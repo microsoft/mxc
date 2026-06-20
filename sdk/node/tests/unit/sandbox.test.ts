@@ -4,7 +4,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
-import { resolveExecutableAndArgs } from '../../src/helper.js';
+import { resolveExecutableAndArgs, resolveBinaryAndCommonArgs } from '../../src/helper.js';
+import {
+  getPlatformPackageName,
+  getPlatformSupport,
+  _setDevMode,
+  _setPlatformPackageDir,
+  _setHostId,
+  _resetPlatformSupportCache,
+} from '../../src/platform.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { platformSkip } from './test-helpers.js';
 
@@ -1196,5 +1204,79 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         'did not expect --allow-testing-features for a url proxy',
       );
     });
+  });
+});
+
+describe('resolveBinaryAndCommonArgs missing-binary diagnostics (#512 F7)', () => {
+  it('throws an error naming the host optional platform package when no binary resolves', () => {
+    // On a FULLY-supported host with no platform package and no MXC_BIN_DIR, the
+    // first-spawn error must name the optional package the user should install
+    // (the install-time skip is silent, so this is the only place it surfaces).
+    // Guard on the full platform support, not just the tuple: a Linux host
+    // without LXC/Bubblewrap (e.g. a CI runner) is an unsupported *platform*
+    // even though linux-x64 is a supported *tuple*, and would hit the
+    // platform-support gate before the binary-resolution path under test.
+    if (!getPlatformSupport().isSupported) {
+      return;
+    }
+    const prevBinDir = process.env.MXC_BIN_DIR;
+    delete process.env.MXC_BIN_DIR;
+    _setDevMode(false); // production: trust only MXC_BIN_DIR + the platform package
+    _setPlatformPackageDir(null); // ...and there is no platform package
+    try {
+      assert.throws(
+        () => resolveBinaryAndCommonArgs('{}', {}),
+        (err: unknown) =>
+          err instanceof Error &&
+          /not found/.test(err.message) &&
+          err.message.includes(getPlatformPackageName()),
+      );
+    } finally {
+      _setDevMode(null);
+      _setPlatformPackageDir(undefined);
+      if (prevBinDir === undefined) delete process.env.MXC_BIN_DIR;
+      else process.env.MXC_BIN_DIR = prevBinDir;
+    }
+  });
+
+  it('honors an explicit executablePath even on an unsupported host (#512 F5)', () => {
+    // Regression guard for F5: an explicit binary path is honored BEFORE the
+    // platform-support gate, so a self-built binary runs without skipPlatformCheck.
+    const { executablePath } = resolveBinaryAndCommonArgs('{}', {
+      executablePath: process.execPath,
+    });
+    assert.strictEqual(executablePath, process.execPath);
+  });
+
+  it('rejects an executablePath that exists but is not a runnable file (#512 C1)', () => {
+    // A directory (or, on POSIX, a non-executable file) exists but cannot be
+    // spawned. It must be rejected up-front with an actionable message rather
+    // than accepted and failed later with an opaque spawn error (EISDIR/EACCES).
+    assert.throws(
+      () => resolveBinaryAndCommonArgs('{}', { executablePath: process.cwd() }),
+      (err: unknown) => err instanceof Error && /Not an executable file/.test(err.message),
+    );
+  });
+
+  it('public resolveExecutableAndArgs honors executablePath on an unsupported host (#512 F5 round 2)', () => {
+    // The PUBLIC one-shot path has its OWN unsupported-platform gate; an explicit
+    // executablePath must bypass it too, not just the low-level resolver. Force an
+    // unsupported tuple (Intel macOS) via the host override.
+    _setHostId({ platform: 'darwin', arch: 'x64' });
+    _resetPlatformSupportCache();
+    try {
+      const config: ContainerConfig = {
+        version: '0.5.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hi' },
+      };
+      const { executablePath } = resolveExecutableAndArgs(config, {
+        executablePath: process.execPath,
+      });
+      assert.strictEqual(executablePath, process.execPath);
+    } finally {
+      _setHostId(null);
+      _resetPlatformSupportCache();
+    }
   });
 });
