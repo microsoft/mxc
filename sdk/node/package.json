@@ -12,8 +12,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "bin/",
     "dist/",
+    "scripts/postinstall-check.cjs",
     "LICENSE.md",
     "README.md"
   ],
@@ -25,6 +25,7 @@
     "test": "npm run test:unit",
     "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js dist-tests/tests/unit/errors.test.js dist-tests/tests/unit/state-aware-types.test.js dist-tests/tests/unit/state-aware.test.js dist-tests/tests/unit/platform.test.js dist-tests/tests/unit/wire-conformance.test.js dist-tests/tests/unit/wire-conformance-state-aware.test.js",
     "test:integration": "cd tests/integration && npm install && npm run build && npm test",
+    "postinstall": "node scripts/postinstall-check.cjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -47,6 +48,13 @@
   "dependencies": {
     "node-pty": "^1.2.0-beta.12",
     "semver": "^7.7.4"
+  },
+  "optionalDependencies": {
+    "@microsoft/mxc-sdk-win32-x64": "0.7.0",
+    "@microsoft/mxc-sdk-win32-arm64": "0.7.0",
+    "@microsoft/mxc-sdk-linux-x64": "0.7.0",
+    "@microsoft/mxc-sdk-linux-arm64": "0.7.0",
+    "@microsoft/mxc-sdk-darwin-arm64": "0.7.0"
   },
   "engines": {
     "node": ">=18.0.0"
