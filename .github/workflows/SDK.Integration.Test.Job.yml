@@ -9,19 +9,37 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # NOTE (round-3 P1-6): win32-arm64 and linux-arm64 are built and packed
+        # but not yet exercised end-to-end here. The arm64 sandbox paths
+        # (AppContainer on win32-arm64, Bubblewrap on linux-arm64) are unverified
+        # on the hosted arm64 runners (windows-11-arm / ubuntu-24.04-arm) and
+        # enabling them needs runner-side validation we haven't done. This is a
+        # conscious deferral, tracked separately — NOT an accidental gap.
         include:
           - os_label: windows
             runner: windows-latest
+            platform_slug: win32-x64
           - os_label: linux
             runner: ubuntu-latest
+            platform_slug: linux-x64
           - os_label: macos
             runner: macos-14
+            platform_slug: darwin-arm64
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: sdk/tests/integration
     env:
       MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+      # Proxy-E2E enforcement is default-ON for EVERY lane (round-3 P0-2): a lane
+      # that actually runs the sandbox but forgets to wire up the test proxy will
+      # hard-fail (evaluateProxyAvailability throws) instead of silently skipping
+      # green. Lanes that legitimately cannot run the sandbox on a public runner
+      # (Windows/macOS set MXC_SKIP_OS_BUILD_DEPENDENT_TESTS, so `sandboxSkipReason`
+      # short-circuits the proxy describe BEFORE the availability check) skip
+      # cleanly without tripping this. The Linux lane runs the unprivileged
+      # Bubblewrap sandbox, so it MUST provide the proxy (see below).
+      MXC_REQUIRE_PROXY_TESTS: '1'
       # Skip network-dependent LXC tests on GHA. Capability probe
       # 27576588204 confirmed lxc-net.service + lxcbr0 + dnsmasq come up
       # cleanly on every supported runner, but the alpine download
@@ -41,19 +59,35 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/tests/integration/package-lock.json
 
-      - name: Download SDK package
+      - name: Download meta SDK package
         uses: actions/download-artifact@v4
         with:
           name: npm-packages
           path: sdk-pkg
 
-      - name: Install dependencies + SDK from artifact
+      - name: Download platform binary packages
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-platform-packages
+          path: sdk-platform-pkg
+
+      # Real consumer shape: install the meta package plus the host's matching
+      # platform tarball (the meta's optionalDependencies point at the registry,
+      # where these may not be published yet).
+      - name: Install dependencies + SDK from artifacts
         shell: bash
         run: |
           set -euo pipefail
           npm ci
-          SDK_TGZ=$(ls ../../../sdk-pkg/*.tgz | head -n1)
-          npm install "$SDK_TGZ"
+          META_TGZ=$(ls "$GITHUB_WORKSPACE"/sdk-pkg/*.tgz | head -n1)
+          PLAT_TGZ=$(ls "$GITHUB_WORKSPACE"/sdk-platform-pkg/microsoft-mxc-sdk-${{ matrix.platform_slug }}-*.tgz | head -n1)
+          if [ -z "$META_TGZ" ] || [ -z "$PLAT_TGZ" ]; then
+            echo "Missing meta ($META_TGZ) or platform ($PLAT_TGZ) tarball" >&2
+            exit 1
+          fi
+          echo "Meta:     $META_TGZ"
+          echo "Platform: $PLAT_TGZ"
+          npm install "$META_TGZ" "$PLAT_TGZ"
 
       - name: npm run build
         run: npm run build
@@ -62,23 +96,6 @@ jobs:
         if: matrix.os_label == 'linux'
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # Installs the LXC + Bubblewrap substrate the SDK integration
-          # tests need. Capability probe 27576588204 confirmed these
-          # packages install cleanly on ubuntu-latest, ubuntu-22.04, and
-          # ubuntu-24.04-arm and that lxc-net.service brings up the
-          # lxcbr0 bridge with dnsmasq serving DHCP on 10.0.3.0/24, so
-          # the long-standing "classic LXC is unreliable on GHA
-          # ubuntu-latest" assumption no longer holds for the non-network
-          # LXC paths (create/start/attach/mount/exit-code).
-          # The network-dependent LXC tests stay gated by
-          # MXC_SKIP_LXC_NETWORK_TESTS=1 (see the job-level env block)
-          # because the alpine download template's eth0 doesn't pick up
-          # a DHCP lease within the test window on these runners.
-          # The ADO equivalent
-          # (.azure-pipelines/templates/SDK.Integration.Test.Job.yml)
-          # installs a similar but narrower set and sets the same skip
-          # env var for the same reason (compounded by 1ES Hosted Pool
-          # egress filtering).
           packages: bubblewrap lxc lxc-utils dnsmasq-base iptables bridge-utils
           version: 1.3
 
@@ -86,29 +103,50 @@ jobs:
         if: matrix.os_label == 'linux'
         shell: bash
         run: |
-          # cache-apt-pkgs-action restores package files but does not
-          # re-run postinst hooks on cache hit, so AppArmor profiles
-          # (lxc-container-default) and the lxc-net bridge service may
-          # not be active. Load/start them explicitly so lxc-start
-          # doesn't abort with an AppArmor denial.
           sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
           sudo systemctl start lxc-net 2>/dev/null || true
 
-      - name: Restore execute permission on mxc-exec-mac
+      # The platform package ships the executor but NOT the dev/test-only proxies
+      # (#512). For the Linux proxy E2E tests, source linux-test-proxy from the
+      # raw build artifact and REQUIRE the tests to run (no silent green-skip).
+      - name: Provide linux-test-proxy (Linux only)
+        if: matrix.os_label == 'linux'
+        uses: actions/download-artifact@v4
+        with:
+          name: lxc-binaries-x86_64-unknown-linux-gnu
+          path: test-proxy-bin
+
+      - name: Restore execute permission on lxc-exec + linux-test-proxy (Linux)
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=$(find node_modules/@microsoft -name lxc-exec -print -quit)
+          if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "lxc-exec not found" && exit 1; fi
+          find "$GITHUB_WORKSPACE/test-proxy-bin" -name linux-test-proxy -exec chmod +x {} +
+
+      - name: Restore execute permission on mxc-exec-mac (macOS)
         if: matrix.os_label == 'macos'
         shell: bash
         run: |
           set -euo pipefail
-          BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
-          if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
+          BIN=$(find node_modules/@microsoft -name mxc-exec-mac -print -quit)
+          if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found in installed packages" && exit 1; fi
 
       # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
-      # preserves the env vars above.
+      # preserves the env vars above (including the job-wide MXC_REQUIRE_PROXY_TESTS).
+      # The Linux lane runs the sandbox, so it provides the proxy via
+      # MXC_TEST_PROXY_DIR; the enforcement is inherited from the job env so it
+      # can't regress per-lane. Windows/macOS skip the proxy describe via
+      # sandboxSkipReason (no runnable sandbox on a public runner) before the
+      # availability check, so they need no proxy.
       - name: npm test
         shell: bash
         run: |
           if [ "${{ matrix.os_label }}" = "linux" ]; then
-            sudo -E npm test
+            sudo -E env \
+              MXC_TEST_PROXY_DIR="$GITHUB_WORKSPACE/test-proxy-bin" \
+              npm test
           else
             npm test
           fi

@@ -80,7 +80,14 @@ fn main() {
 /// the given architecture.
 fn extract_nupkg(arch: &str) -> Result<PathBuf, String> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    // The crate lives at <repo>/src/backends/wslc/common, so the committed nupkg
+    // at <repo>/external/wslc-sdk is FOUR levels up (common -> wslc -> backends
+    // -> src -> repo root). (Historically this crate sat two levels under the
+    // repo root, hence the previously-too-shallow `../..`, which silently
+    // resolved to a nonexistent dir and left wslcsdk.dll unbuilt.)
     let nupkg_dir = PathBuf::from(&manifest_dir)
+        .join("..")
+        .join("..")
         .join("..")
         .join("..")
         .join("external")

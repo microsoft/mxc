@@ -68,18 +68,48 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      # Stage the shipped payload from the platform package's `files` allowlist
+      # (single source of truth), preserving the bin/ + snapshots/ substructure,
+      # and HARD-FAIL if any allowlisted build artifact is missing. Deriving the
+      # list from the manifest (not a hardcoded list) means a new payload entry —
+      # e.g. the micro-VM nanvixd.exe / kernel snapshots / wslcsdk.dll — can never
+      # be silently dropped from the artifact again. The dev/test-only proxy is
+      # staged separately (it is NOT shipped, but the integration job needs it).
+      - name: Stage shipped payload (manifest-driven)
+        shell: pwsh
+        run: |
+          $tuple = if ($env:TARGET -eq 'x86_64-pc-windows-msvc') { 'win32-x64' } else { 'win32-arm64' }
+          $rel = "$env:GITHUB_WORKSPACE/src/target/${{ matrix.target }}/release"
+          $manifest = "$env:GITHUB_WORKSPACE/sdk/platform-packages/$tuple/package.json"
+          $stage = "$env:GITHUB_WORKSPACE/stage/${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $files = & node "$env:GITHUB_WORKSPACE/scripts/platform-package-payload.js" $manifest
+          if ($LASTEXITCODE -ne 0) { Write-Error "failed to read payload list from $manifest"; exit 1 }
+          $missing = @()
+          foreach ($f in $files) {
+            $src = Join-Path $rel $f
+            if (-not (Test-Path $src)) { $missing += $f; continue }
+            $dest = Join-Path $stage $f
+            New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+            Copy-Item $src $dest -Force
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "Missing shipped payload file(s) for ${tuple}: $($missing -join ', ')"
+            exit 1
+          }
+          # Test-only proxy (not part of the manifest / not shipped) for the
+          # integration job; best-effort, not a failure if absent.
+          $proxy = Join-Path $rel 'wxc-test-proxy.exe'
+          if (Test-Path $proxy) { Copy-Item $proxy (Join-Path $stage 'wxc-test-proxy.exe') -Force }
+          Write-Host "Staged $($files.Count) payload file(s) for $tuple."
+          Get-ChildItem -Recurse $stage | Select-Object FullName
+        env:
+          TARGET: ${{ matrix.target }}
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: wxc-binaries-${{ matrix.target }}
-          path: |
-            src/target/${{ matrix.target }}/release/wxc-exec.exe
-            src/target/${{ matrix.target }}/release/wxc-host-prep.exe
-            src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
-            src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
-            src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe
-            src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
-            src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
-            src/target/${{ matrix.target }}/release/wslcsdk.dll
-          if-no-files-found: warn
+          path: stage/${{ matrix.target }}/
+          if-no-files-found: error
           retention-days: 1
