@@ -38,6 +38,94 @@ pub struct ParseResult {
     pub requested_capabilities: HashSet<String>,
     pub need_ui: bool,
     pub ui_event_count: u32,
+    pub ui_events: Vec<UiEvent>,
+}
+
+/// Parsed payload of a UI-injection (EventID=27) event.
+///
+/// The provider emits these via a manifest whose schema isn't always
+/// available to consumers, so the event commonly surfaces inside
+/// `<ProcessingErrorData><EventPayload>` as an opaque hex blob. We
+/// decode it manually using the documented layout:
+///
+/// * `process_name` — UTF-8 / ASCII bytes, null-terminated.
+/// * `process_id` — 8 bytes, little-endian.
+/// * `sequence_number` — 8 bytes, little-endian.
+/// * `category` — 4 bytes, little-endian.
+/// * `detail` — 4 bytes, little-endian.
+/// * `denied` — 0, 1, or 4 trailing bytes; when present, non-zero means denied.
+#[derive(Debug, Clone)]
+pub struct UiEvent {
+    pub process_name: String,
+    pub process_id: u64,
+    pub sequence_number: u64,
+    pub category: u32,
+    pub detail: u32,
+    pub denied: Option<bool>,
+}
+
+fn read_u32_le(bytes: &[u8], off: &mut usize) -> Option<u32> {
+    let end = off.checked_add(4)?;
+    if end > bytes.len() {
+        return None;
+    }
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&bytes[*off..end]);
+    let v = u32::from_le_bytes(arr);
+    *off = end;
+    Some(v)
+}
+
+fn read_u64_le(bytes: &[u8], off: &mut usize) -> Option<u64> {
+    let end = off.checked_add(8)?;
+    if end > bytes.len() {
+        return None;
+    }
+    let mut arr = [0u8; 8];
+    arr.copy_from_slice(&bytes[*off..end]);
+    let v = u64::from_le_bytes(arr);
+    *off = end;
+    Some(v)
+}
+
+/// Decode a UI-injection event payload from its hex representation.
+/// Returns `None` if the hex is malformed or the payload is shorter
+/// than the documented fixed-width tail.
+pub fn parse_ui_event_payload(payload_hex: &str) -> Option<UiEvent> {
+    let bytes = extract_caps::parse_hex_string(payload_hex).ok()?;
+
+    // Process name: bytes up to (but not including) the first 0x00.
+    // The terminator itself is consumed before the fixed-width tail.
+    let null_pos = bytes.iter().position(|&b| b == 0)?;
+    let process_name = String::from_utf8_lossy(&bytes[..null_pos]).into_owned();
+    let mut off = null_pos + 1;
+
+    let process_id = read_u64_le(&bytes, &mut off)?;
+    let sequence_number = read_u64_le(&bytes, &mut off)?;
+    let category = read_u32_le(&bytes, &mut off)?;
+    let detail = read_u32_le(&bytes, &mut off)?;
+
+    // `denied` is optional: payloads observed in the wild trail with 0, 1, or
+    // 4 bytes for it. Anything else means the payload doesn't match.
+    let denied = match bytes.len().checked_sub(off) {
+        Some(0) => None,
+        Some(1) => Some(bytes[off] != 0),
+        Some(4) => {
+            let mut a = [0u8; 4];
+            a.copy_from_slice(&bytes[off..off + 4]);
+            Some(u32::from_le_bytes(a) != 0)
+        }
+        _ => return None,
+    };
+
+    Some(UiEvent {
+        process_name,
+        process_id,
+        sequence_number,
+        category,
+        detail,
+        denied,
+    })
 }
 
 fn to_wide_z(s: &str) -> Vec<u16> {
@@ -148,6 +236,10 @@ struct ParsedEvent {
     /// Inner text of the 5th EventData child (index 4) which carries the
     /// DACL ACE hex blob, when present.
     complex_data_4: Option<String>,
+    /// Hex-encoded `<ProcessingErrorData><EventPayload>` body for events
+    /// whose manifest schema can't be resolved at render time. UI
+    /// injection events (id 27) are commonly delivered this way.
+    processing_error_payload: Option<String>,
 }
 
 fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
@@ -203,6 +295,16 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
         }
     }
 
+    // <ProcessingErrorData> child carries an opaque hex EventPayload for
+    // events the consumer can't render via the provider manifest.
+    let processing_error_payload = root
+        .children()
+        .find(|n| n.has_tag_name("ProcessingErrorData"))
+        .and_then(|n| n.children().find(|c| c.has_tag_name("EventPayload")))
+        .and_then(|n| n.text())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
+
     Some(ParsedEvent {
         event_id,
         time_created,
@@ -210,6 +312,7 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
         thread_id,
         event_data,
         complex_data_4,
+        processing_error_payload,
     })
 }
 
@@ -273,6 +376,7 @@ pub fn parse_events(
     let mut requested_capabilities: HashSet<String> = HashSet::new();
     let mut need_ui = false;
     let mut ui_event_count: u32 = 0;
+    let mut ui_events: Vec<UiEvent> = Vec::new();
 
     for xml in &xml_events {
         let Some(ev) = parse_event_xml(xml) else {
@@ -280,11 +384,39 @@ pub fn parse_events(
         };
 
         if ev.event_id == 27 {
-            if verbose {
-                println!("UI Injection event observed");
-            }
             need_ui = true;
             ui_event_count += 1;
+            if let Some(hex) = ev.processing_error_payload.as_deref() {
+                match parse_ui_event_payload(hex) {
+                    Some(ui) => {
+                        if verbose {
+                            println!(
+                                "UI Injection event: process={} pid={} seq={} category=0x{:08X} detail=0x{:08X} denied={}",
+                                ui.process_name,
+                                ui.process_id,
+                                ui.sequence_number,
+                                ui.category,
+                                ui.detail,
+                                match ui.denied {
+                                    Some(true) => "true",
+                                    Some(false) => "false",
+                                    None => "(absent)",
+                                },
+                            );
+                        }
+                        ui_events.push(ui);
+                    }
+                    None => {
+                        if verbose {
+                            println!(
+                                "UI Injection event observed (payload did not match expected layout: {hex})"
+                            );
+                        }
+                    }
+                }
+            } else if verbose {
+                println!("UI Injection event observed (no ProcessingErrorData payload)");
+            }
             continue;
         }
 
@@ -368,6 +500,7 @@ pub fn parse_events(
         requested_capabilities,
         need_ui,
         ui_event_count,
+        ui_events,
     })
 }
 

@@ -370,7 +370,7 @@ pub fn resolve_sid<'a>(sid_bytes: &[u8], table: &'a [CapabilityEntry]) -> SidRes
     }
 }
 
-fn parse_hex_string(hex_input: &str) -> Result<Vec<u8>> {
+pub(crate) fn parse_hex_string(hex_input: &str) -> Result<Vec<u8>> {
     let cleaned: String = hex_input.chars().filter(|c| !c.is_whitespace()).collect();
     if cleaned.is_empty() || !cleaned.len().is_multiple_of(2) {
         return Err(anyhow!(

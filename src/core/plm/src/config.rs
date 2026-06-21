@@ -394,6 +394,7 @@ pub fn write_detection_summary(
     events: &[LearningModeAccessEvent],
     capabilities: &HashSet<String>,
     ui_event_count: u32,
+    ui_events: &[crate::event_parser::UiEvent],
 ) {
     use std::collections::BTreeMap;
 
@@ -419,10 +420,37 @@ pub fn write_detection_summary(
     }
 
     println!();
-    println!("Detected UI injection events ({ui_event_count}):");
+    println!(
+        "Detected UI injection events ({ui_event_count}, parsed {}):",
+        ui_events.len()
+    );
     if ui_event_count == 0 {
         println!("  (none)");
     } else {
+        if ui_events.is_empty() {
+            println!("  (no payloads could be decoded)");
+        } else {
+            for ui in ui_events {
+                let denied = match ui.denied {
+                    Some(true) => "denied",
+                    Some(false) => "allowed",
+                    None => "denied=(absent)",
+                };
+                println!(
+                    "  + {} pid={} seq={} category=0x{:08X} detail=0x{:08X} {}",
+                    if ui.process_name.is_empty() {
+                        "(unknown)"
+                    } else {
+                        ui.process_name.as_str()
+                    },
+                    ui.process_id,
+                    ui.sequence_number,
+                    ui.category,
+                    ui.detail,
+                    denied,
+                );
+            }
+        }
         println!("  + ui.disable will be set to false (UI subsystem required)");
     }
 

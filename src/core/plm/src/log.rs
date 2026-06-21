@@ -76,6 +76,7 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
         &parse.valid_access_events,
         &parse.requested_capabilities,
         parse.ui_event_count,
+        &parse.ui_events,
     );
     write_requested_capabilities_summary(&parse.requested_capabilities, verbose);
 
