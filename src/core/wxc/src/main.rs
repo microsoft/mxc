@@ -116,6 +116,13 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
+    /// Audit mode: inject the `permissiveLearningMode` capability into the
+    /// AppContainer policy so denied operations are logged but allowed.
+    /// DEBUG BUILDS ONLY — release builds strip this capability for safety.
+    #[cfg(debug_assertions)]
+    #[arg(long)]
+    audit: bool,
+
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
     /// CLI flags remain usable after the config path. Examples:
@@ -297,6 +304,73 @@ fn config_input(cli: &Cli) -> Option<(String, bool)> {
         Some((p.clone(), false))
     } else {
         cli.config_path.as_ref().map(|p| (p.clone(), false))
+    }
+}
+
+/// Resolve the on-disk config path passed to `wxc-exec`, if any. Returns
+/// `None` when the config was supplied as `--config-base64` (no file path)
+/// or not at all. Used by `--audit` to thread `plm stop --config-path` so
+/// findings can be merged back into the source policy.
+#[cfg(debug_assertions)]
+fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
+    if cli.config_base64.is_some() {
+        return None;
+    }
+    cli.config
+        .as_ref()
+        .or(cli.config_path.as_ref())
+        .map(std::path::PathBuf::from)
+}
+
+/// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
+/// same install directory. Returns `None` when the current exe path
+/// can't be resolved.
+#[cfg(debug_assertions)]
+fn plm_exe_path() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("plm.exe")))
+}
+
+/// Run `plm.exe <subcommand> <args...>` synchronously and route stdio
+/// through to wxc-exec's console. Audit tracing is a best-effort
+/// diagnostic; missing-binary / spawn / non-zero-exit conditions are
+/// logged but never abort the wxc-exec flow.
+#[cfg(debug_assertions)]
+fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) {
+    use std::fmt::Write as _;
+
+    let Some(plm) = plm_exe_path() else {
+        let _ = writeln!(logger, "[audit] could not resolve plm.exe path");
+        return;
+    };
+    if !plm.exists() {
+        let _ = writeln!(
+            logger,
+            "[audit] plm.exe not found at {} - skipping",
+            plm.display()
+        );
+        return;
+    }
+
+    let mut summary = String::new();
+    let _ = write!(summary, "[audit] running {}", plm.display());
+    for a in args {
+        let _ = write!(summary, " {}", a.to_string_lossy());
+    }
+    let _ = writeln!(logger, "{summary}");
+    eprintln!("{summary}");
+
+    match std::process::Command::new(&plm).args(args).status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            let _ = writeln!(logger, "[audit] plm exited with status {s}");
+            eprintln!("[audit] plm exited with status {s}");
+        }
+        Err(e) => {
+            let _ = writeln!(logger, "[audit] failed to spawn plm: {e}");
+            eprintln!("[audit] failed to spawn plm: {e}");
+        }
     }
 }
 
@@ -721,6 +795,27 @@ fn main() {
     };
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
 
+    // --audit injects permissiveLearningMode so denied operations are logged
+    // but allowed. Debug-only: release builds don't expose the flag and the
+    // config parser strips the capability anyway.
+    #[cfg(debug_assertions)]
+    if cli.audit
+        && !request
+            .policy
+            .capabilities
+            .iter()
+            .any(|c| c == "permissiveLearningMode")
+    {
+        request
+            .policy
+            .capabilities
+            .push("permissiveLearningMode".to_string());
+        logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced (DEBUG BUILD ONLY)\n");
+        eprintln!(
+            "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
+        );
+    }
+
     // Final validation: a command line must come from somewhere. If neither
     // the policy nor the CLI supplied one we cannot proceed.
     if request.script_code.is_empty() {
@@ -975,10 +1070,40 @@ fn main() {
         }
     };
 
+    // --audit: start the PLM (permissive learning mode) WPR trace before
+    // the runner spawns the container so we capture access-denied events
+    // for the lifetime of the workload. The matching `plm stop` below
+    // tears the trace down and (when the policy came from a file)
+    // merges findings back into it. Both calls are best-effort.
+    #[cfg(debug_assertions)]
+    let audit_config_file = if cli.audit {
+        run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
+        config_file_path(&cli)
+    } else {
+        None
+    };
+
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    // Tear down the PLM trace after the container exits, regardless of
+    // its exit code. Done before the runner is dropped so the trace
+    // tooling sees a fully-quiesced workload.
+    #[cfg(debug_assertions)]
+    if cli.audit {
+        let mut stop_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from("stop")];
+        if let Some(cfg) = audit_config_file.as_ref() {
+            stop_args.push(std::ffi::OsString::from("--config-path"));
+            stop_args.push(cfg.clone().into_os_string());
+        }
+        let borrowed: Vec<&std::ffi::OsStr> = stop_args
+            .iter()
+            .map(std::ffi::OsString::as_os_str)
+            .collect();
+        run_plm_command(&borrowed, &mut logger);
+    }
 
     // Explicitly drop the runner before retrieving the parked DACL
     // manager so any runner-internal resources holding child handles

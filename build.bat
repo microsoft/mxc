@@ -9,6 +9,7 @@ set "WITH_NANVIX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
 set "WITH_HYPERLIGHT=0"
+set "WITH_BFS=0"
 
 :: Parse arguments
 :parse_args
@@ -22,6 +23,7 @@ if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_arg
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
 if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
+if /i "%~1"=="--with-bfs" ( set "WITH_BFS=1" & shift & goto :parse_args )
 if /i "%~1"=="--help"    ( goto :usage )
 if /i "%~1"=="-h"        ( goto :usage )
 echo Unknown argument: %~1
@@ -40,10 +42,15 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
 :: Build flags
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
+:: plm is a standalone Windows-only binary that does not consume any of the
+:: workspace feature flags above, so it uses its own profile/target-only flags.
+set "PLM_FLAGS=--target"
+if "%BUILD_CONFIG%"=="release" set "PLM_FLAGS=--release --target"
 if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
+if "%WITH_BFS%"=="1" set "CARGO_FLAGS=--features tier2_bfs %CARGO_FLAGS%"
 
 :: Build Rust
 echo.
@@ -66,11 +73,14 @@ if not errorlevel 1 (
 if "%BUILD_ALL%"=="1" (
     echo   Target: x86_64-pc-windows-msvc
     cargo build %CARGO_FLAGS% x86_64-pc-windows-msvc || goto :error
+    cargo build -p plm %PLM_FLAGS% x86_64-pc-windows-msvc || goto :error
     echo   Target: aarch64-pc-windows-msvc
     cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error
+    cargo build -p plm %PLM_FLAGS% aarch64-pc-windows-msvc || goto :error
 ) else (
     echo   Target: %BUILD_ARCH%
     cargo build %CARGO_FLAGS% %BUILD_ARCH% || goto :error
+    cargo build -p plm %PLM_FLAGS% %BUILD_ARCH% || goto :error
 )
 echo   Check formatting
 cargo fmt --all -- --check || goto :error
@@ -107,6 +117,14 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if exist "!BIN_DIR!\wxc-host-prep.exe" (
             copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-host-prep.exe
+        )
+        if exist "!BIN_DIR!\plm.exe" (
+            copy /Y "!BIN_DIR!\plm.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\plm.exe
+        )
+        if exist "!BIN_DIR!\plm.wprp" (
+            copy /Y "!BIN_DIR!\plm.wprp" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\plm.wprp
         )
         if "%WITH_NANVIX%"=="1" (
             for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
@@ -218,6 +236,7 @@ echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
 echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)
+echo   --with-bfs                Enable AppContainer Tier 2 BFS (Brokered File System) support
 echo   -h, --help        Show this help
 echo.
 echo Default: builds release for the current machine architecture.

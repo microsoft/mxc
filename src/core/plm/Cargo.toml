@@ -1,0 +1,28 @@
+[package]
+name = "plm"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "plm"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+serde = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = "0.4"
+roxmltree = "0.20"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_EventLog",
+    "Win32_System_Diagnostics_Etw",
+] }
+
+[build-dependencies]
+mxc_build_common.workspace = true
