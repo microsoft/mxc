@@ -4,13 +4,13 @@
 //! Tests for the ported SDK helpers: policy discovery, platform support, and
 //! the SandboxPolicy -> ExecutionRequest builder.
 
-use mxc::{
+use mxc_sdk::{
     available_tools_policy, build_request, platform_support, temporary_files_policy,
     user_profile_policy, SandboxPolicy,
 };
 
 #[cfg(target_os = "macos")]
-use mxc::spawn_sandbox;
+use mxc_sdk::spawn_sandbox;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -130,14 +130,14 @@ fn build_request_rejects_empty_version() {
     };
 
     let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
-    assert_eq!(err.code, mxc::MxcErrorCode::MalformedRequest);
+    assert_eq!(err.code, mxc_sdk::MxcErrorCode::MalformedRequest);
 }
 
 #[test]
 fn build_request_maps_filesystem_and_timeout() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc::policy::FilesystemSection {
+        filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -161,7 +161,7 @@ fn build_request_host_rules_require_outbound() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: None,
-        network: Some(mxc::policy::NetworkSection {
+        network: Some(mxc_sdk::policy::NetworkSection {
             allow_outbound: false,
             allow_local_network: false,
             allowed_hosts: vec!["example.com".to_string()],
@@ -195,7 +195,7 @@ fn build_request_host_rules_require_outbound() {
 fn build_request_then_run_seatbelt() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc::policy::FilesystemSection {
+        filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -221,7 +221,7 @@ fn build_request_then_run_seatbelt() {
 
 #[test]
 fn build_request_preserves_clipboard_policy() {
-    use mxc::policy::ClipboardPolicy as P;
+    use mxc_sdk::policy::ClipboardPolicy as P;
     use wxc_common::models::ClipboardPolicy as Wire;
 
     for (input, expected) in [
@@ -234,7 +234,7 @@ fn build_request_preserves_clipboard_policy() {
             version: "0.7.0-alpha".to_string(),
             filesystem: None,
             network: None,
-            ui: Some(mxc::policy::UiSection {
+            ui: Some(mxc_sdk::policy::UiSection {
                 allow_windows: true,
                 clipboard: input,
                 allow_input_injection: false,
@@ -276,7 +276,7 @@ fn build_request_maps_network_hosts() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: None,
-        network: Some(mxc::policy::NetworkSection {
+        network: Some(mxc_sdk::policy::NetworkSection {
             allow_outbound: true,
             allow_local_network: true,
             allowed_hosts: vec!["allowed.example".to_string()],

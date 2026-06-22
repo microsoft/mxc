@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Streaming backend dispatch for the `mxc` library.
+//! Streaming backend dispatch for the `mxc-sdk` library.
 //!
 //! Spawns the right [`SandboxProcess`] for the request's containment backend.
 //! It lives here — rather than in `wxc_common` — because constructing a
@@ -9,13 +9,19 @@
 //! `wxc_common` must not (it is the cross-platform foundation those backends
 //! build on).
 //!
-//! Only the backends the `mxc` library officially supports are handled here:
+//! Only the backends the `mxc-sdk` library officially supports are handled here:
 //! ProcessContainer (Windows AppContainer / BaseContainer fallback),
 //! Bubblewrap (Linux), and Seatbelt (macOS). Every other backend — including
 //! the experimental ones (Windows Sandbox, IsolationSession, MicroVM,
 //! Hyperlight, WSLC) and LXC (no streaming path suitable for the library) —
 //! returns [`MxcError::unsupported_containment`]; callers that need those must
 //! drive the standalone executor binaries.
+//!
+//! **Provisional.** This in-crate backend selection is a temporary home. A
+//! follow-up will introduce a dedicated `mxc` engine crate that both `mxc-sdk`
+//! and the executor binaries call into; the selection/spawn logic here — and the
+//! host probing in `platform.rs` — moves there, leaving `mxc-sdk` a thin
+//! streaming wrapper over the engine.
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
@@ -34,7 +40,7 @@ fn ensure_host_supported() -> Result<(), MxcError> {
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         Err(MxcError::unsupported_containment(
-            "the mxc library has no sandbox backend for this host OS \
+            "the mxc-sdk library has no sandbox backend for this host OS \
              (supported: Windows, Linux, macOS)",
         ))
     }
@@ -66,7 +72,7 @@ pub fn spawn_runner(
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
-            "the mxc library does not yet support streaming for the '{}' backend",
+            "the mxc-sdk library does not yet support streaming for the '{}' backend",
             other.wire_name()
         ))),
     }

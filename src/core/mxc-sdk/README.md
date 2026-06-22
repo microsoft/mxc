@@ -1,4 +1,4 @@
-# `mxc`
+# `mxc-sdk`
 
 An importable Rust library for starting [MXC](../../../README.md) sandboxes
 **in-process**, without ever allocating a pty.
@@ -12,7 +12,7 @@ returning a handle for live bidirectional stdio and termination.
 
 ```rust,no_run
 use std::io::Read;
-use mxc::{build_request, spawn_sandbox, SandboxPolicy};
+use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy};
 
 // Describe what to restrict, turn it into a request, fill in the command.
 let policy = SandboxPolicy {
@@ -57,7 +57,7 @@ allocated; the streams are ordinary pipes.
 
 ```rust,no_run
 use std::io::{Read, Write};
-use mxc::{build_request, spawn_sandbox, SandboxPolicy};
+use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy};
 
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),

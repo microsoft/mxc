@@ -7,6 +7,10 @@
 //! Reports whether MXC can run on the current host and which containment
 //! backends are available. This lets callers stop depending on the TypeScript
 //! SDK for platform discovery.
+//!
+//! **Provisional.** Like the backend dispatch in `dispatch.rs`, this host
+//! probing is a temporary home; it moves to the future `mxc` engine crate that
+//! both `mxc-sdk` and the executor binaries will share.
 
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
@@ -24,7 +28,7 @@ pub struct PlatformSupport {
 /// Detect MXC support on the current host.
 ///
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
-/// `mxc` library can actually run. On Windows the isolation tier and UI
+/// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
 /// capabilities come from the in-process fallback probe rather than a
 /// `wxc-exec --probe` subprocess.
 pub fn platform_support() -> PlatformSupport {

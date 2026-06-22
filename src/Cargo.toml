@@ -4,7 +4,7 @@ members = [
     "core/wxc_common",
     "core/lxc",
     "core/mxc_darwin",
-    "core/mxc",
+    "core/mxc-sdk",
     "core/mxc_pty",
     "core/mxc_build_common",
     "core/generated/base_container_specification",

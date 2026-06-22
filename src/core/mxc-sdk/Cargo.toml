@@ -1,12 +1,12 @@
 [package]
-name = "mxc"
+name = "mxc-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Importable library for starting MXC sandboxes in-process (no pty, streaming stdio)."
 
 [lib]
-name = "mxc"
+name = "mxc_sdk"
 path = "src/lib.rs"
 
 [dependencies]

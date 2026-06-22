@@ -1,18 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! End-to-end tests for the `mxc` library against the host backend.
+//! End-to-end tests for the `mxc-sdk` library against the host backend.
 //!
 //! Seatbelt-specific cases run only on macOS. The library exposes only the
 //! streaming API, so "run to completion" here means build a request via
 //! [`build_request`], `spawn_sandbox`, read the (untaken)
-//! stdout/stderr, then [`wait`](mxc::SandboxProcess::wait) for the exit code —
+//! stdout/stderr, then [`wait`](mxc_sdk::SandboxProcess::wait) for the exit code —
 //! the same path the consumer drives.
 
-use mxc::{build_request, MxcErrorCode, SandboxPolicy};
+use mxc_sdk::{build_request, MxcErrorCode, SandboxPolicy};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc::{spawn_sandbox, ExecutionRequest};
+use mxc_sdk::{spawn_sandbox, ExecutionRequest};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
@@ -20,7 +20,7 @@ use mxc::{spawn_sandbox, ExecutionRequest};
 fn seatbelt_request(command: &str, timeout_ms: u32) -> ExecutionRequest {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc::policy::FilesystemSection {
+        filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -45,7 +45,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> ExecutionRequest {
 fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> ExecutionRequest {
     let policy = SandboxPolicy {
         version: version.to_string(),
-        filesystem: Some(mxc::policy::FilesystemSection {
+        filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -77,7 +77,7 @@ struct RunOutcome {
 /// Spawn a request, read its stdout/stderr concurrently, and wait for exit —
 /// the streaming-API equivalent of running to completion.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn spawn_and_wait(request: ExecutionRequest) -> Result<RunOutcome, mxc::MxcError> {
+fn spawn_and_wait(request: ExecutionRequest) -> Result<RunOutcome, mxc_sdk::MxcError> {
     use std::io::Read;
 
     fn read_thread(
@@ -246,7 +246,7 @@ fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
 // (AppContainer timeout killed only the direct child, so it never fired).
 // They run a real sandbox, so they require an elevated, host-prepped Windows
 // host (see docs/host-prep.md) and are therefore `#[ignore]`d — run them with
-// `cargo test -p mxc -- --ignored` on such a host.
+// `cargo test -p mxc-sdk -- --ignored` on such a host.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]

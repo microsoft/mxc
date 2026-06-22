@@ -8,7 +8,7 @@
 //! [`SandboxPolicy`] via `build_request`, fill in the command, then
 //! `spawn_sandbox`.
 
-use mxc::{build_request, spawn_sandbox, ExecutionRequest, MxcErrorCode, SandboxPolicy};
+use mxc_sdk::{build_request, spawn_sandbox, ExecutionRequest, MxcErrorCode, SandboxPolicy};
 
 /// A minimal request for the cross-platform error-path cases (never actually
 /// runs a process). `build_request` resolves the host's default backend.
@@ -31,7 +31,7 @@ fn minimal_request(command: &str) -> ExecutionRequest {
 fn seatbelt_request(command: &str, timeout_ms: u32) -> ExecutionRequest {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc::policy::FilesystemSection {
+        filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -203,7 +203,7 @@ fn streaming_processcontainer_bidirectional_stdio() {
 
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc::policy::FilesystemSection {
+        filesystem: Some(mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `mxc` — an importable library for starting MXC sandboxes in-process.
+//! `mxc-sdk` — an importable library for starting MXC sandboxes in-process.
 //!
 //! Build an [`ExecutionRequest`] from a [`SandboxPolicy`] with [`build_request`]
 //! (or construct one directly), then hand it to [`spawn_sandbox`]:
@@ -10,7 +10,7 @@
 //! [`SandboxProcess`] handle for live bidirectional stdio and termination.
 //!
 //! ```no_run
-//! use mxc::{build_request, spawn_sandbox, SandboxPolicy};
+//! use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy};
 //!
 //! // Turn a policy into a request, fill in the command, and spawn it.
 //! let policy = SandboxPolicy {

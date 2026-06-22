@@ -1380,7 +1380,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc"
+name = "mxc-sdk"
 version = "0.7.0"
 dependencies = [
  "appcontainer_common",
