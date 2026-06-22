@@ -3,8 +3,8 @@
 An importable Rust library for starting [MXC](../../../README.md) sandboxes
 **in-process**, without ever allocating a pty.
 
-Build an `ExecutionRequest` from a [`SandboxPolicy`] (or construct one
-directly), then hand it to [`spawn_sandbox`]: it selects the
+Build a `SandboxRequest` from a [`SandboxPolicy`], then hand it to
+[`spawn_sandbox`]: it selects the
 right containment backend for the host and spawns the sandboxed process —
 returning a handle for live bidirectional stdio and termination.
 
@@ -23,7 +23,7 @@ let policy = SandboxPolicy {
     timeout_ms: Some(10_000),
 };
 let mut request = build_request(&policy, None)?;
-request.script_code = "echo hello".to_string();
+request.set_script_code("echo hello");
 
 let mut proc = spawn_sandbox(request)?;
 let mut stdout = proc.take_stdout().unwrap();
@@ -38,9 +38,9 @@ assert_eq!(exit_code, 0);
 resolves the host's containment backend (Seatbelt on macOS, Bubblewrap on
 Linux, ProcessContainer on Windows) and mirrors the SDK's field mapping and
 network validation, building the same wire config internally and running it
-through the shared parser. The returned [`ExecutionRequest`] has an empty
-command line — set `script_code` (and any `working_directory` / `env`) before
-spawning.
+through the shared parser. The returned [`SandboxRequest`] has an empty
+command line — set the command with [`SandboxRequest::set_script_code`] (and any
+working directory / env) before spawning.
 
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
@@ -67,7 +67,7 @@ let policy = SandboxPolicy {
     timeout_ms: None,
 };
 let mut request = build_request(&policy, None)?;
-request.script_code = "cat".to_string(); // echoes stdin until EOF
+request.set_script_code("cat"); // echoes stdin until EOF
 
 let mut proc = spawn_sandbox(request)?;
 let mut stdin = proc.take_stdin().unwrap();

@@ -191,3 +191,69 @@ fn spawn_process_container(
         "ProcessContainer (AppContainer / BaseContainer) is only available on Windows",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_runner;
+    use crate::policy::{build_request, SandboxPolicy};
+    use wxc_common::logger::{Logger, Mode};
+    use wxc_common::mxc_error::MxcErrorCode;
+
+    fn minimal_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn streaming_rejects_dry_run() {
+        // `dry_run` ("validate, don't execute") has no process to stream, so the
+        // streaming spawn rejects it. The public `SandboxRequest` can't set it,
+        // so drive the dispatch directly with the internal model.
+        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        request.inner.dry_run = true;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("dry_run must be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn streaming_rejects_gui_access() {
+        // A windowed (guiAccess) app needs inherited stdio, so it can't stream
+        // over pipes — the backend must reject it rather than drop the GUI cap.
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: Some(crate::policy::FilesystemSection {
+                readwrite_paths: vec!["/tmp".to_string()],
+                readonly_paths: vec![],
+                denied_paths: vec![],
+                clear_policy_on_exit: None,
+            }),
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let mut request = build_request(&policy, None).expect("build_request");
+        request.set_script_code("echo hi");
+        request
+            .inner
+            .seatbelt
+            .as_mut()
+            .expect("seatbelt config on macOS")
+            .gui_access = true;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("guiAccess must be rejected"),
+            Err(e) => e,
+        };
+        assert!(err.message.contains("guiAccess"), "got: {}", err.message);
+    }
+}

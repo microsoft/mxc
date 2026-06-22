@@ -12,12 +12,12 @@
 use mxc_sdk::{build_request, MxcErrorCode, SandboxPolicy};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::{spawn_sandbox, ExecutionRequest};
+use mxc_sdk::{spawn_sandbox, SandboxRequest};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
 #[cfg(target_os = "macos")]
-fn seatbelt_request(command: &str, timeout_ms: u32) -> ExecutionRequest {
+fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: Some(mxc_sdk::policy::FilesystemSection {
@@ -35,14 +35,14 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> ExecutionRequest {
         },
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.script_code = command.to_string();
+    request.set_script_code(command);
     request
 }
 
 /// A Windows ProcessContainer request exposing `C:\Windows\Temp` read-write.
 /// The policy `version` selects the tier (>= 0.5 implies BaseContainer).
 #[cfg(target_os = "windows")]
-fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> ExecutionRequest {
+fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> SandboxRequest {
     let policy = SandboxPolicy {
         version: version.to_string(),
         filesystem: Some(mxc_sdk::policy::FilesystemSection {
@@ -60,7 +60,7 @@ fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> E
         },
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.script_code = command.to_string();
+    request.set_script_code(command);
     request
 }
 
@@ -77,7 +77,7 @@ struct RunOutcome {
 /// Spawn a request, read its stdout/stderr concurrently, and wait for exit —
 /// the streaming-API equivalent of running to completion.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn spawn_and_wait(request: ExecutionRequest) -> Result<RunOutcome, mxc_sdk::MxcError> {
+fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::MxcError> {
     use std::io::Read;
 
     fn read_thread(
@@ -155,7 +155,7 @@ fn seatbelt_does_not_leak_host_environment() {
 fn seatbelt_env_reaches_sandboxed_process() {
     // An env entry set on the request must reach the sandboxed child.
     let mut request = seatbelt_request("echo $MXC_TEST_VAR", 10000);
-    request.env = vec!["MXC_TEST_VAR=injected-value".to_string()];
+    request.set_env(vec!["MXC_TEST_VAR=injected-value".to_string()]);
 
     let result = spawn_and_wait(request).expect("seatbelt run should succeed");
 

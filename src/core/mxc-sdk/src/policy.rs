@@ -558,12 +558,49 @@ pub struct SandboxPolicy {
     pub timeout_ms: Option<u32>,
 }
 
-/// Build an [`ExecutionRequest`] from a [`SandboxPolicy`], resolving the host's
+/// A spawnable sandbox request, built from a [`SandboxPolicy`] by
+/// [`build_request`]. Fill in the command with
+/// [`set_script_code`](Self::set_script_code) — and optionally a working
+/// directory or environment — then hand it to
+/// [`spawn_sandbox`](crate::spawn_sandbox).
+///
+/// This is the SDK's own request type; the internal execution model it maps to
+/// is an implementation detail callers don't depend on.
+#[derive(Debug)]
+pub struct SandboxRequest {
+    /// The internal execution model. `pub(crate)` so the SDK's own modules and
+    /// unit tests can map/inspect it, while it stays out of the public API.
+    pub(crate) inner: ExecutionRequest,
+}
+
+impl SandboxRequest {
+    /// Set the command the sandbox runs — the `/bin/sh -c` body on Unix, the
+    /// command line on Windows.
+    pub fn set_script_code(&mut self, script_code: impl Into<String>) -> &mut Self {
+        self.inner.script_code = script_code.into();
+        self
+    }
+
+    /// Override the working directory the sandboxed child starts in. Left unset,
+    /// it defaults to the policy's resolution.
+    pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
+        self.inner.working_directory = working_directory.into();
+        self
+    }
+
+    /// Set the child's environment as `KEY=VALUE` entries.
+    pub fn set_env(&mut self, env: Vec<String>) -> &mut Self {
+        self.inner.env = env;
+        self
+    }
+}
+
+/// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
-/// The returned request has an empty command line; callers set `script_code`
-/// (and `working_directory` / `env`) before streaming it via
-/// [`crate::spawn_sandbox`].
+/// The returned request has an empty command line; set the command with
+/// [`SandboxRequest::set_script_code`] (and any working directory / env) before
+/// streaming it via [`crate::spawn_sandbox`].
 ///
 /// Mirrors the SDK field mapping and validation (network proxy/host-filtering
 /// constraints) for the supported backends. Internally it builds the same
@@ -572,7 +609,7 @@ pub struct SandboxPolicy {
 pub fn build_request(
     policy: &SandboxPolicy,
     container_name: Option<&str>,
-) -> Result<ExecutionRequest, MxcError> {
+) -> Result<SandboxRequest, MxcError> {
     // The shared parser tolerates an empty schema version (treats it as
     // "unset"), but the SDK requires it; reject it here for parity.
     if policy.version.is_empty() {
@@ -584,8 +621,9 @@ pub fn build_request(
     // Map the wire config straight to a request — no base64/file round-trip.
     // The command line is intentionally empty here (the caller fills
     // `script_code` before running), so tolerate a missing command.
-    wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
-        .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))
+    let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+        .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
+    Ok(SandboxRequest { inner })
 }
 
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
@@ -875,12 +913,8 @@ mod tests {
         );
     }
 
-    // macOS Seatbelt cannot enforce hostnames, so the host-filtering guard must
-    // apply there (cr-003). These assert the fail-closed behavior on macOS.
-    #[cfg(target_os = "macos")]
     use super::{build_request, NetworkSection, SandboxPolicy};
 
-    #[cfg(target_os = "macos")]
     fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
         SandboxPolicy {
             version: "0.7.0-alpha".to_string(),
@@ -891,6 +925,8 @@ mod tests {
         }
     }
 
+    // macOS Seatbelt cannot enforce hostnames, so the host-filtering guard must
+    // apply there (cr-003). These assert the fail-closed behavior on macOS.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_allowed_hosts_without_outbound_is_rejected() {
@@ -924,5 +960,87 @@ mod tests {
             build_request(&policy, None).is_ok(),
             "outbound-allowed host filter should build"
         );
+    }
+
+    #[test]
+    fn build_request_maps_filesystem_and_timeout() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: Some(super::FilesystemSection {
+                readwrite_paths: vec!["/tmp".to_string()],
+                readonly_paths: vec![],
+                denied_paths: vec![],
+                clear_policy_on_exit: None,
+            }),
+            network: None,
+            ui: None,
+            timeout_ms: Some(5000),
+        };
+
+        // Inspect the internal model the SDK maps to — a unit concern; the public
+        // API only hands back the opaque `SandboxRequest`.
+        let request =
+            build_request(&policy, Some("test-container")).expect("build_request should succeed");
+        assert_eq!(request.inner.script_timeout, 5000);
+        assert!(request
+            .inner
+            .policy
+            .readwrite_paths
+            .contains(&"/tmp".to_string()));
+        assert!(request.inner.script_code.is_empty());
+    }
+
+    #[test]
+    fn build_request_preserves_clipboard_policy() {
+        use super::ClipboardPolicy as P;
+        use wxc_common::models::ClipboardPolicy as Wire;
+
+        for (input, expected) in [
+            (P::None, Wire::None),
+            (P::Read, Wire::Read),
+            (P::Write, Wire::Write),
+            (P::All, Wire::All),
+        ] {
+            let policy = SandboxPolicy {
+                version: "0.7.0-alpha".to_string(),
+                filesystem: None,
+                network: None,
+                ui: Some(super::UiSection {
+                    allow_windows: true,
+                    clipboard: input,
+                    allow_input_injection: false,
+                }),
+                timeout_ms: None,
+            };
+            let request = build_request(&policy, None).expect("build_request should succeed");
+            assert_eq!(
+                request.inner.policy.ui.clipboard, expected,
+                "clipboard {input:?} should map to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_request_maps_network_hosts() {
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            allow_local_network: true,
+            allowed_hosts: vec!["allowed.example".to_string()],
+            blocked_hosts: vec!["blocked.example".to_string()],
+            ..Default::default()
+        });
+        let request = build_request(&policy, None)
+            .expect("build_request should accept host rules with allowOutbound");
+        assert!(request
+            .inner
+            .policy
+            .allowed_hosts
+            .contains(&"allowed.example".to_string()));
+        assert!(request
+            .inner
+            .policy
+            .blocked_hosts
+            .contains(&"blocked.example".to_string()));
+        assert!(request.inner.policy.allow_local_network);
     }
 }

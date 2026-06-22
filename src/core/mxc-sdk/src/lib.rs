@@ -3,8 +3,8 @@
 
 //! `mxc-sdk` — an importable library for starting MXC sandboxes in-process.
 //!
-//! Build an [`ExecutionRequest`] from a [`SandboxPolicy`] with [`build_request`]
-//! (or construct one directly), then hand it to [`spawn_sandbox`]:
+//! Build a [`SandboxRequest`] from a [`SandboxPolicy`] with [`build_request`],
+//! then hand it to [`spawn_sandbox`]:
 //! it selects the right containment backend for the host and spawns the
 //! sandboxed process **without ever allocating a pty**, returning a
 //! [`SandboxProcess`] handle for live bidirectional stdio and termination.
@@ -21,7 +21,7 @@
 //!     timeout_ms: None,
 //! };
 //! let mut request = build_request(&policy, None)?;
-//! request.script_code = "echo hi".to_string();
+//! request.set_script_code("echo hi");
 //! let mut proc = spawn_sandbox(request)?;
 //! let exit_code = proc.wait()?;
 //! println!("exit={exit_code}");
@@ -50,28 +50,23 @@ use dispatch::spawn_runner;
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    FilesystemPolicyResult, SandboxPolicy,
+    FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
 };
 
-// Re-export the wire/model types callers need so they don't have to depend
-// on `wxc_common` directly.
-pub use wxc_common::models::ExecutionRequest;
+// Re-export the error + streaming-handle types callers need so they don't have
+// to depend on `wxc_common` directly.
 pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
 pub use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 
 use wxc_common::logger::{Logger, Mode};
 
-/// Spawn a sandbox from a fully-built [`ExecutionRequest`].
+/// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
+/// the command, and any working directory / env, filled in).
 ///
-/// Typically the request comes from [`build_request`] (with `script_code`, and
-/// any working directory / env, filled in), but callers may also construct one
-/// directly. Returns a [`SandboxProcess`] for live bidirectional stdio and
-/// termination; no pty is allocated. Any stdout/stderr stream the caller does
-/// not `take_*` is drained and discarded by [`wait`](SandboxProcess::wait).
-///
-/// A request with `dry_run` set is rejected with
-/// [`MxcErrorCode::MalformedRequest`]: there is no process to stream.
-pub fn spawn_sandbox(request: ExecutionRequest) -> Result<Box<dyn SandboxProcess>, MxcError> {
+/// Returns a [`SandboxProcess`] for live bidirectional stdio and termination;
+/// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
+/// drained and discarded by [`wait`](SandboxProcess::wait).
+pub fn spawn_sandbox(request: SandboxRequest) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let mut logger = Logger::new(Mode::Buffer);
-    spawn_runner(&request, &mut logger)
+    spawn_runner(&request.inner, &mut logger)
 }

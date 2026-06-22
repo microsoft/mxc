@@ -4,31 +4,18 @@
 //! Streaming (handle-based) API tests: live stdio, kill, and wait.
 //! Seatbelt-specific cases run only on macOS.
 //!
-//! These drive the real consumer path: build an [`ExecutionRequest`] from a
+//! These drive the real consumer path: build a [`SandboxRequest`] from a
 //! [`SandboxPolicy`] via `build_request`, fill in the command, then
 //! `spawn_sandbox`.
 
-use mxc_sdk::{build_request, spawn_sandbox, ExecutionRequest, MxcErrorCode, SandboxPolicy};
+#![cfg(target_os = "macos")]
 
-/// A minimal request for the cross-platform error-path cases (never actually
-/// runs a process). `build_request` resolves the host's default backend.
-fn minimal_request(command: &str) -> ExecutionRequest {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.script_code = command.to_string();
-    request
-}
+use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest};
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).
 #[cfg(target_os = "macos")]
-fn seatbelt_request(command: &str, timeout_ms: u32) -> ExecutionRequest {
+fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: Some(mxc_sdk::policy::FilesystemSection {
@@ -46,42 +33,8 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> ExecutionRequest {
         },
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.script_code = command.to_string();
+    request.set_script_code(command);
     request
-}
-
-#[test]
-fn streaming_rejects_dry_run() {
-    let mut request = minimal_request("echo hi");
-    request.dry_run = true;
-    let err = match spawn_sandbox(request) {
-        Ok(_) => panic!("dry_run streaming must be rejected"),
-        Err(e) => e,
-    };
-    assert_eq!(err.code, MxcErrorCode::MalformedRequest);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn streaming_rejects_gui_access() {
-    // A windowed (guiAccess) app needs inherited stdio, so it cannot be streamed
-    // over pipes; the library path must reject it rather than silently drop the
-    // GUI capability.
-    let mut request = seatbelt_request("echo hi", 0);
-    request
-        .seatbelt
-        .as_mut()
-        .expect("seatbelt config on macOS")
-        .gui_access = true;
-    let err = match spawn_sandbox(request) {
-        Ok(_) => panic!("guiAccess streaming must be rejected"),
-        Err(e) => e,
-    };
-    assert!(
-        err.message.contains("guiAccess"),
-        "expected a guiAccess rejection, got: {}",
-        err.message
-    );
 }
 
 #[cfg(target_os = "macos")]
@@ -215,7 +168,7 @@ fn streaming_processcontainer_bidirectional_stdio() {
     };
     let mut request = build_request(&policy, None).expect("build_request");
     // `cmd /c more` echoes stdin to stdout until EOF, then exits.
-    request.script_code = "cmd /c more".to_string();
+    request.set_script_code("cmd /c more");
     let mut proc = spawn_sandbox(request).expect("spawn");
 
     let mut stdin = proc.take_stdin().expect("stdin available");

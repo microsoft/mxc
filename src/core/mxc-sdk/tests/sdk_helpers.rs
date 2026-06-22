@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Tests for the ported SDK helpers: policy discovery, platform support, and
-//! the SandboxPolicy -> ExecutionRequest builder.
+//! the SandboxPolicy -> SandboxRequest builder.
 
 use mxc_sdk::{
     available_tools_policy, build_request, platform_support, temporary_files_policy,
@@ -134,29 +134,6 @@ fn build_request_rejects_empty_version() {
 }
 
 #[test]
-fn build_request_maps_filesystem_and_timeout() {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc_sdk::policy::FilesystemSection {
-            readwrite_paths: vec!["/tmp".to_string()],
-            readonly_paths: vec![],
-            denied_paths: vec![],
-            clear_policy_on_exit: None,
-        }),
-        network: None,
-        ui: None,
-        timeout_ms: Some(5000),
-    };
-
-    let request =
-        build_request(&policy, Some("test-container")).expect("build_request should succeed");
-
-    assert_eq!(request.script_timeout, 5000);
-    assert!(request.policy.readwrite_paths.contains(&"/tmp".to_string()));
-    assert!(request.script_code.is_empty());
-}
-
-#[test]
 fn build_request_host_rules_require_outbound() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
@@ -207,7 +184,7 @@ fn build_request_then_run_seatbelt() {
     };
 
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.script_code = "echo built-from-policy".to_string();
+    request.set_script_code("echo built-from-policy");
 
     let mut proc = spawn_sandbox(request).expect("spawn should succeed");
     let mut out = String::new();
@@ -217,36 +194,6 @@ fn build_request_then_run_seatbelt() {
     let code = proc.wait().expect("wait should succeed");
     assert_eq!(code, 0);
     assert!(out.contains("built-from-policy"), "got: {out:?}");
-}
-
-#[test]
-fn build_request_preserves_clipboard_policy() {
-    use mxc_sdk::policy::ClipboardPolicy as P;
-    use wxc_common::models::ClipboardPolicy as Wire;
-
-    for (input, expected) in [
-        (P::None, Wire::None),
-        (P::Read, Wire::Read),
-        (P::Write, Wire::Write),
-        (P::All, Wire::All),
-    ] {
-        let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: Some(mxc_sdk::policy::UiSection {
-                allow_windows: true,
-                clipboard: input,
-                allow_input_injection: false,
-            }),
-            timeout_ms: None,
-        };
-        let request = build_request(&policy, None).expect("build_request should succeed");
-        assert_eq!(
-            request.policy.ui.clipboard, expected,
-            "clipboard {input:?} should map to {expected:?}"
-        );
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -268,47 +215,6 @@ fn platform_support_windows_is_processcontainer() {
     assert_eq!(
         support.available_methods,
         vec!["processcontainer".to_string()]
-    );
-}
-
-#[test]
-fn build_request_maps_network_hosts() {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        network: Some(mxc_sdk::policy::NetworkSection {
-            allow_outbound: true,
-            allow_local_network: true,
-            allowed_hosts: vec!["allowed.example".to_string()],
-            blocked_hosts: vec!["blocked.example".to_string()],
-            proxy: None,
-        }),
-        ui: None,
-        timeout_ms: None,
-    };
-
-    let request = build_request(&policy, None)
-        .expect("build_request should accept host rules with allowOutbound");
-
-    assert!(
-        request
-            .policy
-            .allowed_hosts
-            .contains(&"allowed.example".to_string()),
-        "allowed hosts should map through: {:?}",
-        request.policy.allowed_hosts
-    );
-    assert!(
-        request
-            .policy
-            .blocked_hosts
-            .contains(&"blocked.example".to_string()),
-        "blocked hosts should map through: {:?}",
-        request.policy.blocked_hosts
-    );
-    assert!(
-        request.policy.allow_local_network,
-        "allow_local_network should map through"
     );
 }
 
