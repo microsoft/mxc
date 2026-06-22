@@ -96,29 +96,36 @@ fn seatbelt_streams_stdout() {
 /// environment today, so the sandboxed child inherits the launcher's env. The
 /// unification refactor makes Seatbelt always `env_clear()` — which will turn
 /// this test RED. That is the intended early-warning signal.
+/// CHARACTERIZES CURRENT BEHAVIOR (regression guard).
+///
+/// With an empty `process.env`, the Seatbelt exec path starts the child from a
+/// *cleared* environment (`env_clear()` plus a default `PATH`), so the
+/// launcher's environment — which may hold cloud creds / API tokens — never
+/// leaks into untrusted sandboxed code. This matches Bubblewrap's `--clearenv`
+/// model (see `bubblewrap_clears_host_env_by_default`); if it ever turns RED the
+/// env model has drifted.
 #[test]
-fn seatbelt_inherits_host_env_when_process_env_empty() {
+fn seatbelt_clears_host_env_when_process_env_empty() {
     if !has_platform_exec() {
         return;
     }
-    let marker = "CHAR_SEATBELT_ENV_INHERIT_4b7c2";
+    let marker = "CHAR_SEATBELT_ENV_CLEAR_4b7c2";
     let result = run_platform_config_value(
-        "seatbelt env inherit",
-        &config(
-            "env-inherit",
-            "printf 'MARKER=[%s]\\n' \"$MXC_CHAR_MARKER\"",
-        ),
+        "seatbelt env clear",
+        &config("env-clear", "printf 'MARKER=[%s]\\n' \"$MXC_CHAR_MARKER\""),
         &[("MXC_CHAR_MARKER", marker)],
         None,
     );
     assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    let out = result.combined_output();
     assert!(
-        result
-            .combined_output()
-            .contains(&format!("MARKER=[{marker}]")),
-        "expected the child to inherit MXC_CHAR_MARKER from the launcher \
-         (current Seatbelt behavior with empty process.env). Output:\n{}",
-        result.combined_output()
+        out.contains("MARKER=[]"),
+        "expected a cleared env (MARKER=[]); the child must not inherit the \
+         launcher's environment when process.env is empty. Output:\n{out}"
+    );
+    assert!(
+        !out.contains(marker),
+        "host env marker leaked into the sandbox. Output:\n{out}"
     );
 }
 
@@ -142,30 +149,31 @@ fn seatbelt_applies_requested_env() {
 
 /// CHARACTERIZES CURRENT BEHAVIOR (regression guard).
 ///
-/// With an empty `process.cwd`, the Seatbelt exec path does *not* change
-/// directory today, so the sandboxed child runs in the launcher's working
-/// directory. The unification refactor rewrites cwd to a policy path or `/` —
-/// which will turn this test RED.
+/// With an empty `process.cwd`, the Seatbelt exec path no longer inherits the
+/// launcher's working directory (which the deny-by-default profile may forbid,
+/// making the child's `getcwd()` fail and leak a "getcwd: Operation not
+/// permitted" line). Instead it resolves the cwd to the first readwrite policy
+/// path — a directory the profile is guaranteed to allow. `write_dir` is listed
+/// first, so the relative-path probe lands there, not in the launcher cwd.
 ///
 /// We observe the cwd by having the child create a file via a relative path
 /// (a shell redirection) and checking which directory it lands in — this
 /// avoids `pwd`/`realpath`, which the default Seatbelt profile denies for
-/// arbitrary temp paths. `write_dir` is a second writable policy path that is
-/// *not* the launcher cwd, so a refactor that rewrites cwd to a policy path
-/// would drop the probe there (or elsewhere) instead of in `launch_dir`.
+/// arbitrary temp paths. `launch_dir` is a second writable policy path that is
+/// *not* the resolved cwd, so the probe must not land there.
 #[test]
-fn seatbelt_runs_in_launcher_cwd_when_process_cwd_empty() {
+fn seatbelt_runs_in_first_readwrite_path_when_process_cwd_empty() {
     if !has_platform_exec() {
         return;
     }
     let write_dir = fs::canonicalize(unique_tempdir("cwd-write")).expect("canonicalize");
     let launch_dir = fs::canonicalize(unique_tempdir("cwd-launch")).expect("canonicalize");
-    let probe = "char_cwd_inherit_probe.txt";
-    let mut cfg = config("cwd-inherit", &format!("echo CHAR_OK > {probe}"));
+    let probe = "char_cwd_default_probe.txt";
+    let mut cfg = config("cwd-default", &format!("echo CHAR_OK > {probe}"));
     cfg["filesystem"] = json!({
         "readwritePaths": [write_dir.to_string_lossy(), launch_dir.to_string_lossy()]
     });
-    let result = run_platform_config_value("seatbelt cwd inherit", &cfg, &[], Some(&launch_dir));
+    let result = run_platform_config_value("seatbelt cwd default", &cfg, &[], Some(&launch_dir));
     let in_launch = launch_dir.join(probe).exists();
     let in_write = write_dir.join(probe).exists();
     let _ = fs::remove_dir_all(&launch_dir);
@@ -177,10 +185,10 @@ fn seatbelt_runs_in_launcher_cwd_when_process_cwd_empty() {
         result.combined_output()
     );
     assert!(
-        in_launch && !in_write,
-        "expected the probe in the launcher cwd {} (current behavior with empty \
-         process.cwd); in_launch={in_launch} in_write={in_write}\n{}",
-        launch_dir.display(),
+        in_write && !in_launch,
+        "expected the probe in the first readwrite policy path {} (resolved cwd \
+         with empty process.cwd); in_write={in_write} in_launch={in_launch}\n{}",
+        write_dir.display(),
         result.combined_output()
     );
 }
