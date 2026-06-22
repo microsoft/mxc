@@ -593,6 +593,35 @@ impl SandboxRequest {
         self.inner.env = env;
         self
     }
+
+    /// The Seatbelt (macOS) extra Mach service names the sandbox profile lets the
+    /// child look up. Empty when the request carries no Seatbelt config (i.e. a
+    /// non-Seatbelt backend). Read these — e.g. to union with your own — before
+    /// [`set_seatbelt_extra_mach_lookups`](Self::set_seatbelt_extra_mach_lookups).
+    pub fn seatbelt_extra_mach_lookups(&self) -> &[String] {
+        self.inner
+            .seatbelt
+            .as_ref()
+            .map(|s| s.extra_mach_lookups.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Set the Seatbelt (macOS) extra Mach service names the child may look up.
+    /// Creates a default Seatbelt config if the request carries none.
+    pub fn set_seatbelt_extra_mach_lookups(&mut self, lookups: Vec<String>) -> &mut Self {
+        self.inner
+            .seatbelt
+            .get_or_insert_default()
+            .extra_mach_lookups = lookups;
+        self
+    }
+
+    /// Allow (or deny) the Seatbelt-sandboxed (macOS) child access to the system
+    /// keychain. Creates a default Seatbelt config if the request carries none.
+    pub fn set_seatbelt_keychain_access(&mut self, allow: bool) -> &mut Self {
+        self.inner.seatbelt.get_or_insert_default().keychain_access = allow;
+        self
+    }
 }
 
 /// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
@@ -1042,5 +1071,35 @@ mod tests {
             .blocked_hosts
             .contains(&"blocked.example".to_string()));
         assert!(request.inner.policy.allow_local_network);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_extra_mach_lookups_and_keychain_round_trip() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        // build_request resolves Seatbelt on macOS, so the config is present and
+        // the consumer can read its defaults and write back.
+        let mut request = build_request(&policy, None).expect("build_request");
+        let mut union: Vec<String> = request.seatbelt_extra_mach_lookups().to_vec();
+        union.push("com.example.service".to_string());
+        request.set_seatbelt_extra_mach_lookups(union.clone());
+        request.set_seatbelt_keychain_access(true);
+
+        assert_eq!(request.seatbelt_extra_mach_lookups(), union.as_slice());
+        let cfg = request
+            .inner
+            .seatbelt
+            .as_ref()
+            .expect("seatbelt config on macOS");
+        assert!(cfg.keychain_access);
+        assert!(cfg
+            .extra_mach_lookups
+            .contains(&"com.example.service".to_string()));
     }
 }
