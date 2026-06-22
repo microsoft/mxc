@@ -7,7 +7,7 @@
 //! then hand it to [`spawn_sandbox`]:
 //! it selects the right containment backend for the host and spawns the
 //! sandboxed process **without ever allocating a pty**, returning a
-//! [`SandboxProcess`] handle for live bidirectional stdio and termination.
+//! [`Sandbox`] handle for live bidirectional stdio and termination.
 //!
 //! ```no_run
 //! use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy};
@@ -33,18 +33,20 @@
 //! The selected backend is driven by the `containment` field in the request
 //! (or the host default). The library supports Bubblewrap (Linux), Seatbelt
 //! (macOS), and ProcessContainer — AppContainer plus the BaseContainer
-//! fallback — (Windows). Other backends return
-//! [`MxcError::unsupported_containment`].
+//! fallback — (Windows). Other backends return an [`Error`] with
+//! [`ErrorCode::UnsupportedContainment`].
 //!
 //! ## No pty
 //!
 //! The child's stdio is always wired to ordinary pipes — the library never
 //! allocates a pty. Stream the handle's `take_stdout`/`take_stderr`, or let
-//! [`wait`](SandboxProcess::wait) drain and discard any untaken stream.
+//! [`wait`](Sandbox::wait) drain and discard any untaken stream.
 
 mod dispatch;
+mod error;
 mod platform;
 pub mod policy;
+mod sandbox;
 
 use dispatch::spawn_runner;
 pub use platform::{platform_support, PlatformSupport};
@@ -53,20 +55,20 @@ pub use policy::{
     FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
 };
 
-// Re-export the error + streaming-handle types callers need so they don't have
-// to depend on `wxc_common` directly.
-pub use wxc_common::mxc_error::{MxcError, MxcErrorCode};
-pub use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
+pub use error::{Error, ErrorCode};
+pub use sandbox::{Sandbox, StreamCloser};
 
 use wxc_common::logger::{Logger, Mode};
 
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
 /// the command, and any working directory / env, filled in).
 ///
-/// Returns a [`SandboxProcess`] for live bidirectional stdio and termination;
+/// Returns a [`Sandbox`] handle for live bidirectional stdio and termination;
 /// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
-/// drained and discarded by [`wait`](SandboxProcess::wait).
-pub fn spawn_sandbox(request: SandboxRequest) -> Result<Box<dyn SandboxProcess>, MxcError> {
+/// drained and discarded by [`wait`](Sandbox::wait).
+pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     spawn_runner(&request.inner, &mut logger)
+        .map(Sandbox::new)
+        .map_err(Error::from)
 }

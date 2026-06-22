@@ -130,7 +130,7 @@ fn build_request_rejects_empty_version() {
     };
 
     let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
-    assert_eq!(err.code, mxc_sdk::MxcErrorCode::MalformedRequest);
+    assert_eq!(err.code, mxc_sdk::ErrorCode::MalformedRequest);
 }
 
 #[test]

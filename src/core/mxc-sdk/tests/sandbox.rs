@@ -6,10 +6,10 @@
 //! Seatbelt-specific cases run only on macOS. The library exposes only the
 //! streaming API, so "run to completion" here means build a request via
 //! [`build_request`], `spawn_sandbox`, read the (untaken)
-//! stdout/stderr, then [`wait`](mxc_sdk::SandboxProcess::wait) for the exit code —
+//! stdout/stderr, then [`wait`](mxc_sdk::Sandbox::wait) for the exit code —
 //! the same path the consumer drives.
 
-use mxc_sdk::{build_request, MxcErrorCode, SandboxPolicy};
+use mxc_sdk::{build_request, ErrorCode, SandboxPolicy};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use mxc_sdk::{spawn_sandbox, SandboxRequest};
@@ -77,7 +77,7 @@ struct RunOutcome {
 /// Spawn a request, read its stdout/stderr concurrently, and wait for exit —
 /// the streaming-API equivalent of running to completion.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::MxcError> {
+fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::Error> {
     use std::io::Read;
 
     fn read_thread(
@@ -128,7 +128,7 @@ fn version_older_than_supported_is_rejected() {
 
     let err =
         build_request(&policy, None).expect_err("an out-of-range schema version must be rejected");
-    assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+    assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
 
 #[cfg(target_os = "macos")]

@@ -51,7 +51,7 @@ support and the available containment backends.
 
 ## Live stdio + kill (streaming)
 
-[`spawn_sandbox`] returns a [`SandboxProcess`] you can drive
+[`spawn_sandbox`] returns a [`Sandbox`] you can drive
 while it runs — persistent bidirectional stdio plus termination. No pty is
 allocated; the streams are ordinary pipes.
 
@@ -98,7 +98,7 @@ The handle is modelled on [`std::process::Child`]:
   forever), drains and discards any **untaken** stdout/stderr so the child
   can't block on a full pipe, and returns the exit code (`ErrorKind::TimedOut`
   if the timeout elapses).
-- `stdout_closer()` / `stderr_closer()` → `Option<Box<dyn StreamCloser>>`: a
+- `stdout_closer()` / `stderr_closer()` → `Option<StreamCloser>`: a
   closer that makes an in-flight or subsequent read on the taken stream return
   EOF promptly **without** killing the child — for abandoning a stream a
   backgrounded descendant is holding open past the foreground command's exit (a
@@ -127,7 +127,7 @@ default):
 | Windows | ProcessContainer (AppContainer + BaseContainer fallback) |
 
 Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
-WSLC, LXC) returns [`MxcError::unsupported_containment`]; drive the standalone
+WSLC, LXC) returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the standalone
 executor binaries for those.
 
 ## No pty

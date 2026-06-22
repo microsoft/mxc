@@ -609,11 +609,11 @@ impl SandboxRequest {
 pub fn build_request(
     policy: &SandboxPolicy,
     container_name: Option<&str>,
-) -> Result<SandboxRequest, MxcError> {
+) -> Result<SandboxRequest, crate::Error> {
     // The shared parser tolerates an empty schema version (treats it as
     // "unset"), but the SDK requires it; reject it here for parity.
     if policy.version.is_empty() {
-        return Err(MxcError::malformed_request("Policy version is required"));
+        return Err(MxcError::malformed_request("Policy version is required").into());
     }
     let config = build_wire_config(policy, container_name)?;
 
