@@ -12,6 +12,14 @@ license.workspace = true
 # bfscfg.exe is known safe to invoke.
 tier2_bfs = []
 
+# Compile-time gate for the `MXC_FORCE_TIER` environment test seam in the
+# *production* binary. OFF by default: `detect` only honors `MXC_FORCE_TIER`
+# under `cfg(test)` (unit tests) so the shipped wxc-exec never lets the
+# environment pick a tier. Enable explicitly to build a wxc-exec that honors
+# `MXC_FORCE_TIER` — used by the Tier 4 (RestrictedToken) workload harness,
+# which has no other way to reach a tier `detect` does not select naturally.
+force_tier_seam = []
+
 [dependencies]
 wxc_common = { workspace = true }
 serde = { workspace = true }
