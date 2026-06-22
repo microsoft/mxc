@@ -3,17 +3,14 @@
 
 //! Seatbelt (macOS) executor **characterization** tests.
 //!
-//! These lock in the *current* run-to-completion behavior of the `mxc-exec-mac`
-//! executor before the unified `SandboxBackend`/`Runner` refactor (the risky
-//! part of the `mxc` library work) lands. They assert what the code does
-//! **today**, not what it ideally should do.
+//! These pin the run-to-completion behavior of the `mxc-exec-mac` executor
+//! under the unified `SandboxBackend`/`Runner` design, exercised end-to-end.
 //!
-//! Two of them — `inherits_host_env_when_process_env_empty` and
-//! `runs_in_launcher_cwd_when_process_cwd_empty` — pin behaviors that the
-//! unification was observed to change (it makes Seatbelt unconditionally
-//! `env_clear()` and rewrite the working directory). If a future refactor turns
-//! these RED, that is the signal to confirm the change is intentional and
-//! documented as a breaking change — not an accident.
+//! Two of them — `clears_host_env_when_process_env_empty` and
+//! `runs_in_first_readwrite_path_when_process_cwd_empty` — assert behaviors the
+//! unification deliberately changed from the pre-refactor executor: Seatbelt now
+//! unconditionally `env_clear()`s and resolves an empty working directory to a
+//! policy path. If they turn RED, the env/cwd model has drifted.
 //!
 //! They run in the existing macOS CI job (`cargo test --target
 //! aarch64-apple-darwin`) with no extra infrastructure: `sandbox-exec` needs no
@@ -90,12 +87,6 @@ fn seatbelt_streams_stdout() {
     );
 }
 
-/// CHARACTERIZES CURRENT BEHAVIOR (regression guard).
-///
-/// With an empty `process.env`, the Seatbelt exec path does *not* clear the
-/// environment today, so the sandboxed child inherits the launcher's env. The
-/// unification refactor makes Seatbelt always `env_clear()` — which will turn
-/// this test RED. That is the intended early-warning signal.
 /// CHARACTERIZES CURRENT BEHAVIOR (regression guard).
 ///
 /// With an empty `process.env`, the Seatbelt exec path starts the child from a
