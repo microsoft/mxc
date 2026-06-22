@@ -118,8 +118,8 @@ struct Cli {
 
     /// Audit mode: inject the `permissiveLearningMode` capability into the
     /// AppContainer policy so denied operations are logged but allowed.
-    /// DEBUG BUILDS ONLY — release builds strip this capability for safety.
-    #[cfg(debug_assertions)]
+    /// In release builds this still relaxes the runner's release-only
+    /// rejection of `permissiveLearningMode` — use with care.
     #[arg(long)]
     audit: bool,
 
@@ -311,7 +311,7 @@ fn config_input(cli: &Cli) -> Option<(String, bool)> {
 /// `None` when the config was supplied as `--config-base64` (no file path)
 /// or not at all. Used by `--audit` to thread `plm stop --config-path` so
 /// findings can be merged back into the source policy.
-#[cfg(debug_assertions)]
+#[cfg(target_os = "windows")]
 fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
     if cli.config_base64.is_some() {
         return None;
@@ -325,7 +325,7 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
 /// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
 /// same install directory. Returns `None` when the current exe path
 /// can't be resolved.
-#[cfg(debug_assertions)]
+#[cfg(target_os = "windows")]
 fn plm_exe_path() -> Option<std::path::PathBuf> {
     std::env::current_exe()
         .ok()
@@ -336,7 +336,7 @@ fn plm_exe_path() -> Option<std::path::PathBuf> {
 /// through to wxc-exec's console. Audit tracing is a best-effort
 /// diagnostic; missing-binary / spawn / non-zero-exit conditions are
 /// logged but never abort the wxc-exec flow.
-#[cfg(debug_assertions)]
+#[cfg(target_os = "windows")]
 fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) {
     use std::fmt::Write as _;
 
@@ -779,6 +779,7 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
+    request.audit = cli.audit;
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
@@ -796,9 +797,8 @@ fn main() {
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
 
     // --audit injects permissiveLearningMode so denied operations are logged
-    // but allowed. Debug-only: release builds don't expose the flag and the
-    // config parser strips the capability anyway.
-    #[cfg(debug_assertions)]
+    // but allowed. Works in both debug and release builds; in release the
+    // runner-side rejection is relaxed because request.audit is set.
     if cli.audit
         && !request
             .policy
@@ -810,7 +810,7 @@ fn main() {
             .policy
             .capabilities
             .push("permissiveLearningMode".to_string());
-        logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced (DEBUG BUILD ONLY)\n");
+        logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
         eprintln!(
             "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
         );
@@ -1075,7 +1075,7 @@ fn main() {
     // for the lifetime of the workload. The matching `plm stop` below
     // tears the trace down and (when the policy came from a file)
     // merges findings back into it. Both calls are best-effort.
-    #[cfg(debug_assertions)]
+    #[cfg(target_os = "windows")]
     let audit_config_file = if cli.audit {
         run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
         config_file_path(&cli)
@@ -1091,7 +1091,7 @@ fn main() {
     // Tear down the PLM trace after the container exits, regardless of
     // its exit code. Done before the runner is dropped so the trace
     // tooling sees a fully-quiesced workload.
-    #[cfg(debug_assertions)]
+    #[cfg(target_os = "windows")]
     if cli.audit {
         let mut stop_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from("stop")];
         if let Some(cfg) = audit_config_file.as_ref() {

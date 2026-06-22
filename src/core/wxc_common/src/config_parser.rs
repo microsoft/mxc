@@ -1022,6 +1022,7 @@ fn convert_wire_config(
         testing_features_enabled: false,
         experimental,
         dry_run: false,
+        audit: false,
     })
 }
 
