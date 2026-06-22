@@ -165,6 +165,11 @@ popd
 echo.
 echo Building SDK integration tests...
 pushd sdk\tests\integration
+:: npm caches `file:` deps by package.json version. The local SDK version
+:: rarely bumps between builds, so a plain `npm install` keeps reusing the
+:: stale packed copy. Force a refresh of the @microsoft/mxc-sdk link so
+:: type-checking sees the dist we just rebuilt above.
+if exist node_modules\@microsoft\mxc-sdk rmdir /s /q node_modules\@microsoft\mxc-sdk
 call npm install & call npm run build
 popd
 

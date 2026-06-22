@@ -60,6 +60,11 @@ enum Cmd {
         /// Override for the adjusted config output path.
         #[arg(long)]
         adjusted_config_path: Option<PathBuf>,
+        /// Re-process a previously captured .etl instead of stopping a
+        /// live WPR session. When set, `wpr -stop` is skipped and the
+        /// supplied file is parsed as-is.
+        #[arg(long)]
+        trace_file: Option<PathBuf>,
         /// Emit per-event/per-ACE diagnostic output.
         #[arg(long)]
         verbose_logging: bool,
@@ -108,6 +113,7 @@ fn main() -> Result<()> {
             bin_path,
             config_path,
             adjusted_config_path,
+            trace_file,
             verbose_logging,
         } => stop::run(
             stop::StopOptions {
@@ -115,6 +121,7 @@ fn main() -> Result<()> {
                 bin_path,
                 config_path,
                 adjusted_config_path,
+                trace_file,
                 verbose: verbose_logging,
             },
             &exe,

@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{
-    deny_file_set, initialize_filesystem, merge_capabilities, set_ui_subsystem_enabled,
-    update_from_access_events, write_added_paths_summary, write_detection_summary,
-    write_requested_capabilities_summary,
+    apply_ui_operation_flags, deny_file_set, initialize_filesystem, merge_capabilities,
+    set_ui_subsystem_enabled, update_from_access_events, write_added_paths_summary,
+    write_detection_summary, write_requested_capabilities_summary,
 };
 use crate::event_parser::parse_events;
 use crate::start;
@@ -77,6 +77,7 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
         &parse.requested_capabilities,
         parse.ui_event_count,
         &parse.ui_events,
+        parse.ui_operation_flags,
     );
     write_requested_capabilities_summary(&parse.requested_capabilities, verbose);
 
@@ -102,6 +103,9 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
 
     if parse.need_ui {
         set_ui_subsystem_enabled(&mut blank);
+    }
+    if parse.ui_operation_flags != 0 {
+        apply_ui_operation_flags(&mut blank, parse.ui_operation_flags);
     }
 
     // `merge_capabilities` requires a `containment` name on the config,

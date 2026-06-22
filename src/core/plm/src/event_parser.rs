@@ -25,6 +25,63 @@ use crate::extract_caps;
 // File path we treat as "no useful info" and skip.
 const MOUNT_POINT_MANAGER: &str = "\\Device\\MountPointManager";
 
+// ---------------------------------------------------------------------------
+// Learning-mode violation categories (EventID=27 `Category` field).
+//
+// Emitted by the OS-side permissive sandbox to describe *why* a containment
+// boundary was crossed. Values match the OS-side
+// `LEARNING_MODE_VIOLATION_CATEGORY_*` enum.
+// ---------------------------------------------------------------------------
+
+/// The process attempted an operation that requires the Win32k GUI subsystem
+/// while running with `DisallowWin32kSystemCalls` enabled. To relax the
+/// policy the corresponding config flips `ui.disable` from the default
+/// `true` to `false`.
+pub const CONVERT_TO_GUI: u32 = 1;
+
+/// The process attempted a UI operation that was blocked by a Job UI Limit
+/// (`JOB_OBJECT_UILIMIT_*`). The `Detail` field carries the specific
+/// `JOB_OBJECT_UILIMIT_*` bit that fired -- see the `JOB_OBJECT_UILIMIT_*`
+/// constants below.
+pub const UI_OPERATION: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// Job Object UI Limit flags.
+//
+// Values match the Win32 `JOB_OBJECT_UILIMIT_*` constants from <winnt.h>.
+// When category=`UI_OPERATION`, the `Detail` field of a violation event
+// carries exactly one of these bits.
+// ---------------------------------------------------------------------------
+
+pub const JOB_OBJECT_UILIMIT_HANDLES: u32 = 0x0001;
+pub const JOB_OBJECT_UILIMIT_READCLIPBOARD: u32 = 0x0002;
+pub const JOB_OBJECT_UILIMIT_WRITECLIPBOARD: u32 = 0x0004;
+pub const JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS: u32 = 0x0008;
+pub const JOB_OBJECT_UILIMIT_DISPLAYSETTINGS: u32 = 0x0010;
+pub const JOB_OBJECT_UILIMIT_GLOBALATOMS: u32 = 0x0020;
+pub const JOB_OBJECT_UILIMIT_DESKTOP: u32 = 0x0040;
+pub const JOB_OBJECT_UILIMIT_EXITWINDOWS: u32 = 0x0080;
+pub const JOB_OBJECT_UILIMIT_IME: u32 = 0x0100;
+pub const JOB_OBJECT_UILIMIT_INJECTION: u32 = 0x0200;
+
+/// Human-readable name for a `JOB_OBJECT_UILIMIT_*` bit. Used for
+/// diagnostic output; returns `None` if the bit is not recognised.
+pub fn ui_limit_name(bit: u32) -> Option<&'static str> {
+    Some(match bit {
+        JOB_OBJECT_UILIMIT_HANDLES => "HANDLES",
+        JOB_OBJECT_UILIMIT_READCLIPBOARD => "READCLIPBOARD",
+        JOB_OBJECT_UILIMIT_WRITECLIPBOARD => "WRITECLIPBOARD",
+        JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS => "SYSTEMPARAMETERS",
+        JOB_OBJECT_UILIMIT_DISPLAYSETTINGS => "DISPLAYSETTINGS",
+        JOB_OBJECT_UILIMIT_GLOBALATOMS => "GLOBALATOMS",
+        JOB_OBJECT_UILIMIT_DESKTOP => "DESKTOP",
+        JOB_OBJECT_UILIMIT_EXITWINDOWS => "EXITWINDOWS",
+        JOB_OBJECT_UILIMIT_IME => "IME",
+        JOB_OBJECT_UILIMIT_INJECTION => "INJECTION",
+        _ => return None,
+    })
+}
+
 // Event property indexes for EventID=14 access events (matches the
 // PowerShell parser's index map).
 const LEARNING_MODE_INDEX: usize = 0;
@@ -36,9 +93,16 @@ const ACCESS_MASK_INDEX: usize = 5;
 pub struct ParseResult {
     pub valid_access_events: Vec<LearningModeAccessEvent>,
     pub requested_capabilities: HashSet<String>,
+    /// True when at least one `CONVERT_TO_GUI` violation was observed.
+    /// Drives the legacy behavior of flipping `ui.disable` to `false`.
     pub need_ui: bool,
+    /// Total number of EventID=27 records observed, regardless of category.
     pub ui_event_count: u32,
     pub ui_events: Vec<UiEvent>,
+    /// OR of the `Detail` values from every `UI_OPERATION` violation.
+    /// Each bit is one of the `JOB_OBJECT_UILIMIT_*` constants and
+    /// indicates the specific UI limit the contained process tripped.
+    pub ui_operation_flags: u32,
 }
 
 /// Parsed payload of a UI-injection (EventID=27) event.
@@ -438,6 +502,7 @@ pub fn parse_events(
     let mut need_ui = false;
     let mut ui_event_count: u32 = 0;
     let mut ui_events: Vec<UiEvent> = Vec::new();
+    let mut ui_operation_flags: u32 = 0;
 
     for xml in &xml_events {
         let Some(ev) = parse_event_xml(xml) else {
@@ -445,25 +510,41 @@ pub fn parse_events(
         };
 
         if ev.event_id == 27 {
-            need_ui = true;
             ui_event_count += 1;
 
             // Prefer the manifest-resolved EventData form (named <Data>
             // children). Fall back to manual hex-payload decoding when the
             // event was rendered as opaque <ProcessingErrorData>.
-            let ui_opt = parse_ui_event_from_named(&ev.event_data_named)
-                .or_else(|| ev.processing_error_payload.as_deref().and_then(parse_ui_event_payload));
+            let ui_opt = parse_ui_event_from_named(&ev.event_data_named).or_else(|| {
+                ev.processing_error_payload
+                    .as_deref()
+                    .and_then(parse_ui_event_payload)
+            });
 
             match ui_opt {
                 Some(ui) => {
+                    // Classify by category so downstream code can apply the
+                    // right relaxation: CONVERT_TO_GUI -> `ui.disable=false`;
+                    // UI_OPERATION -> per-bit field relaxation.
+                    match ui.category {
+                        CONVERT_TO_GUI => need_ui = true,
+                        UI_OPERATION => ui_operation_flags |= ui.detail,
+                        _ => {}
+                    }
                     if verbose {
+                        let detail_name = if ui.category == UI_OPERATION {
+                            ui_limit_name(ui.detail).unwrap_or("UNKNOWN")
+                        } else {
+                            "-"
+                        };
                         println!(
-                            "UI Injection event: process={} pid={} seq={} category=0x{:08X} detail=0x{:08X} denied={}",
+                            "UI Injection event: process={} pid={} seq={} category=0x{:08X} detail=0x{:08X} ({}) denied={}",
                             ui.process_name,
                             ui.process_id,
                             ui.sequence_number,
                             ui.category,
                             ui.detail,
+                            detail_name,
                             match ui.denied {
                                 Some(true) => "true",
                                 Some(false) => "false",
@@ -474,13 +555,20 @@ pub fn parse_events(
                     ui_events.push(ui);
                 }
                 None => {
+                    // Without a decoded payload we can't tell category from
+                    // UI_OPERATION, so preserve the legacy "any EventID=27
+                    // means enable GUI" behavior to stay backward-compatible
+                    // with traces from older OS builds.
+                    need_ui = true;
                     if verbose {
                         if let Some(hex) = ev.processing_error_payload.as_deref() {
                             println!(
                                 "UI Injection event observed (payload did not match expected layout: {hex})"
                             );
                         } else {
-                            println!("UI Injection event observed (no EventData / ProcessingErrorData)");
+                            println!(
+                                "UI Injection event observed (no EventData / ProcessingErrorData)"
+                            );
                         }
                     }
                 }
@@ -569,6 +657,7 @@ pub fn parse_events(
         need_ui,
         ui_event_count,
         ui_events,
+        ui_operation_flags,
     })
 }
 

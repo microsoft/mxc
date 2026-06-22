@@ -306,6 +306,176 @@ pub fn set_ui_subsystem_enabled(config: &mut Value) {
     println!("Enabling access to GUI subsystem ");
 }
 
+/// Apply the relaxations implied by the OR of `JOB_OBJECT_UILIMIT_*` bits
+/// observed in `UI_OPERATION` violations. Each bit names a UI limit the
+/// contained process tripped; the corresponding `ui.*` field is widened
+/// just enough to let the operation succeed next time.
+///
+/// Per `docs/base-process-container/UIPolicy_Schema.md`:
+/// * `READCLIPBOARD` / `WRITECLIPBOARD`  -> `ui.clipboard`
+/// * `SYSTEMPARAMETERS` / `DISPLAYSETTINGS` -> `ui.systemSettings`
+/// * `HANDLES` / `GLOBALATOMS` -> `ui.isolation`
+/// * `DESKTOP` / `EXITWINDOWS` -> `ui.desktopSystemControl = true`
+/// * `IME` -> `ui.ime = true`
+/// * `INJECTION` -> `ui.injection = true`
+///
+/// The function is additive: when a field already grants the requested
+/// operation it is left alone; when it grants the complementary half (e.g.
+/// existing `clipboard: "read"` plus a fresh `WRITECLIPBOARD` violation)
+/// the value is widened to `"all"`.
+pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) {
+    use crate::event_parser::{
+        JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+        JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
+        JOB_OBJECT_UILIMIT_IME, JOB_OBJECT_UILIMIT_INJECTION, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+        JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    };
+
+    if flags == 0 {
+        return;
+    }
+
+    let obj = config.as_object_mut().unwrap();
+    if !obj.contains_key("ui") {
+        obj.insert("ui".into(), json!({}));
+    }
+    let ui = obj.get_mut("ui").unwrap().as_object_mut().unwrap();
+
+    // -- clipboard ---------------------------------------------------------
+    let need_read = flags & JOB_OBJECT_UILIMIT_READCLIPBOARD != 0;
+    let need_write = flags & JOB_OBJECT_UILIMIT_WRITECLIPBOARD != 0;
+    if need_read || need_write {
+        let current = ui
+            .get("clipboard")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        let (cur_r, cur_w) = clipboard_capabilities(&current);
+        let new = pick_clipboard(cur_r || need_read, cur_w || need_write);
+        ui.insert("clipboard".into(), Value::String(new.into()));
+    }
+
+    // -- systemSettings ----------------------------------------------------
+    let need_params = flags & JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS != 0;
+    let need_display = flags & JOB_OBJECT_UILIMIT_DISPLAYSETTINGS != 0;
+    if need_params || need_display {
+        let current = ui
+            .get("systemSettings")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        let (cur_p, cur_d) = system_settings_capabilities(&current);
+        let new = pick_system_settings(cur_p || need_params, cur_d || need_display);
+        ui.insert("systemSettings".into(), Value::String(new.into()));
+    }
+
+    // -- isolation ---------------------------------------------------------
+    let need_other_handles = flags & JOB_OBJECT_UILIMIT_HANDLES != 0;
+    let need_global_atoms = flags & JOB_OBJECT_UILIMIT_GLOBALATOMS != 0;
+    if need_other_handles || need_global_atoms {
+        let current = ui
+            .get("isolation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("container")
+            .to_string();
+        // `(handles_restricted, atoms_restricted)` for the current value.
+        let (cur_h, cur_a) = isolation_restrictions(&current);
+        // Removing a restriction = the process now needs that access.
+        let new_h = cur_h && !need_other_handles;
+        let new_a = cur_a && !need_global_atoms;
+        let new = pick_isolation(new_h, new_a);
+        ui.insert("isolation".into(), Value::String(new.into()));
+    }
+
+    // -- desktopSystemControl (bundled DESKTOP + EXITWINDOWS) -------------
+    if flags & (JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_EXITWINDOWS) != 0 {
+        ui.insert("desktopSystemControl".into(), Value::Bool(true));
+    }
+
+    // -- ime ---------------------------------------------------------------
+    if flags & JOB_OBJECT_UILIMIT_IME != 0 {
+        ui.insert("ime".into(), Value::Bool(true));
+    }
+
+    // -- injection ---------------------------------------------------------
+    if flags & JOB_OBJECT_UILIMIT_INJECTION != 0 {
+        ui.insert("injection".into(), Value::Bool(true));
+    }
+
+    // A non-empty `ui.*` policy only makes sense with the GUI subsystem on.
+    // Mirror `set_ui_subsystem_enabled` -- if `disable` is already present
+    // we set it to false; otherwise leave it absent so the schema default
+    // (no GUI) still applies when the operator has not explicitly enabled
+    // GUI elsewhere. Operators using `--ui` flows always end up with
+    // `disable: false` via the existing `set_ui_subsystem_enabled` call.
+    if let Some(v) = ui.get_mut("disable") {
+        *v = Value::Bool(false);
+    }
+}
+
+fn clipboard_capabilities(value: &str) -> (bool, bool) {
+    // (can_read, can_write)
+    match value {
+        "all" => (true, true),
+        "read" => (true, false),
+        "write" => (false, true),
+        _ => (false, false), // "none" or anything unrecognised
+    }
+}
+
+fn pick_clipboard(read: bool, write: bool) -> &'static str {
+    match (read, write) {
+        (true, true) => "all",
+        (true, false) => "read",
+        (false, true) => "write",
+        (false, false) => "none",
+    }
+}
+
+fn system_settings_capabilities(value: &str) -> (bool, bool) {
+    // (can_params, can_display)
+    match value {
+        "all" => (true, true),
+        "parameters" => (true, false),
+        "display" => (false, true),
+        _ => (false, false),
+    }
+}
+
+fn pick_system_settings(params: bool, display: bool) -> &'static str {
+    match (params, display) {
+        (true, true) => "all",
+        (true, false) => "parameters",
+        (false, true) => "display",
+        (false, false) => "none",
+    }
+}
+
+fn isolation_restrictions(value: &str) -> (bool, bool) {
+    // (handles_restricted, atoms_restricted) for each isolation value.
+    // Per UIPolicy_Schema.md:
+    //   container = HANDLES + GLOBALATOMS
+    //   handles   = HANDLES
+    //   atoms     = GLOBALATOMS
+    //   desktop   = neither
+    match value {
+        "container" => (true, true),
+        "handles" => (true, false),
+        "atoms" => (false, true),
+        "desktop" => (false, false),
+        _ => (true, true),
+    }
+}
+
+fn pick_isolation(handles_restricted: bool, atoms_restricted: bool) -> &'static str {
+    match (handles_restricted, atoms_restricted) {
+        (true, true) => "container",
+        (true, false) => "handles",
+        (false, true) => "atoms",
+        (false, false) => "desktop",
+    }
+}
+
 pub fn resolve_adjusted_config_path(dest_config: &Path, override_path: Option<&Path>) -> PathBuf {
     if let Some(p) = override_path {
         if let Some(parent) = p.parent() {
@@ -395,7 +565,9 @@ pub fn write_detection_summary(
     capabilities: &HashSet<String>,
     ui_event_count: u32,
     ui_events: &[crate::event_parser::UiEvent],
+    ui_operation_flags: u32,
 ) {
+    use crate::event_parser::{ui_limit_name, CONVERT_TO_GUI, UI_OPERATION};
     use std::collections::BTreeMap;
 
     let mut per_path: BTreeMap<String, u32> = BTreeMap::new();
@@ -427,6 +599,8 @@ pub fn write_detection_summary(
     if ui_event_count == 0 {
         println!("  (none)");
     } else {
+        let mut convert_to_gui = 0u32;
+        let mut ui_operation = 0u32;
         if ui_events.is_empty() {
             println!("  (no payloads could be decoded)");
         } else {
@@ -436,8 +610,18 @@ pub fn write_detection_summary(
                     Some(false) => "allowed",
                     None => "denied=(absent)",
                 };
+                let category_name = match ui.category {
+                    CONVERT_TO_GUI => "CONVERT_TO_GUI",
+                    UI_OPERATION => "UI_OPERATION",
+                    _ => "UNKNOWN",
+                };
+                let detail_name = if ui.category == UI_OPERATION {
+                    ui_limit_name(ui.detail).unwrap_or("UNKNOWN")
+                } else {
+                    "-"
+                };
                 println!(
-                    "  + {} pid={} seq={} category=0x{:08X} detail=0x{:08X} {}",
+                    "  + {} pid={} seq={} category=0x{:08X} ({}) detail=0x{:08X} ({}) {}",
                     if ui.process_name.is_empty() {
                         "(unknown)"
                     } else {
@@ -446,12 +630,37 @@ pub fn write_detection_summary(
                     ui.process_id,
                     ui.sequence_number,
                     ui.category,
+                    category_name,
                     ui.detail,
+                    detail_name,
                     denied,
                 );
+                match ui.category {
+                    CONVERT_TO_GUI => convert_to_gui += 1,
+                    UI_OPERATION => ui_operation += 1,
+                    _ => {}
+                }
             }
         }
-        println!("  + ui.disable will be set to false (UI subsystem required)");
+        if convert_to_gui > 0 {
+            println!("  + ui.disable will be set to false (UI subsystem required)");
+        }
+        if ui_operation > 0 {
+            println!(
+                "  + ui.* policy will be relaxed for blocked operations (flags=0x{:04X}):",
+                ui_operation_flags
+            );
+            for bit_pos in 0..16 {
+                let bit = 1u32 << bit_pos;
+                if ui_operation_flags & bit != 0 {
+                    println!(
+                        "      - 0x{:04X} ({})",
+                        bit,
+                        ui_limit_name(bit).unwrap_or("UNKNOWN")
+                    );
+                }
+            }
+        }
     }
 
     println!();

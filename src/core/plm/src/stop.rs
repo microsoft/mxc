@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{
-    deny_file_set, initialize_filesystem, load_config, merge_capabilities,
-    resolve_adjusted_config_path, save_adjusted_config, set_ui_subsystem_enabled,
-    update_from_access_events, write_added_paths_summary, write_detection_summary,
-    write_requested_capabilities_summary,
+    apply_ui_operation_flags, deny_file_set, initialize_filesystem, load_config,
+    merge_capabilities, resolve_adjusted_config_path, save_adjusted_config,
+    set_ui_subsystem_enabled, update_from_access_events, write_added_paths_summary,
+    write_detection_summary, write_requested_capabilities_summary,
 };
 use crate::event_parser::parse_events;
 
@@ -22,6 +22,10 @@ pub struct StopOptions {
     pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     pub adjusted_config_path: Option<PathBuf>,
+    /// When set, skip `wpr -stop` and parse the supplied .etl directly.
+    /// Useful for re-processing a previously captured trace without an
+    /// active WPR session.
+    pub trace_file: Option<PathBuf>,
     pub verbose: bool,
 }
 
@@ -52,8 +56,18 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         .canonicalize()
         .unwrap_or_else(|_| exe_dir.to_path_buf());
 
-    let trace_file = log_dir.join("trace.etl");
-    stop_plm_trace(&trace_file)?;
+    let trace_file = if let Some(p) = opts.trace_file.as_ref() {
+        // Operator supplied a pre-captured .etl -- don't try to stop a
+        // (likely non-existent) live WPR session.
+        if !p.exists() {
+            anyhow::bail!("trace file does not exist: {}", p.display());
+        }
+        p.clone()
+    } else {
+        let p = log_dir.join("trace.etl");
+        stop_plm_trace(&p)?;
+        p
+    };
 
     if opts.verbose {
         println!("Beginning event parsing, this may take several minutes");
@@ -72,6 +86,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         &parse.requested_capabilities,
         parse.ui_event_count,
         &parse.ui_events,
+        parse.ui_operation_flags,
     );
     write_requested_capabilities_summary(&parse.requested_capabilities, opts.verbose);
 
@@ -79,7 +94,15 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    if parse.valid_access_events.is_empty() && parse.requested_capabilities.is_empty() {
+    // Write an adjusted config whenever the trace yielded anything
+    // mergeable: file paths, capabilities, a CONVERT_TO_GUI hint, or a
+    // UI_OPERATION relaxation. Bailing early on file/capability emptiness
+    // alone would silently drop UI-only traces.
+    if parse.valid_access_events.is_empty()
+        && parse.requested_capabilities.is_empty()
+        && !parse.need_ui
+        && parse.ui_operation_flags == 0
+    {
         return Ok(());
     }
 
@@ -112,6 +135,9 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 
     if parse.need_ui {
         set_ui_subsystem_enabled(&mut config);
+    }
+    if parse.ui_operation_flags != 0 {
+        apply_ui_operation_flags(&mut config, parse.ui_operation_flags);
     }
 
     let adjusted = resolve_adjusted_config_path(&dest_config, opts.adjusted_config_path.as_deref());
