@@ -230,48 +230,25 @@ pub fn cancel_and_join_discard<C: StreamCloser>(
     join_discard(drain);
 }
 
-/// Process-tree kill for a Unix child that leads its own process group — the
-/// in-tree backends arrange this via `setsid()` (Seatbelt) or
-/// `process_group(0)` (Bubblewrap), so the child's pgid equals its pid.
-/// `SIGKILL`s the leader and then its whole group (`-pgid`) — targeting only
-/// that group, never the host's — so the leader and every descendant die.
+/// SIGKILL a Unix child's process group. The backends make the child a group
+/// leader (`setsid()` / `process_group(0)`), so `-pid` targets that group —
+/// never the host's — killing the leader and every descendant.
 ///
-/// This is an immediate `SIGKILL` with no graceful `SIGTERM` first, on purpose.
-/// A `SIGTERM` is unreliable for our workloads: everything runs under
-/// `/bin/sh -c …`, and a shell parked in a foreground `wait` defers `SIGTERM`,
-/// reaps the killed child, then runs the rest of the script before any
-/// escalation — so commands could keep executing after we asked the sandbox to
-/// stop. Untrusted sandboxed code is also not owed a cleanup window (nor should
-/// it get one to spawn or exfiltrate once we've decided to kill it); the
-/// sandbox's own temp-file cleanup runs in `wait()` / `Drop` regardless.
-///
-/// The **leader is signalled before the group** so its `SIGKILL` is already
-/// pending when a descendant's death would otherwise wake it: a leader blocked
-/// in a foreground `wait` would, on a `-pgid` sweep alone, sometimes wake (the
-/// kernel can terminate the descendant first) and run one more command before
-/// its own signal lands — observable as post-timeout output on the Inherit path,
-/// where stdout is the live terminal. With the leader's `SIGKILL` already
-/// pending, the kernel terminates it on the `wait` return instead of resuming
-/// it.
-///
-/// The pgid is read from the still-unreaped child, so `-pgid` reliably targets
-/// this child's group (its pid, and thus the pgid, cannot have been recycled).
-/// The caller reaps the direct child afterwards (e.g. via `Child::wait`). Used
-/// by every Unix kill path: streaming `kill()`, `Drop` teardown, and the
-/// run-to-completion timeout branch.
+/// No graceful `SIGTERM` first: it's unreliable (a `/bin/sh -c …` wrapper parked
+/// in a foreground `wait` defers it and finishes the script) and sandboxed code
+/// isn't owed a cleanup window. The **leader is killed before the group**: a
+/// `-pid`-only sweep races — the kernel can kill a descendant first, waking the
+/// shell to run one more command (seen as post-timeout output on the Inherit
+/// path) before its own signal lands — so we make the leader's SIGKILL pending
+/// first. The caller reaps the direct child afterwards.
 #[cfg(unix)]
 pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
-    // Read the pid from the still-unreaped child: its pid (== pgid) cannot be
-    // recycled, so `pid` / `-pid` reliably target this child and its own group.
+    // The child is unreaped, so its pid (== pgid) can't have been recycled.
     let pid = child.id() as i32;
-    // SAFETY: `kill(2)` with a plain integer pid / negative pgid; the arguments
-    // are plain integers with no memory safety concerns.
+    // SAFETY: `kill(2)` with a plain pid / negative pgid — just integers.
     unsafe {
-        // Leader first (see the doc): make its SIGKILL pending while it is still
-        // blocked, before any descendant is signalled.
-        libc::kill(pid, libc::SIGKILL);
-        // Then sweep the rest of the group (the descendants the leader spawned).
-        libc::kill(-pid, libc::SIGKILL);
+        libc::kill(pid, libc::SIGKILL); // leader first
+        libc::kill(-pid, libc::SIGKILL); // then its group
     }
     Ok(())
 }

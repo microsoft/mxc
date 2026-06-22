@@ -431,9 +431,8 @@ impl SandboxProcess for SeatbeltSandboxProcess {
 
     fn kill(&mut self) -> std::io::Result<()> {
         if self.group {
-            // The child leads its own process group (Pipes uses `setsid`; an
-            // Inherit run with a timeout uses `setpgid`) — signal the whole
-            // group so sandboxed descendants are terminated too.
+            // The child leads its own process group — signal the whole group so
+            // sandboxed descendants are terminated too.
             group_kill(&mut self.child)
         } else {
             // Inherited / Open mode: a single process sharing the binary's
@@ -460,10 +459,8 @@ impl SandboxProcess for SeatbeltSandboxProcess {
         let result = match wait_with_timeout(&mut self.child, self.timeout) {
             Ok(status) => Ok(status.code().unwrap_or(-1)),
             Err(WaitError::Timeout) => {
-                // The run already had its full time budget, so terminate it now.
-                // `kill()` SIGKILLs the whole group (or the lone child) — see
-                // `group_kill` for why there's no graceful SIGTERM — then we reap
-                // the zombie.
+                // Timed out — terminate now (`kill()` SIGKILLs the group or the
+                // lone child) and reap the zombie.
                 let _ = self.kill();
                 let _ = self.child.wait();
                 Err(std::io::Error::new(
