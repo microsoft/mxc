@@ -31,7 +31,7 @@ use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCance
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
 use wxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
+    boxed_closer, cancel_and_join_discard, group_kill, hard_kill, spawn_discard, take_boxed_read,
     take_boxed_write, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::validator::validate_common;
@@ -459,10 +459,14 @@ impl SandboxProcess for SeatbeltSandboxProcess {
         let result = match wait_with_timeout(&mut self.child, self.timeout) {
             Ok(status) => Ok(status.code().unwrap_or(-1)),
             Err(WaitError::Timeout) => {
-                // Group-kill (SIGTERM→SIGKILL) so sandboxed descendants are
-                // reaped too — `self.child.kill()` would orphan them; then
-                // wait to clear the zombie.
-                let _ = self.kill();
+                // Hard-kill the whole group immediately (no graceful SIGTERM):
+                // the run already had its full time budget, and a SIGTERM is
+                // unreliable here — `/bin/sh` parked in a foreground `wait`
+                // defers it, reaps the killed child, and runs the rest of the
+                // script before escalation, so post-timeout commands would still
+                // execute. SIGKILL the group so nothing slips through; then wait
+                // to clear the zombie.
+                hard_kill(&mut self.child, self.group);
                 let _ = self.child.wait();
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,

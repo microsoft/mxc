@@ -244,8 +244,9 @@ pub fn cancel_and_join_discard<C: StreamCloser>(
 /// unconditionally (tolerating `ESRCH` once the group is empty) so a descendant
 /// forked around the `SIGTERM` can't survive and leave a later `wait()` blocking
 /// for its full runtime — even if a transient `try_wait` error occurs during the
-/// grace loop. Shared by the Unix backends' streaming `kill()` and their
-/// run-to-completion timeout branches.
+/// grace loop. Used for the Unix backends' graceful `kill()` (streaming / `Drop`
+/// teardown) and bubblewrap's timeout branch; seatbelt's timeout branch instead
+/// uses [`hard_kill`] for an immediate, non-deferrable stop (see its docs).
 #[cfg(unix)]
 pub fn group_kill(
     child: &mut std::process::Child,
@@ -275,6 +276,32 @@ pub fn group_kill(
         libc::kill(-pgid, libc::SIGKILL);
     }
     Ok(())
+}
+
+/// Immediately and forcibly terminate a sandboxed child with `SIGKILL` — the
+/// whole process group (`-pgid`, matching [`group_kill`]'s targeting) when
+/// `group` is set, otherwise just the child itself.
+///
+/// Unlike [`group_kill`] there is no graceful `SIGTERM` first. This is for
+/// **timeout enforcement**, where a `SIGTERM`-then-`SIGKILL` escalation is both
+/// unnecessary — the run already consumed its full time budget — and unreliable:
+/// a shell blocked in a foreground `wait` (e.g. `/bin/sh -c '…; sleep 5; …'`)
+/// defers `SIGTERM`, reaps the killed foreground child, and runs the remaining
+/// script before the escalation fires, so post-timeout commands would still
+/// execute. An un-catchable `SIGKILL` to the group stops everything at once.
+///
+/// The pgid is read from the still-unreaped child, so `-pgid` reliably targets
+/// this child's group (its pid, and thus the pgid, cannot have been recycled).
+/// The caller reaps the direct child afterwards (e.g. via `Child::wait`).
+#[cfg(unix)]
+pub fn hard_kill(child: &mut std::process::Child, group: bool) {
+    let pid = child.id() as i32;
+    let target = if group { -pid } else { pid };
+    // SAFETY: `kill(2)` with a plain integer pid/pgid (negative targets the
+    // group); the arguments have no memory safety concerns.
+    unsafe {
+        libc::kill(target, libc::SIGKILL);
+    }
 }
 
 /// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
