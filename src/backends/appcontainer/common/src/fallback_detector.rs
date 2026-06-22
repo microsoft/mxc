@@ -151,17 +151,17 @@ pub fn detect(
     // proceed with the real probe chain — that lets tests assert
     // pass-through behavior without any error plumbing.
     //
-    // Gate is `cfg(test)`, not `cfg(debug_assertions)`: production
-    // `wxc-exec.exe` builds (release *and* dev binaries) must not honor
-    // `MXC_FORCE_TIER` from the environment. `cfg(test)` ensures the
-    // seam is compiled in only when the crate is built as a test binary
-    // — which is exactly the case for unit tests under any profile,
-    // including CI's `cargo test --profile release` invocation. The
-    // dispatcher/fallback unit tests in this crate's `mod tests` thus
-    // actually exercise tier selection under release-profile CI runs
-    // (previously the seam was elided by `cfg(debug_assertions)` and
-    // the tests silently no-op'd).
-    #[cfg(test)]
+    // Gate is `cfg(test)` OR the opt-in `force_tier_seam` Cargo feature, not
+    // `cfg(debug_assertions)`: a default production `wxc-exec.exe` build
+    // (release *and* dev) must not honor `MXC_FORCE_TIER` from the
+    // environment. `cfg(test)` compiles the seam in for unit tests under any
+    // profile (including CI's `cargo test --profile release`), so the
+    // dispatcher/fallback tests exercise tier selection. The `force_tier_seam`
+    // feature compiles it into a real binary on demand — the only way the
+    // Tier 4 (RestrictedToken) workload harness can reach a tier `detect`
+    // never selects naturally. Both are explicit opt-ins; neither is on by
+    // default.
+    #[cfg(any(test, feature = "force_tier_seam"))]
     if let Ok(forced) = std::env::var("MXC_FORCE_TIER") {
         if let Some(tier) = parse_force_tier(&forced) {
             return forced_decision(tier, policy, denied);
@@ -424,7 +424,7 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "force_tier_seam"))]
 fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     match s {
         "base-container" | "t1" => Some(IsolationTier::BaseContainer),
@@ -435,7 +435,7 @@ fn parse_force_tier(s: &str) -> Option<IsolationTier> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "force_tier_seam"))]
 fn forced_decision(
     tier: IsolationTier,
     policy: &ContainerPolicy,

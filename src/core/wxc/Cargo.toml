@@ -42,3 +42,6 @@ hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engi
 isolation_session = ["mxc_engine/isolation_session"]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["appcontainer_common/tier2_bfs", "mxc_engine/tier2_bfs"]
+# Forwards appcontainer_common/force_tier_seam. OFF by default; see appcontainer_common/Cargo.toml.
+# Builds a wxc-exec that honors the MXC_FORCE_TIER env var (Tier 4 workload harness).
+force_tier_seam = ["appcontainer_common/force_tier_seam"]
