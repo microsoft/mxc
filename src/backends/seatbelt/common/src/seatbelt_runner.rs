@@ -25,14 +25,15 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
-    take_boxed_write, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    WaitError,
 };
 use wxc_common::validator::validate_common;
 
@@ -70,11 +71,6 @@ impl SeatbeltScriptRunner {
         Self
     }
 }
-
-/// Exit-detection poll interval (ms) for the timeout path. Short enough to keep
-/// exit-detection latency low; the per-iteration sleep is additionally clamped
-/// to the time remaining so even sub-interval timeouts are honored precisely.
-const POLL_INTERVAL_MS: u64 = 50;
 
 impl SandboxBackend for SeatbeltScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
@@ -655,41 +651,6 @@ fn apply_clean_environment(command: &mut Command, request: &ExecutionRequest) {
     for kv in &request.env {
         if let Some((key, value)) = kv.split_once('=') {
             command.env(key, value);
-        }
-    }
-}
-
-enum WaitError {
-    Timeout,
-    Io(std::io::Error),
-}
-
-/// Wait for `child` to exit, polling at `POLL_INTERVAL_MS` intervals if a
-/// timeout is set. We poll manually rather than adding an async runtime
-/// dependency since the runner is otherwise synchronous.
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Option<Duration>,
-) -> Result<std::process::ExitStatus, WaitError> {
-    let Some(deadline) = timeout.map(|duration| Instant::now() + duration) else {
-        return child.wait().map_err(WaitError::Io);
-    };
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(WaitError::Timeout);
-                }
-                // Poll at a short interval for low exit-detection latency, but
-                // never sleep past the deadline so even sub-interval timeouts are
-                // honored.
-                let remaining = deadline - now;
-                std::thread::sleep(remaining.min(Duration::from_millis(POLL_INTERVAL_MS)));
-            }
-            Err(error) => return Err(WaitError::Io(error)),
         }
     }
 }

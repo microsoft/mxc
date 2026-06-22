@@ -131,14 +131,12 @@ impl InterruptibleReader {
 pub fn wrap_pipe<T: Into<OwnedFd>>(
     pipe: Option<T>,
 ) -> io::Result<(Option<InterruptibleReader>, Option<ReadCanceller>)> {
-    match pipe {
-        Some(pipe) => {
-            let reader = InterruptibleReader::new(pipe.into())?;
-            let canceller = reader.canceller();
-            Ok((Some(reader), Some(canceller)))
-        }
-        None => Ok((None, None)),
-    }
+    let Some(pipe) = pipe else {
+        return Ok((None, None));
+    };
+    let reader = InterruptibleReader::new(pipe.into())?;
+    let canceller = reader.canceller();
+    Ok((Some(reader), Some(canceller)))
 }
 
 impl Read for InterruptibleReader {

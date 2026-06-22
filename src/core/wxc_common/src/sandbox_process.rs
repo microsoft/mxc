@@ -253,6 +253,44 @@ pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Outcome of [`wait_with_timeout`]: the child exited, the deadline passed, or
+/// the wait itself failed.
+#[cfg(unix)]
+pub enum WaitError {
+    Timeout,
+    Io(std::io::Error),
+}
+
+/// Wait for `child` to exit. With a timeout we poll (rather than add an async
+/// runtime), clamping each sleep to the time remaining so even sub-interval
+/// timeouts fire on time. Shared by the Unix run-to-completion backends.
+#[cfg(unix)]
+pub fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Option<std::time::Duration>,
+) -> Result<std::process::ExitStatus, WaitError> {
+    use std::time::{Duration, Instant};
+    // Short poll interval for low exit-detection latency.
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    let Some(deadline) = timeout.map(|d| Instant::now() + d) else {
+        return child.wait().map_err(WaitError::Io);
+    };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(WaitError::Timeout);
+                }
+                std::thread::sleep((deadline - now).min(POLL_INTERVAL));
+            }
+            Err(error) => return Err(WaitError::Io(error)),
+        }
+    }
+}
+
 /// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioMode {
@@ -350,8 +388,8 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
                 if exit_code != 0 {
                     if let Some(msg) = self.0.diagnose_exit(request, exit_code) {
                         logger.log_line(&format!("Error: Launch diagnostic: {msg}"));
-                        response.error_message = msg.clone();
                         response.standard_err.push_str(&msg);
+                        response.error_message = msg;
                     }
                 }
                 response

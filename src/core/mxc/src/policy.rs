@@ -717,21 +717,12 @@ fn apply_backend(config: &mut serde_json::Value, policy: &SandboxPolicy, contain
             },
         });
         if let Some(network) = config.get_mut("network") {
-            let has_host_rules = network
-                .get("allowedHosts")
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-                || network
-                    .get("blockedHosts")
-                    .and_then(|v| v.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
-            network["enforcementMode"] = json!(if has_host_rules {
+            let mode = if has_host_rules(network) {
                 "both"
             } else {
                 "capabilities"
-            });
+            };
+            network["enforcementMode"] = json!(mode);
         }
     }
 
@@ -739,6 +730,19 @@ fn apply_backend(config: &mut serde_json::Value, policy: &SandboxPolicy, contain
     {
         let _ = (policy, container_id);
     }
+}
+
+/// True when the network section carries any host allow/deny rules, deciding
+/// whether host-level enforcement is engaged. (Linux + Windows only.)
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn has_host_rules(network: &serde_json::Value) -> bool {
+    let non_empty = |key: &str| {
+        network
+            .get(key)
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+    };
+    non_empty("allowedHosts") || non_empty("blockedHosts")
 }
 
 /// Promote network enforcement to `firewall` when host rules are present and
@@ -751,17 +755,7 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
         return;
     };
     let has_proxy = network.get("proxy").is_some();
-    let has_host_rules = network
-        .get("allowedHosts")
-        .and_then(|v| v.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false)
-        || network
-            .get("blockedHosts")
-            .and_then(|v| v.as_array())
-            .map(|a| !a.is_empty())
-            .unwrap_or(false);
-    if has_host_rules && !has_proxy {
+    if has_host_rules(network) && !has_proxy {
         network["enforcementMode"] = json!("firewall");
     }
 }
