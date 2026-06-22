@@ -128,6 +128,57 @@ pub fn parse_ui_event_payload(payload_hex: &str) -> Option<UiEvent> {
     })
 }
 
+/// Parse an integer that may be written as decimal or `0x`-prefixed hex.
+fn parse_u64_loose(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(rest, 16).ok()
+    } else {
+        s.parse::<u64>().ok()
+    }
+}
+
+/// Parse a UI-injection event whose `EventData` carries named `Data`
+/// children (i.e. the consumer was able to resolve the provider manifest).
+/// Recognised names: `ProcessName`, `ProcessId`, `SequenceNumber`,
+/// `Category`, `Detail`, and optional `Denied` (`true`/`false`/integer).
+pub fn parse_ui_event_from_named(named: &[(String, String)]) -> Option<UiEvent> {
+    let mut process_name: Option<String> = None;
+    let mut process_id: Option<u64> = None;
+    let mut sequence_number: Option<u64> = None;
+    let mut category: Option<u32> = None;
+    let mut detail: Option<u32> = None;
+    let mut denied: Option<bool> = None;
+
+    for (name, val) in named {
+        match name.as_str() {
+            "ProcessName" => process_name = Some(val.clone()),
+            "ProcessId" => process_id = parse_u64_loose(val),
+            "SequenceNumber" => sequence_number = parse_u64_loose(val),
+            "Category" => category = parse_u64_loose(val).map(|v| v as u32),
+            "Detail" => detail = parse_u64_loose(val).map(|v| v as u32),
+            "Denied" => {
+                let t = val.trim();
+                denied = match t.to_ascii_lowercase().as_str() {
+                    "true" | "1" => Some(true),
+                    "false" | "0" => Some(false),
+                    _ => parse_u64_loose(t).map(|v| v != 0),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    Some(UiEvent {
+        process_name: process_name?,
+        process_id: process_id?,
+        sequence_number: sequence_number?,
+        category: category?,
+        detail: detail?,
+        denied,
+    })
+}
+
 fn to_wide_z(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -233,6 +284,10 @@ struct ParsedEvent {
     /// For Data nodes this is the inner text; for ComplexData this is
     /// also the inner text (concatenated hex-encoded blob).
     event_data: Vec<String>,
+    /// EventData/Data entries paired with their `Name` attribute (when set),
+    /// in document order. Used for events whose schema is resolved at render
+    /// time (e.g. UI injection event_id=27 with provider manifest available).
+    event_data_named: Vec<(String, String)>,
     /// Inner text of the 5th EventData child (index 4) which carries the
     /// DACL ACE hex blob, when present.
     complex_data_4: Option<String>,
@@ -275,13 +330,18 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 
     // <EventData> child: zero or more Data/ComplexData nodes in order.
     let mut event_data = Vec::new();
+    let mut event_data_named: Vec<(String, String)> = Vec::new();
     let mut complex_data_4: Option<String> = None;
     if let Some(ed) = root.children().find(|n| n.has_tag_name("EventData")) {
         let mut complex_index = 0usize;
         for child in ed.children().filter(|n| n.is_element()) {
             let tag = child.tag_name().name();
             if tag == "Data" || tag == "ComplexData" {
-                event_data.push(child.text().unwrap_or("").to_string());
+                let text = child.text().unwrap_or("").to_string();
+                event_data.push(text.clone());
+                if let Some(name) = child.attribute("Name") {
+                    event_data_named.push((name.to_string(), text));
+                }
             }
             if tag == "ComplexData" {
                 if complex_index == 4 {
@@ -311,6 +371,7 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
         process_id,
         thread_id,
         event_data,
+        event_data_named,
         complex_data_4,
         processing_error_payload,
     })
@@ -386,36 +447,43 @@ pub fn parse_events(
         if ev.event_id == 27 {
             need_ui = true;
             ui_event_count += 1;
-            if let Some(hex) = ev.processing_error_payload.as_deref() {
-                match parse_ui_event_payload(hex) {
-                    Some(ui) => {
-                        if verbose {
-                            println!(
-                                "UI Injection event: process={} pid={} seq={} category=0x{:08X} detail=0x{:08X} denied={}",
-                                ui.process_name,
-                                ui.process_id,
-                                ui.sequence_number,
-                                ui.category,
-                                ui.detail,
-                                match ui.denied {
-                                    Some(true) => "true",
-                                    Some(false) => "false",
-                                    None => "(absent)",
-                                },
-                            );
-                        }
-                        ui_events.push(ui);
+
+            // Prefer the manifest-resolved EventData form (named <Data>
+            // children). Fall back to manual hex-payload decoding when the
+            // event was rendered as opaque <ProcessingErrorData>.
+            let ui_opt = parse_ui_event_from_named(&ev.event_data_named)
+                .or_else(|| ev.processing_error_payload.as_deref().and_then(parse_ui_event_payload));
+
+            match ui_opt {
+                Some(ui) => {
+                    if verbose {
+                        println!(
+                            "UI Injection event: process={} pid={} seq={} category=0x{:08X} detail=0x{:08X} denied={}",
+                            ui.process_name,
+                            ui.process_id,
+                            ui.sequence_number,
+                            ui.category,
+                            ui.detail,
+                            match ui.denied {
+                                Some(true) => "true",
+                                Some(false) => "false",
+                                None => "(absent)",
+                            },
+                        );
                     }
-                    None => {
-                        if verbose {
+                    ui_events.push(ui);
+                }
+                None => {
+                    if verbose {
+                        if let Some(hex) = ev.processing_error_payload.as_deref() {
                             println!(
                                 "UI Injection event observed (payload did not match expected layout: {hex})"
                             );
+                        } else {
+                            println!("UI Injection event observed (no EventData / ProcessingErrorData)");
                         }
                     }
                 }
-            } else if verbose {
-                println!("UI Injection event observed (no ProcessingErrorData payload)");
             }
             continue;
         }
