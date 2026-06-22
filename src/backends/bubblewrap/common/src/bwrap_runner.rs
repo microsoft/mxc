@@ -374,7 +374,7 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         if self.inner.group {
             // Pipes mode: bwrap leads its own process group — tree-kill it.
-            group_kill(&mut self.inner.child, Duration::from_secs(2))
+            group_kill(&mut self.inner.child)
         } else {
             // Inherit mode: bwrap shares the executor's group (no
             // `process_group(0)`), so a group-kill would hit the executor.

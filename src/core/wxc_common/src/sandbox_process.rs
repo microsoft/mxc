@@ -232,76 +232,48 @@ pub fn cancel_and_join_discard<C: StreamCloser>(
 
 /// Process-tree kill for a Unix child that leads its own process group — the
 /// in-tree backends arrange this via `setsid()` (Seatbelt) or
-/// `process_group(0)` (Bubblewrap), so the child's pgid equals its pid: a
-/// graceful `SIGTERM` to the whole group, then a `SIGKILL` sweep after `grace`.
-/// Signalling the negative pgid targets only that group — never the host's.
+/// `process_group(0)` (Bubblewrap), so the child's pgid equals its pid.
+/// `SIGKILL`s the leader and then its whole group (`-pgid`) — targeting only
+/// that group, never the host's — so the leader and every descendant die.
 ///
-/// The group is signalled even when the leader itself has already exited: a
-/// dead leader does **not** mean the group is empty — descendants sharing the
-/// pgid must still be reaped. The pgid is captured before any `try_wait`, so the
-/// leader is still alive or an un-reaped zombie (its pid, and thus the pgid, not
-/// yet recyclable) when the `SIGTERM` is sent. The final `SIGKILL` is sent
-/// unconditionally (tolerating `ESRCH` once the group is empty) so a descendant
-/// forked around the `SIGTERM` can't survive and leave a later `wait()` blocking
-/// for its full runtime — even if a transient `try_wait` error occurs during the
-/// grace loop. Used for the Unix backends' graceful `kill()` (streaming / `Drop`
-/// teardown) and bubblewrap's timeout branch; seatbelt's timeout branch instead
-/// uses [`hard_kill`] for an immediate, non-deferrable stop (see its docs).
-#[cfg(unix)]
-pub fn group_kill(
-    child: &mut std::process::Child,
-    grace: std::time::Duration,
-) -> std::io::Result<()> {
-    // Capture the pgid up front, before any `try_wait` reaps the leader: while
-    // the leader is unreaped its pid (== pgid) cannot be recycled, so `-pgid`
-    // reliably targets this child's group.
-    let pgid = child.id() as i32;
-    // SAFETY: `kill(2)` with a negative pgid signals the child's own process
-    // group; the arguments are plain integers with no memory safety concerns.
-    unsafe {
-        libc::kill(-pgid, libc::SIGTERM);
-    }
-    let deadline = std::time::Instant::now() + grace;
-    loop {
-        // Reap the direct child once it exits; a transient `try_wait` error must
-        // not skip the `SIGKILL` below, so treat anything but a clean exit as
-        // "still running" and keep waiting out the grace window.
-        if matches!(child.try_wait(), Ok(Some(_))) || std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    // SAFETY: as above.
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
-    Ok(())
-}
-
-/// Immediately and forcibly terminate a sandboxed child with `SIGKILL` — the
-/// whole process group (`-pgid`, matching [`group_kill`]'s targeting) when
-/// `group` is set, otherwise just the child itself.
+/// This is an immediate `SIGKILL` with no graceful `SIGTERM` first, on purpose.
+/// A `SIGTERM` is unreliable for our workloads: everything runs under
+/// `/bin/sh -c …`, and a shell parked in a foreground `wait` defers `SIGTERM`,
+/// reaps the killed child, then runs the rest of the script before any
+/// escalation — so commands could keep executing after we asked the sandbox to
+/// stop. Untrusted sandboxed code is also not owed a cleanup window (nor should
+/// it get one to spawn or exfiltrate once we've decided to kill it); the
+/// sandbox's own temp-file cleanup runs in `wait()` / `Drop` regardless.
 ///
-/// Unlike [`group_kill`] there is no graceful `SIGTERM` first. This is for
-/// **timeout enforcement**, where a `SIGTERM`-then-`SIGKILL` escalation is both
-/// unnecessary — the run already consumed its full time budget — and unreliable:
-/// a shell blocked in a foreground `wait` (e.g. `/bin/sh -c '…; sleep 5; …'`)
-/// defers `SIGTERM`, reaps the killed foreground child, and runs the remaining
-/// script before the escalation fires, so post-timeout commands would still
-/// execute. An un-catchable `SIGKILL` to the group stops everything at once.
+/// The **leader is signalled before the group** so its `SIGKILL` is already
+/// pending when a descendant's death would otherwise wake it: a leader blocked
+/// in a foreground `wait` would, on a `-pgid` sweep alone, sometimes wake (the
+/// kernel can terminate the descendant first) and run one more command before
+/// its own signal lands — observable as post-timeout output on the Inherit path,
+/// where stdout is the live terminal. With the leader's `SIGKILL` already
+/// pending, the kernel terminates it on the `wait` return instead of resuming
+/// it.
 ///
 /// The pgid is read from the still-unreaped child, so `-pgid` reliably targets
 /// this child's group (its pid, and thus the pgid, cannot have been recycled).
-/// The caller reaps the direct child afterwards (e.g. via `Child::wait`).
+/// The caller reaps the direct child afterwards (e.g. via `Child::wait`). Used
+/// by every Unix kill path: streaming `kill()`, `Drop` teardown, and the
+/// run-to-completion timeout branch.
 #[cfg(unix)]
-pub fn hard_kill(child: &mut std::process::Child, group: bool) {
+pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
+    // Read the pid from the still-unreaped child: its pid (== pgid) cannot be
+    // recycled, so `pid` / `-pid` reliably target this child and its own group.
     let pid = child.id() as i32;
-    let target = if group { -pid } else { pid };
-    // SAFETY: `kill(2)` with a plain integer pid/pgid (negative targets the
-    // group); the arguments have no memory safety concerns.
+    // SAFETY: `kill(2)` with a plain integer pid / negative pgid; the arguments
+    // are plain integers with no memory safety concerns.
     unsafe {
-        libc::kill(target, libc::SIGKILL);
+        // Leader first (see the doc): make its SIGKILL pending while it is still
+        // blocked, before any descendant is signalled.
+        libc::kill(pid, libc::SIGKILL);
+        // Then sweep the rest of the group (the descendants the leader spawned).
+        libc::kill(-pid, libc::SIGKILL);
     }
+    Ok(())
 }
 
 /// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
