@@ -229,7 +229,7 @@ On non-Windows platforms, all telemetry functions are no-ops.
 
 This project may collect usage data and send it to Microsoft to help improve our products and services. Note, however, that **no data collection is performed for local or open-source builds by default** — the public source code ships without a TraceLogging provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time will route events through the UTC pipeline.
 
-No PII is collected. Events contain only execution metrics (duration, backend type, exit code) and error context (phase, sanitized message). If you use the SDK to build applications, you are responsible for providing appropriate telemetry notices to your own users.
+No PII is collected. Events contain only execution metrics (duration, backend type, exit code) and a bounded error category (`error_type`). Free-form error message text is never emitted, so paths, usernames, and credentials cannot leak through telemetry. If you use the SDK to build applications, you are responsible for providing appropriate telemetry notices to your own users.
 
 Privacy information can be found at https://privacy.microsoft.com.
 
