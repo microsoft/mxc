@@ -184,7 +184,7 @@ fn build_request_then_run_seatbelt() {
     };
 
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script_code("echo built-from-policy");
+    request.set_script("echo built-from-policy");
 
     let mut proc = spawn_sandbox(request).expect("spawn should succeed");
     let mut out = String::new();

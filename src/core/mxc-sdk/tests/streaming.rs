@@ -33,7 +33,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
         },
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script_code(command);
+    request.set_script(command);
     request
 }
 
@@ -168,7 +168,7 @@ fn streaming_processcontainer_bidirectional_stdio() {
     };
     let mut request = build_request(&policy, None).expect("build_request");
     // `cmd /c more` echoes stdin to stdout until EOF, then exits.
-    request.set_script_code("cmd /c more");
+    request.set_script("cmd /c more");
     let mut proc = spawn_sandbox(request).expect("spawn");
 
     let mut stdin = proc.take_stdin().expect("stdin available");

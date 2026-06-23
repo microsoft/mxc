@@ -560,7 +560,7 @@ pub struct SandboxPolicy {
 
 /// A spawnable sandbox request, built from a [`SandboxPolicy`] by
 /// [`build_request`]. Fill in the command with
-/// [`set_script_code`](Self::set_script_code) — and optionally a working
+/// [`set_script`](Self::set_script) — and optionally a working
 /// directory or environment — then hand it to
 /// [`spawn_sandbox`](crate::spawn_sandbox).
 ///
@@ -576,8 +576,8 @@ pub struct SandboxRequest {
 impl SandboxRequest {
     /// Set the command the sandbox runs — the `/bin/sh -c` body on Unix, the
     /// command line on Windows.
-    pub fn set_script_code(&mut self, script_code: impl Into<String>) -> &mut Self {
-        self.inner.script_code = script_code.into();
+    pub fn set_script(&mut self, script: impl Into<String>) -> &mut Self {
+        self.inner.script_code = script.into();
         self
     }
 
@@ -627,7 +627,7 @@ impl SandboxRequest {
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
 /// The returned request has an empty command line; set the command with
-/// [`SandboxRequest::set_script_code`] (and any working directory / env) before
+/// [`SandboxRequest::set_script`] (and any working directory / env) before
 /// streaming it via [`crate::spawn_sandbox`].
 ///
 /// Mirrors the SDK field mapping and validation (network proxy/host-filtering

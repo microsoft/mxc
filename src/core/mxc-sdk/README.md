@@ -23,7 +23,7 @@ let policy = SandboxPolicy {
     timeout_ms: Some(10_000),
 };
 let mut request = build_request(&policy, None)?;
-request.set_script_code("echo hello");
+request.set_script("echo hello");
 
 let mut proc = spawn_sandbox(request)?;
 let mut stdout = proc.take_stdout().unwrap();
@@ -39,7 +39,7 @@ resolves the host's containment backend (Seatbelt on macOS, Bubblewrap on
 Linux, ProcessContainer on Windows) and mirrors the SDK's field mapping and
 network validation, building the same wire config internally and running it
 through the shared parser. The returned [`SandboxRequest`] has an empty
-command line — set the command with [`SandboxRequest::set_script_code`] (and any
+command line — set the command with [`SandboxRequest::set_script`] (and any
 working directory / env) before spawning.
 
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
@@ -67,7 +67,7 @@ let policy = SandboxPolicy {
     timeout_ms: None,
 };
 let mut request = build_request(&policy, None)?;
-request.set_script_code("cat"); // echoes stdin until EOF
+request.set_script("cat"); // echoes stdin until EOF
 
 let mut proc = spawn_sandbox(request)?;
 let mut stdin = proc.take_stdin().unwrap();

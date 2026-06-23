@@ -21,7 +21,7 @@
 //!     timeout_ms: None,
 //! };
 //! let mut request = build_request(&policy, None)?;
-//! request.set_script_code("echo hi");
+//! request.set_script("echo hi");
 //! let mut proc = spawn_sandbox(request)?;
 //! let exit_code = proc.wait()?;
 //! println!("exit={exit_code}");

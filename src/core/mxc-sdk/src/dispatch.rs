@@ -242,7 +242,7 @@ mod tests {
             timeout_ms: None,
         };
         let mut request = build_request(&policy, None).expect("build_request");
-        request.set_script_code("echo hi");
+        request.set_script("echo hi");
         request
             .inner
             .seatbelt

@@ -35,7 +35,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
         },
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script_code(command);
+    request.set_script(command);
     request
 }
 
@@ -60,7 +60,7 @@ fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> S
         },
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script_code(command);
+    request.set_script(command);
     request
 }
 
