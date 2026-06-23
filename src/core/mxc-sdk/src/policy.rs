@@ -541,6 +541,11 @@ pub struct SandboxRequest {
 impl SandboxRequest {
     /// Set the command the sandbox runs — the `/bin/sh -c` body on Unix, the
     /// command line on Windows.
+    ///
+    /// This is the raw command string, mapped to the same `script_code` the
+    /// executor binaries run, so it is interpreted exactly as the SDK's
+    /// `spawnSandbox(script)` / `process.commandLine` is — behavior is identical
+    /// across the SDK and this crate.
     pub fn set_script(&mut self, script: impl Into<String>) -> &mut Self {
         self.inner.script_code = script.into();
         self
