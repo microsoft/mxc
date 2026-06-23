@@ -5,4 +5,4 @@ edition.workspace = true
 description = "Pure Rust TraceLogging ETW telemetry for MXC"
 
 [target.'cfg(windows)'.dependencies]
-tracelogging = "1"
+tracelogging = { workspace = true }

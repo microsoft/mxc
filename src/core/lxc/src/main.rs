@@ -255,6 +255,11 @@ fn main() {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
                 );
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -270,6 +275,11 @@ fn main() {
             #[cfg(not(feature = "microvm"))]
             {
                 eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -281,6 +291,11 @@ fn main() {
             #[cfg(not(target_os = "linux"))]
             {
                 eprintln!("Error: Bubblewrap backend is only available on Linux");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }

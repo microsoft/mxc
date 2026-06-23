@@ -63,7 +63,14 @@ shared Part C custom event fields:
 
 ### MXC.Execution
 
-Emitted on every sandbox execution completion.
+Emitted when a one-shot execution completes (success or failure). It is also
+emitted on early-exit failures in the one-shot executors — configuration,
+policy, and backend-init failures that terminate before a runner produces a
+result (with `mxc.exit_code` = 1 and `mxc.outcome` = `failure`).
+
+> **Note:** The state-aware lifecycle (`provision` / `start` / `exec` /
+> `stop` / `deprovision`) is not yet instrumented; only the one-shot path
+> emits telemetry.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -126,10 +133,16 @@ with another team's GUID.
 
 ### CI pipeline steps
 
-The Azure Pipelines build sets `MXC_TELEMETRY_PROVIDER_GROUP_GUID` to the
-real Microsoft telemetry group GUID before `cargo build` on Windows. Community
-forks that lack access to the private GUID do not set this variable — the
-provider is registered without a group GUID (plain ETW only).
+Internal Microsoft builds set `MXC_TELEMETRY_PROVIDER_GROUP_GUID` to the real
+Microsoft telemetry group GUID before `cargo build` on Windows, so events route
+through the telemetry pipeline. Community forks that lack access to the private
+GUID do not set this variable — the provider is registered without a group GUID
+(plain ETW only).
+
+> **Follow-up:** The Azure Pipelines wiring that injects this value during the
+> official build is planned as a separate build-integration change. Until it
+> lands, official builds behave like public builds (no group GUID). The build
+> already honors the variable today (see *Local developer testing* below).
 
 ### Local developer testing
 

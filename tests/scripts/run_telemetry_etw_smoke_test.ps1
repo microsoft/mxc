@@ -23,15 +23,48 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# MXC public provider GUID — derived deterministically by `tracelogging::define_provider!`
-# from the provider name "Microsoft.MXC" using the standard ETW name-hash algorithm
-# (same algorithm used by <TraceLoggingProvider.h>, WIL's IMPLEMENT_TRACELOGGING_CLASS,
-# and .NET's EventSource). This is NOT private.
-$providerGuid = '{7f10def4-a258-5fea-510e-2c3bb976687f}'
+# MXC public provider name. The provider GUID is derived deterministically from
+# this name by `tracelogging::define_provider!` using the standard ETW name-hash
+# algorithm (the same algorithm used by <TraceLoggingProvider.h>, WIL's
+# IMPLEMENT_TRACELOGGING_CLASS, and .NET's EventSource). We compute the GUID from
+# the name here rather than hard-coding a literal, so the test stays in lockstep
+# with the provider name and never embeds a magic constant.
+$providerName = 'Microsoft.MXC'
+
+function Get-TraceLoggingProviderGuid {
+    param([Parameter(Mandatory)][string]$Name)
+
+    # EventSource/TraceLogging name->GUID: SHA1 over a fixed namespace seed
+    # followed by the UTF-16BE bytes of the upper-cased name; first 16 bytes of
+    # the digest become the GUID with the version nibble forced to 5.
+    $seed = [byte[]]@(
+        0x48, 0x2C, 0x2D, 0xB2, 0xC3, 0x90, 0x47, 0xC8,
+        0x87, 0xF8, 0x1A, 0x15, 0xBF, 0xC1, 0x30, 0xFB
+    )
+    $nameBytes = [System.Text.Encoding]::BigEndianUnicode.GetBytes($Name.ToUpperInvariant())
+    $buffer = New-Object byte[] ($seed.Length + $nameBytes.Length)
+    [Array]::Copy($seed, 0, $buffer, 0, $seed.Length)
+    [Array]::Copy($nameBytes, 0, $buffer, $seed.Length, $nameBytes.Length)
+
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        $hash = $sha1.ComputeHash($buffer)
+    } finally {
+        $sha1.Dispose()
+    }
+
+    $guidBytes = New-Object byte[] 16
+    [Array]::Copy($hash, 0, $guidBytes, 0, 16)
+    $guidBytes[7] = ($guidBytes[7] -band 0x0F) -bor 0x50
+    return '{' + ([guid]::new($guidBytes)).ToString() + '}'
+}
+
+$providerGuid = Get-TraceLoggingProviderGuid -Name $providerName
 $sessionName  = 'MxcTelemetryTest'
 $repoRoot     = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 Write-Host "=== MXC ETW Capture Smoke Test ===" -ForegroundColor Cyan
+Write-Host "Provider: $providerName  $providerGuid"
 
 # ---------------------------------------------------------------------------
 # Pre-flight: elevation check
@@ -99,9 +132,11 @@ Write-Host "ETW session started, writing to $etlFile"
 Write-Host "`n--- Running wxc-exec with telemetry ---" -ForegroundColor Yellow
 
 try {
-    # Run with --experimental to enable the telemetry section.
-    # The sandbox may fail (AppContainer prerequisites), but telemetry
-    # init/emit happens before execution — an error event should still fire.
+    # Run with --experimental to enable the telemetry section. The provider is
+    # registered during init (before execution); the MXC.Execution / MXC.Error
+    # events are emitted on completion, after the runner returns. The sandbox
+    # itself may fail (e.g. AppContainer prerequisites), but completion
+    # telemetry still fires for the failure, so events should be captured.
     $proc = Start-Process -FilePath $wxcExe `
         -ArgumentList "--debug", "--experimental", $configFile `
         -PassThru -NoNewWindow -Wait
@@ -133,10 +168,10 @@ $etlSize = (Get-Item $etlFile).Length
 Write-Host "ETL file size: $etlSize bytes"
 
 if ($etlSize -eq 0) {
-    Write-Host "WARNING: ETL file is empty — no events captured." -ForegroundColor Yellow
-    Write-Host "This may happen if the sandbox failed before telemetry init." -ForegroundColor Yellow
-    Write-Host "TEST INCONCLUSIVE (not a failure)." -ForegroundColor Yellow
-    exit 0
+    Write-Host "FAILED: ETL file is empty — no events captured." -ForegroundColor Red
+    Write-Host "All prerequisites were met (admin, wxc-exec present, ETW session created)," -ForegroundColor Red
+    Write-Host "so the provider should have emitted at least one completion event." -ForegroundColor Red
+    exit 1
 }
 
 # Convert .etl to XML for inspection.
@@ -165,8 +200,9 @@ if ($eventCount -gt 0) {
         }
     }
 } else {
-    Write-Host "WARNING: ETL had content but no parseable events." -ForegroundColor Yellow
-    Write-Host "TEST INCONCLUSIVE." -ForegroundColor Yellow
+    Write-Host "`n=== ETW CAPTURE SMOKE TEST FAILED ===" -ForegroundColor Red
+    Write-Host "ETL file had content ($etlSize bytes) but no parseable events were found." -ForegroundColor Red
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
