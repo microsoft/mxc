@@ -651,12 +651,15 @@ fn build_wire_config(
         },
     });
 
-    // Only Linux has a real host-filtering backend (iptables + cooperative
-    // proxy). Seatbelt cannot enforce hostnames — `profile_builder` turns any
-    // non-empty `allowedHosts` into a blanket `(allow network-outbound)` — so
-    // macOS must fall through to the fail-closed guard below rather than silently
-    // granting allow-all outbound.
-    let targets_host_filtering_backend = cfg!(target_os = "linux");
+    // Mirror the SDK's `resolvesToHostFilteringBackend` (sdk/src/sandbox.ts):
+    // Linux (Bubblewrap/LXC) and macOS (Seatbelt) are treated as host-filtering
+    // backends, so `allowedHosts`/`blockedHosts` are accepted without
+    // `allowOutbound`; only Windows ProcessContainer requires `allowOutbound`.
+    // NB: Seatbelt can't actually enforce hostnames (`profile_builder` degrades a
+    // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
+    // anyway to stay consistent with the SDK rather than diverging — keeping the
+    // two ports reconciled matters more than being stricter here.
+    let targets_host_filtering_backend = cfg!(any(target_os = "linux", target_os = "macos"));
 
     if let Some(net) = &policy.network {
         if net.proxy.is_some() && cfg!(target_os = "macos") {
@@ -901,24 +904,23 @@ mod tests {
         }
     }
 
-    // macOS Seatbelt cannot enforce hostnames, so the host-filtering guard must
-    // apply there (cr-003). These assert the fail-closed behavior on macOS.
+    // macOS Seatbelt is treated as a host-filtering backend to mirror the SDK
+    // (`resolvesToHostFilteringBackend` in sdk/src/sandbox.ts), so `allowedHosts`
+    // is accepted with or without `allowOutbound` — consistency with the SDK over
+    // rejecting on macOS, even though Seatbelt can't actually filter by host.
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_allowed_hosts_without_outbound_is_rejected() {
-        // allowedHosts + allowOutbound=false ("only these hosts") would silently
-        // become allow-all on Seatbelt; it must be rejected instead.
+    fn macos_allowed_hosts_without_outbound_is_accepted() {
+        // The SDK accepts allowedHosts without allowOutbound on Seatbelt, so the
+        // Rust port must too (the guard only applies to Windows ProcessContainer).
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
             allowed_hosts: vec!["example.com".to_string()],
             ..Default::default()
         });
-        let err = build_request(&policy, None).expect_err("must reject host filter w/o outbound");
         assert!(
-            err.message
-                .contains("allowedHosts/blockedHosts require allowOutbound"),
-            "unexpected error: {}",
-            err.message
+            build_request(&policy, None).is_ok(),
+            "macOS must accept allowedHosts without allowOutbound, matching the SDK"
         );
     }
 

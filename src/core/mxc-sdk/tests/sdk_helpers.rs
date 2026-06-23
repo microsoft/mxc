@@ -149,20 +149,19 @@ fn build_request_host_rules_require_outbound() {
         timeout_ms: None,
     };
 
-    // Only Linux has a real host-filtering backend (iptables + cooperative
-    // proxy); Seatbelt (macOS) and the Windows backends cannot enforce
-    // hostnames, so host rules without `allowOutbound` must be rejected there
-    // rather than silently becoming allow-all. Either way it must not panic.
+    // Mirror the SDK's `resolvesToHostFilteringBackend`: Linux (Bubblewrap/LXC)
+    // and macOS (Seatbelt) accept host rules without `allowOutbound`; only the
+    // Windows ProcessContainer backend requires it. Either way it must not panic.
     let result = build_request(&policy, None);
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(
             result.is_ok(),
-            "Linux host-filtering backend accepts host rules"
+            "Linux/macOS host-filtering backends accept host rules without allowOutbound (matching the SDK)"
         );
     } else {
         assert!(
             result.is_err(),
-            "non-host-filtering backends require allowOutbound for host rules"
+            "Windows ProcessContainer requires allowOutbound for host rules"
         );
     }
 }
