@@ -615,7 +615,8 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
 
 /// Validates cross-list filesystem path constraints:
 /// 1. Same-path conflict: a path must not appear in multiple lists.
-/// 2. Paths must exist: every listed path must exist on the host at config time.
+/// 2. Paths should exist: logs a warning for paths that don't exist on the host
+///    (advisory — some backends create mount targets dynamically).
 /// 3. Object-based conflict: two different paths resolving to the same filesystem
 ///    object (same device + inode) with different intents are rejected.
 fn validate_filesystem_path_conflicts(
@@ -667,7 +668,7 @@ fn validate_filesystem_path_conflicts(
     for (path, list_name) in &path_intents {
         if fs::metadata(path).is_err() {
             logger.log_line(&format!(
-                "Warning: filesystem path '{}' (in '{}') does not exist on the host; \
+                "WARNING: filesystem path '{}' (in '{}') does not exist on the host; \
                  the backend may fail at mount time",
                 path, list_name
             ));
@@ -706,24 +707,39 @@ fn validate_filesystem_path_conflicts(
 
     #[cfg(windows)]
     {
-        // On Windows, detect object-based conflicts by comparing canonical paths.
-        // Two different path strings that canonicalize to the same absolute path
-        // (e.g. via junctions, subst drives, or case differences) are the same object.
-        let mut canonical_map: HashMap<std::path::PathBuf, (&str, &str)> = HashMap::new();
+        // On Windows, detect object-based conflicts by comparing file identity
+        // (volume serial + file index) obtained via GetFileInformationByHandle.
+        // This correctly detects hardlinks, junctions, and case-only differences.
+        use std::os::windows::io::AsRawHandle;
+
+        let mut identity_map: HashMap<(u32, u64), (&str, &str)> = HashMap::new();
         for (path, intent) in &path_intents {
-            if let Ok(canonical) = fs::canonicalize(path) {
-                if let Some((existing_path, existing_intent)) = canonical_map.get(&canonical) {
-                    if *existing_intent != *intent {
-                        let msg = format!(
-                            "Filesystem paths '{}' ({}) and '{}' ({}) resolve to the \
-                             same filesystem object but have conflicting intents",
-                            existing_path, existing_intent, path, intent
-                        );
-                        logger.log_line(&msg);
-                        return Err(WxcError::ConfigParse(msg));
+            if let Ok(file) = fs::File::open(path) {
+                let mut info: windows::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
+                    unsafe { std::mem::zeroed() };
+                let handle = windows::Win32::Foundation::HANDLE(file.as_raw_handle());
+                let ok = unsafe {
+                    windows::Win32::Storage::FileSystem::GetFileInformationByHandle(
+                        handle, &mut info,
+                    )
+                };
+                if ok.is_ok() {
+                    let file_index =
+                        ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+                    let key = (info.dwVolumeSerialNumber, file_index);
+                    if let Some((existing_path, existing_intent)) = identity_map.get(&key) {
+                        if *existing_intent != *intent {
+                            let msg = format!(
+                                "Filesystem paths '{}' ({}) and '{}' ({}) resolve to the \
+                                 same filesystem object but have conflicting intents",
+                                existing_path, existing_intent, path, intent
+                            );
+                            logger.log_line(&msg);
+                            return Err(WxcError::ConfigParse(msg));
+                        }
+                    } else {
+                        identity_map.insert(key, (path, intent));
                     }
-                } else {
-                    canonical_map.insert(canonical, (path, intent));
                 }
             }
         }
@@ -4085,5 +4101,65 @@ mod tests {
         let mut logger = test_logger();
 
         load_request(&encoded, &mut logger, true).unwrap();
+    }
+
+    #[test]
+    fn object_based_conflict_via_hardlink_rejected() {
+        // Create a temp file and a hardlink to it — same inode, two paths.
+        let dir = std::env::temp_dir().join("mxc_test_object_conflict");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.txt");
+        let link = dir.join("link.txt");
+        fs::write(&original, "test").unwrap();
+        fs::hard_link(&original, &link).unwrap();
+
+        let original_str = original.to_str().unwrap().replace('\\', "\\\\");
+        let link_str = link.to_str().unwrap().replace('\\', "\\\\");
+
+        let json = format!(
+            r#"{{"process": {{"commandLine": "echo hi"}}, "containment": "process", "filesystem": {{"readwritePaths": ["{}"], "deniedPaths": ["{}"]}}}}"#,
+            original_str, link_str
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("same filesystem object") && msg.contains("conflicting intents"),
+            "expected object-based conflict error, got: {msg}"
+        );
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn object_based_same_intent_via_hardlink_accepted() {
+        // Same inode, same intent (both readwritePaths) → no conflict.
+        let dir = std::env::temp_dir().join("mxc_test_object_same_intent");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.txt");
+        let link = dir.join("link.txt");
+        fs::write(&original, "test").unwrap();
+        fs::hard_link(&original, &link).unwrap();
+
+        let original_str = original.to_str().unwrap().replace('\\', "\\\\");
+        let link_str = link.to_str().unwrap().replace('\\', "\\\\");
+
+        let json = format!(
+            r#"{{"process": {{"commandLine": "echo hi"}}, "containment": "process", "filesystem": {{"readwritePaths": ["{}", "{}"]}}}}"#,
+            original_str, link_str
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        // Same intent → should succeed (no conflict)
+        load_request(&encoded, &mut logger, true).unwrap();
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
     }
 }
