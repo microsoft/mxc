@@ -602,8 +602,7 @@ impl SandboxRequest {
         self.inner
             .seatbelt
             .as_ref()
-            .map(|s| s.extra_mach_lookups.as_slice())
-            .unwrap_or_default()
+            .map_or(&[], |s| s.extra_mach_lookups.as_slice())
     }
 
     /// Set the Seatbelt (macOS) extra Mach service names the child may look up.
