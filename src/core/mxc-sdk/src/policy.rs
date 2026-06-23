@@ -566,7 +566,7 @@ pub struct SandboxPolicy {
 ///
 /// This is the SDK's own request type; the internal execution model it maps to
 /// is an implementation detail callers don't depend on.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SandboxRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
