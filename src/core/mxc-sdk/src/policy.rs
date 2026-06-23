@@ -222,76 +222,38 @@ fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)
 }
 
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
-/// (Windows only), grant read-only access to just the directories PowerShell
-/// needs to start and run — its install dir (`$PSHOME`, which also carries the
-/// self-contained .NET runtime and the core module tree), the System32 system
-/// DLLs, and the module search roots — plus the PSReadLine history dir
-/// read-write.
+/// (Windows only), grant the system-drive root (`C:\`) read-only — `pwsh.exe`
+/// enumerates the drive root on startup — plus the PSReadLine history directory
+/// read-write so the module can persist command history.
 ///
-/// Previously this (mirroring the SDK's `getPowerShellPolicy`) exposed the
-/// **entire** system drive (`C:\`) read-only, which widened the sandbox's read
-/// surface far past what PowerShell requires. The grant is now scoped; the SDK
-/// helper was narrowed in the same change to keep the two ports in parity.
+/// Mirrors the SDK's `getPowerShellPolicy`. The system drive is read from the
+/// process environment (`SystemDrive`, defaulting to `C:`); the user-scoped
+/// `USERPROFILE` comes from the passed-in `env`.
 ///
-/// Nonexistent read-only candidates are dropped so the default-deny brokered
-/// filesystem is never handed a path it cannot resolve. System-scoped infra
-/// variables (`WINDIR`, `ProgramFiles*`) are read from the process environment
-/// (as the SDK reads `SystemDrive`); user-scoped variables (`USERPROFILE`,
-/// `PSModulePath`) come from the passed-in `env`.
+/// On non-Windows, or when `pwsh.exe` is not on `path_dirs`, returns an empty
+/// policy.
 fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> FilesystemPolicyResult {
     if !is_windows() {
         return FilesystemPolicyResult::default();
     }
 
-    // `$PSHOME` is the directory that actually contains `pwsh.exe`.
-    let ps_home = match path_dirs
+    let pwsh_found = path_dirs
         .iter()
-        .find(|dir| Path::new(dir).join("pwsh.exe").exists())
-    {
-        Some(dir) => dir.clone(),
-        None => return FilesystemPolicyResult::default(),
-    };
+        .any(|dir| Path::new(dir).join("pwsh.exe").exists());
+    if !pwsh_found {
+        return FilesystemPolicyResult::default();
+    }
 
-    let mut readonly: Vec<String> = Vec::new();
-
-    // 1. The PowerShell install tree: pwsh.exe, its self-contained .NET
-    //    runtime, and the shipped modules under `$PSHOME\Modules`.
-    readonly.push(ps_home.clone());
-    readonly.push(join_str(&ps_home, &["Modules"]));
-
-    // 2. System DLLs the loader and the .NET runtime resolve from System32.
-    let windir = std::env::var("WINDIR")
+    let system_drive = std::env::var("SystemDrive")
         .ok()
-        .or_else(|| std::env::var("windir").ok())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "C:\\Windows".to_string());
-    readonly.push(join_str(&windir, &["System32"]));
+        .unwrap_or_else(|| "C:".to_string());
+    let readonly_paths = vec![format!("{system_drive}\\")];
 
-    // 3. Module search roots: `$PSModulePath` plus the well-known per-machine
-    //    module directories PowerShell probes on startup.
-    if let Some(ps_module_path) = env_get(env, "PSModulePath") {
-        readonly.extend(split_path_list(ps_module_path));
-    }
-    for program_files_var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
-        if let Some(program_files) = std::env::var(program_files_var)
-            .ok()
-            .filter(|s| !s.is_empty())
-        {
-            readonly.push(join_str(&program_files, &["PowerShell", "Modules"]));
-            readonly.push(join_str(&program_files, &["WindowsPowerShell", "Modules"]));
-        }
-    }
-
-    let mut readwrite: Vec<String> = Vec::new();
+    let mut readwrite_paths: Vec<String> = Vec::new();
     if let Some(user_profile) = env_get(env, "USERPROFILE") {
-        // Per-user module directory (read-only).
-        readonly.push(join_str(
-            user_profile,
-            &["Documents", "PowerShell", "Modules"],
-        ));
-        // PSReadLine command-history directory (read-write). Left unfiltered so
-        // the module can create it on first use.
-        readwrite.push(join_str(
+        // PSReadLine command-history directory (read-write).
+        readwrite_paths.push(join_str(
             user_profile,
             &[
                 "AppData",
@@ -304,17 +266,9 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
         ));
     }
 
-    // Keep the grant minimal: drop nonexistent read-only candidates (the
-    // brokered filesystem rejects paths it cannot resolve). The caller
-    // deduplicates the merged set.
-    let readonly_paths: Vec<String> = readonly
-        .into_iter()
-        .filter(|path| directory_exists(path))
-        .collect();
-
     FilesystemPolicyResult {
         readonly_paths,
-        readwrite_paths: readwrite,
+        readwrite_paths,
     }
 }
 
@@ -877,7 +831,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn powershell_policy_is_scoped_not_whole_drive() {
+    fn powershell_policy_grants_system_drive_root() {
         use super::powershell_policy;
         use std::fs;
         use std::path::PathBuf;
@@ -902,32 +856,15 @@ mod tests {
         // Clean up before asserting so a failing assertion still leaves nothing.
         let _ = fs::remove_dir_all(&ps_home);
 
-        // `$PSHOME` is granted read-only...
-        assert!(
-            result
-                .readonly_paths
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(&ps_home_str)),
-            "expected $PSHOME in readonly paths: {:?}",
-            result.readonly_paths
-        );
-        // ...as are the System32 system DLLs...
-        assert!(
-            result
-                .readonly_paths
-                .iter()
-                .any(|p| p.to_lowercase().ends_with("system32")),
-            "expected System32 in readonly paths: {:?}",
-            result.readonly_paths
-        );
-        // ...but the whole system-drive root is NOT (the regression we fixed).
+        // The system-drive root (e.g. `C:\`) is granted read-only — pwsh
+        // enumerates the drive root on startup (mirrors `getPowerShellPolicy`).
         // A bare drive root normalizes to a 2-char `X:` after trimming separators.
         assert!(
-            !result.readonly_paths.iter().any(|p| {
+            result.readonly_paths.iter().any(|p| {
                 let trimmed = p.trim_end_matches(['\\', '/']);
-                trimmed.len() <= 2 && trimmed.ends_with(':')
+                trimmed.len() == 2 && trimmed.ends_with(':')
             }),
-            "system-drive root must not be granted: {:?}",
+            "expected system-drive root in readonly paths: {:?}",
             result.readonly_paths
         );
         // PSReadLine command history stays read-write.
