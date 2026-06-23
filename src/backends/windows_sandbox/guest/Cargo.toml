@@ -2,6 +2,7 @@
 name = "wxc_windows_sandbox_guest"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "wxc-windows-sandbox-guest"

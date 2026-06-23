@@ -1015,14 +1015,16 @@ impl WSLContainerRunner {
                 mappings.len()
             );
         }
-
-        let (mounts, warnings) = policy_mapping::build_volume_mounts(
+        let mounts = match policy_mapping::build_volume_mounts(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,
-        );
-        for w in &warnings {
-            let _ = writeln!(logger, "[WSLC] Warning: {}", w);
-        }
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = writeln!(logger, "[WSLC] {}", e);
+                return ScriptResponse::error(&e);
+            }
+        };
 
         // Keep owned data alive for volume pointers
         let wide_paths: Vec<(Vec<u16>, Vec<u8>)> = mounts

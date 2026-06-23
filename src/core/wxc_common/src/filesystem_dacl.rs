@@ -312,6 +312,12 @@ pub struct RecoveryReport {
     pub files_processed: usize,
     /// Total ACEs successfully removed across all orphan files.
     pub aces_restored: usize,
+    /// ACEs pruned because their target path no longer exists. There is
+    /// nothing to restore on a deleted file, so the entry is dropped rather
+    /// than retained-and-retried forever (which would emit perpetual
+    /// recovery errors). Counted separately from `aces_restored` so the
+    /// diagnostic line stays honest.
+    pub aces_pruned_missing: usize,
     /// Per-file or per-path errors, formatted for logging.
     pub errors: Vec<String>,
 }
@@ -563,16 +569,33 @@ pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
         // Reap. Failed entries are retained so the next startup retries.
         let mut remaining: Vec<AppliedAce> = Vec::new();
         for ace in state.applied.iter().rev() {
+            // Prune ACEs whose target no longer exists: there is nothing to
+            // restore on a deleted file/dir, and retaining the entry would
+            // make every future startup re-attempt the restore and fail with
+            // PATH_NOT_FOUND forever. `try_exists() == Ok(false)`
+            // is a confirmed "not there"; an `Err` (e.g. access denied) is
+            // ambiguous, so we still attempt the restore in that case.
+            if matches!(ace.canonical_path.try_exists(), Ok(false)) {
+                report.aces_pruned_missing += 1;
+                continue;
+            }
             match restore_one(ace) {
                 Ok(_) => report.aces_restored += 1,
                 Err(e) => {
-                    report.errors.push(format!(
-                        "restore {} (pid {}): {}",
-                        ace.canonical_path.display(),
-                        state.pid,
-                        e
-                    ));
-                    remaining.push(ace.clone());
+                    // Race: the target may have been deleted between the
+                    // existence check above and the restore attempt. If it is
+                    // now confirmed gone, prune rather than retain.
+                    if matches!(ace.canonical_path.try_exists(), Ok(false)) {
+                        report.aces_pruned_missing += 1;
+                    } else {
+                        report.errors.push(format!(
+                            "restore {} (pid {}): {}",
+                            ace.canonical_path.display(),
+                            state.pid,
+                            e
+                        ));
+                        remaining.push(ace.clone());
+                    }
                 }
             }
         }
@@ -2624,6 +2647,50 @@ mod tests {
         }
         let report = recover_orphaned_state().unwrap();
         assert!(report.files_processed >= 1);
+    }
+
+    #[test]
+    fn recovery_prunes_ace_whose_target_is_gone() {
+        use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        // A forged orphan (dead pid) whose single ACE targets a path that no
+        // longer exists must be pruned — not retained and re-errored forever.
+        let _scope = ScopedStateDir::new();
+        let dir = state_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does-not-exist-victim");
+        assert!(matches!(missing.try_exists(), Ok(false)));
+
+        let synthetic = dir.join("pid-2147483646-missing.json");
+        let s = StateFile {
+            run_id: "pid-2147483646-missing".into(),
+            pid: 0x7FFF_FFFE,
+            image_name: "wxc-exec.exe".into(),
+            started_at_filetime: 0,
+            applied: vec![AppliedAce {
+                canonical_path: missing,
+                sid_string: "S-1-1-0".into(),
+                access_mask: FILE_ALL_ACCESS.0,
+                ace_type: AceType::Allow,
+                inheritable: false,
+                prior_state: Vec::new(),
+            }],
+        };
+        write_state_file(&synthetic, &s).unwrap();
+
+        let report = recover_orphaned_state().unwrap();
+        assert!(
+            report.aces_pruned_missing >= 1,
+            "missing-target ACE should be pruned"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "a pruned (missing-target) entry must not surface as an error: {:?}",
+            report.errors
+        );
+        assert!(
+            matches!(synthetic.try_exists(), Ok(false)),
+            "a fully-pruned state file should be removed"
+        );
     }
 
     #[test]

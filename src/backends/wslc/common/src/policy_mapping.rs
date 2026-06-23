@@ -66,44 +66,49 @@ pub fn windows_path_to_container_path(windows_path: &str) -> Option<String> {
 /// - `readonly_paths` → mounts with `read_only: true`
 /// - `denied_paths` → not mounted (Linux container isolation means they're inaccessible)
 ///
-/// Paths that don't have a valid drive letter are skipped with a warning-style message
-/// in the returned errors vec.
+/// Returns an error if any path is not a valid local Windows drive path.
+/// UNC paths (`\\server\share`) are explicitly rejected because the WSLC SDK
+/// can only mount paths via the `/mnt/<drive>/` convention and has no mechanism
+/// to project network shares into the container's filesystem namespace.
 pub fn build_volume_mounts(
     readwrite_paths: &[String],
     readonly_paths: &[String],
-) -> (Vec<VolumeMount>, Vec<String>) {
+) -> Result<Vec<VolumeMount>, String> {
     let mut mounts = Vec::new();
-    let mut warnings = Vec::new();
 
     for path in readwrite_paths {
-        match windows_path_to_container_path(path) {
-            Some(container_path) => mounts.push(VolumeMount {
-                windows_path: path.clone(),
-                container_path,
-                read_only: false,
-            }),
-            None => warnings.push(format!(
-                "Skipping readwrite path '{}': not a valid Windows drive path",
+        let container_path = windows_path_to_container_path(path).ok_or_else(|| {
+            format!(
+                "WSLC: readwritePaths entry '{}' is not a valid local drive path. \
+                 Only paths starting with a drive letter (e.g. C:\\...) are supported; \
+                 UNC paths (\\\\server\\share) cannot be mapped into a WSL container.",
                 path
-            )),
-        }
+            )
+        })?;
+        mounts.push(VolumeMount {
+            windows_path: path.clone(),
+            container_path,
+            read_only: false,
+        });
     }
 
     for path in readonly_paths {
-        match windows_path_to_container_path(path) {
-            Some(container_path) => mounts.push(VolumeMount {
-                windows_path: path.clone(),
-                container_path,
-                read_only: true,
-            }),
-            None => warnings.push(format!(
-                "Skipping readonly path '{}': not a valid Windows drive path",
+        let container_path = windows_path_to_container_path(path).ok_or_else(|| {
+            format!(
+                "WSLC: readonlyPaths entry '{}' is not a valid local drive path. \
+                 Only paths starting with a drive letter (e.g. C:\\...) are supported; \
+                 UNC paths (\\\\server\\share) cannot be mapped into a WSL container.",
                 path
-            )),
-        }
+            )
+        })?;
+        mounts.push(VolumeMount {
+            windows_path: path.clone(),
+            container_path,
+            read_only: true,
+        });
     }
 
-    (mounts, warnings)
+    Ok(mounts)
 }
 
 /// Map the network default policy to a WSLC networking mode.
@@ -295,9 +300,8 @@ mod tests {
     fn build_mounts_mixed_rw_ro() {
         let rw = vec![r"C:\workspace".to_string()];
         let ro = vec![r"D:\data".to_string()];
-        let (mounts, warnings) = build_volume_mounts(&rw, &ro);
+        let mounts = build_volume_mounts(&rw, &ro).unwrap();
 
-        assert!(warnings.is_empty());
         assert_eq!(mounts.len(), 2);
         assert_eq!(mounts[0].container_path, "/mnt/c/workspace");
         assert!(!mounts[0].read_only);
@@ -306,22 +310,57 @@ mod tests {
     }
 
     #[test]
-    fn build_mounts_skips_invalid_with_warning() {
+    fn build_mounts_rejects_unc_readwrite() {
+        let rw = vec![r"\\server\share".to_string()];
+        let ro = vec![];
+        let err = build_volume_mounts(&rw, &ro).unwrap_err();
+
+        assert!(
+            err.contains("\\\\server\\share"),
+            "error should cite the path: {err}"
+        );
+        assert!(err.contains("UNC"), "error should mention UNC: {err}");
+    }
+
+    #[test]
+    fn build_mounts_rejects_unc_readonly() {
+        let rw = vec![];
+        let ro = vec![r"\\nas\docs".to_string()];
+        let err = build_volume_mounts(&rw, &ro).unwrap_err();
+
+        assert!(
+            err.contains("\\\\nas\\docs"),
+            "error should cite the path: {err}"
+        );
+        assert!(
+            err.contains("readonlyPaths"),
+            "error should identify the field: {err}"
+        );
+    }
+
+    #[test]
+    fn build_mounts_rejects_unc_mixed_with_valid() {
+        // Even if valid paths are present, a single UNC path fails the whole call.
         let rw = vec![r"\\server\share".to_string(), r"C:\valid".to_string()];
         let ro = vec![];
-        let (mounts, warnings) = build_volume_mounts(&rw, &ro);
+        let err = build_volume_mounts(&rw, &ro).unwrap_err();
 
-        assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].container_path, "/mnt/c/valid");
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("\\\\server\\share"));
+        assert!(err.contains("\\\\server\\share"));
+    }
+
+    #[test]
+    fn build_mounts_rejects_relative_path() {
+        let rw = vec!["relative/path".to_string()];
+        let ro = vec![];
+        let err = build_volume_mounts(&rw, &ro).unwrap_err();
+
+        assert!(err.contains("relative/path"));
     }
 
     #[test]
     fn build_mounts_empty_paths() {
-        let (mounts, warnings) = build_volume_mounts(&[], &[]);
+        let mounts = build_volume_mounts(&[], &[]).unwrap();
         assert!(mounts.is_empty());
-        assert!(warnings.is_empty());
     }
 
     // -- Network policy tests --

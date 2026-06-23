@@ -2,6 +2,7 @@
 name = "appcontainer_common"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 # Compile-time gate for Tier 2 (AppContainer + BFS via bfscfg.exe).
@@ -27,4 +28,4 @@ widestring = { workspace = true }
 winreg = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

@@ -2,6 +2,7 @@
 name = "nanvix_binaries"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Build-time download of NanVix binaries from GitHub releases"
 links = "nanvix_binaries"
 

@@ -1,0 +1,242 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Seatbelt (macOS) executor **characterization** tests.
+//!
+//! These lock in the *current* run-to-completion behavior of the `mxc-exec-mac`
+//! executor before the unified `SandboxBackend`/`Runner` refactor (the risky
+//! part of the `mxc` library work) lands. They assert what the code does
+//! **today**, not what it ideally should do.
+//!
+//! Two of them — `inherits_host_env_when_process_env_empty` and
+//! `runs_in_launcher_cwd_when_process_cwd_empty` — pin behaviors that the
+//! unification was observed to change (it makes Seatbelt unconditionally
+//! `env_clear()` and rewrite the working directory). If a future refactor turns
+//! these RED, that is the signal to confirm the change is intentional and
+//! documented as a breaking change — not an accident.
+//!
+//! They run in the existing macOS CI job (`cargo test --target
+//! aarch64-apple-darwin`) with no extra infrastructure: `sandbox-exec` needs no
+//! elevation. Each test skips cleanly if `mxc-exec-mac` has not been built.
+#![cfg(target_os = "macos")]
+
+use std::fs;
+use std::path::PathBuf;
+
+use serde_json::json;
+use wxc_e2e_tests::{has_platform_exec, run_platform_config_value};
+
+const SCHEMA_VERSION: &str = "0.7.0-alpha";
+
+/// Build a one-shot config that omits `containment` so the binary selects its
+/// OS-native backend (Seatbelt on macOS). `cwd`/`env`/`timeout` are optional.
+fn config(label: &str, command_line: &str) -> serde_json::Value {
+    json!({
+        "version": SCHEMA_VERSION,
+        "containerId": format!("char-seatbelt-{label}"),
+        "process": { "commandLine": command_line }
+    })
+}
+
+/// Create a unique temporary directory for cwd characterization.
+fn unique_tempdir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("mxc-char-{tag}-{nanos}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
+#[test]
+fn seatbelt_propagates_exit_code() {
+    if !has_platform_exec() {
+        return;
+    }
+    let result = run_platform_config_value(
+        "seatbelt exit code",
+        &config("exit-code", "exit 7"),
+        &[],
+        None,
+    );
+    assert_eq!(
+        result.code,
+        Some(7),
+        "expected exit 7, got {:?}\n--- stderr ---\n{}",
+        result.code,
+        result.stderr
+    );
+}
+
+#[test]
+fn seatbelt_streams_stdout() {
+    if !has_platform_exec() {
+        return;
+    }
+    let result = run_platform_config_value(
+        "seatbelt stdout",
+        &config("stdout", "echo CHAR_SEATBELT_STDOUT_9f31a"),
+        &[],
+        None,
+    );
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    assert!(
+        result
+            .combined_output()
+            .contains("CHAR_SEATBELT_STDOUT_9f31a"),
+        "stdout missing sentinel:\n{}",
+        result.combined_output()
+    );
+}
+
+/// CHARACTERIZES CURRENT BEHAVIOR (regression guard).
+///
+/// With an empty `process.env`, the Seatbelt exec path does *not* clear the
+/// environment today, so the sandboxed child inherits the launcher's env. The
+/// unification refactor makes Seatbelt always `env_clear()` — which will turn
+/// this test RED. That is the intended early-warning signal.
+#[test]
+fn seatbelt_inherits_host_env_when_process_env_empty() {
+    if !has_platform_exec() {
+        return;
+    }
+    let marker = "CHAR_SEATBELT_ENV_INHERIT_4b7c2";
+    let result = run_platform_config_value(
+        "seatbelt env inherit",
+        &config(
+            "env-inherit",
+            "printf 'MARKER=[%s]\\n' \"$MXC_CHAR_MARKER\"",
+        ),
+        &[("MXC_CHAR_MARKER", marker)],
+        None,
+    );
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    assert!(
+        result
+            .combined_output()
+            .contains(&format!("MARKER=[{marker}]")),
+        "expected the child to inherit MXC_CHAR_MARKER from the launcher \
+         (current Seatbelt behavior with empty process.env). Output:\n{}",
+        result.combined_output()
+    );
+}
+
+/// Locks in that an explicitly requested `process.env` is honored (and, by
+/// implication, that the env is scrubbed to exactly the request when set).
+#[test]
+fn seatbelt_applies_requested_env() {
+    if !has_platform_exec() {
+        return;
+    }
+    let mut cfg = config("env-set", "printf 'SET=[%s]\\n' \"$MXC_CHAR_SET\"");
+    cfg["process"]["env"] = json!(["MXC_CHAR_SET=from_config_e21a"]);
+    let result = run_platform_config_value("seatbelt env set", &cfg, &[], None);
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    assert!(
+        result.combined_output().contains("SET=[from_config_e21a]"),
+        "expected requested env var to reach the child. Output:\n{}",
+        result.combined_output()
+    );
+}
+
+/// CHARACTERIZES CURRENT BEHAVIOR (regression guard).
+///
+/// With an empty `process.cwd`, the Seatbelt exec path does *not* change
+/// directory today, so the sandboxed child runs in the launcher's working
+/// directory. The unification refactor rewrites cwd to a policy path or `/` —
+/// which will turn this test RED.
+///
+/// We observe the cwd by having the child create a file via a relative path
+/// (a shell redirection) and checking which directory it lands in — this
+/// avoids `pwd`/`realpath`, which the default Seatbelt profile denies for
+/// arbitrary temp paths. `write_dir` is a second writable policy path that is
+/// *not* the launcher cwd, so a refactor that rewrites cwd to a policy path
+/// would drop the probe there (or elsewhere) instead of in `launch_dir`.
+#[test]
+fn seatbelt_runs_in_launcher_cwd_when_process_cwd_empty() {
+    if !has_platform_exec() {
+        return;
+    }
+    let write_dir = fs::canonicalize(unique_tempdir("cwd-write")).expect("canonicalize");
+    let launch_dir = fs::canonicalize(unique_tempdir("cwd-launch")).expect("canonicalize");
+    let probe = "char_cwd_inherit_probe.txt";
+    let mut cfg = config("cwd-inherit", &format!("echo CHAR_OK > {probe}"));
+    cfg["filesystem"] = json!({
+        "readwritePaths": [write_dir.to_string_lossy(), launch_dir.to_string_lossy()]
+    });
+    let result = run_platform_config_value("seatbelt cwd inherit", &cfg, &[], Some(&launch_dir));
+    let in_launch = launch_dir.join(probe).exists();
+    let in_write = write_dir.join(probe).exists();
+    let _ = fs::remove_dir_all(&launch_dir);
+    let _ = fs::remove_dir_all(&write_dir);
+    assert_eq!(
+        result.code,
+        Some(0),
+        "run failed:\n{}",
+        result.combined_output()
+    );
+    assert!(
+        in_launch && !in_write,
+        "expected the probe in the launcher cwd {} (current behavior with empty \
+         process.cwd); in_launch={in_launch} in_write={in_write}\n{}",
+        launch_dir.display(),
+        result.combined_output()
+    );
+}
+
+/// Locks in that an explicit `process.cwd` is honored.
+#[test]
+fn seatbelt_honors_explicit_process_cwd() {
+    if !has_platform_exec() {
+        return;
+    }
+    let dir = fs::canonicalize(unique_tempdir("cwd-explicit")).expect("canonicalize");
+    let probe = "char_cwd_explicit_probe.txt";
+    let mut cfg = config("cwd-explicit", &format!("echo CHAR_OK > {probe}"));
+    cfg["process"]["cwd"] = json!(dir.to_string_lossy());
+    cfg["filesystem"] = json!({ "readwritePaths": [dir.to_string_lossy()] });
+    let result = run_platform_config_value("seatbelt cwd explicit", &cfg, &[], None);
+    let exists = dir.join(probe).exists();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        result.code,
+        Some(0),
+        "run failed:\n{}",
+        result.combined_output()
+    );
+    assert!(
+        exists,
+        "expected the probe file in the explicit process.cwd {}\n{}",
+        dir.display(),
+        result.combined_output()
+    );
+}
+
+/// Characterizes that a `process.timeout` shorter than the workload kills the
+/// child mid-run: the pre-timeout marker is emitted, the post-timeout marker is
+/// not, and the process exits non-zero well before the workload would finish.
+#[test]
+fn seatbelt_timeout_kills_before_completion() {
+    if !has_platform_exec() {
+        return;
+    }
+    let mut cfg = config("timeout", "echo CHAR_BEFORE; /bin/sleep 5; echo CHAR_AFTER");
+    cfg["process"]["timeout"] = json!(1500);
+    let result = run_platform_config_value("seatbelt timeout", &cfg, &[], None);
+    let out = result.combined_output();
+    assert!(
+        out.contains("CHAR_BEFORE"),
+        "expected pre-timeout output. Output:\n{out}"
+    );
+    assert!(
+        !out.contains("CHAR_AFTER"),
+        "workload should have been killed before completing. Output:\n{out}"
+    );
+    assert_ne!(result.code, Some(0), "timed-out run should not exit 0");
+    assert!(
+        result.wall_time_ms < 4500,
+        "timeout should fire well before the 5s workload; took {}ms",
+        result.wall_time_ms
+    );
+}

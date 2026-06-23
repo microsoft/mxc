@@ -2,6 +2,7 @@
 name = "wxc_common"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 microvm = ["dep:nanvix_common", "dep:uuid"]
@@ -27,4 +28,4 @@ winreg = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
