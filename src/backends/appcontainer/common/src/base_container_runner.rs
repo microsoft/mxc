@@ -36,7 +36,7 @@ use crate::launch_diagnostics::{
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
-use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
+use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials, DenialSink};
 use sandbox_spec::base_container_layout::{
     finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, IntegrityLevel,
     NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
@@ -1112,11 +1112,28 @@ impl ScriptRunner for BaseContainerRunner {
         let descendant_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let descendant_count_for_summary = std::sync::Arc::clone(&descendant_count);
 
+        // Shared captureDenials sink (named pipe or stderr), opened
+        // once so the per-denial lines and the terminator summary line
+        // ride the same handle. `None` when capture wasn't requested.
+        let denial_sink: Option<DenialSink> = if request.capture_denials {
+            Some(DenialSink::open())
+        } else {
+            None
+        };
+
         let (collector, stream_writer, child_observer) = if request.capture_denials {
             let (tx, rx) = std::sync::mpsc::channel::<learning_mode_windows::DeniedResource>();
+            // Open the captureDenials sink once and share it between
+            // the writer thread (per-denial lines) and the summary
+            // emit below. For the named-pipe transport this is the
+            // single accepted connection, so both must use this handle.
+            let denial_sink = denial_sink.clone();
             let writer = std::thread::Builder::new()
                 .name("denial-stream-writer".to_string())
-                .spawn(move || stream_denials_to_stderr(rx))
+                .spawn(move || match denial_sink {
+                    Some(sink) => stream_denials(rx, sink),
+                    None => 0,
+                })
                 .ok();
 
             let collector = match learning_mode_windows::session::open_via_shim(
@@ -1397,16 +1414,23 @@ impl ScriptRunner for BaseContainerRunner {
                 child_observer.map(|o| o.take_observed_count()).unwrap_or(0);
             let descendant_pids_covered =
                 descendant_count_for_summary.load(std::sync::atomic::Ordering::SeqCst);
-            emit_denial_summary_line(
-                exit_code as i32,
-                streamed_unique,
-                raw_event_count,
-                denied_resources_truncated,
-                capture_was_active,
-                child_processes_observed,
-                descendant_pids_covered,
-            );
+            if let Some(sink) = &denial_sink {
+                emit_denial_summary_line(
+                    sink,
+                    exit_code as i32,
+                    streamed_unique,
+                    raw_event_count,
+                    denied_resources_truncated,
+                    capture_was_active,
+                    child_processes_observed,
+                    descendant_pids_covered,
+                );
+            }
         }
+        // Drop the shared sink now that both the per-denial lines and
+        // the summary have been written, closing the named pipe so the
+        // SDK consumer observes the stream end promptly.
+        drop(denial_sink);
 
         ScriptResponse {
             exit_code: exit_code as i32,

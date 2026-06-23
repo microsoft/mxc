@@ -32,7 +32,7 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
-use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials_to_stderr};
+use learning_mode_windows::denial_stream::{emit_denial_summary_line, stream_denials, DenialSink};
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
@@ -849,11 +849,24 @@ impl AppContainerScriptRunner {
         // captured denial to stderr as NDJSON prefixed with ASCII RS
         // (0x1E). SDK callers split stderr on 0x1E and parse each
         // segment as JSON, enabling mid-run prompts.
+        let denial_sink: Option<DenialSink> = if request.capture_denials {
+            Some(DenialSink::open())
+        } else {
+            None
+        };
+
         let (collector, stream_writer, child_observer) = if request.capture_denials {
             let (tx, rx) = std::sync::mpsc::channel::<learning_mode_windows::DeniedResource>();
+            // Share the sink between the writer thread and the summary
+            // emit so both ride the same handle (single accepted
+            // connection for the named-pipe transport).
+            let denial_sink = denial_sink.clone();
             let writer = std::thread::Builder::new()
                 .name("denial-stream-writer".to_string())
-                .spawn(move || stream_denials_to_stderr(rx))
+                .spawn(move || match denial_sink {
+                    Some(sink) => stream_denials(rx, sink),
+                    None => 0,
+                })
                 .ok();
 
             let collector = match learning_mode_windows::session::open_via_shim(
@@ -1007,16 +1020,22 @@ impl AppContainerScriptRunner {
             // stays uniform; consumers see no descendants covered
             // because the IOCP listener was never attached.
             let descendant_pids_covered = 0usize;
-            emit_denial_summary_line(
-                exit_code as i32,
-                streamed_unique,
-                raw_event_count,
-                denied_resources_truncated,
-                capture_was_active,
-                child_processes_observed,
-                descendant_pids_covered,
-            );
+            if let Some(sink) = &denial_sink {
+                emit_denial_summary_line(
+                    sink,
+                    exit_code as i32,
+                    streamed_unique,
+                    raw_event_count,
+                    denied_resources_truncated,
+                    capture_was_active,
+                    child_processes_observed,
+                    descendant_pids_covered,
+                );
+            }
         }
+        // Close the shared sink (and the named pipe) now that denials
+        // and summary have been written, so the SDK sees stream end.
+        drop(denial_sink);
 
         Ok(ScriptResponse {
             exit_code: exit_code as i32,

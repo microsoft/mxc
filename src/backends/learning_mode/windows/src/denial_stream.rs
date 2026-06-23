@@ -70,6 +70,60 @@ const PIPE_ENV_VAR: &str = "MXC_DENIALS_PIPE";
 /// listening, name typo, etc.), we log the error and fall back to
 /// stderr. The captureDenials feature staying half-functional is
 /// strictly better than panicking the workload's runner.
+/// A shared, thread-safe handle to the captureDenials output sink
+/// (the named pipe in PTY mode, otherwise stderr).
+///
+/// The sink is opened exactly **once** per `wxc-exec` invocation and
+/// shared (cheap `Arc` clone) between the denial-writer thread and the
+/// summary-emit call. This is load-bearing for the named-pipe
+/// transport: the SDK-side pipe server (`createDenialPipeServer`)
+/// accepts exactly **one** client connection and then stops listening,
+/// so the per-denial lines and the terminator summary line *must* ride
+/// the same connection. Opening the pipe a second time for the summary
+/// would be refused (the server has already closed), the summary would
+/// silently fall back to stderr, and in PTY mode that stderr write is
+/// swallowed — so the SDK would never see the stream terminator.
+/// Sharing one handle keeps both the stderr and named-pipe transports
+/// correct.
+#[derive(Clone)]
+pub struct DenialSink {
+    inner: std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
+}
+
+impl std::fmt::Debug for DenialSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The inner Box<dyn Write> is not Debug; expose only the type.
+        f.debug_struct("DenialSink").finish_non_exhaustive()
+    }
+}
+
+impl DenialSink {
+    /// Opens the destination the captureDenials stream should drain
+    /// into for this invocation (named pipe when `MXC_DENIALS_PIPE` is
+    /// set, otherwise stderr). Call this once and clone the result to
+    /// share the same underlying handle across threads.
+    pub fn open() -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(open_writer())),
+        }
+    }
+
+    /// Writes one `\x1e<json>\n` framed line to the shared handle,
+    /// recovering from a poisoned lock so a panicking peer thread can
+    /// never wedge the summary write.
+    fn write_line(&self, json: &str) {
+        use std::io::Write;
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = guard.write_all(&[DENIAL_STREAM_MARKER]);
+        let _ = guard.write_all(json.as_bytes());
+        let _ = guard.write_all(b"\n");
+        let _ = guard.flush();
+    }
+}
+
 fn open_writer() -> Box<dyn std::io::Write + Send> {
     match std::env::var(PIPE_ENV_VAR) {
         Ok(name) if !name.trim().is_empty() => {
@@ -99,9 +153,9 @@ fn open_writer() -> Box<dyn std::io::Write + Send> {
 }
 
 /// Drains `rx` until the channel closes, writing one
-/// `\x1e<ndjson>\n` line to stderr per *newly-seen*
+/// `\x1e<ndjson>\n` line to the shared `sink` per *newly-seen*
 /// `(path, accessType)` pair. Runs on its own thread so the ETW
-/// callback never blocks on stderr I/O.
+/// callback never blocks on the sink's I/O.
 ///
 /// Returns the number of unique `(path, accessType)` pairs that were
 /// streamed, so the caller can fold it into the summary line.
@@ -118,17 +172,24 @@ fn open_writer() -> Box<dyn std::io::Write + Send> {
 /// The channel closes when the `CollectorHandle` is dropped (the
 /// sender lives inside its `CallbackContext`). Receiving `Err` is
 /// the normal teardown signal.
-pub fn stream_denials_to_stderr(rx: std::sync::mpsc::Receiver<crate::DeniedResource>) -> usize {
-    // Resolve the destination at thread start, not per-event. The
-    // env var is process-wide and never changes mid-run, so one
-    // lookup is enough. Tests inject a Vec<u8> via the
-    // `_to_writer` core directly and bypass this entirely.
-    let mut writer = open_writer();
-    stream_denials_to_writer(rx, &mut writer)
+pub fn stream_denials(
+    rx: std::sync::mpsc::Receiver<crate::DeniedResource>,
+    sink: DenialSink,
+) -> usize {
+    // Lock the shared handle for the lifetime of the drain. The
+    // summary line is only emitted after this thread is joined (see
+    // the runners), so the summary's `write_line` never contends for
+    // this lock — holding it across `rx.recv()` blocks is therefore
+    // safe and keeps every denial line atomic on the wire.
+    let mut guard = match sink.inner.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    stream_denials_to_writer(rx, &mut *guard)
 }
 
-/// Test-friendly implementation of [`stream_denials_to_stderr`]. The
-/// stderr-bound variant delegates here after locking; tests pass a
+/// Test-friendly implementation of [`stream_denials`]. The
+/// sink-bound variant delegates here after locking; tests pass a
 /// `Vec<u8>` to capture and assert against the rendered bytes.
 fn stream_denials_to_writer<W: std::io::Write>(
     rx: std::sync::mpsc::Receiver<crate::DeniedResource>,
@@ -275,6 +336,7 @@ fn build_summary_envelope(
 /// contributed to the captured denial list" metric.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_denial_summary_line(
+    sink: &DenialSink,
     exit_code: i32,
     unique_denials: usize,
     raw_event_count: usize,
@@ -297,16 +359,13 @@ pub fn emit_denial_summary_line(
         Ok(s) => s,
         Err(_) => return,
     };
-    use std::io::Write;
-    // Same routing as the per-event writer (open_writer respects
-    // MXC_DENIALS_PIPE). The summary is the wire-format terminator
-    // for the SDK consumer; it has to land on the same channel as
-    // the individual denial lines.
-    let mut writer = open_writer();
-    let _ = writer.write_all(&[DENIAL_STREAM_MARKER]);
-    let _ = writer.write_all(json.as_bytes());
-    let _ = writer.write_all(b"\n");
-    let _ = writer.flush();
+    // The summary is the wire-format terminator for the SDK consumer,
+    // so it has to land on the same channel (and, for the named-pipe
+    // transport, the same connection) as the individual denial lines.
+    // `sink` is the shared handle the denial-writer thread already
+    // drained into; by the time this is called that thread has been
+    // joined, so this write is uncontended.
+    sink.write_line(&json);
 }
 
 #[cfg(test)]
@@ -352,6 +411,59 @@ mod tests {
     }
 
     // ---- writer-thread dedupe behavior ----------------------------------
+
+    /// In-memory `Write` whose bytes survive the writer being dropped,
+    /// so a test can inspect everything a shared `DenialSink` wrote.
+    #[derive(Clone)]
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("buf lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression guard: the per-denial lines and the terminator
+    /// summary line must land on the SAME `DenialSink` handle. The
+    /// named-pipe transport accepts exactly one connection, so a
+    /// summary written to a second handle would be lost. This mirrors
+    /// the runner ordering: stream on a thread, join, then emit the
+    /// summary on the shared sink.
+    #[test]
+    fn shared_sink_carries_denials_and_summary_on_one_handle() {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = DenialSink {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(Box::new(SharedBuf(buf.clone())))),
+        };
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(make_resource("\\REG\\A", AccessType::Read, 1)).unwrap();
+        tx.send(make_resource("\\REG\\A", AccessType::Read, 2)).unwrap(); // dup
+        tx.send(make_resource("\\REG\\B", AccessType::Write, 3)).unwrap();
+        drop(tx);
+
+        let sink_for_thread = sink.clone();
+        let unique = std::thread::spawn(move || stream_denials(rx, sink_for_thread))
+            .join()
+            .expect("writer thread");
+        assert_eq!(unique, 2, "two unique (path, access) pairs");
+
+        emit_denial_summary_line(&sink, 0, unique, 3, false, true, 0, 0);
+
+        let bytes = buf.lock().unwrap().clone();
+        let segments = split_segments(&bytes);
+        // Two denial lines followed by exactly one summary line, all on
+        // the same underlying buffer.
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0]["type"], "denial");
+        assert_eq!(segments[1]["type"], "denial");
+        assert_eq!(segments[2]["type"], "summary");
+        assert_eq!(segments[2]["totalDenials"], 2);
+    }
 
     #[test]
     fn writer_dedupes_repeated_path_and_access() {
