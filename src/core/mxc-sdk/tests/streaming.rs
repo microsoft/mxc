@@ -97,6 +97,44 @@ fn streaming_kill_after_reap_is_a_noop() {
     proc.kill().expect("repeat kill after reap stays Ok");
 }
 
+#[test]
+fn streaming_kill_after_try_wait_reap_is_a_noop() {
+    // The exact race the review flagged: `try_wait()` reaps the exited child, so
+    // a later `kill()` must not signal the now-recycled pid/pgid. Poll try_wait
+    // to completion, then `kill()` must stay a clean no-op.
+    let mut proc = spawn_sandbox(seatbelt_request("true", 0)).expect("spawn");
+    let mut reaped = false;
+    for _ in 0..100 {
+        if proc.try_wait().expect("try_wait").is_some() {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        reaped,
+        "quick command should exit and try_wait should reap it"
+    );
+    proc.kill().expect("kill after try_wait reap is a no-op Ok");
+    proc.kill().expect("repeat kill stays Ok");
+}
+
+#[test]
+fn streaming_double_kill_before_wait_completes_promptly() {
+    // Calling `kill()` twice before `wait()` must be stable (both Ok), and
+    // `wait()` must then complete promptly rather than hang.
+    let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 0)).expect("spawn");
+    proc.kill().expect("first kill");
+    proc.kill().expect("second kill stays Ok");
+    let start = std::time::Instant::now();
+    let _ = proc.wait();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "wait() after a double kill should complete promptly, took {:?}",
+        start.elapsed()
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_stdout_closer_unblocks_parked_read_without_killing() {
