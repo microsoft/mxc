@@ -209,7 +209,18 @@ fn is_system_critical_path(dir: &str) -> bool {
 }
 
 fn env_get<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    // Windows environment variable names are case-insensitive (matching the OS
+    // and Node's `process.env`, which the TS SDK relies on); Unix names are
+    // case-sensitive.
+    env.iter()
+        .find(|(k, _)| {
+            if cfg!(windows) {
+                k.eq_ignore_ascii_case(name)
+            } else {
+                k == name
+            }
+        })
+        .map(|(_, v)| v.as_str())
 }
 
 /// Borrow the caller-supplied env, or snapshot the process environment when
