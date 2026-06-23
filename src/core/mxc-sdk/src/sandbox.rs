@@ -9,6 +9,21 @@ use std::io::{Read, Write};
 
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
 
+/// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).
+///
+/// An ordinary exit and a timeout are both represented here as success
+/// outcomes; [`Sandbox::wait`] reserves its `Err` for an actual OS / wait
+/// failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// The process exited with this code. On Unix a process terminated by a
+    /// signal (rather than exiting normally) surfaces as `Exited(-1)`.
+    Exited(i32),
+    /// The request's `scriptTimeout` elapsed before the process exited; the
+    /// process and its whole tree were killed.
+    TimedOut,
+}
+
 /// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox).
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill
@@ -66,10 +81,18 @@ impl Sandbox {
     }
 
     /// Wait for the child to exit, draining and discarding any untaken
-    /// stdout/stderr so it can't block on a full pipe. Returns the exit code
-    /// (`io::ErrorKind::TimedOut` if a `timeout` elapsed first).
-    pub fn wait(&mut self) -> std::io::Result<i32> {
-        self.inner.wait()
+    /// stdout/stderr so it can't block on a full pipe.
+    ///
+    /// Returns [`WaitOutcome::Exited`] with the exit code, or
+    /// [`WaitOutcome::TimedOut`] if the request's `scriptTimeout` elapsed (the
+    /// process and its tree are killed first). `Err` is reserved for an actual
+    /// OS / wait failure.
+    pub fn wait(&mut self) -> std::io::Result<WaitOutcome> {
+        match self.inner.wait() {
+            Ok(code) => Ok(WaitOutcome::Exited(code)),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(WaitOutcome::TimedOut),
+            Err(e) => Err(e),
+        }
     }
 }
 

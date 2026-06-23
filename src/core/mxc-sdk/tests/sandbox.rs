@@ -10,9 +10,8 @@
 //! the same path the consumer drives.
 
 use mxc_sdk::{build_request, ErrorCode, SandboxPolicy};
-
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::{spawn_sandbox, SandboxRequest};
+use mxc_sdk::{spawn_sandbox, SandboxRequest, WaitOutcome};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
@@ -96,8 +95,8 @@ fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::Error>
     let out_thread = read_thread(proc.take_stdout());
     let err_thread = read_thread(proc.take_stderr());
     let (exit_code, timed_out) = match proc.wait() {
-        Ok(code) => (code, false),
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => (-1, true),
+        Ok(WaitOutcome::Exited(code)) => (code, false),
+        Ok(WaitOutcome::TimedOut) => (-1, true),
         Err(e) => panic!("wait failed: {e}"),
     };
     let standard_out = out_thread

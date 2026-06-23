@@ -10,7 +10,7 @@ use mxc_sdk::{
 };
 
 #[cfg(target_os = "macos")]
-use mxc_sdk::spawn_sandbox;
+use mxc_sdk::{spawn_sandbox, WaitOutcome};
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -190,8 +190,8 @@ fn build_request_then_run_seatbelt() {
     if let Some(mut stdout) = proc.take_stdout() {
         let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
     }
-    let code = proc.wait().expect("wait should succeed");
-    assert_eq!(code, 0);
+    let outcome = proc.wait().expect("wait should succeed");
+    assert_eq!(outcome, WaitOutcome::Exited(0));
     assert!(out.contains("built-from-policy"), "got: {out:?}");
 }
 

@@ -10,7 +10,7 @@
 //! [`Sandbox`] handle for live bidirectional stdio and termination.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy};
+//! use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 //!
 //! // Turn a policy into a request, fill in the command, and spawn it.
 //! let policy = SandboxPolicy {
@@ -23,8 +23,10 @@
 //! let mut request = build_request(&policy, None)?;
 //! request.set_script("echo hi");
 //! let mut proc = spawn_sandbox(request)?;
-//! let exit_code = proc.wait()?;
-//! println!("exit={exit_code}");
+//! match proc.wait()? {
+//!     WaitOutcome::Exited(code) => println!("exit={code}"),
+//!     WaitOutcome::TimedOut => println!("timed out"),
+//! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -56,7 +58,7 @@ pub use policy::{
 };
 
 pub use error::{Error, ErrorCode};
-pub use sandbox::{Sandbox, StreamCloser};
+pub use sandbox::{Sandbox, StreamCloser, WaitOutcome};
 
 use wxc_common::logger::{Logger, Mode};
 

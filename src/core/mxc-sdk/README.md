@@ -12,7 +12,7 @@ returning a handle for live bidirectional stdio and termination.
 
 ```rust,no_run
 use std::io::Read;
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy};
+use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 
 // Describe what to restrict, turn it into a request, fill in the command.
 let policy = SandboxPolicy {
@@ -29,8 +29,8 @@ let mut proc = spawn_sandbox(request)?;
 let mut stdout = proc.take_stdout().unwrap();
 let mut out = String::new();
 stdout.read_to_string(&mut out)?; // "hello\n"
-let exit_code = proc.wait()?;     // drains/discards any untaken stream, returns exit code
-assert_eq!(exit_code, 0);
+let outcome = proc.wait()?;       // drains/discards any untaken stream
+assert_eq!(outcome, WaitOutcome::Exited(0));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -57,7 +57,7 @@ allocated; the streams are ordinary pipes.
 
 ```rust,no_run
 use std::io::{Read, Write};
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy};
+use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
@@ -78,7 +78,8 @@ drop(stdin);                      // close -> child sees EOF
 let mut out = String::new();
 stdout.read_to_string(&mut out)?; // "hello\n"
 
-let exit_code = proc.wait()?;     // any untaken stream is drained and discarded
+let outcome = proc.wait()?;       // any untaken stream is drained and discarded
+assert_eq!(outcome, WaitOutcome::Exited(0));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -96,8 +97,9 @@ The handle is modelled on [`std::process::Child`]:
   on Windows the child's job object is terminated.
 - `wait()` blocks until exit (honouring `scriptTimeout`, where `0` waits
   forever), drains and discards any **untaken** stdout/stderr so the child
-  can't block on a full pipe, and returns the exit code (`ErrorKind::TimedOut`
-  if the timeout elapses).
+  can't block on a full pipe, and returns a `WaitOutcome` —
+  `Exited(code)` or `TimedOut` if the timeout elapses (`Err` is reserved for an
+  actual OS/wait failure).
 - `stdout_closer()` / `stderr_closer()` → `Option<StreamCloser>`: a
   closer that makes an in-flight or subsequent read on the taken stream return
   EOF promptly **without** killing the child — for abandoning a stream a

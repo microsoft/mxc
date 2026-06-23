@@ -10,7 +10,7 @@
 
 #![cfg(target_os = "macos")]
 
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest};
+use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest, WaitOutcome};
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).
@@ -92,7 +92,11 @@ fn streaming_kill_after_reap_is_a_noop() {
     // `kill()` must not signal its pid/pgid again — a recycled pid could belong
     // to an unrelated process (group). The post-reap `kill()` is a clean no-op.
     let mut proc = spawn_sandbox(seatbelt_request("true", 0)).expect("spawn");
-    assert_eq!(proc.wait().expect("wait"), 0, "quick command should exit 0");
+    assert_eq!(
+        proc.wait().expect("wait"),
+        WaitOutcome::Exited(0),
+        "quick command should exit 0"
+    );
     proc.kill().expect("kill after reap is a no-op Ok");
     proc.kill().expect("repeat kill after reap stays Ok");
 }
@@ -230,8 +234,7 @@ fn streaming_processcontainer_bidirectional_stdio() {
     stdout.read_to_string(&mut out).expect("read stdout");
     assert!(out.contains("ping-pong"), "got: {:?}", out);
 
-    let code = proc.wait().expect("wait");
-    assert_eq!(code, 0);
+    assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
 }
 
 #[cfg(target_os = "macos")]
@@ -241,8 +244,10 @@ fn streaming_wait_discards_untaken_streams() {
         spawn_sandbox(seatbelt_request("echo streamed-out", 0)).expect("spawn should succeed");
     // Take nothing -> wait() drains and discards the output, returning only
     // the exit code.
-    let code = proc.wait().expect("wait should succeed");
-    assert_eq!(code, 0);
+    assert_eq!(
+        proc.wait().expect("wait should succeed"),
+        WaitOutcome::Exited(0)
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -263,8 +268,7 @@ fn streaming_bidirectional_stdio() {
     stdout.read_to_string(&mut out).expect("read stdout");
     assert!(out.contains("ping-pong"), "got: {:?}", out);
 
-    let code = proc.wait().expect("wait");
-    assert_eq!(code, 0);
+    assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
 }
 
 #[cfg(target_os = "macos")]
@@ -278,8 +282,11 @@ fn streaming_kill_terminates_process() {
     proc.kill().expect("kill should succeed");
 
     // After kill, the process must be reapable and not report success.
-    let code = proc.wait().expect("wait after kill");
-    assert_ne!(code, 0, "killed process should not exit 0");
+    assert_ne!(
+        proc.wait().expect("wait after kill"),
+        WaitOutcome::Exited(0),
+        "killed process should not exit 0"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -388,10 +395,11 @@ fn streaming_timeout_kills_process_tree() {
         .parse()
         .expect("descendant pid");
 
-    let err = proc
-        .wait()
-        .expect_err("timed-out process should report a timeout");
-    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(
+        proc.wait().expect("wait yields an outcome"),
+        WaitOutcome::TimedOut,
+        "timed-out process should report a timeout"
+    );
 
     let mut gone = false;
     for _ in 0..60 {
@@ -416,8 +424,11 @@ fn streaming_wait_returns_when_descendant_holds_not_taken_stream_open() {
         spawn_sandbox(seatbelt_request("sleep 30 & exit 0", 0)).expect("spawn should succeed");
 
     let start = std::time::Instant::now();
-    let code = proc.wait().expect("wait should return");
-    assert_eq!(code, 0, "foreground command exits 0");
+    assert_eq!(
+        proc.wait().expect("wait should return"),
+        WaitOutcome::Exited(0),
+        "foreground command exits 0"
+    );
     assert!(
         start.elapsed() < std::time::Duration::from_secs(10),
         "wait() must return promptly, not block on the descendant's 30s pipe hold \
@@ -434,8 +445,11 @@ fn streaming_honors_sub_500ms_timeout() {
     // exceeds it, so wait() reports a timeout promptly.
     let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 200)).expect("spawn");
     let start = std::time::Instant::now();
-    let err = proc.wait().expect_err("sub-500ms timeout should fire");
-    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    assert_eq!(
+        proc.wait().expect("wait yields an outcome"),
+        WaitOutcome::TimedOut,
+        "sub-500ms timeout should fire"
+    );
     assert!(
         start.elapsed() < std::time::Duration::from_secs(5),
         "timeout should fire near 200ms, not wait out the 30s sleep (elapsed: {:?})",
