@@ -368,6 +368,12 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
+        // No-op once the child has exited and been reaped: its pid/pgid can be
+        // recycled, so signaling it could hit an unrelated process (group). A
+        // reaped `Child` returns its cached status here without a syscall.
+        if self.inner.child.try_wait()?.is_some() {
+            return Ok(());
+        }
         if self.inner.group {
             // Pipes mode: bwrap leads its own process group — tree-kill it.
             group_kill(&mut self.inner.child)
@@ -376,9 +382,6 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             // `process_group(0)`), so a group-kill would hit the executor.
             // bwrap is pid 1 of the sandbox pid namespace, so killing the root
             // alone tears the whole namespace (every descendant) down.
-            if self.inner.child.try_wait()?.is_some() {
-                return Ok(());
-            }
             self.inner.child.kill()
         }
     }

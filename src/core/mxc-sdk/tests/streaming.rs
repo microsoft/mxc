@@ -86,6 +86,17 @@ fn streaming_try_wait_reports_exit_after_completion() {
     assert_eq!(code, 0, "quick command should exit 0");
 }
 
+#[test]
+fn streaming_kill_after_reap_is_a_noop() {
+    // Regression: once the child has exited and been reaped (here via `wait`),
+    // `kill()` must not signal its pid/pgid again — a recycled pid could belong
+    // to an unrelated process (group). The post-reap `kill()` is a clean no-op.
+    let mut proc = spawn_sandbox(seatbelt_request("true", 0)).expect("spawn");
+    assert_eq!(proc.wait().expect("wait"), 0, "quick command should exit 0");
+    proc.kill().expect("kill after reap is a no-op Ok");
+    proc.kill().expect("repeat kill after reap stays Ok");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_stdout_closer_unblocks_parked_read_without_killing() {

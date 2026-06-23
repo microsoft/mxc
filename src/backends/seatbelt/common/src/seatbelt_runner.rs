@@ -426,6 +426,12 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
+        // No-op once the child has exited and been reaped: its pid/pgid can be
+        // recycled, so signaling it could hit an unrelated process (group). A
+        // reaped `Child` returns its cached status here without a syscall.
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
         if self.group {
             // The child leads its own process group — signal the whole group so
             // sandboxed descendants are terminated too.
@@ -434,9 +440,6 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             // Inherited / Open mode: a single process sharing the binary's
             // process group, so signal just it (a group-kill would hit the
             // binary itself).
-            if self.child.try_wait()?.is_some() {
-                return Ok(());
-            }
             self.child.kill()
         }
     }
