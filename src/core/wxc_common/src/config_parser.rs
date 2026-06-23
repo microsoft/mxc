@@ -598,6 +598,7 @@ fn validate_filesystem_paths(
     validate_paths(&policy.readonly_paths, logger)?;
     validate_paths(&policy.readwrite_paths, logger)?;
     validate_paths(&policy.denied_paths, logger)?;
+    validate_filesystem_path_conflicts(policy, logger)?;
     Ok(())
 }
 
@@ -609,6 +610,125 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
             return Err(WxcError::ConfigParse(msg));
         }
     }
+    Ok(())
+}
+
+/// Validates cross-list filesystem path constraints:
+/// 1. Same-path conflict: a path must not appear in multiple lists.
+/// 2. Paths must exist: every listed path must exist on the host at config time.
+/// 3. Object-based conflict: two different paths resolving to the same filesystem
+///    object (same device + inode) with different intents are rejected.
+fn validate_filesystem_path_conflicts(
+    policy: &ContainerPolicy,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    // Skip validation if all lists are empty.
+    if policy.readwrite_paths.is_empty()
+        && policy.readonly_paths.is_empty()
+        && policy.denied_paths.is_empty()
+    {
+        return Ok(());
+    }
+
+    // 1. Same-path conflict detection: reject if a path appears in more than one list.
+    let mut path_intents: HashMap<&str, &str> = HashMap::new();
+    for path in &policy.readwrite_paths {
+        path_intents.insert(path.as_str(), "readwritePaths");
+    }
+    for path in &policy.readonly_paths {
+        if let Some(existing) = path_intents.get(path.as_str()) {
+            let msg = format!(
+                "Filesystem path '{}' appears in both '{}' and 'readonlyPaths'; \
+                 a path cannot have conflicting intents",
+                path, existing
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+        path_intents.insert(path.as_str(), "readonlyPaths");
+    }
+    for path in &policy.denied_paths {
+        if let Some(existing) = path_intents.get(path.as_str()) {
+            let msg = format!(
+                "Filesystem path '{}' appears in both '{}' and 'deniedPaths'; \
+                 a path cannot have conflicting intents",
+                path, existing
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+        path_intents.insert(path.as_str(), "deniedPaths");
+    }
+
+    // 2. Paths must exist at policy-load time.
+    //    Log a warning for paths that don't exist — the backend will likely fail
+    //    at mount time with an opaque error. This is a diagnostic aid, not a hard
+    //    gate, because some backends create mount targets dynamically.
+    for (path, list_name) in &path_intents {
+        if fs::metadata(path).is_err() {
+            logger.log_line(&format!(
+                "Warning: filesystem path '{}' (in '{}') does not exist on the host; \
+                 the backend may fail at mount time",
+                path, list_name
+            ));
+        }
+    }
+
+    // 3. Object-based conflict detection: two paths resolving to the same
+    //    filesystem object (device + inode) with different intents are rejected.
+    //    Only applicable on Unix (where LXC and Bubblewrap run); on Windows,
+    //    paths are compared by canonicalization instead.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        // Map (dev, ino) → (first path, intent) for conflict detection.
+        let mut inode_map: HashMap<(u64, u64), (&str, &str)> = HashMap::new();
+        for (path, intent) in &path_intents {
+            if let Ok(meta) = fs::metadata(path) {
+                let key = (meta.dev(), meta.ino());
+                if let Some((existing_path, existing_intent)) = inode_map.get(&key) {
+                    if *existing_intent != *intent {
+                        let msg = format!(
+                            "Filesystem paths '{}' ({}) and '{}' ({}) resolve to the \
+                             same filesystem object but have conflicting intents",
+                            existing_path, existing_intent, path, intent
+                        );
+                        logger.log_line(&msg);
+                        return Err(WxcError::ConfigParse(msg));
+                    }
+                } else {
+                    inode_map.insert(key, (path, intent));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, detect object-based conflicts by comparing canonical paths.
+        // Two different path strings that canonicalize to the same absolute path
+        // (e.g. via junctions, subst drives, or case differences) are the same object.
+        let mut canonical_map: HashMap<std::path::PathBuf, (&str, &str)> = HashMap::new();
+        for (path, intent) in &path_intents {
+            if let Ok(canonical) = fs::canonicalize(path) {
+                if let Some((existing_path, existing_intent)) = canonical_map.get(&canonical) {
+                    if *existing_intent != *intent {
+                        let msg = format!(
+                            "Filesystem paths '{}' ({}) and '{}' ({}) resolve to the \
+                             same filesystem object but have conflicting intents",
+                            existing_path, existing_intent, path, intent
+                        );
+                        logger.log_line(&msg);
+                        return Err(WxcError::ConfigParse(msg));
+                    }
+                } else {
+                    canonical_map.insert(canonical, (path, intent));
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3902,5 +4022,68 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         load_request(&encoded, &mut logger, true).expect_err("vm has no resolver off Windows");
+    }
+
+    // --- Filesystem policy validation tests ---
+
+    #[test]
+    fn same_path_in_readwrite_and_denied_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "deniedPaths": ["C:\\workspace"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("C:\\workspace") && msg.contains("conflicting intents"),
+            "expected same-path conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn same_path_in_readwrite_and_readonly_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\workspace"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("C:\\workspace") && msg.contains("conflicting intents"),
+            "expected same-path conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn same_path_in_readonly_and_denied_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\tools"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("C:\\tools") && msg.contains("conflicting intents"),
+            "expected same-path conflict error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn distinct_paths_across_lists_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\secrets"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        // Should not error on conflict (paths don't exist but that's a warning, not an error)
+        load_request(&encoded, &mut logger, true).unwrap();
+    }
+
+    #[test]
+    fn empty_filesystem_lists_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": [], "readonlyPaths": [], "deniedPaths": []}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true).unwrap();
     }
 }
