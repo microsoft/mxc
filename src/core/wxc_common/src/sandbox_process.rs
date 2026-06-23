@@ -96,8 +96,8 @@ pub trait SandboxProcess: Send {
 
     /// Request termination of the sandboxed process **and its descendants**
     /// (a process-tree kill). On Unix the child leads its own process group
-    /// and this signals the whole group (graceful `SIGTERM`, escalating to
-    /// `SIGKILL` after a short grace period); on Windows it terminates the job
+    /// and this signals the whole group (an immediate `SIGKILL`, no graceful
+    /// `SIGTERM` first); on Windows it terminates the job
     /// object the child is assigned to. Reaping happens in
     /// [`wait`](SandboxProcess::wait).
     fn kill(&mut self) -> std::io::Result<()>;

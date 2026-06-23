@@ -92,8 +92,8 @@ The handle is modelled on [`std::process::Child`]:
 - `try_wait()` for a non-blocking exit check.
 - `kill()` terminates the sandboxed process **and its descendants** (a
   process-tree kill): on Unix the child leads its own process group and the
-  whole group is signalled (graceful `SIGTERM`, escalating to `SIGKILL` after
-  a short grace period); on Windows the child's job object is terminated.
+  whole group is signalled (an immediate `SIGKILL`, no graceful `SIGTERM`);
+  on Windows the child's job object is terminated.
 - `wait()` blocks until exit (honouring `scriptTimeout`, where `0` waits
   forever), drains and discards any **untaken** stdout/stderr so the child
   can't block on a full pipe, and returns the exit code (`ErrorKind::TimedOut`
