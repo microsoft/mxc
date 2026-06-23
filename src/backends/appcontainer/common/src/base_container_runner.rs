@@ -60,7 +60,9 @@ use wxc_common::sandbox_process::{
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
 
-use windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
+use windows::Win32::System::Threading::{
+    ResumeThread, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+};
 
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
@@ -849,11 +851,17 @@ impl BaseContainerRunner {
             .as_ref()
             .map(|b| b.as_ptr() as *const c_void)
             .unwrap_or(ptr::null());
-        let creation_flags = if env_block.is_some() {
-            CREATE_UNICODE_ENVIRONMENT.0
-        } else {
-            0
-        };
+        // Create the child suspended so its main thread cannot spawn any
+        // descendant before we've assigned it to the job object below; it is
+        // resumed right after the assignment. If the sandbox create API ignores
+        // CREATE_SUSPENDED on a given build, the child starts running anyway and
+        // the later resume is a harmless no-op.
+        let creation_flags = CREATE_SUSPENDED.0
+            | if env_block.is_some() {
+                CREATE_UNICODE_ENVIRONMENT.0
+            } else {
+                0
+            };
 
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
@@ -946,9 +954,10 @@ impl BaseContainerRunner {
                     diag.kind, diag.message
                 );
 
-                // Retry without the environment block.
+                // Retry without the environment block, but keep the child
+                // suspended (resumed after job assignment).
                 current_env_ptr = ptr::null();
-                current_creation_flags = 0;
+                current_creation_flags = CREATE_SUSPENDED.0;
                 continue;
             }
 
@@ -1036,15 +1045,12 @@ impl BaseContainerRunner {
         // could only `TerminateProcess` the root and no descendant was
         // tree-killed at all.)
         //
-        // The child is created running: the BaseContainer create API
-        // (`Experimental_CreateProcessInSandbox`) does not, on the builds
-        // validated to date, honor a suspended/paused start the way the
-        // AppContainer path does (create suspended → assign → resume), so a
-        // descendant spawned in the brief window between `CreateProcessInSandbox`
-        // returning and `assign_process` completing could still escape the job.
-        // In practice the child is a shell that has not yet run the user
-        // command, so that window is empty; fully closing it would require a
-        // create-suspended path verified on a host-prepped build.
+        // The child was created suspended (CREATE_SUSPENDED) and is resumed only
+        // after this assignment, so no descendant it spawns can escape the job.
+        // If the create API ignores CREATE_SUSPENDED on a given build the child
+        // is already running; it is a shell that has not yet run the user
+        // command, so the pre-assignment window is empty in practice and the
+        // later resume is a harmless no-op.
         let job = match UiJobObject::new().and_then(|job| {
             // Pass the raw handle — `assign_process` borrows it and does not
             // take ownership. Wrapping it in a temporary `OwnedHandle` here
@@ -1099,11 +1105,20 @@ impl BaseContainerRunner {
             }
         };
 
-        // The child runs immediately (no suspend); hand ownership to the
-        // caller via `BaseChild`, which performs sandbox/proxy teardown after
-        // the child exits. `job` is always present here (we failed closed
-        // above); the `Option` and the root-only fallback in `kill()` remain
-        // purely as defense-in-depth.
+        // The child was created suspended; now that it is in the job object (so
+        // every descendant it spawns is captured), resume its main thread. If the
+        // create API ignored CREATE_SUSPENDED the thread is already running and
+        // this is a harmless no-op.
+        // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
+        // handle; `ResumeThread` only adjusts its suspend count.
+        unsafe {
+            ResumeThread(pi.hThread);
+        }
+
+        // Hand ownership to the caller via `BaseChild`, which performs
+        // sandbox/proxy teardown after the child exits. `job` is always present
+        // here (we failed closed above); the `Option` and the root-only fallback
+        // in `kill()` remain purely as defense-in-depth.
         Ok(BaseChild {
             process: OwnedHandle::new(pi.hProcess),
             thread: OwnedHandle::new(pi.hThread),
