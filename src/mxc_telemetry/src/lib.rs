@@ -125,7 +125,12 @@ mod provider {
     }
 
     /// Emit an `MXC.Error` ETW event.
-    pub fn log_error(backend: &str, error_type: &str, error_message: &str) {
+    ///
+    /// By design this event carries **no free-form error text** — only the
+    /// bounded `error_type` category and the process `exit_code`. This keeps
+    /// telemetry free of PII (paths, usernames, credentials) that error
+    /// strings can contain.
+    pub fn log_error(backend: &str, error_type: &str, exit_code: i32) {
         let state = match STATE.get() {
             Some(s) => s,
             None => return,
@@ -147,7 +152,7 @@ mod provider {
             }),
             str8("mxc.backend", backend),
             str8("mxc.error_type", error_type),
-            str8("mxc.error_message", error_message),
+            i32("mxc.exit_code", &exit_code),
         );
     }
 }
@@ -173,7 +178,7 @@ mod provider {
     ) {
     }
 
-    pub fn log_error(_backend: &str, _error_type: &str, _error_message: &str) {}
+    pub fn log_error(_backend: &str, _error_type: &str, _exit_code: i32) {}
 }
 
 pub use provider::*;
@@ -229,7 +234,7 @@ mod tests {
     fn log_error_after_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
-        log_error("test_backend", "config_error", "test error message");
+        log_error("test_backend", "config_error", 1);
         shutdown();
     }
 
@@ -237,7 +242,7 @@ mod tests {
     fn log_without_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         log_execution("test_backend", 0, "success", 50, "none");
-        log_error("test_backend", "unknown", "no init");
+        log_error("test_backend", "unknown", 1);
     }
 
     #[test]
@@ -246,7 +251,7 @@ mod tests {
         let _ = init("0.0.0-test", "dev");
         shutdown();
         log_execution("test_backend", 1, "failure", 200, "timeout");
-        log_error("test_backend", "process_error", "after shutdown");
+        log_error("test_backend", "process_error", 1);
     }
 
     #[test]
@@ -254,7 +259,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("", "");
         log_execution("", 0, "", 0, "");
-        log_error("", "", "");
+        log_error("", "", 0);
         shutdown();
     }
 }

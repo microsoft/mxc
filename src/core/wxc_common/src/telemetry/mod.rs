@@ -13,7 +13,9 @@
 
 pub mod events;
 
-use crate::models::TelemetryConfig;
+use std::time::Duration;
+
+use crate::models::{ContainmentBackend, FailurePhase, ScriptResponse, TelemetryConfig};
 
 pub use events::{log_error, log_execution, ExecutionEvent, FailureReason};
 
@@ -66,6 +68,75 @@ pub fn init(config: &TelemetryConfig) -> bool {
 /// will clean up the provider registration at process termination.
 pub fn shutdown() {
     mxc_telemetry::shutdown();
+}
+
+/// Stable telemetry name for a containment backend.
+fn backend_name(backend: &ContainmentBackend) -> &'static str {
+    match backend {
+        ContainmentBackend::ProcessContainer => "processcontainer",
+        ContainmentBackend::WindowsSandbox => "windows_sandbox",
+        ContainmentBackend::Lxc => "lxc",
+        ContainmentBackend::MicroVm => "microvm",
+        ContainmentBackend::Wslc => "wslc",
+        ContainmentBackend::IsolationSession => "isolation_session",
+        ContainmentBackend::Seatbelt => "seatbelt",
+        ContainmentBackend::Bubblewrap => "bubblewrap",
+        ContainmentBackend::Hyperlight => "hyperlight",
+        ContainmentBackend::Vm => "vm",
+    }
+}
+
+/// Classify a failed execution into a bounded [`FailureReason`].
+fn classify_failure(phase: &FailurePhase) -> FailureReason {
+    match phase {
+        FailurePhase::LaunchFailed | FailurePhase::BackendUnavailable => FailureReason::InitError,
+        FailurePhase::Timeout => FailureReason::Timeout,
+        FailurePhase::ProcessExited | FailurePhase::None => FailureReason::ProcessError,
+    }
+}
+
+/// Emit completion telemetry for a finished execution and shut the provider
+/// down. No-op when `active` is `false`.
+///
+/// This is the single shared emit path for the `wxc` and `lxc` executors:
+/// it records an `MXC.Execution` event and, for failures that carry an error
+/// message, an `MXC.Error` event (category + exit code only — never the
+/// message text), then calls [`shutdown`].
+pub fn emit_completion(
+    active: bool,
+    containment: &ContainmentBackend,
+    response: &ScriptResponse,
+    elapsed: Duration,
+) {
+    if !active {
+        return;
+    }
+
+    let backend = backend_name(containment);
+    let failed = response.exit_code != 0;
+    let outcome = if failed { "failure" } else { "success" };
+    let failure_reason = failed.then(|| classify_failure(&response.failure_phase));
+
+    log_execution(&ExecutionEvent {
+        backend,
+        exit_code: response.exit_code,
+        outcome,
+        duration_ms: elapsed.as_millis() as u64,
+        failure_reason,
+    });
+
+    // The presence of an error message signals an infrastructure error (as
+    // opposed to a script that merely exited non-zero). We use it only as a
+    // boolean signal — the message text itself is never emitted.
+    if failed && !response.error_message.is_empty() {
+        log_error(
+            backend,
+            classify_failure(&response.failure_phase),
+            response.exit_code,
+        );
+    }
+
+    shutdown();
 }
 
 #[cfg(test)]

@@ -81,7 +81,12 @@ Emitted on execution errors.
 |-------|------|-------------|
 | `mxc.backend` | string | Containment backend name |
 | `mxc.error_type` | string | Error category (`config_error`, `process_error`, etc.) |
-| `mxc.error_message` | string | Sanitized error message (PII-stripped, max 256 chars) |
+| `mxc.exit_code` | int32 | Process exit code |
+
+> **No free-form error text is emitted.** Error messages can contain paths,
+> usernames, or credentials, so `MXC.Error` deliberately carries only the
+> bounded `error_type` category and the numeric `exit_code` — never the
+> message string itself.
 
 ## Cross-Platform Behaviour
 
