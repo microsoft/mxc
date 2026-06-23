@@ -262,20 +262,27 @@ pub enum WaitError {
 }
 
 /// Wait for `child` to exit. With a timeout we poll (rather than add an async
-/// runtime), clamping each sleep to the time remaining so even sub-interval
-/// timeouts fire on time. Shared by the Unix run-to-completion backends.
+/// runtime), starting at a short interval and backing off to a cap: a quick
+/// child is detected within ~a millisecond instead of always paying a full
+/// fixed tick, while a long run settles to an inexpensive cadence. Each sleep is
+/// clamped to the time remaining so even sub-interval timeouts fire on time.
+/// Shared by the Unix run-to-completion backends.
 #[cfg(unix)]
 pub fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Option<std::time::Duration>,
 ) -> Result<std::process::ExitStatus, WaitError> {
     use std::time::{Duration, Instant};
-    // Short poll interval for low exit-detection latency.
-    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+    // Poll interval grows from this floor to the cap (doubling each idle tick),
+    // trading low exit-detection latency for short runs against an inexpensive
+    // cadence for long ones.
+    const MIN_POLL: Duration = Duration::from_millis(1);
+    const MAX_POLL: Duration = Duration::from_millis(50);
 
     let Some(deadline) = timeout.map(|d| Instant::now() + d) else {
         return child.wait().map_err(WaitError::Io);
     };
+    let mut interval = MIN_POLL;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -284,7 +291,8 @@ pub fn wait_with_timeout(
                 if now >= deadline {
                     return Err(WaitError::Timeout);
                 }
-                std::thread::sleep((deadline - now).min(POLL_INTERVAL));
+                std::thread::sleep((deadline - now).min(interval));
+                interval = (interval * 2).min(MAX_POLL);
             }
             Err(error) => return Err(WaitError::Io(error)),
         }
@@ -402,5 +410,66 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
             },
             Err(e) => ScriptResponse::error(&format!("wait failed: {e}")),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{wait_with_timeout, WaitError};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn wait_with_timeout_detects_quick_exit_promptly() {
+        // A child that exits almost immediately is reaped well before a generous
+        // deadline -- the adaptive poll starts in the millisecond range, so the
+        // detection latency is small (the old fixed 50ms tick was the worst case).
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let start = Instant::now();
+        let status = match wait_with_timeout(&mut child, Some(Duration::from_secs(10))) {
+            Ok(status) => status,
+            Err(_) => panic!("a quick child must exit, not time out"),
+        };
+        assert!(status.success(), "`true` exits 0");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "quick exit should be detected promptly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn wait_with_timeout_fires_at_the_deadline() {
+        // A long-running child hits the timeout branch at (not before) the
+        // deadline, even though the deadline is shorter than the poll cap.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let start = Instant::now();
+        let result = wait_with_timeout(&mut child, Some(Duration::from_millis(200)));
+        let elapsed = start.elapsed();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(matches!(result, Err(WaitError::Timeout)), "should time out");
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "must not fire before the deadline, fired at {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should fire near the deadline, fired at {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn wait_with_timeout_without_deadline_waits_for_exit() {
+        // A `None` timeout blocks until the child exits.
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let status = match wait_with_timeout(&mut child, None) {
+            Ok(status) => status,
+            Err(_) => panic!("blocking wait must return the exit status"),
+        };
+        assert!(status.success());
     }
 }
