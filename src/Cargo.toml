@@ -50,6 +50,10 @@ version = "0.7.0"
 edition = "2021"
 
 [workspace.dependencies]
+# Pure-Rust ETW TraceLogging provider used by `mxc_telemetry` (Windows-only;
+# the crate compiles to no-ops on other targets). Pinned at the workspace
+# level so every consumer resolves the same version.
+tracelogging = "1.2"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",

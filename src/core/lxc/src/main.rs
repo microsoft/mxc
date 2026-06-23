@@ -237,6 +237,11 @@ fn main() {
                         "Error: Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
                          Use --experimental flag."
                     );
+                    telemetry::emit_early_exit(
+                        telemetry_active,
+                        &request.containment,
+                        telemetry::FailureReason::PolicyError,
+                    );
                     process::exit(1);
                 }
                 Box::new(HyperlightScriptRunner::new())
@@ -246,12 +251,22 @@ fn main() {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
                 );
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
         ContainmentBackend::MicroVm => {
             if !request.experimental_enabled {
                 eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::PolicyError,
+                );
                 process::exit(1);
             }
             #[cfg(feature = "microvm")]
@@ -261,6 +276,11 @@ fn main() {
             #[cfg(not(feature = "microvm"))]
             {
                 eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -272,6 +292,11 @@ fn main() {
             #[cfg(not(target_os = "linux"))]
             {
                 eprintln!("Error: Bubblewrap backend is only available on Linux");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }

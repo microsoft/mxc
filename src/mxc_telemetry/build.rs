@@ -17,42 +17,30 @@
 //! `"Microsoft.MXC"` the derived GUID is
 //! `{7f10def4-a258-5fea-510e-2c3bb976687f}`. Keeping the name and GUID in
 //! lockstep this way prevents drift and avoids hard-coding a literal.
+//!
+//! The pure code-generation logic lives in `provider_codegen.rs` so it can be
+//! unit-tested from `lib.rs` (Cargo never runs build-script test modules).
 
-/// Validates that `s` is a well-formed GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
-/// Prevents code injection via the environment variable since the value is
-/// interpolated into generated Rust source that is `include!()`'d.
-fn is_valid_guid(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == 5
-        && parts[0].len() == 8
-        && parts[1].len() == 4
-        && parts[2].len() == 4
-        && parts[3].len() == 4
-        && parts[4].len() == 12
-        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-}
+include!("provider_codegen.rs");
 
 fn main() {
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_PROVIDER_GROUP_GUID");
 
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
-    let provider_def = match std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID") {
-        Ok(guid) if !guid.is_empty() => {
-            assert!(
-                is_valid_guid(&guid),
-                "MXC_TELEMETRY_PROVIDER_GROUP_GUID is not a valid GUID"
-            );
-            format!(
-                "tracelogging::define_provider!(\
-                 MXC_PROVIDER, \"Microsoft.MXC\", \
-                 group_id(\"{guid}\"));\n"
-            )
-        }
-        _ => "tracelogging::define_provider!(\
-              MXC_PROVIDER, \"Microsoft.MXC\");\n"
-            .to_string(),
+    // The `tracelogging` provider only emits on Windows; on every other target
+    // the crate compiles to no-ops. Honor (and validate) the group GUID only
+    // for Windows builds so a stray or malformed environment value cannot break
+    // cross-platform builds — e.g. a CI host that exports the variable globally
+    // while cross-compiling the Linux/macOS binaries.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let group_guid = if target_os == "windows" {
+        std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID").ok()
+    } else {
+        None
     };
+
+    let provider_def = generate_provider_def(group_guid.as_deref());
 
     std::fs::write(out.join("provider_def.rs"), provider_def).unwrap();
 }

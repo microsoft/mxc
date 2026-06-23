@@ -70,22 +70,6 @@ pub fn shutdown() {
     mxc_telemetry::shutdown();
 }
 
-/// Stable telemetry name for a containment backend.
-fn backend_name(backend: &ContainmentBackend) -> &'static str {
-    match backend {
-        ContainmentBackend::ProcessContainer => "processcontainer",
-        ContainmentBackend::WindowsSandbox => "windows_sandbox",
-        ContainmentBackend::Lxc => "lxc",
-        ContainmentBackend::MicroVm => "microvm",
-        ContainmentBackend::Wslc => "wslc",
-        ContainmentBackend::IsolationSession => "isolation_session",
-        ContainmentBackend::Seatbelt => "seatbelt",
-        ContainmentBackend::Bubblewrap => "bubblewrap",
-        ContainmentBackend::Hyperlight => "hyperlight",
-        ContainmentBackend::Vm => "vm",
-    }
-}
-
 /// Classify a failed execution into a bounded [`FailureReason`].
 fn classify_failure(phase: &FailurePhase) -> FailureReason {
     match phase {
@@ -111,7 +95,7 @@ pub fn emit_completion(
         return;
     }
 
-    let backend = backend_name(containment);
+    let backend = containment.wire_name();
     let failed = response.exit_code != 0;
     let outcome = if failed { "failure" } else { "success" };
     let failure_reason = failed.then(|| classify_failure(&response.failure_phase));
@@ -134,6 +118,36 @@ pub fn emit_completion(
             response.exit_code,
         );
     }
+
+    shutdown();
+}
+
+/// Emit failure telemetry for an early-exit path that terminates **before** a
+/// runner produces a [`ScriptResponse`], then shut the provider down. No-op
+/// when `active` is `false`.
+///
+/// One-shot executors validate configuration and select a backend before
+/// running; failures there call `process::exit` directly and would otherwise
+/// bypass [`emit_completion`] entirely. This records an `MXC.Execution` event
+/// (exit code 1, `failure` outcome) plus an `MXC.Error` event carrying the
+/// bounded `reason` category and exit code, so config/policy/init failures are
+/// observable. `duration_ms` is reported as `0` because no execution occurred.
+pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
+    if !active {
+        return;
+    }
+
+    let backend = containment.wire_name();
+
+    log_execution(&ExecutionEvent {
+        backend,
+        exit_code: 1,
+        outcome: "failure",
+        duration_ms: 0,
+        failure_reason: Some(reason),
+    });
+
+    log_error(backend, reason, 1);
 
     shutdown();
 }
@@ -167,5 +181,28 @@ mod tests {
     #[test]
     fn version_is_not_empty() {
         assert!(!version().is_empty());
+    }
+
+    #[test]
+    fn classify_failure_maps_all_phases() {
+        // Backend/launch failures classify as init errors.
+        assert_eq!(
+            classify_failure(&FailurePhase::LaunchFailed),
+            FailureReason::InitError
+        );
+        assert_eq!(
+            classify_failure(&FailurePhase::BackendUnavailable),
+            FailureReason::InitError
+        );
+        // A process that ran and exited (or an unclassified failure) is a
+        // process error.
+        assert_eq!(
+            classify_failure(&FailurePhase::ProcessExited),
+            FailureReason::ProcessError
+        );
+        assert_eq!(
+            classify_failure(&FailurePhase::None),
+            FailureReason::ProcessError
+        );
     }
 }
