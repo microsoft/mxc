@@ -2026,6 +2026,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shim_security_test"
+version = "0.6.1"
+dependencies = [
+ "learning_mode_windows",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
