@@ -217,8 +217,8 @@ All flags default to `false` (no network access).
 |--------------------|-------------|
 | `allowOutbound`    | Allow outbound connections to the internet (HTTP, DNS, etc.). |
 | `allowLocalNetwork`| Allow connections to local networks. |
-| `allowedHosts`     | When set, ONLY these outbound hosts are reachable. Error if `allowOutbound` is not set. |
-| `blockedHosts`     | Hosts to block even when outbound is allowed. Error if `allowOutbound` is not set. |
+| `allowedHosts`     | When set, ONLY these outbound hosts are reachable. Host-filtering backends (Linux, macOS) accept this without `allowOutbound`; Windows ProcessContainer requires `allowOutbound`. |
+| `blockedHosts`     | Hosts to block even when outbound is allowed. Same `allowOutbound` requirement as `allowedHosts` (Windows ProcessContainer only). |
 | `proxy`            | `{ builtinTestServer: true }` or `{ url: "..." }`. Routes all traffic through this proxy. Cannot be combined with other network flags. |
 
 Omitted = no network access.
