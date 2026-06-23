@@ -32,8 +32,8 @@
 //!
 //! The selected backend is driven by the `containment` field in the request
 //! (or the host default). The library supports Bubblewrap (Linux), Seatbelt
-//! (macOS), and ProcessContainer — AppContainer plus the BaseContainer
-//! fallback — (Windows). Other backends return an [`Error`] with
+//! (macOS), and ProcessContainer — AppContainer and BaseContainer —
+//! (Windows). Other backends return an [`Error`] with
 //! [`ErrorCode::UnsupportedContainment`].
 //!
 //! ## No pty

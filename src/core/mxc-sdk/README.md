@@ -124,7 +124,7 @@ default):
 |---------|--------------------------------------------------------|
 | Linux   | Bubblewrap                                             |
 | macOS   | Seatbelt                                               |
-| Windows | ProcessContainer (AppContainer + BaseContainer fallback) |
+| Windows | ProcessContainer (AppContainer + BaseContainer)        |
 
 Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
 WSLC, LXC) returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the standalone
@@ -141,6 +141,6 @@ take is drained and discarded by `wait()`.
 ## Relationship to the executor binaries
 
 The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not depend on this
-crate. It reuses the same backend crates they do (and, on Windows, the shared
-`appcontainer_common::dispatcher::dispatch_with_fallback` primitive), but
-spawns its own streaming handles.
+crate. It reuses the same backend crates they do, but selects between them
+directly (no BFS/DACL `dispatch_with_fallback`) and spawns its own streaming
+handles.
