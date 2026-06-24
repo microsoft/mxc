@@ -245,12 +245,29 @@ pub fn cancel_and_join_discard<C: StreamCloser>(
 pub fn group_kill(child: &mut std::process::Child) -> std::io::Result<()> {
     // The child is unreaped, so its pid (== pgid) can't have been recycled.
     let pid = child.id() as i32;
-    // SAFETY: `kill(2)` with a plain pid / negative pgid — just integers.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL); // leader first
-        libc::kill(-pid, libc::SIGKILL); // then its group
-    }
+    send_sigkill(pid)?; // leader first
+    send_sigkill(-pid)?; // then its group
     Ok(())
+}
+
+/// `SIGKILL` `target` (a pid, or a negative pgid), treating the "already gone"
+/// outcomes as success. The caller only invokes this on its own still-unreaped
+/// child (so the pid/pgid can't have been recycled), which leaves two benign
+/// errno: `ESRCH` (no such process/group — already exited) and `EPERM`, which on
+/// macOS a redundant kill of an exited-but-not-yet-reaped child's group reports
+/// instead of `ESRCH`. Any other error propagates, so a genuinely failed signal
+/// isn't misreported as a successful kill.
+#[cfg(unix)]
+fn send_sigkill(target: i32) -> std::io::Result<()> {
+    // SAFETY: `kill(2)` with a plain pid / negative pgid — just integers.
+    if unsafe { libc::kill(target, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::ESRCH) | Some(libc::EPERM) => Ok(()),
+        _ => Err(err),
+    }
 }
 
 /// Outcome of [`wait_with_timeout`]: the child exited, the deadline passed, or
