@@ -194,9 +194,10 @@ fn spawn_process_container(
 
 #[cfg(test)]
 mod tests {
-    use super::spawn_runner;
+    use super::{ensure_host_supported, spawn_runner};
     use crate::policy::{build_request, SandboxPolicy};
     use wxc_common::logger::{Logger, Mode};
+    use wxc_common::models::ContainmentBackend;
     use wxc_common::mxc_error::MxcErrorCode;
 
     fn minimal_policy() -> SandboxPolicy {
@@ -222,6 +223,32 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+    }
+
+    #[test]
+    fn streaming_rejects_unsupported_containment() {
+        // LXC has no streaming path in the library; selecting it must surface a
+        // clear `UnsupportedContainment` rather than spawning. The public
+        // `SandboxRequest` can't choose a backend, so drive dispatch with the
+        // internal model.
+        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        request.inner.containment = ContainmentBackend::Lxc;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("LXC must be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert!(err.message.contains("lxc"), "got: {}", err.message);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn host_support_ok_on_supported_platforms() {
+        // The three platforms the library supports must all pass the host gate
+        // `spawn_runner` checks before backend selection; this guards against a
+        // regression in the `cfg` list dropping one of them.
+        assert!(ensure_host_supported().is_ok());
     }
 
     #[cfg(target_os = "macos")]
