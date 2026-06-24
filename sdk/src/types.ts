@@ -224,20 +224,33 @@ export interface WslcConfig {
   gpu?: boolean;
   /** Path to a local tar file to import as the container image */
   imageTarPath?: string;
-  /** Host↔container port mappings (TCP only) */
+  /**
+   * Host↔container port mappings.
+   *
+   * Only TCP is currently supported by the vendored WSLC SDK runtime
+   * (Microsoft.WSL.Containers 2.8.1). UDP is declared in the SDK header
+   * but the shipped runtime returns `E_NOTIMPL` when UDP is actually
+   * requested, so the parser hard-rejects `"udp"` with a clear message at
+   * spawn time. The `protocol` field defaults to `"tcp"` when omitted.
+   */
   portMappings?: PortMapping[];
 }
 
 /**
- * Port mapping for host↔container port forwarding
+ * Port mapping for host↔container port forwarding.
  */
 export interface PortMapping {
   /** Port on the Windows host */
   windowsPort: number;
   /** Port inside the Linux container */
   containerPort: number;
-  /** Protocol: "tcp" or "udp" (default: "tcp") */
-  protocol?: string;
+  /**
+   * Transport protocol. Only `"tcp"` is currently supported; `"udp"` is
+   * rejected by the parser because the vendored WSLC SDK runtime
+   * (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL` for UDP even
+   * though the header declares it. Defaults to `"tcp"` when omitted.
+   */
+  protocol?: 'tcp';
 }
 
 /**

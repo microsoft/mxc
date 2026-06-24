@@ -6,24 +6,10 @@ name: Build
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/PULL_REQUEST_TEMPLATE.md'
-      - '.github/copilot-instructions.md'
-      - '.github/instructions/**'
-      - '**/*.md'
-      - '.editorconfig'
+
   pull_request:
     branches: [main, 'feature/*', 'user/*']
-    paths-ignore:
-      - 'docs/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/PULL_REQUEST_TEMPLATE.md'
-      - '.github/copilot-instructions.md'
-      - '.github/instructions/**'
-      - '**/*.md'
-      - '.editorconfig'
+
   workflow_call:
   workflow_dispatch:
 

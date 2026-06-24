@@ -11,8 +11,5 @@
         "blockedHosts": [
             "evil.example.com"
         ]
-    },
-    "seatbelt": {
-        "mode": "exec"
     }
 }

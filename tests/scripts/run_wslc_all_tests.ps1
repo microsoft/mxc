@@ -217,6 +217,8 @@ $null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "R
 
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
+$null = $results.Add((Run-WslcTest "wslc_port_mapping_tcp.json" -OutputContains "PORT_MAPPING_TCP_OK"))
+$null = $results.Add((Run-WslcTest "wslc_port_mapping_multiple.json" -OutputContains "PORT_MAPPING_MULTI_OK"))
 
 Write-Host "`n--- Image Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_python_hello.json" -OutputContains "Hello from Python"))

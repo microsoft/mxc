@@ -27,7 +27,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ```
 ./build.sh                 # Release build
 ./build.sh --debug         # Debug build
-./build.sh --rust-only     # Only Rust binaries, skip SDK/CLI
+./build.sh --rust-only     # Only Rust binaries, skip SDK
 ```
 
 ### Full build (macOS)
@@ -52,9 +52,6 @@ cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS only 
 
 # SDK (from sdk/)
 npm install && npm run build
-
-# CLI (from cli/)
-npm install && npm run build
 ```
 
 ### Lint and format
@@ -63,9 +60,6 @@ npm install && npm run build
 # Rust (from src/)
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-
-# CLI (from cli/)
-npx eslint src --ext .ts
 ```
 
 ### Tests
@@ -79,9 +73,6 @@ cargo test -p wxc_common -- config_parser   # Filter by test name
 # SDK (from sdk/)
 npm test
 npm run test:integration
-
-# CLI (from cli/) — requires build first
-node --test dist/cli.test.js
 
 # Local PowerShell helpers — run from repo root, require built binaries
 tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
@@ -98,7 +89,7 @@ cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repea
 
 ## Architecture
 
-MXC is a **sandboxed code execution system** with a Rust core and TypeScript SDK/CLI layer.
+MXC is a **sandboxed code execution system** with a Rust core and TypeScript SDK layer.
 
 ### Containment backends
 
@@ -131,7 +122,7 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 ### Schema system
 
 - **Stable schemas**: released, immutable schemas live in [`schemas/stable/`](../schemas/stable) (one file per released version, plus a `-strict` view) — never edit them after release.
-- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev).
+- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev). It is **generated** from the Rust wire model (`src/core/wxc_common/src/wire.rs`) by the `mxc_schema_gen` tool — **do not hand-edit it**. To change the dev schema, edit the wire model and regenerate with `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`. `scripts/versioning/check-schema-codegen.js` is a CI gate that regenerates and fails if the committed schema drifts. See [`docs/schema-codegen.md`](../docs/schema-codegen.md).
 - **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file. See [`docs/versioning.md`](../docs/versioning.md) for the full design.
 - Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
@@ -171,7 +162,7 @@ State-aware lifecycle:
 
 New features go under the `experimental` JSON section and are only active when `--experimental` is passed. See `docs/authoring-a-new-feature.md` for the full checklist. The pattern:
 
-1. Add the property schema to `schemas/dev/` under `experimental`
+1. Add the field to the Rust wire model (`src/core/wxc_common/src/wire.rs`) under the `Experimental` section, then regenerate the dev schema (`cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`) — do not hand-edit the generated schema
 2. Add Rust structs to `models.rs` (`ExperimentalConfig`) and `config_parser.rs` (`RawExperimental`)
 3. Guard execution behind `if request.experimental_enabled` in the runner
 4. Never modify files in `schemas/stable/` — those are immutable release artifacts
@@ -204,10 +195,8 @@ The parser uses two layers of structs: `Raw*` structs (matching JSON with `#[ser
 
 ### TypeScript conventions
 
-- Target ES2020, CommonJS modules, strict mode
-- SDK and CLI each have their own `tsconfig.json` with `declaration: true`
+- Target ES2022, ESM modules (`module`/`moduleResolution: NodeNext`, `"type": "module"`), strict mode — relative imports use explicit `.js` extensions
 - Tests use Node.js built-in test runner (`node --test`)
-- CLI uses flat ESLint config (`eslint.config.js`) with `typescript-eslint`
 
 ### Binary naming
 
@@ -227,7 +216,6 @@ When changing behavior covered by existing documentation, update the relevant do
 - **Schema changes** (adding/removing/renaming config fields) → update `docs/schema.md` and the appropriate JSON schema in `schemas/dev/` or `schemas/stable/`
 - **New experimental features** → follow `docs/authoring-a-new-feature.md`, which includes schema, Rust, and test config steps
 - **SDK API changes** (new exports, changed signatures, new options) → update `sdk/README.md` and the JSDoc in `sdk/src/index.ts`
-- **CLI command changes** → update `cli/README.md` and `cli/ARCHITECTURE.md`
 - **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-support/lxc-backend.md`, `windows-sandbox/windows-sandbox.md`)
 - **Versioning or promotion changes** → update `docs/versioning.md`
 

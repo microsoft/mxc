@@ -51,19 +51,121 @@ param(
     [string]$CargoLog       = (Join-Path $env:TEMP 'Win25H2Safe-Tests.cargo.log'),
     [switch]$SkipBuild,
     [switch]$SkipReleaseLane,
-    [switch]$KeepArtifacts
+    [switch]$KeepArtifacts,
+    # Restrict execution to a subset of phases (build + preflight + scratch
+    # init always run). Accepts the phase keys listed in $AllPhases below, e.g.
+    # -Phases UiMitigationMatrix runs only Phase 4b. Empty = run all phases.
+    [string[]]$Phases = @()
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# The UI-mitigation probe binary refuses EXITWINDOWS / WIN32K by
-# default — running those operations outside a sandbox can log out
-# the interactive user. Set the explicit override here so the AC
-# child wxc_ui_probe inherits it via wxc-exec's env-passthrough.
-# Without this, Phase 4b's EXITWINDOWS / WIN32K assertions fail with
-# "DIAG: refused".
-$env:MXC_PROBE_DESTRUCTIVE_OK = '1'
+# The UI-mitigation probe binary refuses EXITWINDOWS / WIN32K by default —
+# running those operations outside a sandbox can log out the interactive
+# user. The contained child must see MXC_PROBE_DESTRUCTIVE_OK=1 to attempt
+# them. NOTE: the AppContainer (T3) runner REPLACES the child environment with
+# the config's `process.env` whenever it is non-empty (it only falls back to
+# CreateEnvironmentBlock when env is empty), so a process-level `$env:` here
+# would NOT reach the child. The override is therefore delivered per-run via
+# New-Config -Env (see Get-ProbeEnvWithDestructive). That env block must be
+# COMPLETE — CreateProcessW requires at least %SystemRoot% and fails with
+# ERROR_ENVVAR_NOT_FOUND (0x800700CB) on a one-var block — so we pass the full
+# current environment plus the override, not just the override alone.
+
+# kernel32 atom-table P/Invoke used by Phase-GlobalAtomIsolation to plant a
+# host-side global atom (direction 1) and to probe its own session-global
+# table for the contained process's atom (direction 2). Guarded so a re-run
+# in the same PowerShell session doesn't throw "type already exists".
+if (-not ([System.Management.Automation.PSTypeName]'Mxc.AtomNative').Type) {
+    Add-Type -Namespace 'Mxc' -Name 'AtomNative' -MemberDefinition @'
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern ushort GlobalAddAtomW(string lpString);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern ushort GlobalFindAtomW(string lpString);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern ushort GlobalDeleteAtom(ushort nAtom);
+'@ | Out-Null
+}
+
+# A hidden, message-pumping top-level window owned by the harness process —
+# used by Phase 4b's HANDLES probe as a USER handle owned by a process OUTSIDE
+# the job. The window runs its message loop on a dedicated background thread so
+# a cross-job GetWindowTextW (WM_GETTEXT) is answered promptly in the (broken)
+# case where the JOB_OBJECT_UILIMIT_HANDLES limit fails to block it.
+if (-not ([System.Management.Automation.PSTypeName]'Mxc.WindowHost').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace Mxc {
+    public class WindowHost {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int ptX; public int ptY; }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateWindowExW(int dwExStyle, string lpClassName, string lpWindowName, int dwStyle, int x, int y, int nWidth, int nHeight, IntPtr hWndParent, IntPtr hMenu, IntPtr hInstance, IntPtr lpParam);
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool DestroyWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern int GetMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+        [DllImport("user32.dll")]
+        private static extern bool TranslateMessage(ref MSG lpMsg);
+        [DllImport("user32.dll")]
+        private static extern IntPtr DispatchMessageW(ref MSG lpMsg);
+        [DllImport("user32.dll")]
+        private static extern bool PostThreadMessageW(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        private const uint WM_QUIT = 0x0012;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+
+        private Thread _thread;
+        private uint _threadId;
+        private volatile IntPtr _hwnd = IntPtr.Zero;
+        private readonly ManualResetEventSlim _ready = new ManualResetEventSlim(false);
+        private string _title;
+
+        public IntPtr Hwnd { get { return _hwnd; } }
+        public string Title { get { return _title; } }
+
+        public void Start(string title) {
+            _title = title;
+            _thread = new Thread(Run);
+            _thread.IsBackground = true;
+            _thread.Start();
+            if (!_ready.Wait(5000)) { throw new Exception("WindowHost: window creation timed out"); }
+            if (_hwnd == IntPtr.Zero) { throw new Exception("WindowHost: CreateWindowExW failed"); }
+        }
+
+        private void Run() {
+            _threadId = GetCurrentThreadId();
+            // The system "STATIC" class needs no registration; omitting
+            // WS_VISIBLE keeps the window hidden. Its caption is the sentinel
+            // title that WM_GETTEXT (DefWindowProc) returns.
+            _hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, "STATIC", _title, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            _ready.Set();
+            if (_hwnd == IntPtr.Zero) { return; }
+            MSG msg;
+            // GetMessageW returns 0 on WM_QUIT and -1 on error; exit on both.
+            while (GetMessageW(out msg, IntPtr.Zero, 0, 0) > 0) {
+                TranslateMessage(ref msg);
+                DispatchMessageW(ref msg);
+            }
+            DestroyWindow(_hwnd);
+        }
+
+        public void Stop() {
+            if (_thread == null) { return; }
+            if (_threadId != 0) { PostThreadMessageW(_threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero); }
+            _thread.Join(3000);
+        }
+    }
+}
+'@ | Out-Null
+}
 
 # -----------------------------------------------------------------------
 # Result accumulator
@@ -278,6 +380,25 @@ function Assert-NoBfscfg {
 # -----------------------------------------------------------------------
 # Config generation
 # -----------------------------------------------------------------------
+# Build a COMPLETE environment block (current process env + the destructive
+# override) for delivery to the contained probe via New-Config -Env. The T3
+# runner replaces the child env with process.env when it is non-empty, and
+# CreateProcessW requires a full block (notably %SystemRoot%), so passing only
+# the override would fail with ERROR_ENVVAR_NOT_FOUND (0x800700CB).
+function Get-ProbeEnvWithDestructive {
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($e in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $k = [string]$e.Key
+        # Skip the hidden per-drive "=C:" cwd vars and any empty key; skip the
+        # override (re-added below) and the test-only tier knob.
+        if ([string]::IsNullOrEmpty($k) -or $k.StartsWith('=')) { continue }
+        if ($k -ieq 'MXC_PROBE_DESTRUCTIVE_OK' -or $k -ieq 'MXC_FORCE_TIER') { continue }
+        [void]$list.Add("$k=$($e.Value)")
+    }
+    [void]$list.Add('MXC_PROBE_DESTRUCTIVE_OK=1')
+    return $list.ToArray()
+}
+
 function New-Config {
     param(
         [Parameter(Mandatory)] [string]$Name,
@@ -293,7 +414,8 @@ function New-Config {
         [string]$BpUiSystemSettings         = $null,
         [Nullable[bool]]$BpUiIme            = $null,
         [string]$Clipboard                  = $null,
-        [Nullable[bool]]$Injection          = $null
+        [Nullable[bool]]$Injection          = $null,
+        [string[]]$Env                      = @()
     )
     $obj = [ordered]@{
         version     = '0.5.0-dev'
@@ -304,6 +426,7 @@ function New-Config {
             timeout     = $TimeoutMs
         }
     }
+    if ($Env.Count -gt 0) { $obj['process']['env'] = @($Env) }
     if ($ReadWrite.Count -gt 0 -or $ReadOnly.Count -gt 0 -or $Denied.Count -gt 0) {
         $fs = [ordered]@{}
         if ($ReadWrite.Count -gt 0) { $fs['readwritePaths'] = @($ReadWrite) }
@@ -820,50 +943,100 @@ function Phase-UiMitigationMatrix {
     # injection=false. base_process_ui: isolation=container (HANDLES +
     # GLOBALATOMS), desktopSystemControl=false (DESKTOP + EXITWINDOWS),
     # systemSettings=none (SYSTEMPARAMETERS + DISPLAYSETTINGS), ime=false.
-    $probeArgsA = 'GLOBALATOMS READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES'
-    $cmdA = "`"$UiProbeDebug`" $probeArgsA"
-    $cfgA = New-Config -Name 'ui-matrix-A-allbits' `
-        -CommandLine $cmdA `
-        -ReadWrite @($rw) `
-        -UiDisable $false `
-        -Clipboard 'none' `
-        -Injection $false `
-        -BpUiIsolation 'container' `
-        -BpUiDesktopControl $false `
-        -BpUiSystemSettings 'none' `
-        -BpUiIme $false
-    $logA = Join-Path $ScratchRoot 'logs\ui-matrix-A.log'
-    $rA = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgA -LogPath $logA
-    $logContentA = Read-Log $logA
-    Assert-NoBfscfg -LogContent $logContentA -Phase 'P4b' -Name 'ui-matrix-A'
+    # NOTE: GLOBALATOMS is NOT probed here. JOB_OBJECT_UILIMIT_GLOBALATOMS
+    # does not fail the atom APIs — it gives the job a private atom table —
+    # so it cannot be verified with the simple "API failed -> PASS" matrix.
+    # Phase-GlobalAtomIsolation covers it with a bidirectional isolation test.
+    # Create a hidden, message-pumping window owned by THIS (out-of-job)
+    # process. Its USER handle is what the HANDLES probe must NOT be able to
+    # reach: JOB_OBJECT_UILIMIT_HANDLES does not stop FindWindow from returning
+    # HWNDs — it blocks USING handles owned by processes outside the job — so
+    # the probe reads the window's title via GetWindowTextW (a cross-job
+    # WM_GETTEXT). PASS = it could not read the sentinel; FAIL = it read it.
+    # The window pumps messages on its own thread so the broken case returns
+    # the title promptly instead of hanging; the working case never delivers
+    # the message (rejected at the sender), so no pump dependency there.
+    $handleTitle = "MxcHandleProbe_$([guid]::NewGuid().ToString('N'))"
+    $winHost = New-Object Mxc.WindowHost
+    $winHost.Start($handleTitle)
+    try {
+        $hwndVal = $winHost.Hwnd.ToInt64()
+        $probeArgsA = 'READCLIPBOARD WRITECLIPBOARD SYSTEMPARAMETERS DISPLAYSETTINGS DESKTOP EXITWINDOWS HANDLES'
+        $cmdA = "`"$UiProbeDebug`" $probeArgsA --handle-hwnd=$hwndVal --handle-title=`"$handleTitle`""
+        $cfgA = New-Config -Name 'ui-matrix-A-allbits' `
+            -CommandLine $cmdA `
+            -ReadWrite @($rw) `
+            -UiDisable $false `
+            -Clipboard 'none' `
+            -Injection $false `
+            -BpUiIsolation 'container' `
+            -BpUiDesktopControl $false `
+            -BpUiSystemSettings 'none' `
+            -BpUiIme $false `
+            -Env (Get-ProbeEnvWithDestructive)
+        $logA = Join-Path $ScratchRoot 'logs\ui-matrix-A.log'
+        $rA = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgA -LogPath $logA
+        $logContentA = Read-Log $logA
+        Assert-NoBfscfg -LogContent $logContentA -Phase 'P4b' -Name 'ui-matrix-A'
 
-    $matrixA = @{}
-    foreach ($line in ($rA.Stdout -split "`r?`n")) {
-        if ($line -match '^(?<k>GLOBALATOMS|READCLIPBOARD|WRITECLIPBOARD|SYSTEMPARAMETERS|DISPLAYSETTINGS|DESKTOP|EXITWINDOWS|HANDLES|WIN32K)=(?<v>PASS|FAIL)\s*$') {
-            $matrixA[$matches['k']] = $matches['v']
+        $matrixA = @{}
+        foreach ($line in ($rA.Stdout -split "`r?`n")) {
+            if ($line -match '^(?<k>READCLIPBOARD|WRITECLIPBOARD|SYSTEMPARAMETERS|DISPLAYSETTINGS|DESKTOP|EXITWINDOWS|HANDLES|WIN32K)=(?<v>PASS|FAIL)\s*$') {
+                $matrixA[$matches['k']] = $matches['v']
+            }
         }
+        $summaryA = ($matrixA.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
+
+        Record-Result -Phase 'P4b' -Name 'scenarioA: UI Job Object assigned telemetry' -Pass ([bool]($logContentA -match 'UI Job Object assigned'))
+        Record-Result -Phase 'P4b' -Name 'scenarioA: selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContentA -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
+        # ui.disable=false on this run: Win32k mitigation applied must NOT appear.
+        Record-Result -Phase 'P4b' -Name 'scenarioA: no Win32k mitigation applied (ui.disable=false)' -Pass (-not ($logContentA -match 'Win32k mitigation applied'))
+
+        foreach ($tag in @('READCLIPBOARD','WRITECLIPBOARD','SYSTEMPARAMETERS','DISPLAYSETTINGS','DESKTOP','EXITWINDOWS','HANDLES')) {
+            $got = if ($matrixA.ContainsKey($tag)) { $matrixA[$tag] } else { '<missing>' }
+            Record-Result -Phase 'P4b' -Name "scenarioA: $tag blocked (probe -> PASS)" -Pass ($got -eq 'PASS') -Detail "got=$got; full=$summaryA"
+        }
+
+        # Negative control for HANDLES: same probe + host window, but
+        # isolation=desktop sets NO UILIMIT_HANDLES. The probe MUST be able to
+        # read the external window's title -> HANDLES=FAIL, proving the
+        # HANDLES=PASS above is a real isolation result and not vacuous (e.g.
+        # GetWindowTextW returning empty for an unrelated reason).
+        $cmdAneg = "`"$UiProbeDebug`" HANDLES --handle-hwnd=$hwndVal --handle-title=`"$handleTitle`""
+        $cfgAneg = New-Config -Name 'ui-matrix-A-handles-neg' `
+            -CommandLine $cmdAneg `
+            -ReadWrite @($rw) `
+            -UiDisable $false `
+            -BpUiIsolation 'desktop' `
+            -Env (Get-ProbeEnvWithDestructive)
+        $logAneg = Join-Path $ScratchRoot 'logs\ui-matrix-A-handles-neg.log'
+        $rAneg = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgAneg -LogPath $logAneg
+        Assert-NoBfscfg -LogContent (Read-Log $logAneg) -Phase 'P4b' -Name 'ui-matrix-A-handles-neg'
+        $negHandles = if ($rAneg.Stdout -match '(?m)^HANDLES=(?<v>PASS|FAIL)\s*$') { $matches['v'] } else { '<missing>' }
+        Record-Result -Phase 'P4b' -Name 'negative control: HANDLES visible without UILIMIT_HANDLES (probe -> FAIL)' -Pass ($negHandles -eq 'FAIL') -Detail "got=$negHandles; stdout=$($rAneg.Stdout.Trim())"
     }
-    $summaryA = ($matrixA.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
-
-    Record-Result -Phase 'P4b' -Name 'scenarioA: UI Job Object assigned telemetry' -Pass ([bool]($logContentA -match 'UI Job Object assigned'))
-    Record-Result -Phase 'P4b' -Name 'scenarioA: selected isolation tier: appcontainer-dacl' -Pass ([bool]($logContentA -match '(?im)selected isolation tier:.*?appcontainer-dacl'))
-    # ui.disable=false on this run: Win32k mitigation applied must NOT appear.
-    Record-Result -Phase 'P4b' -Name 'scenarioA: no Win32k mitigation applied (ui.disable=false)' -Pass (-not ($logContentA -match 'Win32k mitigation applied'))
-
-    foreach ($tag in @('GLOBALATOMS','READCLIPBOARD','WRITECLIPBOARD','SYSTEMPARAMETERS','DISPLAYSETTINGS','DESKTOP','EXITWINDOWS','HANDLES')) {
-        $got = if ($matrixA.ContainsKey($tag)) { $matrixA[$tag] } else { '<missing>' }
-        Record-Result -Phase 'P4b' -Name "scenarioA: $tag blocked (probe -> PASS)" -Pass ($got -eq 'PASS') -Detail "got=$got; full=$summaryA"
+    finally {
+        $winHost.Stop()
     }
 
     # ---------------- Scenario B: ui.disable=true (Win32k mitigation) ----
-    # WIN32K probe makes a Win32k syscall (GetMessageW). With the
-    # mitigation in place the kernel terminates the process. If the
-    # mitigation is NOT honored the probe prints WIN32K=FAIL and exits 0.
+    # WIN32K probe makes a Win32k syscall (GetMessageW). The mitigation is
+    # honored in either of two ways depending on the host:
+    #   * user32.dll loads, the GetMessageW syscall is reached, and the kernel
+    #     terminates the process — the probe prints nothing; or
+    #   * user32.dll fails to load at all (its init makes blocked win32k
+    #     syscalls) — the probe prints a WIN32K=DIAG line and nothing else.
+    # Either way the child must print neither WIN32K=FAIL nor WIN32K=PASS. If
+    # the mitigation is NOT honored, user32 loads and GetMessageW returns, so
+    # the probe prints WIN32K=FAIL. WIN32K is destructive-gated, so the
+    # MXC_PROBE_DESTRUCTIVE_OK override must reach the child (via the full env
+    # block) for the GetMessageW path to be attempted.
     $cmdB = "`"$UiProbeDebug`" WIN32K"
     $cfgB = New-Config -Name 'ui-matrix-B-win32k' `
         -CommandLine $cmdB `
         -ReadWrite @($rw) `
-        -UiDisable $true
+        -UiDisable $true `
+        -Env (Get-ProbeEnvWithDestructive)
     $logB = Join-Path $ScratchRoot 'logs\ui-matrix-B.log'
     $rB = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgB -LogPath $logB
     $logContentB = Read-Log $logB
@@ -879,6 +1052,168 @@ function Phase-UiMitigationMatrix {
     # by the kernel; without it the probe completes and exits 0.
     Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=FAIL (mitigation honored)' -Pass (-not $printedFail) -Detail "exit=$($rB.ExitCode); stdout=$($rB.Stdout.Trim())"
     Record-Result -Phase 'P4b' -Name 'scenarioB: child did NOT report WIN32K=PASS' -Pass (-not $printedPass) -Detail 'probe never returns PASS for WIN32K (process is killed before printing)'
+}
+
+# -----------------------------------------------------------------------
+# Phase 4c — GLOBALATOMS bidirectional isolation (T3 forced)
+#
+# JOB_OBJECT_UILIMIT_GLOBALATOMS does NOT make the atom APIs fail — the
+# documented behavior is that each job gets its own private atom table, so
+# GlobalAddAtomW still succeeds inside the container. The restriction is
+# therefore verified as *isolation* between the host's session-global atom
+# table and the contained job's private table, in BOTH directions:
+#
+#   * host -> guest: the host plants a global atom and passes its name to the
+#     probe. The probe must NOT be able to find it. Decided by the probe and
+#     printed as GLOBALATOMS_HOST_TO_GUEST=PASS|FAIL.
+#   * guest -> host: the probe adds its own atom, creates the ready file, and
+#     blocks until the host creates the release file. While the probe holds
+#     the atom alive the host checks its own global table and must NOT find
+#     it. Decided here (the job-private table is torn down when the container
+#     exits, so the check MUST happen while the probe is still alive — hence
+#     the handshake).
+# -----------------------------------------------------------------------
+function Invoke-GlobalAtomProbe {
+    # Runs the GLOBALATOMS bidirectional handshake once with the given
+    # isolation mode and returns the observed results so the caller can assert
+    # either the isolated (container) or non-isolated (desktop) expectation.
+    # Returns: HostToGuest (PASS|FAIL|<missing>), GuestFound (UInt16 atom, or
+    # $null if the probe never signalled ready), TierMatch (bool), Detail.
+    param(
+        [Parameter(Mandatory)] [string]$Isolation,
+        [Parameter(Mandatory)] [string]$Name
+    )
+    $rw = Join-Path $ScratchRoot 'rw'
+    New-Item -ItemType Directory -Path $rw -Force | Out-Null
+
+    $suffix      = [guid]::NewGuid().ToString('N')
+    $hostName    = "MxcWin25H2HostAtom_$suffix"
+    $guestName   = "MxcWin25H2GuestAtom_$suffix"
+    $readyFile   = Join-Path $rw "globalatom-ready-$suffix"
+    $releaseFile = Join-Path $rw "globalatom-release-$suffix"
+    Remove-Item -LiteralPath $readyFile, $releaseFile -ErrorAction SilentlyContinue
+
+    # Plant the host-side global atom (the direction-1 reference). Held alive
+    # until the finally block — PowerShell stays running, so it persists for
+    # the whole contained run.
+    $hostAtom = [Mxc.AtomNative]::GlobalAddAtomW($hostName)
+    if ($hostAtom -eq 0) {
+        return [pscustomobject]@{ HostToGuest = '<missing>'; GuestFound = $null; TierMatch = $false; Detail = 'host GlobalAddAtomW returned 0' }
+    }
+
+    $cmd = "`"$UiProbeDebug`" GLOBALATOMS " +
+        "--atom-host-name=$hostName --atom-guest-name=$guestName " +
+        "--atom-ready-file=`"$readyFile`" --atom-release-file=`"$releaseFile`""
+    $cfg = New-Config -Name $Name `
+        -CommandLine $cmd `
+        -ReadWrite @($rw) `
+        -UiDisable $false `
+        -BpUiIsolation $Isolation
+    $log = Join-Path $ScratchRoot "logs\$Name.log"
+
+    # Match Invoke-Wxc's defensive scrub of the test-only tier override.
+    Remove-Item Env:\MXC_FORCE_TIER -ErrorAction SilentlyContinue
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $WxcDebug
+    $psi.Arguments = "--config `"$cfg`" --experimental --log-file `"$log`""
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow  = $true
+
+    # The probe blocks mid-run waiting on the release file, so we cannot use
+    # the synchronous Invoke-Wxc (which reads stdout only after exit). Drain
+    # both streams asynchronously to avoid a pipe-buffer deadlock while the
+    # child is parked.
+    $sbOut = New-Object System.Text.StringBuilder
+    $sbErr = New-Object System.Text.StringBuilder
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    # Use explicit SourceIdentifiers so the finally block can unregister the
+    # subscriptions AND remove the backing PSEventJobs unambiguously.
+    # Unregister-Event removes only the subscription, not the job it created,
+    # so without Remove-Job the jobs accumulate across same-session re-runs.
+    $outSid = "MxcGAOut_$suffix"
+    $errSid = "MxcGAErr_$suffix"
+    $outEvt = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -SourceIdentifier $outSid -MessageData $sbOut -Action {
+        if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
+    }
+    $errEvt = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -SourceIdentifier $errSid -MessageData $sbErr -Action {
+        if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.AppendLine($EventArgs.Data) }
+    }
+
+    $guestFound = $null
+    try {
+        [void]$p.Start()
+        $p.BeginOutputReadLine()
+        $p.BeginErrorReadLine()
+
+        # Wait for the probe to signal that its atom now exists.
+        $deadline = (Get-Date).AddSeconds(30)
+        $ready = $false
+        while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $readyFile) { $ready = $true; break }
+            if ($p.HasExited) { break }
+            Start-Sleep -Milliseconds 100
+        }
+
+        if ($ready) {
+            # Direction 2: does the host find the contained process's atom?
+            $guestFound = [Mxc.AtomNative]::GlobalFindAtomW($guestName)
+        }
+
+        # Release the probe so it deletes its atom and exits.
+        Set-Content -LiteralPath $releaseFile -Value 'go' -ErrorAction SilentlyContinue
+
+        if (-not $p.WaitForExit(30000)) {
+            try { $p.Kill() } catch {}
+        }
+        $p.WaitForExit()   # ensure async stdout/stderr handlers flush
+    }
+    finally {
+        # Remove the host-planted atom regardless of outcome.
+        [void][Mxc.AtomNative]::GlobalDeleteAtom($hostAtom)
+        # Unregister the subscriptions, then remove the PSEventJobs they
+        # created (Unregister-Event leaves the job behind).
+        foreach ($sid in @($outSid, $errSid)) {
+            Unregister-Event -SourceIdentifier $sid -ErrorAction SilentlyContinue
+            Remove-Job -Name $sid -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $stdout = $sbOut.ToString()
+    $logContent = Read-Log $log
+    Assert-NoBfscfg -LogContent $logContent -Phase 'P4c' -Name $Name
+    $tierMatch = [bool]($logContent -match '(?im)selected isolation tier:.*?appcontainer-dacl')
+    $h2g = if ($stdout -match '(?m)^GLOBALATOMS_HOST_TO_GUEST=(?<v>PASS|FAIL)\s*$') { $matches['v'] } else { '<missing>' }
+    return [pscustomobject]@{ HostToGuest = $h2g; GuestFound = $guestFound; TierMatch = $tierMatch; Detail = "stdout=$($stdout.Trim())" }
+}
+
+function Phase-GlobalAtomIsolation {
+    Section 'Phase 4c: GLOBALATOMS bidirectional isolation (T3 forced)'
+
+    # ---- Positive: isolation=container sets UILIMIT_GLOBALATOMS -> isolated.
+    $pos = Invoke-GlobalAtomProbe -Isolation 'container' -Name 'ui-globalatoms'
+    Record-Result -Phase 'P4c' -Name 'selected isolation tier: appcontainer-dacl' -Pass $pos.TierMatch
+    Record-Result -Phase 'P4c' -Name 'host atom NOT visible to contained process (host->guest)' -Pass ($pos.HostToGuest -eq 'PASS') -Detail "got=$($pos.HostToGuest); $($pos.Detail)"
+    if ($null -eq $pos.GuestFound) {
+        Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass $false -Detail 'probe never signalled ready; no guest-atom check performed'
+    } else {
+        Record-Result -Phase 'P4c' -Name 'contained atom NOT visible to host (guest->host)' -Pass ($pos.GuestFound -eq 0) -Detail "GlobalFindAtomW=$($pos.GuestFound) (0 = not found = isolated)"
+    }
+
+    # ---- Negative control: isolation=desktop sets NO UILIMIT_GLOBALATOMS, so
+    # the global atom table is shared. The probe MUST see the host atom and the
+    # host MUST see the guest atom — proving the positive results above are not
+    # vacuous (e.g. an atom API silently failing would otherwise read as PASS).
+    $neg = Invoke-GlobalAtomProbe -Isolation 'desktop' -Name 'ui-globalatoms-neg'
+    Record-Result -Phase 'P4c' -Name 'negative control: host atom VISIBLE without UILIMIT_GLOBALATOMS (host->guest -> FAIL)' -Pass ($neg.HostToGuest -eq 'FAIL') -Detail "got=$($neg.HostToGuest); $($neg.Detail)"
+    if ($null -eq $neg.GuestFound) {
+        Record-Result -Phase 'P4c' -Name 'negative control: contained atom VISIBLE to host without UILIMIT_GLOBALATOMS' -Pass $false -Detail 'probe never signalled ready; no guest-atom check performed'
+    } else {
+        Record-Result -Phase 'P4c' -Name 'negative control: contained atom VISIBLE to host without UILIMIT_GLOBALATOMS' -Pass ($neg.GuestFound -ne 0) -Detail "GlobalFindAtomW=$($neg.GuestFound) (nonzero = found = NOT isolated)"
+    }
 }
 
 # -----------------------------------------------------------------------
@@ -1032,15 +1367,30 @@ try {
     Test-Preflight
     Initialize-Scratch
 
-    Phase-UnitTests
-    Phase-Probes
-    Phase-EmptyRelease
-    Phase-DeniedRelease
-    Phase-T3Forced
-    Phase-T1DenyForced
-    Phase-UiMitigationMatrix
-    Phase-DaclDisabled
-    Phase-CrashRecovery
+    # Phase registry. Build + preflight + scratch init above always run; this
+    # table is filtered by the -Phases parameter (empty = run all). Phase 4b is
+    # 'UiMitigationMatrix'; Phase 4c is 'GlobalAtomIsolation'.
+    $AllPhases = [ordered]@{
+        'UnitTests'           = { Phase-UnitTests }
+        'Probes'              = { Phase-Probes }
+        'EmptyRelease'        = { Phase-EmptyRelease }
+        'DeniedRelease'       = { Phase-DeniedRelease }
+        'T3Forced'            = { Phase-T3Forced }
+        'T1DenyForced'        = { Phase-T1DenyForced }
+        'UiMitigationMatrix'  = { Phase-UiMitigationMatrix }
+        'GlobalAtomIsolation' = { Phase-GlobalAtomIsolation }
+        'DaclDisabled'        = { Phase-DaclDisabled }
+        'CrashRecovery'       = { Phase-CrashRecovery }
+    }
+    if ($Phases.Count -gt 0) {
+        $unknown = $Phases | Where-Object { $_ -notin $AllPhases.Keys }
+        if ($unknown) { throw "Unknown -Phases value(s): $($unknown -join ', '). Valid: $($AllPhases.Keys -join ', ')" }
+    }
+    foreach ($key in $AllPhases.Keys) {
+        if ($Phases.Count -eq 0 -or $Phases -contains $key) {
+            & $AllPhases[$key]
+        }
+    }
 }
 catch {
     Write-Host ''

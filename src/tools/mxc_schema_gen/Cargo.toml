@@ -1,0 +1,10 @@
+[package]
+name = "mxc_schema_gen"
+version.workspace = true
+edition.workspace = true
+
+# Emits the MXC config JSON Schema generated from the dedicated
+# `wxc_common::wire` model. Run with:
+#   cargo run -p mxc_schema_gen -- <out-path>
+[dependencies]
+wxc_common = { path = "../../core/wxc_common", features = ["schema-gen"] }
