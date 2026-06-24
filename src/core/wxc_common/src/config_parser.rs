@@ -15,7 +15,7 @@ use crate::models::{
     ClipboardPolicy, ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
     IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig,
     NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -201,6 +201,13 @@ struct RawExperimental {
     isolation_session: Option<RawIsolationSession>,
     #[serde(alias = "macos_sandbox")]
     seatbelt: Option<RawSeatbelt>,
+    telemetry: Option<RawTelemetry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawTelemetry {
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1315,11 +1322,15 @@ fn convert_raw_config_inner(
             logger.log_line(&msg);
             return Err(WxcError::ConfigParse(msg));
         }
+        let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
+            enabled: raw_t.enabled,
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
+            telemetry,
         }
     } else {
         ExperimentalConfig::default()
@@ -3902,5 +3913,46 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         load_request(&encoded, &mut logger, true).expect_err("vm has no resolver off Windows");
+    }
+
+    // ── Telemetry ────────────────────────────────────────────────────
+
+    #[test]
+    fn telemetry_not_set() {
+        let json = r#"{"process":{"commandLine":"echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.telemetry.is_none());
+    }
+
+    #[test]
+    fn telemetry_enabled_true() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        assert_eq!(telem.enabled, Some(true));
+    }
+
+    #[test]
+    fn telemetry_enabled_false() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":false}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        assert_eq!(telem.enabled, Some(false));
+    }
+
+    #[test]
+    fn telemetry_empty_object() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        assert_eq!(telem.enabled, None);
     }
 }

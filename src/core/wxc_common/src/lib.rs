@@ -18,6 +18,7 @@ pub mod script_runner;
 pub mod state_aware_backend;
 pub mod state_aware_dispatch;
 pub mod state_aware_request;
+pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
 

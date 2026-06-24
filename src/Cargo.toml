@@ -30,6 +30,7 @@ members = [
     "testing/linux_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
+    "mxc_telemetry",
 ]
 exclude = ["testing/fuzz"]
 resolver = "3"
@@ -50,6 +51,10 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+# Pure-Rust ETW TraceLogging provider used by `mxc_telemetry` (Windows-only;
+# the crate compiles to no-ops on other targets). Pinned at the workspace
+# level so every consumer resolves the same version.
+tracelogging = "1.2"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -106,6 +111,7 @@ isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 mxc_pty = { path = "core/mxc_pty" }
 flatbuffers = "25"
 sandbox_spec = { path = "core/generated/base_container_specification" }
+mxc_telemetry = { path = "mxc_telemetry" }
 widestring = "1"
 url = "2"
 winreg = "0.55"

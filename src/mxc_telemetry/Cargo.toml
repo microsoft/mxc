@@ -1,0 +1,8 @@
+[package]
+name = "mxc_telemetry"
+version.workspace = true
+edition.workspace = true
+description = "Pure Rust TraceLogging ETW telemetry for MXC"
+
+[target.'cfg(windows)'.dependencies]
+tracelogging = { workspace = true }

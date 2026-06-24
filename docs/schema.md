@@ -83,6 +83,9 @@ production configs and the dev schema when working on experimental features:
             "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
             "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
             "keychainAccess": false        // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+        },
+        "telemetry": {                // Telemetry (experimental, Windows only)
+            "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
         }
     }
 }
