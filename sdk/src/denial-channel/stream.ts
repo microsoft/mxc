@@ -61,8 +61,14 @@ export type DeniedResource =
       accessType: DenialAccessType;
       /** PID of the workload process inside the sandbox. */
       pid: number;
-      /** Windows FILETIME (100-ns ticks since 1601) when the kernel logged the denial. */
-      filetime: number;
+      /**
+       * Kernel timestamp when the denial was logged (on Windows, a
+       * `FILETIME`: 100-ns ticks since 1601). Carried on the wire as a
+       * decimal string and surfaced here as a `bigint` so the full
+       * 64-bit value round-trips without the precision loss a JS
+       * `number` would incur past 2^53-1.
+       */
+      filetime: bigint;
     };
 // (Future: { kind: 'network'; host: string; port: number; protocol: 'tcp'|'udp'|'icmp'; direction: 'outbound'|'inbound'; ... })
 
@@ -351,7 +357,13 @@ export function parseDenialStream(
       result.parseErrors += 1;
     };
 
-    stderr.on('data', (chunk: Buffer) => {
+    stderr.on('data', (chunkRaw: Buffer | string) => {
+      // A Readable with an encoding set (e.g. setEncoding('utf8'))
+      // emits string chunks; coerce to Buffer so the byte-wise scan
+      // and 0x1E comparisons below stay correct.
+      const chunk = Buffer.isBuffer(chunkRaw)
+        ? chunkRaw
+        : Buffer.from(chunkRaw);
       // State machine:
       //   not-in-segment + 0x1E  -> enter segment
       //   not-in-segment + byte  -> passthrough byte
@@ -425,7 +437,21 @@ export function parseDenialStream(
 function denialFromWire(obj: Record<string, unknown>): DeniedResource | null {
   if (typeof obj.path !== 'string') return null;
   if (typeof obj.pid !== 'number') return null;
-  if (typeof obj.filetime !== 'number') return null;
+  // filetime is carried as a decimal string (see model.rs) to preserve
+  // full 64-bit precision. Accept a number too for forward/backward
+  // tolerance, but coerce both to bigint.
+  let filetime: bigint;
+  try {
+    if (typeof obj.filetime === 'string') {
+      filetime = BigInt(obj.filetime);
+    } else if (typeof obj.filetime === 'number' && Number.isInteger(obj.filetime)) {
+      filetime = BigInt(obj.filetime);
+    } else {
+      return null;
+    }
+  } catch {
+    return null;
+  }
 
   const resourceTypeStr = typeof obj.resourceType === 'string' ? obj.resourceType : 'other';
   const accessTypeStr = typeof obj.accessType === 'string' ? obj.accessType : 'unknown';
@@ -443,7 +469,7 @@ function denialFromWire(obj: Record<string, unknown>): DeniedResource | null {
     resourceType,
     accessType,
     pid: obj.pid,
-    filetime: obj.filetime,
+    filetime,
   };
 }
 

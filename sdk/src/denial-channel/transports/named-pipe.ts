@@ -48,7 +48,9 @@ import * as os from 'os';
  * The returned socket implements the Readable interface expected
  * by `parseDenialStream`. The stream emits `end` when wxc-exec
  * closes its side (typically when the workload exits and the
- * runner's writer thread sees its mpsc channel close).
+ * runner's writer thread sees its mpsc channel close). If `close()`
+ * is called before any client connects, `denialStream` rejects so
+ * the shutdown is observable rather than hanging.
  *
  * `close()` tears down the server and the accepted socket. Safe
  * to call multiple times. Idempotent.
@@ -87,9 +89,13 @@ export function createDenialPipeServer(): DenialPipeServer {
   let acceptedSocket: Socket | null = null;
   let server: Server | null = null;
   let closed = false;
+  let settled = false;
+  let rejectStream: (err: Error) => void = () => {};
 
   const denialStream = new Promise<Socket>((resolve, reject) => {
+    rejectStream = reject;
     server = createServer((socket) => {
+      settled = true;
       acceptedSocket = socket;
       // Stop listening after the first (and only expected)
       // connection -- this pipe is private to one wxc-exec run.
@@ -98,7 +104,10 @@ export function createDenialPipeServer(): DenialPipeServer {
     });
 
     server.on('error', (err) => {
-      if (!closed) reject(err);
+      if (!closed && !settled) {
+        settled = true;
+        reject(err);
+      }
     });
 
     server.listen(fullPath, () => {
@@ -112,6 +121,17 @@ export function createDenialPipeServer(): DenialPipeServer {
     close() {
       if (closed) return;
       closed = true;
+      // If no client ever connected, settle the promise so callers
+      // awaiting `denialStream` observe the shutdown instead of
+      // hanging forever.
+      if (!settled) {
+        settled = true;
+        rejectStream(
+          new Error(
+            'createDenialPipeServer: closed before a client connected',
+          ),
+        );
+      }
       try {
         acceptedSocket?.destroy();
       } catch {

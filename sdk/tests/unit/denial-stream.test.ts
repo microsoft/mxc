@@ -71,7 +71,7 @@ describe('defaultDenialFilters', () => {
     resourceType: 'file',
     accessType: 'read',
     pid: 1234,
-    filetime: 0,
+    filetime: 0n,
   });
 
   it('drops \\REGISTRY\\USER\\.DEFAULT registry noise', () => {
@@ -121,7 +121,7 @@ describe('parseDenialStream', () => {
           resourceType: 'file',
           accessType: 'read',
           pid: 1234,
-          filetime: 132000000000000000,
+          filetime: '132000000000000000',
         },
       },
       {
@@ -147,7 +147,7 @@ describe('parseDenialStream', () => {
       resourceType: 'file',
       accessType: 'read',
       pid: 1234,
-      filetime: 132000000000000000,
+      filetime: 132000000000000000n,
     });
     assert.deepStrictEqual(result.summary, {
       exitCode: 0,
@@ -177,7 +177,7 @@ describe('parseDenialStream', () => {
           resourceType: 'file',
           accessType: 'read',
           pid: 7,
-          filetime: 1,
+          filetime: '1',
         },
       },
       { passthrough: 'workload progress 50%\n' },
@@ -215,7 +215,7 @@ describe('parseDenialStream', () => {
           resourceType: 'file',
           accessType: 'read',
           pid: 1,
-          filetime: 1,
+          filetime: '1',
         },
       },
       {
@@ -225,7 +225,7 @@ describe('parseDenialStream', () => {
           resourceType: 'other',
           accessType: 'unknown',
           pid: 1,
-          filetime: 2,
+          filetime: '2',
         },
       },
       {
@@ -235,7 +235,7 @@ describe('parseDenialStream', () => {
           resourceType: 'file',
           accessType: 'read',
           pid: 1,
-          filetime: 3,
+          filetime: '3',
         },
       },
       {
@@ -265,7 +265,7 @@ describe('parseDenialStream', () => {
           resourceType: 'other',
           accessType: 'unknown',
           pid: 1,
-          filetime: 1,
+          filetime: '1',
         },
       },
       {
@@ -291,7 +291,7 @@ describe('parseDenialStream', () => {
           resourceType: 'file',
           accessType: 'read',
           pid: 1,
-          filetime: 1,
+          filetime: '1',
         },
       },
       {
@@ -333,7 +333,7 @@ describe('parseDenialStream', () => {
       resourceType: 'file',
       accessType: 'read',
       pid: 1,
-      filetime: 1,
+      filetime: '1',
     });
     const summary = JSON.stringify({
       type: 'summary',
@@ -361,7 +361,7 @@ describe('parseDenialStream', () => {
   it('counts unparseable segments as parseErrors and keeps going', async () => {
     const stream = readableOf(
       `${RS}not valid json\n` +
-        `${RS}{"type":"denial","path":"C:\\\\ok.txt","resourceType":"file","accessType":"read","pid":1,"filetime":1}\n` +
+        `${RS}{"type":"denial","path":"C:\\\\ok.txt","resourceType":"file","accessType":"read","pid":1,"filetime":"1"}\n` +
         `${RS}{"type":"summary","exitCode":0,"totalDenials":1,"deniedResourcesTruncated":false}\n`,
     );
 
@@ -399,7 +399,7 @@ describe('parseDenialStream', () => {
           resourceType: 'file',
           accessType: 'read',
           pid: 1,
-          filetime: 1,
+          filetime: '1',
         },
       },
     ]);

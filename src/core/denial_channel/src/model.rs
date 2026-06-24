@@ -66,7 +66,30 @@ pub struct DeniedResource {
     /// `EVENT_RECORD.EventHeader.TimeStamp`. Linux/macOS backends
     /// will normalise their native clocks into the same epoch on
     /// emit so consumers can treat the field uniformly.
+    ///
+    /// Serialised as a decimal **string** on the wire: FILETIME values
+    /// (~1.3e17 today) exceed JavaScript's safe-integer range (2^53-1),
+    /// so a JSON number would silently lose precision in JS consumers.
+    /// The string form round-trips exactly to a `bigint` in the SDK.
+    #[serde(with = "filetime_str")]
     pub filetime: u64,
+}
+
+/// Serialises [`DeniedResource::filetime`] as a decimal string and
+/// parses it back to `u64`, so cross-language consumers (notably the
+/// JS/TypeScript SDK) can round-trip the full 64-bit value without
+/// the precision loss a JSON number would incur past 2^53-1.
+mod filetime_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<u64>().map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
@@ -77,8 +100,10 @@ mod tests {
     fn denied_resource_serializes_camel_case() {
         // Guards the wire-format contract: SDK consumers depend on
         // `resourceType` / `accessType` / `filetime` keys (camelCase)
-        // and the lowercased enum strings. A future serde rename
-        // would break every downstream parser silently.
+        // and the lowercased enum strings. `filetime` is a decimal
+        // string (not a JSON number) so 64-bit values round-trip
+        // without precision loss in JS. A future serde rename would
+        // break every downstream parser silently.
         let r = DeniedResource {
             path: r"C:\Users\test\file.txt".to_string(),
             resource_type: ResourceType::File,
@@ -90,7 +115,7 @@ mod tests {
         assert!(json.contains("\"resourceType\":\"file\""), "got {json}");
         assert!(json.contains("\"accessType\":\"read\""), "got {json}");
         assert!(
-            json.contains("\"filetime\":132847890123456789"),
+            json.contains("\"filetime\":\"132847890123456789\""),
             "got {json}"
         );
     }
@@ -102,7 +127,8 @@ mod tests {
             resource_type: ResourceType::File,
             access_type: AccessType::Write,
             pid: 9999,
-            filetime: 42,
+            // A value past 2^53 to exercise the decimal-string codec.
+            filetime: 132_847_890_123_456_789,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: DeniedResource = serde_json::from_str(&json).unwrap();

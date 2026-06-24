@@ -17,6 +17,10 @@ describe('createDenialPipeServer', { skip: !isWindows ? 'Windows-only' : false }
   it('produces a unique randomised pipe name on each call', () => {
     const a = createDenialPipeServer();
     const b = createDenialPipeServer();
+    // Neither server gets a client; swallow the close()-before-connect
+    // rejection so it doesn't surface as an unhandled rejection.
+    void a.denialStream.catch(() => {});
+    void b.denialStream.catch(() => {});
     try {
       assert.match(a.pipeName, /^mxc-denials-[0-9a-f]{16}$/);
       assert.match(b.pipeName, /^mxc-denials-[0-9a-f]{16}$/);
@@ -56,18 +60,24 @@ describe('createDenialPipeServer', { skip: !isWindows ? 'Windows-only' : false }
 
   it('close() is idempotent', () => {
     const s = createDenialPipeServer();
+    void s.denialStream.catch(() => {});
     s.close();
     // Second close must not throw.
     s.close();
     s.close();
   });
 
-  it('close() tears down the server before any client connects', async () => {
+  it('close() before any client connects rejects denialStream and refuses connections', async () => {
     const s = createDenialPipeServer();
+    // close() before a client connects must settle denialStream
+    // (rejecting) so awaiters observe shutdown instead of hanging.
+    const rejected = assert.rejects(
+      s.denialStream,
+      /closed before a client connected/,
+    );
     s.close();
-    // After close, an attempt to connect should fail. Don't await
-    // the denialStream promise -- it stays pending forever when no
-    // one ever connects, which is the desired semantic.
+    await rejected;
+    // And an attempt to connect after close should fail.
     await new Promise<void>((resolve) => {
       const sock = createConnection(`\\\\.\\pipe\\${s.pipeName}`);
       sock.once('error', () => resolve());

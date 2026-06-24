@@ -16,7 +16,10 @@
 //! - **`learning_mode`** (the core orchestrator): re-exports these
 //!   types so consumers depend on one crate.
 //! - The SDK's TypeScript NDJSON parser, whose `DeniedResource`
-//!   type mirrors this shape field-for-field.
+//!   type is an ergonomic superset of this wire shape: it parses the
+//!   same fields, but adds a `kind` discriminator and anticipates
+//!   resource-type values (e.g. `registry`) that this minimal model
+//!   currently folds into `Other`.
 
 pub mod model;
 
