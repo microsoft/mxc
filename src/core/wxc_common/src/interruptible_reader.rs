@@ -101,6 +101,12 @@ impl InterruptibleReader {
         // SAFETY: `pipe` succeeded, so both fds are freshly owned by us.
         let wake_r = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         let wake_w = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        // `pipe(2)` doesn't set close-on-exec, so mark both ends `FD_CLOEXEC` —
+        // otherwise they leak into any process this thread later forks+execs
+        // (e.g. another sandbox child). The data pipe is already CLOEXEC: Rust
+        // sets it on `Child` stdio.
+        set_cloexec(wake_r.as_raw_fd())?;
+        set_cloexec(wake_w.as_raw_fd())?;
         set_nonblocking(wake_w.as_raw_fd())?;
 
         Ok(Self {
@@ -209,6 +215,20 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Add `FD_CLOEXEC` to `fd`'s descriptor flags so it doesn't leak across `exec`.
+fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is a valid open fd; `fcntl` with these commands only reads
+    // and writes its descriptor flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
