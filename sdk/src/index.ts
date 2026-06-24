@@ -54,6 +54,27 @@ export {
   SandboxSpawnOptions,
 } from './sandbox.js';
 
+// Export captureDenials side-channel transport
+export {
+  createDenialPipeServer,
+  DenialPipeServer,
+} from './denial-channel/transports/named-pipe.js';
+
+// Export captureDenials streaming consumer
+export {
+  DENIAL_STREAM_MARKER,
+  DenialAccessType,
+  DenialResourceType,
+  DeniedResource,
+  DenialStreamSummary,
+  DenialFilter,
+  defaultDenialFilters,
+  stripNtPrefix,
+  DenialStreamResult,
+  ParseDenialStreamOptions,
+  parseDenialStream,
+} from './denial-channel/stream.js';
+
 // Export policy discovery functions
 export {
   getAvailableToolsPolicy,

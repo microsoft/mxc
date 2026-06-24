@@ -2,6 +2,7 @@
 members = [
     "core/wxc",
     "core/wxc_common",
+    "core/denial_channel",
     "core/lxc",
     "core/mxc_darwin",
     "core/mxc_pty",
@@ -90,6 +91,7 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 wxc_common = { path = "core/wxc_common" }
+denial_channel = { path = "core/denial_channel" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
 isolation_session_common = { path = "backends/isolation_session/common" }

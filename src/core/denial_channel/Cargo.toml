@@ -1,0 +1,19 @@
+[package]
+name = "denial_channel"
+version.workspace = true
+edition.workspace = true
+
+# Cross-platform crate. Holds the public denial-channel data shapes
+# (DeniedResource, ResourceType, AccessType) that the wire format
+# carries. All OS-specific code (denial collectors, path
+# canonicalisation, side-channel transports, etc.) lives in the
+# per-OS learning-mode backend crates that depend on this one.
+#
+# Adding a new resource kind (network, IPC, etc.) is an additive
+# change here -- both the existing Windows backend and any future
+# Linux/macOS backend re-export the new variant via the same trait
+# surface they all implement.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
