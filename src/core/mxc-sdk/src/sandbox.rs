@@ -24,6 +24,18 @@ pub enum WaitOutcome {
     TimedOut,
 }
 
+/// The captured result of running a [`Sandbox`] to completion via
+/// [`wait_with_output`](Sandbox::wait_with_output).
+#[derive(Debug, Clone)]
+pub struct Output {
+    /// How the process finished.
+    pub outcome: WaitOutcome,
+    /// Everything the child wrote to stdout.
+    pub stdout: Vec<u8>,
+    /// Everything the child wrote to stderr.
+    pub stderr: Vec<u8>,
+}
+
 /// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox).
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill
@@ -93,6 +105,39 @@ impl Sandbox {
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(WaitOutcome::TimedOut),
             Err(e) => Err(e),
         }
+    }
+
+    /// Wait for the child to exit, capturing its stdout and stderr.
+    ///
+    /// The safe alternative to [`take_stdout`](Self::take_stdout) +
+    /// [`take_stderr`](Self::take_stderr): it drains both streams **concurrently**
+    /// on separate threads, so an output-heavy child can't deadlock (reading one
+    /// stream to EOF before the other can). Consumes the handle.
+    ///
+    /// `Err` is reserved for an actual OS / wait failure; a timeout is reported
+    /// as [`Output`] with `outcome: WaitOutcome::TimedOut` and whatever each
+    /// stream produced before the tree was killed.
+    pub fn wait_with_output(mut self) -> std::io::Result<Output> {
+        fn capture(stream: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut stream) = stream {
+                    let _ = stream.read_to_end(&mut buf);
+                }
+                buf
+            })
+        }
+
+        // Take both streams before waiting so `wait` won't discard them, and
+        // read each on its own thread so the child never blocks on a full pipe.
+        let stdout = capture(self.inner.take_stdout());
+        let stderr = capture(self.inner.take_stderr());
+        let outcome = self.wait()?;
+        Ok(Output {
+            outcome,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
     }
 }
 

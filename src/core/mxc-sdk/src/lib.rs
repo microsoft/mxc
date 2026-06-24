@@ -58,7 +58,7 @@ pub use policy::{
 };
 
 pub use error::{Error, ErrorCode};
-pub use sandbox::{Sandbox, StreamCloser, WaitOutcome};
+pub use sandbox::{Output, Sandbox, StreamCloser, WaitOutcome};
 
 use wxc_common::logger::{Logger, Mode};
 

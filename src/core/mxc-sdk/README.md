@@ -100,6 +100,10 @@ The handle is modelled on [`std::process::Child`]:
   can't block on a full pipe, and returns a `WaitOutcome` —
   `Exited(code)` or `TimedOut` if the timeout elapses (`Err` is reserved for an
   actual OS/wait failure).
+- `wait_with_output()` consumes the handle and returns an `Output` with the
+  `WaitOutcome` plus the captured `stdout`/`stderr` — it drains both streams
+  concurrently for you, the safe alternative to `take_stdout()` + `take_stderr()`
+  (reading one to EOF before the other can deadlock an output-heavy child).
 - `stdout_closer()` / `stderr_closer()` → `Option<StreamCloser>`: a
   closer that makes an in-flight or subsequent read on the taken stream return
   EOF promptly **without** killing the child — for abandoning a stream a

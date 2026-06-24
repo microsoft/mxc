@@ -252,6 +252,29 @@ fn streaming_wait_discards_untaken_streams() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn streaming_wait_with_output_captures_both_streams() {
+    // wait_with_output drains stdout and stderr concurrently, so a child that
+    // writes to both is captured without the take-both deadlock foot-gun.
+    let proc = spawn_sandbox(seatbelt_request("echo to-out; echo to-err 1>&2", 0))
+        .expect("spawn should succeed");
+    let output = proc
+        .wait_with_output()
+        .expect("wait_with_output should succeed");
+    assert_eq!(output.outcome, WaitOutcome::Exited(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("to-out"),
+        "stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("to-err"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn streaming_bidirectional_stdio() {
     use std::io::{Read, Write};
 
