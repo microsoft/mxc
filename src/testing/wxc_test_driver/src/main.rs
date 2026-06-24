@@ -52,12 +52,31 @@ fn run_configs(config_path: &std::path::Path, debug: bool) -> anyhow::Result<()>
             cmd.arg("--debug");
         }
 
-        // Windows Sandbox is experimental — pass --experimental when the config uses it.
-        let content = fs::read_to_string(path).unwrap_or_default();
-        if content.contains("\"containment\": \"windows_sandbox\"")
-            || content.contains("\"containment\":\"windows_sandbox\"")
-        {
-            cmd.arg("--experimental");
+        // Derive the flags wxc-exec needs from the config's actual JSON fields
+        // rather than sniffing for substrings. Parsing leniently: a config that
+        // fails to parse just gets no extra flags (wxc-exec will report the real
+        // error), matching the prior best-effort behavior.
+        let config_json: Option<serde_json::Value> = fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok());
+
+        if let Some(config) = &config_json {
+            // Windows Sandbox is experimental — pass --experimental when selected.
+            if config.get("containment").and_then(|c| c.as_str()) == Some("windows_sandbox") {
+                cmd.arg("--experimental");
+            }
+
+            // builtinTestServer is testing-only scaffolding gated behind
+            // --allow-testing-features — pass it when the config opts in.
+            let builtin_test_server = config
+                .get("network")
+                .and_then(|n| n.get("proxy"))
+                .and_then(|p| p.get("builtinTestServer"))
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            if builtin_test_server {
+                cmd.arg("--allow-testing-features");
+            }
         }
 
         let output = cmd.output()?;

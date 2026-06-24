@@ -64,6 +64,12 @@ struct Cli {
     #[arg(long)]
     experimental: bool,
 
+    /// Allow testing-only features that must never run in production, currently
+    /// `network.proxy.builtinTestServer` (a bundled, deliberately-permissive
+    /// test HTTP proxy). Distinct from --experimental.
+    #[arg(long = "allow-testing-features")]
+    allow_testing_features: bool,
+
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
     dry_run: bool,
@@ -697,6 +703,7 @@ fn main() {
 
     let mut request = request;
     request.experimental_enabled = cli.experimental;
+    request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
     // Apply the CLI command-line override to one-shot requests. State-aware

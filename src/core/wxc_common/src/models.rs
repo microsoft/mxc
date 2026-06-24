@@ -574,6 +574,12 @@ pub struct ExecutionRequest {
     pub seatbelt: Option<SeatbeltConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
+    /// Whether the --allow-testing-features flag was passed. Gates testing-only,
+    /// deliberately-permissive helpers (currently `network.proxy.builtinTestServer`)
+    /// that must never activate from a stock production config. This is a distinct
+    /// axis from `experimental_enabled`: "experimental" means unstable/new, whereas
+    /// this means "not-for-production testing scaffolding".
+    pub testing_features_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
     pub experimental: ExperimentalConfig,
     /// Dry-run mode: validate config and runner setup then return success
