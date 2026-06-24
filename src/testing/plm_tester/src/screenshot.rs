@@ -45,9 +45,9 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::Console::GetConsoleWindow;
@@ -125,7 +125,9 @@ fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
 }
 
 fn d3d11_device_to_winrt(device: &ID3D11Device) -> Result<IDirect3DDevice> {
-    let dxgi: IDXGIDevice = device.cast().context("ID3D11Device -> IDXGIDevice cast failed")?;
+    let dxgi: IDXGIDevice = device
+        .cast()
+        .context("ID3D11Device -> IDXGIDevice cast failed")?;
     let inspectable = unsafe {
         CreateDirect3D11DeviceFromDXGIDevice(&dxgi)
             .context("CreateDirect3D11DeviceFromDXGIDevice failed")?
@@ -135,7 +137,9 @@ fn d3d11_device_to_winrt(device: &ID3D11Device) -> Result<IDirect3DDevice> {
         .context("IInspectable -> IDirect3DDevice cast failed")
 }
 
-fn frame_texture(frame: &windows::Graphics::Capture::Direct3D11CaptureFrame) -> Result<ID3D11Texture2D> {
+fn frame_texture(
+    frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
+) -> Result<ID3D11Texture2D> {
     let surface = frame.Surface().context("Frame Surface() failed")?;
     let access: IDirect3DDxgiInterfaceAccess = surface
         .cast()
@@ -172,8 +176,15 @@ fn main_impl(out_path: PathBuf) -> Result<(u32, u32)> {
     eprintln!("[step] launching GraphicsCapturePicker");
     let item = pick_capture_item()?;
     let size = item.Size().context("GraphicsCaptureItem Size() failed")?;
-    let name = item.DisplayName().ok().map(|h| h.to_string_lossy()).unwrap_or_default();
-    eprintln!("[ok]   picked item: {:?} ({}x{})", name, size.Width, size.Height);
+    let name = item
+        .DisplayName()
+        .ok()
+        .map(|h| h.to_string_lossy())
+        .unwrap_or_default();
+    eprintln!(
+        "[ok]   picked item: {:?} ({}x{})",
+        name, size.Width, size.Height
+    );
 
     eprintln!("[step] creating D3D11 device");
     let (d3d_device, d3d_context) = create_d3d11_device()?;
@@ -183,7 +194,10 @@ fn main_impl(out_path: PathBuf) -> Result<(u32, u32)> {
     let winrt_device = d3d11_device_to_winrt(&d3d_device)?;
     eprintln!("[ok]   IDirect3DDevice");
 
-    eprintln!("[step] CreateFreeThreaded frame pool ({}x{}, BGRA8)", size.Width, size.Height);
+    eprintln!(
+        "[step] CreateFreeThreaded frame pool ({}x{}, BGRA8)",
+        size.Width, size.Height
+    );
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &winrt_device,
         DirectXPixelFormat::B8G8R8A8UIntNormalized,
@@ -201,25 +215,25 @@ fn main_impl(out_path: PathBuf) -> Result<(u32, u32)> {
 
     eprintln!("[step] subscribing to FrameArrived");
     let (tx, rx) = mpsc::sync_channel::<()>(1);
-    let captured: std::sync::Arc<std::sync::Mutex<Option<windows::Graphics::Capture::Direct3D11CaptureFrame>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured: std::sync::Arc<
+        std::sync::Mutex<Option<windows::Graphics::Capture::Direct3D11CaptureFrame>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_h = captured.clone();
     let tx_h = tx.clone();
-    let handler =
-        TypedEventHandler::<Direct3D11CaptureFramePool, windows::core::IInspectable>::new(
-            move |sender, _| {
-                if let Some(pool) = sender.as_ref() {
-                    if let Ok(frame) = pool.TryGetNextFrame() {
-                        let mut slot = captured_h.lock().unwrap();
-                        if slot.is_none() {
-                            *slot = Some(frame);
-                            let _ = tx_h.try_send(());
-                        }
+    let handler = TypedEventHandler::<Direct3D11CaptureFramePool, windows::core::IInspectable>::new(
+        move |sender, _| {
+            if let Some(pool) = sender.as_ref() {
+                if let Ok(frame) = pool.TryGetNextFrame() {
+                    let mut slot = captured_h.lock().unwrap();
+                    if slot.is_none() {
+                        *slot = Some(frame);
+                        let _ = tx_h.try_send(());
                     }
                 }
-                Ok(())
-            },
-        );
+            }
+            Ok(())
+        },
+    );
     let _token = frame_pool
         .FrameArrived(&handler)
         .context("FrameArrived subscription failed")?;
@@ -242,7 +256,10 @@ fn main_impl(out_path: PathBuf) -> Result<(u32, u32)> {
     eprintln!("[ok]   frame retrieved from slot");
 
     let frame_size = frame.ContentSize().context("ContentSize() failed")?;
-    eprintln!("[ok]   ContentSize = {}x{}", frame_size.Width, frame_size.Height);
+    eprintln!(
+        "[ok]   ContentSize = {}x{}",
+        frame_size.Width, frame_size.Height
+    );
 
     eprintln!("[step] extracting ID3D11Texture2D from frame surface");
     let texture = frame_texture(&frame)?;

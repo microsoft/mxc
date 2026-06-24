@@ -53,7 +53,9 @@ const KNOWN_CAPABILITIES: &[&str] = &[
     "voipCall",
     "objects3D",
     "userAccountInformation",
-    "userPrincipalName",
+    // userPrincipalName intentionally excluded: it is read by LSASS during
+    // token/logon plumbing on behalf of arbitrary callers, so it shows up
+    // in audit traces for workloads that never asked for it.
     "backgroundMediaPlayback",
     "codeGeneration",
     "allowElevation",

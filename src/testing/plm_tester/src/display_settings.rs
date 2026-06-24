@@ -54,9 +54,8 @@ fn current_mode() -> Result<DEVMODEW> {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
     };
-    let ok = unsafe {
-        EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut dm).as_bool()
-    };
+    let ok =
+        unsafe { EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut dm).as_bool() };
     if !ok {
         return Err(anyhow!(
             "EnumDisplaySettingsW(ENUM_CURRENT_SETTINGS) failed"
@@ -123,7 +122,10 @@ pub fn run(args: DisplaySettingsArgs) -> Result<()> {
 
     let result = unsafe { ChangeDisplaySettingsW(Some(&dm), flags) };
     let label = disp_change_label(result.0);
-    eprintln!("[info] ChangeDisplaySettingsW returned {} ({})", result.0, label);
+    eprintln!(
+        "[info] ChangeDisplaySettingsW returned {} ({})",
+        result.0, label
+    );
 
     if result == DISP_CHANGE_SUCCESSFUL {
         println!("{label}");

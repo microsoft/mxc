@@ -16,10 +16,9 @@ use windows::core::PWSTR;
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Gdi::SetSysColors;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
-    SPI_GETDESKWALLPAPER, SPI_GETMOUSESPEED, SPI_GETSCREENSAVETIMEOUT, SPI_SETMOUSESPEED,
-    SPI_SETSCREENSAVETIMEOUT, SYSTEM_PARAMETERS_INFO_ACTION,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SystemParametersInfoW, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_GETDESKWALLPAPER,
+    SPI_GETMOUSESPEED, SPI_GETSCREENSAVETIMEOUT, SPI_SETMOUSESPEED, SPI_SETSCREENSAVETIMEOUT,
+    SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -70,7 +69,8 @@ pub struct SystemParamArgs {
 
 fn parse_u32_auto(s: &str) -> Result<u32, String> {
     let t = s.trim();
-    let (radix, digits) = if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+    let (radix, digits) = if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X"))
+    {
         (16, rest)
     } else {
         (10, t)
@@ -116,7 +116,8 @@ pub fn run(args: SystemParamArgs) -> Result<()> {
             println!("mouse_speed = {speed}  (range 1..=20)");
         },
         SpiAction::SetMouseSpeed => {
-            let v = value.ok_or_else(|| anyhow!("--value required for set-mouse-speed (1..=20)"))?;
+            let v =
+                value.ok_or_else(|| anyhow!("--value required for set-mouse-speed (1..=20)"))?;
             if !(1..=20).contains(&v) {
                 return Err(anyhow!("--value must be in 1..=20, got {v}"));
             }
@@ -124,12 +125,7 @@ pub fn run(args: SystemParamArgs) -> Result<()> {
                 // SPI_SETMOUSESPEED takes the new speed in pvParam as a
                 // DWORD-sized integer cast to a pointer (not via the
                 // buffer). Pass the value directly.
-                spi(
-                    SPI_SETMOUSESPEED,
-                    0,
-                    Some(v as usize as *mut _),
-                    set_flags,
-                )?;
+                spi(SPI_SETMOUSESPEED, 0, Some(v as usize as *mut _), set_flags)?;
             }
             eprintln!("[ok]   SPI_SETMOUSESPEED -> {v} (persist={persist})");
         }
@@ -145,15 +141,11 @@ pub fn run(args: SystemParamArgs) -> Result<()> {
             println!("screensaver_timeout = {secs} s");
         },
         SpiAction::SetScreenSaverTimeout => {
-            let v = value
-                .ok_or_else(|| anyhow!("--value required for set-screen-saver-timeout (seconds)"))?;
+            let v = value.ok_or_else(|| {
+                anyhow!("--value required for set-screen-saver-timeout (seconds)")
+            })?;
             unsafe {
-                spi(
-                    SPI_SETSCREENSAVETIMEOUT,
-                    v,
-                    None,
-                    set_flags,
-                )?;
+                spi(SPI_SETSCREENSAVETIMEOUT, v, None, set_flags)?;
             }
             eprintln!("[ok]   SPI_SETSCREENSAVETIMEOUT -> {v}s (persist={persist})");
         }

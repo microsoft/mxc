@@ -1,0 +1,12 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "PLM-Filesystem-AddReadwrite",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd /c \"echo added > C:\\Tessera\\plm_fs_test\\dst\\out.txt\"",
+    "timeout": 30000
+  },
+  "ui": {
+    "disable": false
+  }
+}

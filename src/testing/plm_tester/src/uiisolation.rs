@@ -84,9 +84,7 @@ fn run_find_window(args: FindWindowArgs) -> Result<()> {
         }
         _ => {
             let code = unsafe { GetLastError() }.0;
-            eprintln!(
-                "[fail] FindWindowW returned NULL (last_error=0x{code:08X})"
-            );
+            eprintln!("[fail] FindWindowW returned NULL (last_error=0x{code:08X})");
             Err(anyhow!(
                 "FindWindowW(class={:?}, title={:?}) returned NULL (last_error=0x{code:08X}). \
                  Either the window does not exist on this desktop / session, or UIPI is hiding \

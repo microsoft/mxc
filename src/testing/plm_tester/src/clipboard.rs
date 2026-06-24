@@ -20,8 +20,8 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::Security::{
-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows::Win32::System::Console::GetConsoleWindow;
 use windows::Win32::System::DataExchange::{
@@ -49,12 +49,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
-unsafe extern "system" fn wndproc_thunk(
-    hwnd: HWND,
-    msg: u32,
-    wp: WPARAM,
-    lp: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc_thunk(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     DefWindowProcW(hwnd, msg, wp, lp)
 }
 
@@ -198,12 +193,8 @@ fn process_image_name(pid: u32) -> Option<String> {
         let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
         let mut n = buf.len() as u32;
-        let res = QueryFullProcessImageNameW(
-            p,
-            PROCESS_NAME_FORMAT(0),
-            PWSTR(buf.as_mut_ptr()),
-            &mut n,
-        );
+        let res =
+            QueryFullProcessImageNameW(p, PROCESS_NAME_FORMAT(0), PWSTR(buf.as_mut_ptr()), &mut n);
         let _ = CloseHandle(p);
         res.ok()?;
         Some(String::from_utf16_lossy(&buf[..n as usize]))
@@ -290,7 +281,10 @@ pub fn dump_environment(prefix: &str) {
         "{prefix}   desktop         : {}",
         desktop_name().unwrap_or_else(|| "?".into())
     );
-    eprintln!("{prefix}   clipboard owner : {}", clipboard_owner_description());
+    eprintln!(
+        "{prefix}   clipboard owner : {}",
+        clipboard_owner_description()
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -352,9 +346,7 @@ pub fn resolve_hwnd(src: HwndSource) -> Result<(HWND, Option<OwnedWindow>)> {
         HwndSource::Console => {
             let h = unsafe { GetConsoleWindow() };
             if h.0.is_null() {
-                eprintln!(
-                    "[warn] GetConsoleWindow returned NULL; falling back to HWND(NULL)"
-                );
+                eprintln!("[warn] GetConsoleWindow returned NULL; falling back to HWND(NULL)");
             }
             Ok((h, None))
         }
@@ -452,8 +444,8 @@ pub fn clipboard_set(hwnd: HWND, value: &str) -> Result<()> {
 pub fn clipboard_get(hwnd: HWND) -> Result<Option<String>> {
     let _guard = ClipboardGuard::open(hwnd)?;
     eprintln!("[step] GetClipboardData(CF_UNICODETEXT)");
-    let handle = unsafe { GetClipboardData(CF_UNICODETEXT.0 as u32) }
-        .context("GetClipboardData failed")?;
+    let handle =
+        unsafe { GetClipboardData(CF_UNICODETEXT.0 as u32) }.context("GetClipboardData failed")?;
     eprintln!(
         "[info] GetClipboardData -> HANDLE={:p} is_invalid={}",
         handle.0,

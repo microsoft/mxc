@@ -21,7 +21,11 @@ use display_settings::DisplaySettingsArgs;
 use system_param::SystemParamArgs;
 
 #[derive(Parser, Debug)]
-#[command(name = "PLMTester", version, about = "AppContainer / PLM behavior probes")]
+#[command(
+    name = "PLMTester",
+    version,
+    about = "AppContainer / PLM behavior probes"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -163,9 +167,7 @@ fn main() -> Result<()> {
                     // --reopen=false: hold a separate scope and read inside
                     // it. Tells you whether the in-clipboard HGLOBAL is
                     // readable at all from this token.
-                    eprintln!(
-                        "[step] === phase 2: GET (same OpenClipboard scope) ==="
-                    );
+                    eprintln!("[step] === phase 2: GET (same OpenClipboard scope) ===");
                     clipboard_get_in_scope(h)?
                 };
 

@@ -7,6 +7,7 @@
     "timeout": 30000
   },
   "ui": {
-    "disable": false
+    "disable": false,
+    "systemSettings": "none"
   }
 }

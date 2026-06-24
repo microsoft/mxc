@@ -1,0 +1,17 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "PLM-Filesystem-Basic",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd /c \"echo promoted > C:\\Tessera\\plm_fs_test\\readonly\\out.txt\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "C:\\Tessera\\plm_fs_test\\readonly"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}

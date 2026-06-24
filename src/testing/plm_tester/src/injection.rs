@@ -133,9 +133,7 @@ fn create_message_window() -> Result<HWND> {
         // 0x582 (ERROR_CLASS_ALREADY_EXISTS) is fine — a previous run
         // in the same process already registered it.
         if code != 0x582 {
-            return Err(anyhow!(
-                "RegisterClassW failed (last_error=0x{code:08X})"
-            ));
+            return Err(anyhow!("RegisterClassW failed (last_error=0x{code:08X})"));
         }
         eprintln!("[info] class already registered (last_error=0x{code:08X}) — continuing");
     } else {
@@ -247,9 +245,7 @@ pub fn run(args: InjectionArgs) -> Result<()> {
     let expected = events.len() as u32;
     eprintln!(
         "[step] SendInput(count={}, vk=0x{:02X}, keyup={})",
-        expected,
-        args.vk,
-        !args.no_keyup
+        expected, args.vk, !args.no_keyup
     );
 
     let injected = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
@@ -268,9 +264,7 @@ pub fn run(args: InjectionArgs) -> Result<()> {
              Even with ConsoleSetForeground + SetForegroundWindow, USER32 / UIPI / \
              AppContainer is filtering the call. Exit code = SendInput's GetLastError."
         );
-        println!(
-            "injected=0 expected={expected} last_error=0x{last_error:08X}"
-        );
+        println!("injected=0 expected={expected} last_error=0x{last_error:08X}");
         // Exit code = GetLastError() from SendInput, per the reference test pattern.
         std::process::exit(last_error as i32);
     }
