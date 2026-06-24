@@ -129,6 +129,9 @@ mod provider {
         tracelogging::write_event!(
             MXC_PROVIDER,
             "MXC.Execution",
+            // Informational: every completion (success or failure) is a routine
+            // "what happened" record, not a fault. Severity is reserved for
+            // MXC.Error (Warning) and any future provider malfunction.
             level(Informational),
             keyword(MICROSOFT_KEYWORD_MEASURES),
             u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
@@ -163,6 +166,12 @@ mod provider {
         tracelogging::write_event!(
             MXC_PROVIDER,
             "MXC.Error",
+            // Warning, not Error/Critical: this reports an expected operational
+            // failure of a *sandboxed run* (e.g. the user's script failed, a
+            // backend was unavailable, a missing/rejected config) — not a
+            // defect in MXC itself. Downstream pipelines treat Error/Critical as
+            // product faults that feed reliability alerting, so those levels are
+            // reserved for genuine provider/telemetry malfunctions.
             level(Warning),
             keyword(MICROSOFT_KEYWORD_MEASURES),
             u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
