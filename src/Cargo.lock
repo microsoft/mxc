@@ -1386,6 +1386,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc-sdk"
+version = "0.7.0"
+dependencies = [
+ "appcontainer_common",
+ "bwrap_common",
+ "libc",
+ "seatbelt_common",
+ "serde",
+ "serde_json",
+ "wxc_common",
+]
+
+[[package]]
 name = "mxc_build_common"
 version = "0.7.0"
 dependencies = [

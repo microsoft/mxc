@@ -427,8 +427,25 @@ pub fn load_request_with_options(
     convert_raw_config_inner(raw, logger, true, opts.allow_missing_command)
 }
 
-/// Loads a request and routes to the one-shot or state-aware path based on
-/// presence of the wire-format `phase` field. Errors are categorised so the
+/// Build a request from an already-parsed wire-format config [`Value`], running
+/// the same validation and wire→model mapping as [`load_request_with_options`]
+/// but without a base64 (or file) round-trip. For in-process callers (e.g. the
+/// `mxc` crate) that already hold the config as JSON and would otherwise pay to
+/// serialise → base64 → decode → re-parse it.
+///
+/// [`Value`]: serde_json::Value
+pub fn load_request_from_value(
+    config: serde_json::Value,
+    logger: &mut Logger,
+    allow_missing_command: bool,
+) -> Result<ExecutionRequest, WxcError> {
+    let raw: RawConfig = serde_json::from_value(config).map_err(|e| {
+        logger.log_line("Error parsing JSON");
+        WxcError::ConfigParse(format!("JSON parse error: {}", e))
+    })?;
+
+    convert_raw_config_inner(raw, logger, true, allow_missing_command)
+}
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
 /// failures).
