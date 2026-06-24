@@ -77,17 +77,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
             ));
         }
 
-        // The bundled `linux-test-proxy` is a testing-only HTTP proxy with
-        // a deliberately permissive feature set (no auth, no body limits,
-        // no hop-by-hop header handling). Gate it behind --experimental so
-        // it cannot be enabled from a stock production config.
-        if request.policy.network_proxy.builtin_test_server && !request.experimental_enabled {
-            return Err(ScriptResponse::error(
-                "network.proxy.builtinTestServer is a testing-only feature and requires \
-                 --experimental. For production, point network.proxy at a real HTTP \
-                 proxy via 'localhost' or 'url'.",
-            ));
-        }
+        // `network.proxy.builtinTestServer` is gated centrally in
+        // `validate_common` (ahead of every `ScriptRunner::run`), so no
+        // backend-local check is needed here.
 
         if !Self::is_bwrap_available() {
             return Err(ScriptResponse::error(
@@ -479,22 +471,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_builtin_test_server_without_experimental() {
+    fn validate_does_not_locally_gate_builtin_test_server() {
+        // The builtinTestServer gate moved to `wxc_common::validator::validate_common`
+        // (enforced centrally for every backend). The bwrap runner must therefore no
+        // longer reject it locally — otherwise the gate would be applied twice with
+        // diverging messages.
         let mut req = base_request();
         req.policy.network_proxy = ProxyConfig {
             address: None,
             builtin_test_server: true,
         };
-        req.experimental_enabled = false;
+        req.testing_features_enabled = false;
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
-        assert!(
-            err.error_message.contains("builtinTestServer")
-                && err.error_message.contains("--experimental"),
-            "expected experimental-gate error, got: {}",
-            err.error_message
-        );
+        assert!(runner.validate(&req).is_ok());
     }
 
     #[test]

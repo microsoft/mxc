@@ -159,7 +159,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `$h.Send(); ` +
         `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
       const result = await sdk.spawnSandboxAsync(
-        script, policy, { debug: true }, undefined, `proxy-builtin-${schemaVersion}`,
+        script, policy, { debug: true, allowTestingFeatures: true }, undefined, `proxy-builtin-${schemaVersion}`,
       );
 
       assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);

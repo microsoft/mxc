@@ -1374,6 +1374,7 @@ fn convert_raw_config_inner(
         lxc_config,
         seatbelt,
         experimental_enabled: false,
+        testing_features_enabled: false,
         experimental,
         dry_run: false,
     })

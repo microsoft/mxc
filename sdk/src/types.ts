@@ -200,7 +200,10 @@ export interface NetworkConfig {
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Proxy configuration (supported on Windows ProcessContainer and Linux Bubblewrap) */
+  /** Proxy configuration (supported on Windows ProcessContainer and Linux Bubblewrap).
+   *  `builtinTestServer` activates a bundled, testing-only proxy; the SDK rejects it
+   *  unless `allowTestingFeatures: true` is set in SandboxSpawnOptions (which maps to
+   *  the native `--allow-testing-features` flag). */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
@@ -329,7 +332,10 @@ export type SandboxPolicy = {
       blockedHosts?: string[];
       /**
        * Proxy configuration. Routes all traffic through this proxy.
-       * Cannot be combined with other network flags.
+       * Cannot be combined with other network flags. `builtinTestServer`
+       * selects a bundled, testing-only proxy; the SDK rejects it unless
+       * `allowTestingFeatures: true` is set in SandboxSpawnOptions (which maps
+       * to the native `--allow-testing-features` flag).
        */
       proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   };

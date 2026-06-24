@@ -208,7 +208,7 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
 1. When `network.proxy` is set, the runner launches an unprivileged HTTP
    proxy on loopback (`127.0.0.1:N`). For tests, the bundled
    `linux-test-proxy` binary is used (`builtinTestServer: true`,
-   testing-only and gated behind `--experimental`); in production callers
+   testing-only and gated behind `--allow-testing-features`); in production callers
    supply their own proxy via `localhost: <port>` or `url: <url>`.
 2. The sandbox is then started **without** `--unshare-net` so the sandbox
    shares the host network namespace and can reach the loopback proxy.
@@ -277,10 +277,11 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
   **not** forward `allowedHosts` / `blockedHosts` / `defaultPolicy: "block"`
   to it, and config combinations that would silently weaken enforcement
   are rejected at parse time.
-- **`builtinTestServer` is testing-only**: gated behind `--experimental`
+- **`builtinTestServer` is testing-only**: gated behind `--allow-testing-features`
   and never to be used as a real production proxy. It has no auth, no
   body-size limits, and minimal hop-by-hop header handling. Use a real
-  HTTP proxy for production deployments.
+  HTTP proxy for production deployments. (Selecting the Bubblewrap backend
+  itself still also requires `--experimental`.)
 - **HTTPS via CONNECT**: the proxy uses HTTP `CONNECT` tunnels for TLS, so
   certificate validation continues to work end-to-end (the proxy does not
   see plaintext).

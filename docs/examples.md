@@ -82,4 +82,10 @@ an OS-assigned port (for integration testing only, not production):
 ```
 
 When `builtinTestServer` is `true`, it must be the only key in the `proxy`
-object.
+object. Because it activates a deliberately-permissive, testing-only proxy
+(no auth, no body limits), it is **not** enabled by default: pass the
+`--allow-testing-features` flag to `wxc-exec`/`lxc-exec`/`mxc-exec-mac`. This
+is a separate axis from `--experimental` (which selects experimental backends
+and features). The MXC SDK exposes the same gate as the `allowTestingFeatures`
+spawn option, which must be set to `true` for a policy that uses
+`builtinTestServer`.

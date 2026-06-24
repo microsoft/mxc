@@ -138,7 +138,7 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
       proxy: { builtinTestServer: true },
     };
 
-    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true, allowTestingFeatures: true });
     assert.strictEqual(result.exitCode, 0, `builtin-proxy run failed: ${result.stdout}`);
     assert.ok(result.stdout.includes('BUILTIN_OK'), `missing BUILTIN_OK in: ${result.stdout}`);
   });
@@ -167,7 +167,7 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
       allowedHosts: ['api.github.com'],
     };
 
-    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true, allowTestingFeatures: true });
     assert.strictEqual(result.exitCode, 0, `allowlist run failed: ${result.stdout}`);
     assert.ok(result.stdout.includes('SENTINEL_OK'), `missing SENTINEL_OK in: ${result.stdout}`);
     assert.ok(result.stdout.includes('BLOCKED_OK'), `disallowed host was not blocked: ${result.stdout}`);

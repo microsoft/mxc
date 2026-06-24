@@ -2990,6 +2990,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "mxc_build_common",
+ "serde_json",
 ]
 
 [[package]]

@@ -414,6 +414,17 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
+   * Allow testing-only, deliberately-permissive features that must never run
+   * in production — currently `network.proxy.builtinTestServer` (a bundled
+   * test HTTP proxy with no auth, no body limits, minimal hop-by-hop header
+   * handling). This is a distinct axis from {@link experimental}: a policy
+   * that requests such a feature is rejected unless this is explicitly set,
+   * keeping the gate fail-closed at the SDK boundary (it maps to the native
+   * `--allow-testing-features` flag).
+   */
+  allowTestingFeatures?: boolean;
+
+  /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
    * When set, the SDK uses this path directly instead of searching.
    * Useful for packaged apps (e.g., Electron) where the binary
