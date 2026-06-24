@@ -598,7 +598,6 @@ fn validate_filesystem_paths(
     validate_paths(&policy.readonly_paths, logger)?;
     validate_paths(&policy.readwrite_paths, logger)?;
     validate_paths(&policy.denied_paths, logger)?;
-    validate_filesystem_path_conflicts(policy, logger)?;
     Ok(())
 }
 
@@ -613,139 +612,173 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
     Ok(())
 }
 
-/// Validates cross-list filesystem path constraints:
-/// 1. Same-path conflict: a path must not appear in multiple lists.
+/// Returns a platform-specific identity for the filesystem object a path points to.
+/// On Unix this is `(device, inode)`; on Windows it is `(volume serial, file index)`
+/// obtained via `GetFileInformationByHandle`. Two paths returning the same identity
+/// (hardlinks, junctions, case-only differences, drive aliases) name the same object.
+/// Returns `None` if the path does not exist or its identity cannot be read.
+#[cfg(unix)]
+fn file_identity(path: &str) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &str) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+
+    let file = fs::File::open(path).ok()?;
+    let mut info: windows::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
+        unsafe { std::mem::zeroed() };
+    let handle = windows::Win32::Foundation::HANDLE(file.as_raw_handle());
+    let ok = unsafe {
+        windows::Win32::Storage::FileSystem::GetFileInformationByHandle(handle, &mut info)
+    };
+    if ok.is_ok() {
+        let file_index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+        Some((info.dwVolumeSerialNumber as u64, file_index))
+    } else {
+        None
+    }
+}
+
+/// Numeric precedence for filesystem intents; higher is more restrictive.
+/// Used to apply "most-restrictive-wins" when a path (or filesystem object)
+/// is referenced by more than one policy list.
+const INTENT_READWRITE: u8 = 1;
+const INTENT_READONLY: u8 = 2;
+const INTENT_DENIED: u8 = 3;
+
+/// Normalizes cross-list filesystem path constraints by applying
+/// **most-restrictive-wins** precedence (`deny` > `readonly` > `readwrite`):
+///
+/// 1. Same-path conflict: if a path string appears in multiple lists, it is kept
+///    only in the most restrictive list (e.g. a path in both `readwritePaths` and
+///    `deniedPaths` is normalized to denied).
 /// 2. Paths should exist: logs a warning for paths that don't exist on the host
 ///    (advisory — some backends create mount targets dynamically).
-/// 3. Object-based conflict: two different paths resolving to the same filesystem
-///    object (same device + inode) with different intents are rejected.
-fn validate_filesystem_path_conflicts(
-    policy: &ContainerPolicy,
-    logger: &mut Logger,
-) -> Result<(), WxcError> {
-    // Skip validation if all lists are empty.
+/// 3. Object-based conflict: if two different paths resolve to the same filesystem
+///    object (via hardlinks, junctions, symlinks, or aliases) with different
+///    intents, the more restrictive intent wins and the less-restrictive path
+///    entry is dropped.
+///
+/// This never rejects the config — conflicting intents are resolved deterministically
+/// rather than erroring, matching the roadmap's most-restrictive-wins decision.
+fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger) {
     if policy.readwrite_paths.is_empty()
         && policy.readonly_paths.is_empty()
         && policy.denied_paths.is_empty()
     {
-        return Ok(());
+        return;
     }
 
-    // 1. Same-path conflict detection: reject if a path appears in more than one list.
-    let mut path_intents: HashMap<&str, &str> = HashMap::new();
-    for path in &policy.readwrite_paths {
-        path_intents.insert(path.as_str(), "readwritePaths");
-    }
-    for path in &policy.readonly_paths {
-        if let Some(existing) = path_intents.get(path.as_str()) {
-            let msg = format!(
-                "Filesystem path '{}' appears in both '{}' and 'readonlyPaths'; \
-                 a path cannot have conflicting intents",
-                path, existing
-            );
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
-        }
-        path_intents.insert(path.as_str(), "readonlyPaths");
-    }
-    for path in &policy.denied_paths {
-        if let Some(existing) = path_intents.get(path.as_str()) {
-            let msg = format!(
-                "Filesystem path '{}' appears in both '{}' and 'deniedPaths'; \
-                 a path cannot have conflicting intents",
-                path, existing
-            );
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
-        }
-        path_intents.insert(path.as_str(), "deniedPaths");
-    }
+    // 1. Same-path (string) conflict: drop a path from a list if it also appears
+    //    in a more restrictive list.
+    let denied: std::collections::HashSet<String> = policy.denied_paths.iter().cloned().collect();
+    let readonly: std::collections::HashSet<String> =
+        policy.readonly_paths.iter().cloned().collect();
 
-    // 2. Paths must exist at policy-load time.
-    //    Log a warning for paths that don't exist — the backend will likely fail
-    //    at mount time with an opaque error. This is a diagnostic aid, not a hard
-    //    gate, because some backends create mount targets dynamically.
-    for (path, list_name) in &path_intents {
-        if fs::metadata(path).is_err() {
+    policy.readwrite_paths.retain(|p| {
+        if denied.contains(p) {
             logger.log_line(&format!(
-                "WARNING: filesystem path '{}' (in '{}') does not exist on the host; \
-                 the backend may fail at mount time",
-                path, list_name
+                "Filesystem path '{}' appears in 'readwritePaths' and 'deniedPaths'; \
+                 applying most-restrictive intent (denied)",
+                p
             ));
+            false
+        } else if readonly.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'readwritePaths' and 'readonlyPaths'; \
+                 applying most-restrictive intent (readonly)",
+                p
+            ));
+            false
+        } else {
+            true
+        }
+    });
+    policy.readonly_paths.retain(|p| {
+        if denied.contains(p) {
+            logger.log_line(&format!(
+                "Filesystem path '{}' appears in 'readonlyPaths' and 'deniedPaths'; \
+                 applying most-restrictive intent (denied)",
+                p
+            ));
+            false
+        } else {
+            true
+        }
+    });
+
+    // 2. Existence warning (advisory; not a hard gate).
+    for (paths, list_name) in [
+        (&policy.readwrite_paths, "readwritePaths"),
+        (&policy.readonly_paths, "readonlyPaths"),
+        (&policy.denied_paths, "deniedPaths"),
+    ] {
+        for path in paths {
+            if fs::metadata(path).is_err() {
+                logger.log_line(&format!(
+                    "WARNING: filesystem path '{}' (in '{}') does not exist on the host; \
+                     the backend may fail at mount time",
+                    path, list_name
+                ));
+            }
         }
     }
 
-    // 3. Object-based conflict detection: two paths resolving to the same
-    //    filesystem object (device + inode) with different intents are rejected.
-    //    Only applicable on Unix (where LXC and Bubblewrap run); on Windows,
-    //    paths are compared by canonicalization instead.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
+    // 3. Object-based conflict: most-restrictive-wins across path aliases that
+    //    resolve to the same filesystem object.
+    normalize_object_aliases(policy, logger);
+}
 
-        // Map (dev, ino) → (first path, intent) for conflict detection.
-        let mut inode_map: HashMap<(u64, u64), (&str, &str)> = HashMap::new();
-        for (path, intent) in &path_intents {
-            if let Ok(meta) = fs::metadata(path) {
-                let key = (meta.dev(), meta.ino());
-                if let Some((existing_path, existing_intent)) = inode_map.get(&key) {
-                    if *existing_intent != *intent {
-                        let msg = format!(
-                            "Filesystem paths '{}' ({}) and '{}' ({}) resolve to the \
-                             same filesystem object but have conflicting intents",
-                            existing_path, existing_intent, path, intent
-                        );
-                        logger.log_line(&msg);
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                } else {
-                    inode_map.insert(key, (path, intent));
+/// Resolves object-based intent conflicts (different path strings naming the same
+/// filesystem object) using most-restrictive-wins. Drops the less-restrictive path
+/// entry when a more restrictive entry references the same object.
+fn normalize_object_aliases(policy: &mut ContainerPolicy, logger: &mut Logger) {
+    // Compute the most restrictive intent rank observed for each object identity.
+    let mut max_rank: HashMap<(u64, u64), u8> = HashMap::new();
+    for (paths, rank) in [
+        (&policy.readwrite_paths, INTENT_READWRITE),
+        (&policy.readonly_paths, INTENT_READONLY),
+        (&policy.denied_paths, INTENT_DENIED),
+    ] {
+        for path in paths {
+            if let Some(id) = file_identity(path) {
+                let entry = max_rank.entry(id).or_insert(0);
+                if rank > *entry {
+                    *entry = rank;
                 }
             }
         }
     }
 
-    #[cfg(windows)]
-    {
-        // On Windows, detect object-based conflicts by comparing file identity
-        // (volume serial + file index) obtained via GetFileInformationByHandle.
-        // This correctly detects hardlinks, junctions, and case-only differences.
-        use std::os::windows::io::AsRawHandle;
-
-        let mut identity_map: HashMap<(u32, u64), (&str, &str)> = HashMap::new();
-        for (path, intent) in &path_intents {
-            if let Ok(file) = fs::File::open(path) {
-                let mut info: windows::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
-                    unsafe { std::mem::zeroed() };
-                let handle = windows::Win32::Foundation::HANDLE(file.as_raw_handle());
-                let ok = unsafe {
-                    windows::Win32::Storage::FileSystem::GetFileInformationByHandle(
-                        handle, &mut info,
-                    )
-                };
-                if ok.is_ok() {
-                    let file_index =
-                        ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
-                    let key = (info.dwVolumeSerialNumber, file_index);
-                    if let Some((existing_path, existing_intent)) = identity_map.get(&key) {
-                        if *existing_intent != *intent {
-                            let msg = format!(
-                                "Filesystem paths '{}' ({}) and '{}' ({}) resolve to the \
-                                 same filesystem object but have conflicting intents",
-                                existing_path, existing_intent, path, intent
-                            );
-                            logger.log_line(&msg);
-                            return Err(WxcError::ConfigParse(msg));
-                        }
-                    } else {
-                        identity_map.insert(key, (path, intent));
-                    }
-                }
+    policy.readwrite_paths.retain(|path| {
+        if let Some(id) = file_identity(path) {
+            if max_rank.get(&id).copied().unwrap_or(INTENT_READWRITE) > INTENT_READWRITE {
+                logger.log_line(&format!(
+                    "Filesystem path '{}' (readwritePaths) resolves to the same object as a \
+                     more restrictive entry; applying most-restrictive intent",
+                    path
+                ));
+                return false;
             }
         }
-    }
-
-    Ok(())
+        true
+    });
+    policy.readonly_paths.retain(|path| {
+        if let Some(id) = file_identity(path) {
+            if max_rank.get(&id).copied().unwrap_or(INTENT_READONLY) > INTENT_READONLY {
+                logger.log_line(&format!(
+                    "Filesystem path '{}' (readonlyPaths) resolves to the same object as a \
+                     deniedPaths entry; applying most-restrictive intent (denied)",
+                    path
+                ));
+                return false;
+            }
+        }
+        true
+    });
 }
 
 // ---------- Conversion from raw JSON to domain model ----------
@@ -1172,6 +1205,7 @@ fn convert_raw_config_inner(
         }
     }
     validate_filesystem_paths(&policy, logger)?;
+    normalize_filesystem_paths(&mut policy, logger);
 
     // Fallback section
     if let Some(fbcfg) = raw.fallback {
@@ -4040,58 +4074,73 @@ mod tests {
         load_request(&encoded, &mut logger, true).expect_err("vm has no resolver off Windows");
     }
 
-    // --- Filesystem policy validation tests ---
+    // --- Filesystem policy normalization tests (most-restrictive-wins) ---
 
     #[test]
-    fn same_path_in_readwrite_and_denied_rejected() {
+    fn same_path_in_readwrite_and_denied_becomes_denied() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "deniedPaths": ["C:\\workspace"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
+        let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(
-            msg.contains("C:\\workspace") && msg.contains("conflicting intents"),
-            "expected same-path conflict error, got: {msg}"
+            req.policy.readwrite_paths.is_empty(),
+            "path should be removed from readwritePaths (denied wins)"
         );
+        assert_eq!(req.policy.denied_paths, vec!["C:\\workspace"]);
     }
 
     #[test]
-    fn same_path_in_readwrite_and_readonly_rejected() {
+    fn same_path_in_readwrite_and_readonly_becomes_readonly() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\workspace"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
+        let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(
-            msg.contains("C:\\workspace") && msg.contains("conflicting intents"),
-            "expected same-path conflict error, got: {msg}"
+            req.policy.readwrite_paths.is_empty(),
+            "path should be removed from readwritePaths (readonly wins)"
         );
+        assert_eq!(req.policy.readonly_paths, vec!["C:\\workspace"]);
     }
 
     #[test]
-    fn same_path_in_readonly_and_denied_rejected() {
+    fn same_path_in_readonly_and_denied_becomes_denied() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\tools"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
+        let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(
-            msg.contains("C:\\tools") && msg.contains("conflicting intents"),
-            "expected same-path conflict error, got: {msg}"
+            req.policy.readonly_paths.is_empty(),
+            "path should be removed from readonlyPaths (denied wins)"
         );
+        assert_eq!(req.policy.denied_paths, vec!["C:\\tools"]);
     }
 
     #[test]
-    fn distinct_paths_across_lists_accepted() {
+    fn same_path_in_all_three_lists_becomes_denied() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\x"], "readonlyPaths": ["C:\\x"], "deniedPaths": ["C:\\x"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.readwrite_paths.is_empty());
+        assert!(req.policy.readonly_paths.is_empty());
+        assert_eq!(req.policy.denied_paths, vec!["C:\\x"]);
+    }
+
+    #[test]
+    fn distinct_paths_across_lists_preserved() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\secrets"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        // Should not error on conflict (paths don't exist but that's a warning, not an error)
-        load_request(&encoded, &mut logger, true).unwrap();
+        // Distinct paths — nothing dropped.
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
+        assert_eq!(req.policy.readonly_paths, vec!["C:\\tools"]);
+        assert_eq!(req.policy.denied_paths, vec!["C:\\secrets"]);
     }
 
     #[test]
@@ -4104,7 +4153,7 @@ mod tests {
     }
 
     #[test]
-    fn object_based_conflict_via_hardlink_rejected() {
+    fn object_based_conflict_via_hardlink_resolves_to_denied() {
         // Create a temp file and a hardlink to it — same inode, two paths.
         let dir = std::env::temp_dir().join("mxc_test_object_conflict");
         let _ = fs::remove_dir_all(&dir);
@@ -4117,6 +4166,7 @@ mod tests {
         let original_str = original.to_str().unwrap().replace('\\', "\\\\");
         let link_str = link.to_str().unwrap().replace('\\', "\\\\");
 
+        // original = readwrite, link = denied → same object, denied wins.
         let json = format!(
             r#"{{"process": {{"commandLine": "echo hi"}}, "containment": "process", "filesystem": {{"readwritePaths": ["{}"], "deniedPaths": ["{}"]}}}}"#,
             original_str, link_str
@@ -4124,20 +4174,20 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
+        let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(
-            msg.contains("same filesystem object") && msg.contains("conflicting intents"),
-            "expected object-based conflict error, got: {msg}"
+            req.policy.readwrite_paths.is_empty(),
+            "readwrite alias should be dropped (denied wins)"
         );
+        assert_eq!(req.policy.denied_paths.len(), 1);
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn object_based_same_intent_via_hardlink_accepted() {
-        // Same inode, same intent (both readwritePaths) → no conflict.
+    fn object_based_same_intent_via_hardlink_preserved() {
+        // Same inode, same intent (both readwritePaths) → both preserved.
         let dir = std::env::temp_dir().join("mxc_test_object_same_intent");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -4156,8 +4206,9 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        // Same intent → should succeed (no conflict)
-        load_request(&encoded, &mut logger, true).unwrap();
+        // Same intent → both retained.
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.readwrite_paths.len(), 2);
 
         // Cleanup
         let _ = fs::remove_dir_all(&dir);
