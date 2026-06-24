@@ -558,9 +558,25 @@ impl SandboxRequest {
         self
     }
 
-    /// Set the child's environment as `KEY=VALUE` entries.
-    pub fn set_env(&mut self, env: Vec<String>) -> &mut Self {
-        self.inner.env = env;
+    /// Set the child's environment from `(key, value)` pairs.
+    ///
+    /// Each pair is stored as a `KEY=VALUE` entry — the same wire form the SDK's
+    /// env channel produces (`injectEnvIntoConfig` joins a `{ key: value }` map
+    /// the same way), so behavior is identical across the SDK and this crate.
+    /// Iteration order is preserved, so on a duplicate key the later entry wins,
+    /// matching the SDK.
+    pub fn set_env<K, V>(&mut self, env: impl IntoIterator<Item = (K, V)>) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.inner.env = env
+            .into_iter()
+            .map(|(k, v)| {
+                let (k, v): (String, String) = (k.into(), v.into());
+                format!("{k}={v}")
+            })
+            .collect();
         self
     }
 
@@ -971,6 +987,23 @@ mod tests {
             .readwrite_paths
             .contains(&"/tmp".to_string()));
         assert!(request.inner.script_code.is_empty());
+    }
+
+    #[test]
+    fn set_env_formats_pairs_as_key_value_in_order() {
+        // The structured `(key, value)` setter mirrors the SDK env channel
+        // (`injectEnvIntoConfig`): each pair becomes a `KEY=VALUE` wire entry, in
+        // iteration order so a later duplicate key wins downstream.
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let mut request = build_request(&policy, None).expect("build_request should succeed");
+        request.set_env([("FIRST", "1"), ("SECOND", "2")]);
+        assert_eq!(request.inner.env, vec!["FIRST=1", "SECOND=2"]);
     }
 
     #[test]
