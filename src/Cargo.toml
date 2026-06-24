@@ -31,12 +31,14 @@ members = [
     "testing/wxc_test_proxy",
     "testing/linux_test_proxy",
     "testing/wxc_ui_probe",
+    "testing/plm_tester",
     "tools/mxc_diagnostic_console",
 ]
-# `core/plm` is Windows-only. Listing every other member in `default-members`
-# (rather than `default-members = members - plm`, which Cargo doesn't support)
-# keeps `cargo build` / `cargo test` from the workspace root portable across
-# Linux and macOS; build.bat opts plm in explicitly on Windows via `-p plm`.
+# `core/plm` and `testing/plm_tester` are Windows-only. Listing every other
+# member in `default-members` (rather than `default-members = members - plm`,
+# which Cargo doesn't support) keeps `cargo build` / `cargo test` from the
+# workspace root portable across Linux and macOS; build.bat opts them in
+# explicitly on Windows via `-p plm` / `-p plmtester`.
 default-members = [
     "core/wxc",
     "core/wxc_common",

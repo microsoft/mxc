@@ -1,0 +1,12 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "PLM-SysColor-Set-Basic",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "c:\\users\\adminuser\\desktop\\lily\\plmtester.exe system-param --action set-sys-colors --index 1 --value 0x00112233",
+    "timeout": 30000
+  },
+  "ui": {
+    "disable": false
+  }
+}

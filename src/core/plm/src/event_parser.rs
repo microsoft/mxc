@@ -555,19 +555,20 @@ pub fn parse_events(
                     ui_events.push(ui);
                 }
                 None => {
-                    // Without a decoded payload we can't tell category from
-                    // UI_OPERATION, so preserve the legacy "any EventID=27
-                    // means enable GUI" behavior to stay backward-compatible
-                    // with traces from older OS builds.
-                    need_ui = true;
+                    // Undecodable payload: surface in verbose mode but
+                    // otherwise ignore. We can't tell the category, so
+                    // there's no safe relaxation to apply -- assuming
+                    // CONVERT_TO_GUI would over-grant `ui.disable=false`
+                    // for traces whose only undecoded events were
+                    // UI_OPERATION variants.
                     if verbose {
                         if let Some(hex) = ev.processing_error_payload.as_deref() {
                             println!(
-                                "UI Injection event observed (payload did not match expected layout: {hex})"
+                                "UI Injection event observed (payload did not match expected layout, ignored: {hex})"
                             );
                         } else {
                             println!(
-                                "UI Injection event observed (no EventData / ProcessingErrorData)"
+                                "UI Injection event observed (no EventData / ProcessingErrorData, ignored)"
                             );
                         }
                     }
