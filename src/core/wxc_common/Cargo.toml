@@ -28,7 +28,7 @@ windows-core = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]

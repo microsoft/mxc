@@ -2,8 +2,11 @@
 // Licensed under the MIT License.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use crate::error::WxcError;
+use crate::sandbox_process::StreamCloser;
 use crate::string_util;
 
 use windows::Win32::Foundation::{
@@ -11,11 +14,233 @@ use windows::Win32::Foundation::{
     HLOCAL, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::WaitForSingleObject;
+use windows::Win32::System::IO::CancelIoEx;
 use windows_core::BOOL;
 use windows_core::PCWSTR;
+
+/// A readable end of an anonymous pipe (e.g. the child's stdout/stderr),
+/// owning the handle and closing it on drop. Implements [`std::io::Read`]
+/// via `ReadFile`; a broken pipe (all write ends closed) reads as EOF.
+/// `Send` so it can be handed to a reader thread.
+pub struct PipeReader(SendOwnedHandle);
+
+impl PipeReader {
+    /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
+    pub fn new(mut handle: OwnedHandle) -> Self {
+        Self(SendOwnedHandle::take(&mut handle))
+    }
+}
+
+impl std::io::Read for PipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
+        let mut read: u32 = 0;
+        // SAFETY: `self.0` owns a valid pipe handle for the lifetime of this
+        // `PipeReader`; `buf`/`read` are valid local out-params for the call.
+        match unsafe { ReadFile(self.0.get(), Some(buf), Some(&mut read), None) } {
+            Ok(()) => Ok(read as usize),
+            // Write ends all closed: normal end-of-stream, report EOF.
+            Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
+            Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+}
+
+/// Cancellation state shared between an [`InterruptiblePipeReader`] and its
+/// [`PipeReadCanceller`]s. Owns the pipe handle — closed only when the **last**
+/// reference drops, so a canceller's `CancelIoEx` can never race a closed (and
+/// possibly reused) handle — plus the [`ReadGate`] the reader and cancellers
+/// hand off through.
+struct CancelablePipe {
+    handle: SendOwnedHandle,
+    gate: Mutex<ReadGate>,
+}
+
+/// Reader/canceller handshake, guarded by [`CancelablePipe::gate`].
+///
+/// `CancelIoEx` is *edge-triggered*: it aborts only I/O already pending when it
+/// is called. A bare `cancelled` flag + a single `CancelIoEx` therefore has a
+/// lost-wakeup race — a `close` landing between a read's flag check and its
+/// `ReadFile` entering the kernel cancels nothing and never retries, parking the
+/// read until real EOF. The mutex closes that race by ordering "a read is
+/// starting" against "cancel requested": a racing `close` either sees the read
+/// has not started (and the read then observes `cancelled`) or sees `reading`
+/// and keeps issuing `CancelIoEx` until the read is aborted.
+#[derive(Default)]
+struct ReadGate {
+    /// Set once `close` has been called; a read observing it returns EOF instead
+    /// of issuing (or while abandoning) a `ReadFile`.
+    cancelled: bool,
+    /// True while a read is in — or about to enter — its blocking `ReadFile`, so
+    /// `close` knows to keep issuing `CancelIoEx` until that read is aborted.
+    reading: bool,
+}
+
+impl CancelablePipe {
+    /// Lock the gate, tolerating a poisoned mutex (the guarded data is two
+    /// bools with no broken invariant on panic).
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReadGate> {
+        self.gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+// SAFETY: the only non-`Sync` field is a process-global Windows HANDLE whose
+// value is copied for `ReadFile` / `CancelIoEx`; issuing `CancelIoEx` from one
+// thread to abort a `ReadFile` blocked on another is the documented, supported
+// way to interrupt synchronous pipe I/O, and the reader/canceller handshake is
+// serialised by `gate`. So sharing `&CancelablePipe` across threads is sound.
+unsafe impl Sync for CancelablePipe {}
+
+/// A readable pipe end (e.g. the child's stdout/stderr) whose blocking
+/// `ReadFile` can be cancelled out-of-band via a [`PipeReadCanceller`] —
+/// reporting EOF — without closing the child or its other streams. A broken
+/// pipe (all write ends closed) still reads as EOF as usual. `Send` so it can
+/// be handed to a reader thread. Single-reader: at most one thread may `read` it
+/// at a time (any number of cancellers may fire concurrently).
+pub struct InterruptiblePipeReader(Arc<CancelablePipe>);
+
+impl InterruptiblePipeReader {
+    /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
+    pub fn new(mut handle: OwnedHandle) -> Self {
+        Self(Arc::new(CancelablePipe {
+            handle: SendOwnedHandle::take(&mut handle),
+            gate: Mutex::new(ReadGate::default()),
+        }))
+    }
+
+    /// Mint a closer that EOFs this reader's `read` on demand. Several closers
+    /// may be minted; they share one cancellation state. The closer holds only a
+    /// [`Weak`] reference, so it never keeps the read handle open past this
+    /// reader's lifetime.
+    pub fn canceller(&self) -> PipeReadCanceller {
+        PipeReadCanceller(Arc::downgrade(&self.0))
+    }
+}
+
+impl std::io::Read for InterruptiblePipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED};
+        // Announce the read under the gate: a `close` that already fired makes us
+        // EOF without touching the pipe; otherwise mark `reading` so a `close`
+        // racing us keeps issuing `CancelIoEx` until our `ReadFile` is aborted.
+        {
+            let mut gate = self.0.lock();
+            if gate.cancelled {
+                return Ok(0);
+            }
+            gate.reading = true;
+        }
+        let mut read: u32 = 0;
+        // SAFETY: the `Arc` keeps the pipe handle valid for this call;
+        // `buf`/`read` are valid local out-params.
+        let result = unsafe { ReadFile(self.0.handle.get(), Some(buf), Some(&mut read), None) };
+        let cancelled = {
+            let mut gate = self.0.lock();
+            gate.reading = false;
+            gate.cancelled
+        };
+        // If `close` fired while this read was in flight, drop any
+        // completed-but-undelivered chunk and report EOF — matching the Unix
+        // reader, which never delivers data once cancelled.
+        if cancelled {
+            return Ok(0);
+        }
+        match result {
+            Ok(()) => Ok(read as usize),
+            // Write ends all closed: normal end-of-stream, report EOF.
+            Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
+            // A canceller's `CancelIoEx` aborted this read: report EOF.
+            Err(e) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Ok(0),
+            Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+}
+
+/// A [`StreamCloser`] for an [`InterruptiblePipeReader`]. Cloneable and
+/// `Send + Sync` so a watchdog thread can hold and fire it; all clones share
+/// one cancellation state and [`close`](StreamCloser::close) is idempotent.
+/// Holds a [`Weak`] reference so a stored canceller never keeps the reader's
+/// data-pipe handle open after the reader is dropped.
+#[derive(Clone)]
+pub struct PipeReadCanceller(Weak<CancelablePipe>);
+
+impl StreamCloser for PipeReadCanceller {
+    fn close(&self) {
+        // Upgrade to a temporary strong ref for the duration of the cancel. If
+        // the reader has already been dropped there is nothing to cancel (and
+        // its handle is already closed), so this is a no-op.
+        let Some(pipe) = self.0.upgrade() else {
+            return;
+        };
+        // Mark cancelled once (so reads short-circuit to EOF), then abort an
+        // in-flight read. Because `CancelIoEx` is edge-triggered, retry while a
+        // read is in its announce→`ReadFile` window (`reading == true`): the next
+        // iteration catches the `ReadFile` once it enters the kernel. The reader
+        // clears `reading` when its `ReadFile` returns (aborted or with data),
+        // which bounds the loop; if no read is in progress it exits at once.
+        {
+            let mut gate = pipe.lock();
+            if gate.cancelled {
+                return;
+            }
+            gate.cancelled = true;
+        }
+        loop {
+            // SAFETY: the upgraded `Arc` keeps the handle valid; `CancelIoEx`
+            // with a null overlapped aborts all outstanding synchronous I/O on
+            // it. Ignore the result — a benign no-op (ERROR_NOT_FOUND) when none
+            // is pending.
+            unsafe {
+                let _ = CancelIoEx(pipe.handle.get(), None);
+            }
+            if !pipe.lock().reading {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// A writable end of an anonymous pipe (e.g. the child's stdin), owning the
+/// handle and closing it on drop (which sends EOF to the child). Implements
+/// [`std::io::Write`] via `WriteFile`. `Send`.
+pub struct PipeWriter(SendOwnedHandle);
+
+impl PipeWriter {
+    /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
+    pub fn new(mut handle: OwnedHandle) -> Self {
+        Self(SendOwnedHandle::take(&mut handle))
+    }
+}
+
+impl std::io::Write for PipeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
+        let mut written: u32 = 0;
+        // SAFETY: `self.0` owns a valid pipe handle for the lifetime of this
+        // `PipeWriter`; `buf`/`written` are valid local params for the call.
+        match unsafe { WriteFile(self.0.get(), Some(buf), Some(&mut written), None) } {
+            Ok(()) => Ok(written as usize),
+            // The read end is gone (child exited / closed its stdin): surface the
+            // standard `BrokenPipe` kind so callers' graceful handling fires
+            // instead of an opaque OS error.
+            Err(e) if e.code() == ERROR_BROKEN_PIPE.to_hresult() => {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            Err(e) => Err(std::io::Error::other(e)),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Anonymous pipes are not buffered on the writer side.
+        Ok(())
+    }
+}
 
 const BUFFER_SIZE: u32 = 4096;
 const MAX_OUTPUT_CHARS: usize = 1024 * 1024;
