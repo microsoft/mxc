@@ -75,6 +75,7 @@ use crate::fallback_detector::{self, FallbackError, IsolationTier};
 use wxc_common::error::WxcError;
 use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
 use wxc_common::models::ExecutionRequest;
+use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::ScriptRunner;
 
 /// Result of a successful dispatch decision: a phased handle holding a
@@ -287,7 +288,7 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
             // opaque principal `Experimental_CreateProcessInSandbox`
             // actually runs the child under; a mismatch would render
             // the ACEs inert and silently un-enforce `deniedPaths`.
-            let runner: Box<dyn ScriptRunner> = Box::new(BaseContainerRunner::new());
+            let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(BaseContainerRunner::new()));
             (runner, None)
         }
         IsolationTier::AppContainerBfs => {
@@ -297,9 +298,9 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
             // common no-deny case skips both costs.
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             if denied.is_empty() {
-                let runner: Box<dyn ScriptRunner> = Box::new(
+                let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(
                     AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs),
-                );
+                ));
                 (runner, None)
             } else {
                 let sid =
@@ -308,12 +309,12 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
                 // Hand the derived SID string to the runner so it does
                 // not re-run `ConvertSidToStringSidW` for the firewall
                 // principal-id lookup.
-                let runner: Box<dyn ScriptRunner> = Box::new(
+                let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(
                     AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
                         FilesystemMode::Bfs,
                         sid,
                     ),
-                );
+                ));
                 (runner, mgr)
             }
         }
@@ -342,12 +343,12 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             let sid = derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
             let mgr = build_t3_dacl(&sid, &readwrite, &readonly, &denied)?;
-            let runner: Box<dyn ScriptRunner> = Box::new(
+            let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(
                 AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
                     FilesystemMode::Dacl,
                     sid,
                 ),
-            );
+            ));
             (runner, Some(mgr))
         }
     };

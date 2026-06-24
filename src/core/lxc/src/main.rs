@@ -19,6 +19,8 @@ use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
 #[cfg(feature = "microvm")]
 use nanvix_runner::NanVixScriptRunner;
+#[cfg(target_os = "linux")]
+use wxc_common::sandbox_process::Runner;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -254,7 +256,7 @@ fn main() {
         ContainmentBackend::Bubblewrap => {
             #[cfg(target_os = "linux")]
             {
-                Box::new(BubblewrapScriptRunner::new())
+                Box::new(Runner::new(BubblewrapScriptRunner::new()))
             }
             #[cfg(not(target_os = "linux"))]
             {

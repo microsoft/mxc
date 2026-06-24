@@ -26,6 +26,7 @@ use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
+use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
@@ -853,7 +854,7 @@ fn main() {
                     }
                 }
             } else {
-                Box::new(AppContainerScriptRunner::new())
+                Box::new(Runner::new(AppContainerScriptRunner::new()))
             }
         }
         ContainmentBackend::Wslc => {

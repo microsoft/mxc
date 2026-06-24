@@ -6,7 +6,7 @@ use std::ptr;
 
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
-    HANDLE_FLAG_INHERIT, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
@@ -35,8 +35,15 @@ use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
-use wxc_common::process_util::{get_capability_sid_from_name, OwnedHandle, SidAndAttributes};
-use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use wxc_common::process_util::{
+    create_std_pipes, get_capability_sid_from_name, InterruptiblePipeReader, OwnedHandle,
+    PipeReadCanceller, PipeWriter, SendOwnedHandle, SidAndAttributes,
+};
+use wxc_common::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+};
+use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
 
 /// `UpdateProcThreadAttribute` value for
@@ -147,18 +154,23 @@ fn build_explicit_entries(
         .collect();
 
     if let Some(addr) = proxy_address {
-        // Strip existing proxy vars before injecting ours.
-        entries.retain(|(key, _)| {
-            !PROXY_VAR_NAMES
-                .iter()
-                .any(|name| key.eq_ignore_ascii_case(name))
-        });
-        let proxy_url = addr.to_url();
-        entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
-        entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+        inject_proxy_vars(&mut entries, addr);
     }
 
     entries
+}
+
+/// Strip any pre-existing proxy env vars from `entries`, then inject the
+/// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
+fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::models::ProxyAddress) {
+    entries.retain(|(key, _)| {
+        !PROXY_VAR_NAMES
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+    });
+    let proxy_url = addr.to_url();
+    entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+    entries.push(("HTTPS_PROXY".to_string(), proxy_url));
 }
 
 /// RAII guard that frees capability SID pointers via `LocalFree` on drop.
@@ -415,12 +427,18 @@ impl AppContainerScriptRunner {
         }
     }
 
-    /// Core implementation of `run_internal`, returning `Result` for ergonomic error handling.
-    fn run_internal_impl(
+    /// Set up the AppContainer and create the sandboxed child **suspended**,
+    /// returning a [`SpawnedChild`] the caller resumes and then either waits on
+    /// (run-to-completion) or wraps in a streaming handle. When `capture` is set
+    /// the child's stdio is wired to pipes the caller drives (the streaming
+    /// path); otherwise the child inherits the parent's std handles / console
+    /// (the run-to-completion path).
+    fn spawn_suspended(
         &self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-    ) -> Result<ScriptResponse, WxcError> {
+        capture: bool,
+    ) -> Result<SpawnedChild, WxcError> {
         // --- Validate permissiveLearningMode ---
         for cap in &request.policy.capabilities {
             if cap == "permissiveLearningMode" {
@@ -434,8 +452,9 @@ impl AppContainerScriptRunner {
                 }
                 #[cfg(not(debug_assertions))]
                 {
-                    return Ok(ScriptResponse::error(
-                        "SECURITY: permissiveLearningMode not allowed in release builds",
+                    return Err(WxcError::Validation(
+                        "SECURITY: permissiveLearningMode not allowed in release builds"
+                            .to_string(),
                     ));
                 }
             }
@@ -495,10 +514,20 @@ impl AppContainerScriptRunner {
         // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
         // child's output streams directly to the SDK in real time. Otherwise we use
         // console sharing (the ConPTY path).
-        let pipe_mode = !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
+        //
+        // In capture mode (`StdioMode::Pipes`) we always take the pipe
+        // path — but instead of forwarding our own std handles we wire the
+        // child to capture pipes that the streaming handle reads from.
+        let pipe_mode =
+            capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
 
         if pipe_mode {
-            logger.log_line("STDIO mode: passthrough (forwarding parent handles to child)");
+            if capture {
+                logger
+                    .log_line("STDIO mode: capture (piping child output to the streaming handle)");
+            } else {
+                logger.log_line("STDIO mode: passthrough (forwarding parent handles to child)");
+            }
         }
 
         // --- Allocate and initialize attribute list ---
@@ -609,48 +638,86 @@ impl AppContainerScriptRunner {
             logger.log_line("Win32k mitigation applied to child process");
         }
 
-        // --- Setup handle passthrough (pipe mode only) ---
-        // Forward wxc-exec's own stdin/stdout/stderr handles to the child so the
-        // child's output streams directly to the SDK caller in real time.
-        // Handle list for PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Must outlive CreateProcessW.
+        // --- Setup handle passthrough / capture (pipe mode only) ---
+        // In passthrough mode we forward wxc-exec's own std handles to the
+        // child so its output streams to the caller. In capture mode we wire
+        // the child to fresh capture pipes that the streaming handle reads from
+        // (the `mxc` library path). Handle list for
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Must outlive CreateProcessW.
         let mut handle_list: Vec<HANDLE> = Vec::new();
 
         let h_stdin;
         let h_stdout;
         let h_stderr;
 
+        // Capture pipe read-ends (parent side): kept alive until after the
+        // wait, then drained. Child-side ends (stdin read, stdout/stderr
+        // write): kept alive until after CreateProcessW, then dropped so the
+        // read-ends observe EOF when the child exits.
+        let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
+        let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
+        // Parent's stdin write-end; in capture mode it is handed to the caller
+        // so they can write to the child.
+        let mut captured_stdin_write: Option<OwnedHandle> = None;
+
         if pipe_mode {
-            h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
-                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDIN): {e}")))?;
-            h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
-                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDOUT): {e}")))?;
-            h_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
-                .map_err(|e| WxcError::Process(format!("GetStdHandle(STDERR): {e}")))?;
+            if capture {
+                // create_std_pipes(false): read-end inheritable (child stdin),
+                // write-end non-inheritable (kept for streaming, else dropped).
+                let (stdin_read, stdin_write) = create_std_pipes(false)?;
+                // create_std_pipes(true): read-end non-inheritable (parent
+                // reads it), write-end inheritable (child writes to it).
+                let (stdout_read, stdout_write) = create_std_pipes(true)?;
+                let (stderr_read, stderr_write) = create_std_pipes(true)?;
 
-            if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
-                return Err(WxcError::Process(
-                    "GetStdHandle(STDIN) returned null/invalid handle".to_string(),
-                ));
-            }
-            if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
-                return Err(WxcError::Process(
-                    "GetStdHandle(STDOUT) returned null/invalid handle".to_string(),
-                ));
-            }
-            if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
-                return Err(WxcError::Process(
-                    "GetStdHandle(STDERR) returned null/invalid handle".to_string(),
-                ));
-            }
+                h_stdin = stdin_read.get();
+                h_stdout = stdout_write.get();
+                h_stderr = stderr_write.get();
 
-            // Ensure the handles are inheritable.
-            unsafe {
-                SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDIN): {e}")))?;
-                SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDOUT): {e}")))?;
-                SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    .map_err(|e| WxcError::Process(format!("SetHandleInformation(STDERR): {e}")))?;
+                capture_child_ends.push(stdin_read);
+                capture_child_ends.push(stdout_write);
+                capture_child_ends.push(stderr_write);
+                captured_stdin_write = Some(stdin_write);
+                capture_reads = Some((stdout_read, stderr_read));
+            } else {
+                h_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+                    .map_err(|e| WxcError::Process(format!("GetStdHandle(STDIN): {e}")))?;
+                h_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+                    .map_err(|e| WxcError::Process(format!("GetStdHandle(STDOUT): {e}")))?;
+                h_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+                    .map_err(|e| WxcError::Process(format!("GetStdHandle(STDERR): {e}")))?;
+
+                if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
+                    return Err(WxcError::Process(
+                        "GetStdHandle(STDIN) returned null/invalid handle".to_string(),
+                    ));
+                }
+                if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
+                    return Err(WxcError::Process(
+                        "GetStdHandle(STDOUT) returned null/invalid handle".to_string(),
+                    ));
+                }
+                if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
+                    return Err(WxcError::Process(
+                        "GetStdHandle(STDERR) returned null/invalid handle".to_string(),
+                    ));
+                }
+
+                // Ensure the handles are inheritable.
+                unsafe {
+                    SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                        .map_err(|e| {
+                            WxcError::Process(format!("SetHandleInformation(STDIN): {e}"))
+                        })?;
+                    SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                        .map_err(|e| {
+                            WxcError::Process(format!("SetHandleInformation(STDOUT): {e}"))
+                        })?;
+                    SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                        .map_err(|e| {
+                            WxcError::Process(format!("SetHandleInformation(STDERR): {e}"))
+                        })?;
+                }
             }
 
             handle_list.push(h_stdin);
@@ -721,16 +788,7 @@ impl AppContainerScriptRunner {
             // Get clean default user env without inheriting process env vars.
             let mut entries = create_default_env_entries()?;
             if let Some(addr) = self.proxy_address.as_ref() {
-                // Strip any pre-existing proxy vars from the default block
-                // and inject our configured proxy.
-                entries.retain(|(key, _)| {
-                    !PROXY_VAR_NAMES
-                        .iter()
-                        .any(|name| key.eq_ignore_ascii_case(name))
-                });
-                let proxy_url = addr.to_url();
-                entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
-                entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+                inject_proxy_vars(&mut entries, addr);
             }
             encode_env_block(&entries)
         };
@@ -789,13 +847,17 @@ impl AppContainerScriptRunner {
             pi.dwProcessId
         ));
 
+        // The child has inherited the pipe handles, so close the parent's
+        // child-side ends now (otherwise the read-ends would never see EOF).
+        capture_child_ends.clear();
+
         let process_handle = OwnedHandle::new(pi.hProcess);
         let thread_handle = OwnedHandle::new(pi.hThread);
 
         // CRITICAL: child was created with CREATE_SUSPENDED. We must either
-        // successfully attach the Job Object and ResumeThread, OR TerminateProcess.
-        // Anything that returns an error in this block must terminate first.
-        let _job = match (|| -> Result<UiJobObject, WxcError> {
+        // successfully attach the Job Object, OR TerminateProcess. Anything
+        // that returns an error in this block must terminate first.
+        let job = match (|| -> Result<UiJobObject, WxcError> {
             let job = UiJobObject::new()?;
             let restrictions = ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
@@ -817,56 +879,22 @@ impl AppContainerScriptRunner {
             }
         };
 
-        // Resume the child now that UI restrictions are in place.
-        // ResumeThread returns the previous suspend count (or u32::MAX on failure).
-        let resume_result = unsafe { ResumeThread(thread_handle.get()) };
-        if resume_result == u32::MAX {
-            let err = unsafe { GetLastError() };
-            unsafe {
-                let _ = TerminateProcess(process_handle.get(), u32::MAX);
-            }
-            return Err(WxcError::Process(format!("ResumeThread failed: {:?}", err)));
-        }
+        let (stdout_read, stderr_read) = match capture_reads {
+            Some((out, err)) => (Some(out), Some(err)),
+            None => (None, None),
+        };
 
-        // --- Wait for child process to exit ---
-        let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-
-        let wait_result = unsafe { WaitForSingleObject(process_handle.get(), timeout_ms) };
-
-        match wait_result {
-            WAIT_OBJECT_0 => {}
-            WAIT_TIMEOUT => unsafe {
-                let _ = TerminateProcess(process_handle.get(), u32::MAX);
-                let _ = WaitForSingleObject(process_handle.get(), u32::MAX);
-            },
-            WAIT_FAILED => {
-                let err = unsafe { GetLastError() };
-                return Err(WxcError::Process(format!(
-                    "WaitForSingleObject failed: {:?}",
-                    err
-                )));
-            }
-            other => {
-                return Err(WxcError::Process(format!(
-                    "WaitForSingleObject returned unexpected value: {}",
-                    other.0
-                )));
-            }
-        }
-
-        // --- Get exit code ---
-        let mut exit_code: u32 = 0;
-        unsafe {
-            GetExitCodeProcess(process_handle.get(), &mut exit_code)
-                .map_err(|_| WxcError::Process("GetExitCodeProcess failed".into()))?;
-        }
-
-        Ok(ScriptResponse {
-            exit_code: exit_code as i32,
-            standard_out: String::new(),
-            standard_err: String::new(),
-            error_message: String::new(),
-            ..Default::default()
+        // The child is still suspended; the caller resumes it (after starting
+        // any drain threads, for the run-to-completion path).
+        Ok(SpawnedChild {
+            process: process_handle,
+            thread: thread_handle,
+            job,
+            pid: pi.dwProcessId,
+            stdin_write: captured_stdin_write,
+            stdout_read,
+            stderr_read,
+            timeout_ms: get_timeout_milliseconds(request.script_timeout),
         })
     }
 
@@ -895,158 +923,44 @@ impl AppContainerScriptRunner {
         }
         unsafe { string_util::sid_to_string(self.app_container_sid.0, "unknown-sid") }
     }
+}
 
-    /// Execute the script inside the AppContainer, converting errors to ScriptResponse.
-    fn run_internal(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        match self.run_internal_impl(request, logger) {
-            Ok(response) => response,
-            Err(e) => ScriptResponse::error(&e.to_string()),
+/// A sandboxed AppContainer child created **suspended** by
+/// [`AppContainerScriptRunner::spawn_suspended`]. The caller resumes it and
+/// then either runs it to completion (blocking) or wraps it in a streaming
+/// handle. Owns the process/thread/job handles and the parent-side pipe ends.
+struct SpawnedChild {
+    process: OwnedHandle,
+    thread: OwnedHandle,
+    job: UiJobObject,
+    /// OS process id of the child.
+    pid: u32,
+    /// Parent's stdin write-end (Some only when spawned for streaming).
+    stdin_write: Option<OwnedHandle>,
+    /// Parent's stdout/stderr read-ends (Some only in streaming mode).
+    stdout_read: Option<OwnedHandle>,
+    stderr_read: Option<OwnedHandle>,
+    timeout_ms: u32,
+}
+
+impl SpawnedChild {
+    /// Resume the suspended child, terminating it on failure.
+    fn resume(&self) -> Result<(), WxcError> {
+        let r = unsafe { ResumeThread(self.thread.get()) };
+        if r == u32::MAX {
+            let err = unsafe { GetLastError() };
+            unsafe {
+                let _ = TerminateProcess(self.process.get(), u32::MAX);
+            }
+            return Err(WxcError::Process(format!("ResumeThread failed: {:?}", err)));
         }
+        Ok(())
     }
 }
 
 impl Default for AppContainerScriptRunner {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl ScriptRunner for AppContainerScriptRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
-            return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        Ok(())
-    }
-
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        use crate::filesystem_bfs::FileSystemBfsManager;
-        use crate::launch_diagnostics::diagnose_process_exit;
-        use crate::network_manager::NetworkManager;
-        use wxc_common::models::FailurePhase;
-
-        // Apply experimental features when flag is set
-        if request.experimental_enabled {
-            if let Some(ref test) = request.experimental.test {
-                logger.log_line(&format!(
-                    "Experimental feature 'test' applied: {}",
-                    test.message
-                ));
-            }
-        }
-
-        if let Err(e) = self.initialize(request) {
-            return ScriptResponse::error(&e.to_string());
-        }
-
-        let principal_id = self.get_principal_id();
-        logger.log_line(&format!("AppContainerSID: {principal_id}"));
-
-        // Resolve `bfscfg.exe` by absolute path so probe and execution
-        // agree on the binary — defeats executable-search-order
-        // hijacking (see `fallback_detector::find_bfscfg_exe`). Only
-        // resolve when we actually plan to use BFS; Tier 3 (DACL) hosts
-        // legitimately may not have `bfscfg.exe` installed.
-        let bfscfg_path = if self.filesystem_mode == FilesystemMode::Bfs {
-            match crate::fallback_detector::find_bfscfg_exe() {
-                Ok(p) => p,
-                Err(e) => return ScriptResponse::error(&e.to_string()),
-            }
-        } else {
-            None
-        };
-
-        let mut bfs_manager =
-            FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
-        if self.filesystem_mode == FilesystemMode::Bfs {
-            if let Err(e) = bfs_manager.configure(&request.policy, logger) {
-                let msg = if matches!(&e, WxcError::BfsNotAvailable)
-                    && request.schema_version.starts_with("0.4.0")
-                {
-                    format!(
-                        "Filesystem policy error: bfscfg.exe is not available on this Windows build. \
-                         Your config uses schema version '{}', which requires BFS support. \
-                         Either update your Windows build to one that includes bfscfg.exe, \
-                         or update your config to schema version '0.6.0-alpha' or later \
-                         (which uses the BaseContainer backend and does not require bfscfg.exe).",
-                        request.schema_version
-                    )
-                } else {
-                    e.to_string()
-                };
-                return ScriptResponse::error(&msg);
-            }
-        }
-
-        if request.policy.network_proxy.is_enabled() {
-            logger.log_line(
-                "warning: proxy support on Windows is best-effort -- only scripts that use \
-                 the WinHTTP stack will be proxied; other HTTP stacks may bypass it. The \
-                 AppContainer backend may also surface a UAC prompt.",
-            );
-        }
-
-        let mut network_manager = NetworkManager::new();
-        match network_manager.start(
-            &principal_id,
-            &self.app_container_name,
-            &request.policy,
-            self.app_container_sid,
-            logger,
-        ) {
-            Ok(()) => {
-                self.proxy_address = network_manager.proxy_address().cloned();
-            }
-            Err(err) => {
-                return ScriptResponse::error(&err.to_string());
-            }
-        }
-
-        let mut response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.run_internal(request, logger)
-        })) {
-            Ok(r) => r,
-            Err(_) => ScriptResponse::error("Unknown error during script execution."),
-        };
-
-        // Post-failure diagnostics: if the child failed, check for known
-        // environment issues and enrich the error message.
-        if response.exit_code != 0 {
-            response.failure_phase = FailurePhase::ProcessExited;
-            if let Some(diag) = diagnose_process_exit(
-                &request.script_code,
-                &request.policy.readonly_paths,
-                &request.policy.readwrite_paths,
-                response.exit_code as u32,
-            ) {
-                logger.log_line(&format!(
-                    "Error: Launch diagnostic [{}]: {}",
-                    diag.kind, diag.message
-                ));
-                if !response.error_message.is_empty() {
-                    response.extended_error = response.error_message.clone();
-                }
-                response.error_message = diag.message.clone();
-                response.standard_err.push_str(&diag.message);
-            }
-        }
-
-        network_manager.stop_all(!request.lifecycle.preserve_policy, logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
-            && bfs_manager.configured()
-            && !request.lifecycle.preserve_policy
-        {
-            bfs_manager.remove_configuration(logger);
-        }
-
-        response
     }
 }
 
@@ -1091,6 +1005,379 @@ impl Drop for AppContainerScriptRunner {
             }
             self.app_container_sid = PSID(ptr::null_mut());
         }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Shared setup/teardown + streaming (handle-based) execution
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Per-run resources (firewall + filesystem policy) whose lifetime is tied to
+/// the sandboxed child. Created by [`AppContainerScriptRunner::prepare`] and
+/// torn down by [`AppContainerScriptRunner::teardown`] after the child exits.
+struct Prepared {
+    network_manager: crate::network_manager::NetworkManager,
+    bfs_manager: crate::filesystem_bfs::FileSystemBfsManager,
+}
+
+impl AppContainerScriptRunner {
+    /// Set up the AppContainer for a run: initialise the SID, configure BFS
+    /// filesystem policy, and start network enforcement. Shared by both stdio
+    /// modes of [`SandboxBackend::spawn`].
+    fn prepare(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<Prepared, ScriptResponse> {
+        use crate::filesystem_bfs::FileSystemBfsManager;
+        use crate::network_manager::NetworkManager;
+
+        if request.experimental_enabled {
+            if let Some(ref test) = request.experimental.test {
+                logger.log_line(&format!(
+                    "Experimental feature 'test' applied: {}",
+                    test.message
+                ));
+            }
+        }
+
+        if let Err(e) = self.initialize(request) {
+            return Err(ScriptResponse::error(&e.to_string()));
+        }
+
+        let principal_id = self.get_principal_id();
+        logger.log_line(&format!("AppContainerSID: {principal_id}"));
+
+        // Resolve `bfscfg.exe` by absolute path (defeats search-order
+        // hijacking); only needed in BFS mode.
+        let bfscfg_path = if self.filesystem_mode == FilesystemMode::Bfs {
+            match crate::fallback_detector::find_bfscfg_exe() {
+                Ok(p) => p,
+                Err(e) => return Err(ScriptResponse::error(&e.to_string())),
+            }
+        } else {
+            None
+        };
+
+        let mut bfs_manager =
+            FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
+        if self.filesystem_mode == FilesystemMode::Bfs {
+            if let Err(e) = bfs_manager.configure(&request.policy, logger) {
+                let msg = if matches!(&e, WxcError::BfsNotAvailable)
+                    && request.schema_version.starts_with("0.4.0")
+                {
+                    format!(
+                        "Filesystem policy error: bfscfg.exe is not available on this Windows build. \
+                         Your config uses schema version '{}', which requires BFS support. \
+                         Either update your Windows build to one that includes bfscfg.exe, \
+                         or update your config to schema version '0.6.0-alpha' or later \
+                         (which uses the BaseContainer backend and does not require bfscfg.exe).",
+                        request.schema_version
+                    )
+                } else {
+                    e.to_string()
+                };
+                return Err(ScriptResponse::error(&msg));
+            }
+        }
+
+        if request.policy.network_proxy.is_enabled() {
+            logger.log_line(
+                "warning: proxy support on Windows is best-effort -- only scripts that use \
+                 the WinHTTP stack will be proxied; other HTTP stacks may bypass it. The \
+                 AppContainer backend may also surface a UAC prompt.",
+            );
+        }
+
+        let mut network_manager = NetworkManager::new();
+        match network_manager.start(
+            &principal_id,
+            &self.app_container_name,
+            &request.policy,
+            self.app_container_sid,
+            logger,
+        ) {
+            Ok(()) => {
+                self.proxy_address = network_manager.proxy_address().cloned();
+            }
+            Err(err) => {
+                return Err(ScriptResponse::error(&err.to_string()));
+            }
+        }
+
+        Ok(Prepared {
+            network_manager,
+            bfs_manager,
+        })
+    }
+
+    /// Tear down the per-run firewall and filesystem policy. Idempotent at the
+    /// manager level; called once after the child exits.
+    fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
+        prepared.network_manager.stop_all(!preserve_policy, logger);
+        if self.filesystem_mode == FilesystemMode::Bfs
+            && prepared.bfs_manager.configured()
+            && !preserve_policy
+        {
+            prepared.bfs_manager.remove_configuration(logger);
+        }
+    }
+}
+
+impl SandboxBackend for AppContainerScriptRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
+            return Err(ScriptResponse::error(
+                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        Ok(())
+    }
+
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        use wxc_common::validator::validate_common;
+
+        validate_common(request)?;
+        self.validate(request)?;
+
+        let mut prepared = self.prepare(request, logger)?;
+
+        // Pipes → capture pipes the caller drives; Inherit → the child inherits
+        // the binary's own std handles / console (a TTY when the binary has one).
+        let capture = stdio == StdioMode::Pipes;
+        let child = match self.spawn_suspended(request, logger, capture) {
+            Ok(c) => c,
+            Err(e) => {
+                self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
+                return Err(ScriptResponse::error(&e.to_string()));
+            }
+        };
+        if let Err(e) = child.resume() {
+            self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
+            return Err(ScriptResponse::error(&e.to_string()));
+        }
+
+        Ok(Box::new(AppContainerSandboxProcess::new(
+            child,
+            prepared,
+            self.filesystem_mode,
+            request,
+        )))
+    }
+
+    fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
+        crate::launch_diagnostics::diagnose_process_exit(
+            &request.script_code,
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+            exit_code as u32,
+        )
+        .map(|diag| diag.message)
+    }
+}
+
+/// A running AppContainer-sandboxed process exposed as a [`SandboxProcess`].
+/// Owns the process/job handles, the parent-side pipes, and the per-run
+/// firewall/filesystem policy, which it tears down once the child exits.
+struct AppContainerSandboxProcess {
+    process: SendOwnedHandle,
+    _thread: SendOwnedHandle,
+    job: crate::job_object::UiJobObject,
+    pid: u32,
+    stdin: Option<PipeWriter>,
+    stdout: Option<InterruptiblePipeReader>,
+    stderr: Option<InterruptiblePipeReader>,
+    /// Cancellers for the stdout/stderr reads, kept so the `SandboxProcess`
+    /// closers can mint a [`StreamCloser`] even after the stream is taken.
+    stdout_canceller: Option<PipeReadCanceller>,
+    stderr_canceller: Option<PipeReadCanceller>,
+    prepared: Prepared,
+    filesystem_mode: FilesystemMode,
+    preserve_policy: bool,
+    timeout_ms: u32,
+    teardown_done: bool,
+}
+
+// SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
+// strings. HANDLEs are process-global and safe to use from any single thread,
+// and this handle is owned exclusively by the caller (not shared), so it is
+// only ever touched from one thread at a time.
+//
+// The one historically thread-affine field was the `NetworkManager` inside
+// `prepared`: it used to cache an STA `INetFwPolicy2` interface plus its
+// `CoInitializeEx` state and reuse them at teardown, which is unsound when
+// `wait()`/`kill()`/`Drop` run on a different thread (e.g. a tokio
+// `spawn_blocking` worker) than `spawn`. That no longer happens: each firewall
+// apply/remove is apartment-self-contained (it opens its own COM apartment,
+// creates a fresh interface, and uninitializes — all on whichever thread runs
+// it), so no COM interface or apartment state is moved across threads. The only
+// remaining OS state the manager keeps is the process-global Winsock refcount,
+// which is thread-agnostic. Moving this handle across threads is therefore
+// sound.
+unsafe impl Send for AppContainerSandboxProcess {}
+
+impl AppContainerSandboxProcess {
+    fn new(
+        mut child: SpawnedChild,
+        prepared: Prepared,
+        filesystem_mode: FilesystemMode,
+        request: &ExecutionRequest,
+    ) -> Self {
+        let process = SendOwnedHandle::take(&mut child.process);
+        let thread = SendOwnedHandle::take(&mut child.thread);
+        let stdin = child.stdin_write.take().map(PipeWriter::new);
+        let stdout = child.stdout_read.take().map(InterruptiblePipeReader::new);
+        let stderr = child.stderr_read.take().map(InterruptiblePipeReader::new);
+        let stdout_canceller = stdout.as_ref().map(InterruptiblePipeReader::canceller);
+        let stderr_canceller = stderr.as_ref().map(InterruptiblePipeReader::canceller);
+        Self {
+            process,
+            _thread: thread,
+            job: child.job,
+            pid: child.pid,
+            stdin,
+            stdout,
+            stderr,
+            stdout_canceller,
+            stderr_canceller,
+            prepared,
+            filesystem_mode,
+            preserve_policy: request.lifecycle.preserve_policy,
+            timeout_ms: child.timeout_ms,
+            teardown_done: false,
+        }
+    }
+
+    fn run_teardown(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+        self.teardown_done = true;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        self.prepared
+            .network_manager
+            .stop_all(!self.preserve_policy, &mut logger);
+        if self.filesystem_mode == FilesystemMode::Bfs
+            && self.prepared.bfs_manager.configured()
+            && !self.preserve_policy
+        {
+            self.prepared.bfs_manager.remove_configuration(&mut logger);
+        }
+    }
+}
+
+impl SandboxProcess for AppContainerSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        take_boxed_write(&mut self.stdin)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.stdout)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stderr_canceller)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        match unsafe { WaitForSingleObject(self.process.get(), 0) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = 0;
+                if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
+                    return Err(std::io::Error::other("GetExitCodeProcess failed"));
+                }
+                Ok(Some(code as i32))
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // Terminate the whole job: the child and every descendant assigned to
+        // it die together (tree-kill).
+        self.job.terminate(u32::MAX);
+        Ok(())
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        // Close our copy of any not-taken stdin so the child sees EOF and can
+        // exit reliably (an interactive command would otherwise block waiting
+        // for input).
+        self.stdin.take();
+
+        // Drain (and discard) any not-taken streams concurrently to avoid the
+        // child blocking on a full pipe buffer.
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
+
+        let result = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = 0;
+                if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
+                    Err(std::io::Error::other("GetExitCodeProcess failed"))
+                } else {
+                    Ok(code as i32)
+                }
+            }
+            WAIT_TIMEOUT => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("script timed out after {}ms", self.timeout_ms),
+            )),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
+        };
+
+        // Tree-kill the job so any backgrounded descendant dies *before*
+        // `run_teardown()` removes the firewall / BFS enforcement (keyed to the
+        // shared AppContainer package SID) — upholding the same invariant as
+        // `Drop`. The foreground child has already exited on the success path; on
+        // a timeout or wait failure this also terminates it. Then reap the root
+        // (immediate once it has exited) before releasing the pipe drains — and
+        // killing the tree closes the descendant's pipe write-ends, so the drains
+        // can finish.
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
+        cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
+        cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
+        self.run_teardown();
+        result
+    }
+}
+
+impl Drop for AppContainerSandboxProcess {
+    fn drop(&mut self) {
+        // Kill the tree and reap before tearing down firewall/filesystem
+        // policy, so an abandoned-but-running sandbox cannot outlive its
+        // enforcement (or leak as an orphan). `kill()` terminates the job.
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
+        self.run_teardown();
     }
 }
 
@@ -1272,7 +1559,7 @@ mod tests {
 
     use super::{AppContainerScriptRunner, FilesystemMode};
     use wxc_common::models::ExecutionRequest;
-    use wxc_common::script_runner::ScriptRunner;
+    use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
     fn validate_runner_rejects_denied_paths_in_bfs_mode() {
@@ -1281,7 +1568,7 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("BFS mode must reject deniedPaths");
         assert!(
             err.error_message.contains("deniedPaths"),
@@ -1297,7 +1584,7 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         assert!(
-            runner.validate_runner(&request).is_ok(),
+            runner.validate(&request).is_ok(),
             "DACL mode supports deniedPaths and should not error"
         );
     }
@@ -1309,7 +1596,7 @@ mod tests {
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("allowedHosts is not yet supported");
         assert!(err.error_message.contains("allowedHosts"));
     }
@@ -1321,7 +1608,7 @@ mod tests {
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
     }
@@ -1330,6 +1617,6 @@ mod tests {
     fn validate_runner_accepts_empty_policy() {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
-        assert!(runner.validate_runner(&request).is_ok());
+        assert!(runner.validate(&request).is_ok());
     }
 }

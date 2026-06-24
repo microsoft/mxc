@@ -125,8 +125,9 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     use seatbelt_common::seatbelt_runner::SeatbeltScriptRunner;
+    use wxc_common::sandbox_process::Runner;
 
-    let mut runner = SeatbeltScriptRunner::new();
+    let mut runner = Runner::new(SeatbeltScriptRunner::new());
     let run_start = Instant::now();
     let response = runner.run(request, logger);
     let run_elapsed = run_start.elapsed();

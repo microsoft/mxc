@@ -16,7 +16,7 @@ use std::ptr;
 
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
-    HANDLE_FLAG_INHERIT, WAIT_FAILED, WAIT_TIMEOUT,
+    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -30,6 +30,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::PCWSTR;
 
+use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
     is_environment_not_supported,
@@ -48,10 +49,20 @@ use wxc_common::models::{
     ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
     ScriptResponse,
 };
-use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use wxc_common::process_util::{
+    create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
+    SendOwnedHandle,
+};
+use wxc_common::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+};
+use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
 
-use windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
+use windows::Win32::System::Threading::{
+    ResumeThread, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+};
 
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
@@ -101,7 +112,7 @@ const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
-pub(crate) fn is_api_not_implemented(err: u32) -> bool {
+fn is_api_not_implemented(err: u32) -> bool {
     err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
 }
 
@@ -532,50 +543,22 @@ impl BaseContainerRunner {
     }
 }
 
-impl ScriptRunner for BaseContainerRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        Self::is_base_container_api_present().map_err(|e| {
-            let hint = if !request.experimental_enabled {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: Config schema version '{}' requires the BaseContainer backend, \
-                     but this OS build does not support it. \
-                     Use schema version '0.4.0-alpha' to fall back to AppContainer.",
-                    request.schema_version
-                )
-            } else {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: --experimental requested BaseContainer, but this OS build \
-                     does not support it. Remove --experimental to use the AppContainer \
-                     backend, or use an OS build with BaseContainer support."
-                )
-            };
-            ScriptResponse {
-                // Symbol absent: report BackendUnavailable, not a hard error.
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(&hint)
-            }
-        })
-    }
-
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+impl BaseContainerRunner {
+    /// Set up and launch the BaseContainer child, returning a [`BaseChild`] the
+    /// caller runs to completion (blocking) or wraps in a streaming handle. When
+    /// `capture` is set the child's stdio is wired to pipes the caller drives
+    /// (the streaming path); otherwise the child inherits the parent's std
+    /// handles / console (the run-to-completion path).
+    fn spawn_base(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        capture: bool,
+    ) -> Result<BaseChild, ScriptResponse> {
         let _ = writeln!(
             logger,
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
         );
-
-        let run_start = std::time::Instant::now();
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
@@ -586,9 +569,9 @@ impl ScriptRunner for BaseContainerRunner {
                     request.policy.network_proxy.address = Some(addr);
                 }
                 Err(e) => {
-                    return ScriptResponse::error(&format!(
+                    return Err(ScriptResponse::error(&format!(
                         "Failed to start builtin test proxy: {e}"
-                    ));
+                    )));
                 }
             }
         }
@@ -626,7 +609,7 @@ impl ScriptRunner for BaseContainerRunner {
         // 2. Dynamically load the API from processmodel.dll.
         let create_process_in_sandbox = match Self::load_api() {
             Ok(f) => f,
-            Err(e) => return ScriptResponse::error(&e),
+            Err(e) => return Err(ScriptResponse::error(&e)),
         };
         let _ = writeln!(
             logger,
@@ -714,60 +697,123 @@ impl ScriptRunner for BaseContainerRunner {
         // If wxc-exec's stdout or stderr is not a terminal (i.e., piped by the SDK),
         // we forward our own std handles to the child via STARTF_USESTDHANDLES so the
         // child's output streams directly to the SDK in real time.
-        let pipe_mode = !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
+        //
+        // In capture mode (`StdioMode::Pipes`) we always take the pipe
+        // path and wire the child to capture pipes that the streaming handle
+        // reads from.
+        let pipe_mode =
+            capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
 
         if pipe_mode {
-            let _ = writeln!(
-                logger,
-                "STDIO mode: passthrough (forwarding parent handles to child)"
-            );
+            if capture {
+                let _ = writeln!(
+                    logger,
+                    "STDIO mode: capture (piping child output to the streaming handle)"
+                );
+            } else {
+                let _ = writeln!(
+                    logger,
+                    "STDIO mode: passthrough (forwarding parent handles to child)"
+                );
+            }
         }
 
-        // --- Retrieve parent std handles for passthrough (pipe mode only) ---
+        // --- Retrieve / create std handles (pipe mode only) ---
         let mut h_stdin = HANDLE::default();
         let mut h_stdout = HANDLE::default();
         let mut h_stderr = HANDLE::default();
 
+        // Capture pipe read-ends (parent side) kept alive until after the wait;
+        // child-side ends kept alive until after process creation.
+        let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
+        let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
+        // Parent's stdin write-end; in capture mode it is handed to the caller
+        // so they can write to the child.
+        let mut captured_stdin_write: Option<OwnedHandle> = None;
+
         if pipe_mode {
-            h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
-                Ok(h) => h,
-                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")),
-            };
-            h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
-                Ok(h) => h,
-                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")),
-            };
-            h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
-                Ok(h) => h,
-                Err(e) => return ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")),
-            };
+            if capture {
+                let (stdin_read, stdin_write) = match create_std_pipes(false) {
+                    Ok(p) => p,
+                    Err(e) => return Err(ScriptResponse::error(&format!("stdin pipe: {e}"))),
+                };
+                let (stdout_read, stdout_write) = match create_std_pipes(true) {
+                    Ok(p) => p,
+                    Err(e) => return Err(ScriptResponse::error(&format!("stdout pipe: {e}"))),
+                };
+                let (stderr_read, stderr_write) = match create_std_pipes(true) {
+                    Ok(p) => p,
+                    Err(e) => return Err(ScriptResponse::error(&format!("stderr pipe: {e}"))),
+                };
 
-            if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
-                return ScriptResponse::error("GetStdHandle(STDIN) returned null/invalid handle");
-            }
-            if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
-                return ScriptResponse::error("GetStdHandle(STDOUT) returned null/invalid handle");
-            }
-            if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
-                return ScriptResponse::error("GetStdHandle(STDERR) returned null/invalid handle");
-            }
+                h_stdin = stdin_read.get();
+                h_stdout = stdout_write.get();
+                h_stderr = stderr_write.get();
 
-            // Ensure the handles are inheritable.
-            unsafe {
-                if let Err(e) =
-                    SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                {
-                    return ScriptResponse::error(&format!("SetHandleInformation(STDIN): {e}"));
+                capture_child_ends.push(stdin_read);
+                capture_child_ends.push(stdout_write);
+                capture_child_ends.push(stderr_write);
+                captured_stdin_write = Some(stdin_write);
+                capture_reads = Some((stdout_read, stderr_read));
+            } else {
+                h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")))
+                    }
+                };
+                h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")))
+                    }
+                };
+                h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")))
+                    }
+                };
+
+                if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
+                    return Err(ScriptResponse::error(
+                        "GetStdHandle(STDIN) returned null/invalid handle",
+                    ));
                 }
-                if let Err(e) =
-                    SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                {
-                    return ScriptResponse::error(&format!("SetHandleInformation(STDOUT): {e}"));
+                if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
+                    return Err(ScriptResponse::error(
+                        "GetStdHandle(STDOUT) returned null/invalid handle",
+                    ));
                 }
-                if let Err(e) =
-                    SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                {
-                    return ScriptResponse::error(&format!("SetHandleInformation(STDERR): {e}"));
+                if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
+                    return Err(ScriptResponse::error(
+                        "GetStdHandle(STDERR) returned null/invalid handle",
+                    ));
+                }
+
+                // Ensure the handles are inheritable.
+                unsafe {
+                    if let Err(e) =
+                        SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    {
+                        return Err(ScriptResponse::error(&format!(
+                            "SetHandleInformation(STDIN): {e}"
+                        )));
+                    }
+                    if let Err(e) =
+                        SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    {
+                        return Err(ScriptResponse::error(&format!(
+                            "SetHandleInformation(STDOUT): {e}"
+                        )));
+                    }
+                    if let Err(e) =
+                        SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+                    {
+                        return Err(ScriptResponse::error(&format!(
+                            "SetHandleInformation(STDERR): {e}"
+                        )));
+                    }
                 }
             }
         }
@@ -805,11 +851,17 @@ impl ScriptRunner for BaseContainerRunner {
             .as_ref()
             .map(|b| b.as_ptr() as *const c_void)
             .unwrap_or(ptr::null());
-        let creation_flags = if env_block.is_some() {
-            CREATE_UNICODE_ENVIRONMENT.0
-        } else {
-            0
-        };
+        // Create the child suspended so its main thread cannot spawn any
+        // descendant before we've assigned it to the job object below; it is
+        // resumed right after the assignment. If the sandbox create API ignores
+        // CREATE_SUSPENDED on a given build, the child starts running anyway and
+        // the later resume is a harmless no-op.
+        let creation_flags = CREATE_SUSPENDED.0
+            | if env_block.is_some() {
+                CREATE_UNICODE_ENVIRONMENT.0
+            } else {
+                0
+            };
 
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
@@ -829,13 +881,13 @@ impl ScriptRunner for BaseContainerRunner {
                 "Error: Pre-launch diagnostic [{}]: {}",
                 diag.kind, diag.message
             );
-            return ScriptResponse {
+            return Err(ScriptResponse {
                 exit_code: -1,
                 error_message: diag.message.clone(),
                 standard_err: diag.message,
                 failure_phase: FailurePhase::LaunchFailed,
                 ..Default::default()
-            };
+            });
         }
 
         // 4. Call Experimental_CreateProcessInSandbox.
@@ -902,9 +954,10 @@ impl ScriptRunner for BaseContainerRunner {
                     diag.kind, diag.message
                 );
 
-                // Retry without the environment block.
+                // Retry without the environment block, but keep the child
+                // suspended (resumed after job assignment).
                 current_env_ptr = ptr::null();
-                current_creation_flags = 0;
+                current_creation_flags = CREATE_SUSPENDED.0;
                 continue;
             }
 
@@ -960,107 +1013,405 @@ impl ScriptRunner for BaseContainerRunner {
                 FailurePhase::LaunchFailed
             };
 
-            return ScriptResponse {
+            return Err(ScriptResponse {
                 exit_code: -1,
                 error_message: diag.message.clone(),
                 standard_err: diag.message,
                 extended_error,
                 failure_phase,
                 ..Default::default()
-            };
+            });
         }
 
         let _ = writeln!(logger, "process created (PID: {})", pi.dwProcessId);
 
-        let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Wait for exit");
+        // Child has inherited the pipe handles; close the parent's child-side
+        // ends so the read-ends observe EOF when the child exits.
+        capture_child_ends.clear();
 
-        // 5. Wait for the child process to exit.
-        let timeout_ms = get_timeout_milliseconds(request.script_timeout);
-        let mut exit_code: u32 = u32::MAX;
+        let (stdout_read, stderr_read) = match capture_reads {
+            Some((out, err)) => (Some(out), Some(err)),
+            None => (None, None),
+        };
 
-        unsafe {
-            let wait_result = WaitForSingleObject(pi.hProcess, timeout_ms);
-            if wait_result == WAIT_FAILED {
-                let err = GetLastError();
-                let _ = CloseHandle(pi.hProcess);
-                let _ = CloseHandle(pi.hThread);
-                return ScriptResponse::error(&format!("WaitForSingleObject failed: {err:?}"));
-            } else if wait_result == WAIT_TIMEOUT {
-                let _ = writeln!(logger, "process timed out, terminating...");
-                let _ = TerminateProcess(pi.hProcess, u32::MAX);
-                let _ = WaitForSingleObject(pi.hProcess, 5000);
-            }
-
-            let _ = GetExitCodeProcess(pi.hProcess, &mut exit_code);
-
-            let _ = CloseHandle(pi.hProcess);
-            let _ = CloseHandle(pi.hThread);
-        }
-
-        let _ = writeln!(logger, "process exited with code {exit_code}");
-
-        // 6. Sandbox cleanup: delete AppContainer profile and tracking entry.
-        //    Deferred if a network proxy is configured (proxy state can't be cleaned up yet).
-        if request.lifecycle.destroy_on_exit {
-            run_sandbox_cleanup(
-                &identity,
-                &sid_string,
-                request.policy.network_proxy.is_enabled(),
-                logger,
-            );
-            // Unregister so a late Ctrl+C doesn't double-cleanup.
-            sandbox_tracking::unregister_ctrl_c_cleanup();
-        }
-
-        let _ = writeln!(
-            logger,
-            "{EMOJI_SECTION} SECTION: Done ({:.3}s)",
-            run_start.elapsed().as_secs_f64()
-        );
-
-        // Stop the builtin test proxy if it was started.
-        self.proxy_coordinator.stop(logger);
-
+        // Assign the child to a job object so the streaming handle's `kill()`
+        // (and the timeout / `Drop` paths) can tree-kill it — the child plus
+        // every descendant it spawns after assignment. This backend *is* a
+        // security boundary, so fail **closed**: if the job cannot be created
+        // or the process cannot be assigned, terminate the just-launched child
+        // and reject the spawn rather than run a sandbox that cannot be
+        // reliably torn down. (Previously this was best-effort: a failed
+        // assignment left `job = None`, after which `kill()`/timeout/`Drop`
+        // could only `TerminateProcess` the root and no descendant was
+        // tree-killed at all.)
         //
-        // Diagnose the application failure (FailurePhase::ProcessExited).
-        //
-        let (error_message, failure_phase) = if exit_code != 0 {
-            if let Some(diag) = diagnose_process_exit(
-                &request.script_code,
-                &request.policy.readonly_paths,
-                &request.policy.readwrite_paths,
-                exit_code,
-            ) {
+        // The child was created suspended (CREATE_SUSPENDED) and is resumed only
+        // after this assignment, so no descendant it spawns can escape the job.
+        // If the create API ignores CREATE_SUSPENDED on a given build the child
+        // is already running; it is a shell that has not yet run the user
+        // command, so the pre-assignment window is empty in practice and the
+        // later resume is a harmless no-op.
+        let job = match UiJobObject::new().and_then(|job| {
+            // Pass the raw handle — `assign_process` borrows it and does not
+            // take ownership. Wrapping it in a temporary `OwnedHandle` here
+            // would close `pi.hProcess` when the temporary dropped, leaving the
+            // owned handle on the `BaseChild` below pointing at a closed (and
+            // possibly reused) handle. Sole ownership stays with that field.
+            job.assign_process(pi.hProcess)?;
+            Ok(job)
+        }) {
+            Ok(job) => job,
+            Err(e) => {
                 let _ = writeln!(
                     logger,
-                    "Error: Launch diagnostic [{}]: {}",
-                    diag.kind, diag.message
+                    "Error: BaseContainer job-object setup failed ({e}); terminating \
+                     the child and failing closed — a sandbox that cannot be \
+                     tree-killed must not run."
                 );
-                (diag.message, FailurePhase::ProcessExited)
-            } else {
-                (String::new(), FailurePhase::ProcessExited)
+                // The child is already running and there is no job to tree-kill
+                // through, so terminate the root directly and reap it before
+                // tearing down sandbox / proxy state, upholding the same
+                // "enforcement never outlives a live child" invariant as the
+                // normal teardown paths.
+                unsafe {
+                    let _ = TerminateProcess(pi.hProcess, u32::MAX);
+                    let _ = WaitForSingleObject(pi.hProcess, u32::MAX);
+                    let _ = CloseHandle(pi.hProcess);
+                    let _ = CloseHandle(pi.hThread);
+                }
+                if request.lifecycle.destroy_on_exit {
+                    run_sandbox_cleanup(
+                        &identity,
+                        &sid_string,
+                        request.policy.network_proxy.is_enabled(),
+                        logger,
+                    );
+                    sandbox_tracking::unregister_ctrl_c_cleanup();
+                }
+                self.proxy_coordinator.stop(logger);
+
+                const JOB_SETUP_FAILED_MSG: &str =
+                    "BaseContainer sandbox could not be placed in a job object, so it \
+                     could not be reliably terminated; the launch was rejected to \
+                     avoid running an uncontainable sandbox.";
+                return Err(ScriptResponse {
+                    exit_code: -1,
+                    error_message: JOB_SETUP_FAILED_MSG.to_string(),
+                    standard_err: JOB_SETUP_FAILED_MSG.to_string(),
+                    extended_error: format!("BaseContainer job-object setup failed: {e}"),
+                    failure_phase: FailurePhase::LaunchFailed,
+                    ..Default::default()
+                });
             }
-        } else {
-            (String::new(), FailurePhase::None)
         };
 
-        // Merge diagnostic error into stderr field if present.
-        // In passthrough mode, stdout/stderr already went directly to the SDK caller,
-        // so standard_out/standard_err in ScriptResponse will be empty.
-        let final_stderr = if error_message.is_empty() {
-            String::new()
-        } else {
-            error_message.clone()
-        };
-
-        ScriptResponse {
-            exit_code: exit_code as i32,
-            standard_out: String::new(),
-            standard_err: final_stderr,
-            error_message,
-            failure_phase,
-            ..Default::default()
+        // The child was created suspended; now that it is in the job object (so
+        // every descendant it spawns is captured), resume its main thread. If the
+        // create API ignored CREATE_SUSPENDED the thread is already running and
+        // this is a harmless no-op.
+        // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
+        // handle; `ResumeThread` only adjusts its suspend count.
+        unsafe {
+            ResumeThread(pi.hThread);
         }
+
+        // Hand ownership to the caller via `BaseChild`, which performs
+        // sandbox/proxy teardown after the child exits. `job` is always present
+        // here (we failed closed above); the `Option` and the root-only fallback
+        // in `kill()` remain purely as defense-in-depth.
+        Ok(BaseChild {
+            process: OwnedHandle::new(pi.hProcess),
+            thread: OwnedHandle::new(pi.hThread),
+            pid: pi.dwProcessId,
+            job: Some(job),
+            stdin_write: captured_stdin_write,
+            stdout_read,
+            stderr_read,
+            timeout_ms: get_timeout_milliseconds(request.script_timeout),
+            destroy_on_exit: request.lifecycle.destroy_on_exit,
+            proxy_enabled: request.policy.network_proxy.is_enabled(),
+            identity,
+            sid_string,
+            proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
+        })
+    }
+}
+
+/// A BaseContainer child launched by [`BaseContainerRunner::spawn_base`]. The
+/// child runs immediately (no suspend); this owns the process handle, the
+/// parent-side pipe ends, and the per-run proxy/sandbox state it tears down
+/// once the child exits.
+struct BaseChild {
+    process: OwnedHandle,
+    thread: OwnedHandle,
+    pid: u32,
+    /// Job object the child is assigned to, used to tree-kill it. Always
+    /// `Some` on a successfully spawned child (`spawn_base` fails closed when
+    /// the job cannot be set up); the `Option` is retained so `kill()` can keep
+    /// a root-only fallback as defense-in-depth.
+    job: Option<UiJobObject>,
+    stdin_write: Option<OwnedHandle>,
+    stdout_read: Option<OwnedHandle>,
+    stderr_read: Option<OwnedHandle>,
+    timeout_ms: u32,
+    destroy_on_exit: bool,
+    proxy_enabled: bool,
+    identity: String,
+    sid_string: String,
+    proxy_coordinator: ProxyCoordinator,
+}
+
+impl SandboxBackend for BaseContainerRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if !request.policy.denied_paths.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        Self::is_base_container_api_present().map_err(|e| {
+            let hint = if !request.experimental_enabled {
+                format!(
+                    "BaseContainer API unavailable: {e}\n\
+                     Hint: Config schema version '{}' requires the BaseContainer backend, \
+                     but this OS build does not support it. \
+                     Use schema version '0.4.0-alpha' to fall back to AppContainer.",
+                    request.schema_version
+                )
+            } else {
+                format!(
+                    "BaseContainer API unavailable: {e}\n\
+                     Hint: --experimental requested BaseContainer, but this OS build \
+                     does not support it. Remove --experimental to use the AppContainer \
+                     backend, or use an OS build with BaseContainer support."
+                )
+            };
+            ScriptResponse {
+                // Symbol absent: report BackendUnavailable, not a hard error.
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&hint)
+            }
+        })
+    }
+
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        use wxc_common::validator::validate_common;
+
+        validate_common(request)?;
+        self.validate(request)?;
+
+        // Pipes → capture pipes the caller drives; Inherit → the child inherits
+        // the binary's own std handles / console (a TTY when the binary has one).
+        let capture = stdio == StdioMode::Pipes;
+        let child = self.spawn_base(request, logger, capture)?;
+        Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
+    }
+
+    fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
+        diagnose_process_exit(
+            &request.script_code,
+            &request.policy.readonly_paths,
+            &request.policy.readwrite_paths,
+            exit_code as u32,
+        )
+        .map(|diag| diag.message)
+    }
+}
+
+/// A running BaseContainer-sandboxed process exposed as a [`SandboxProcess`].
+/// Owns the process handle, the parent-side pipes, and the per-run proxy /
+/// sandbox state, which it tears down once the child exits.
+struct BaseContainerSandboxProcess {
+    process: SendOwnedHandle,
+    _thread: SendOwnedHandle,
+    job: Option<UiJobObject>,
+    pid: u32,
+    stdin: Option<PipeWriter>,
+    stdout: Option<InterruptiblePipeReader>,
+    stderr: Option<InterruptiblePipeReader>,
+    /// Cancellers for the stdout/stderr reads, kept so the `SandboxProcess`
+    /// closers can mint a [`StreamCloser`] even after the stream is taken.
+    stdout_canceller: Option<PipeReadCanceller>,
+    stderr_canceller: Option<PipeReadCanceller>,
+    timeout_ms: u32,
+    destroy_on_exit: bool,
+    proxy_enabled: bool,
+    identity: String,
+    sid_string: String,
+    proxy_coordinator: ProxyCoordinator,
+    teardown_done: bool,
+}
+
+// SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
+// strings. HANDLEs are process-global and safe to use from any single thread;
+// this handle is owned exclusively by the caller, so moving it across threads
+// is sound.
+unsafe impl Send for BaseContainerSandboxProcess {}
+
+impl BaseContainerSandboxProcess {
+    fn from_child(mut child: BaseChild) -> Self {
+        let process = SendOwnedHandle::take(&mut child.process);
+        let thread = SendOwnedHandle::take(&mut child.thread);
+        let stdin = child.stdin_write.take().map(PipeWriter::new);
+        let stdout = child.stdout_read.take().map(InterruptiblePipeReader::new);
+        let stderr = child.stderr_read.take().map(InterruptiblePipeReader::new);
+        let stdout_canceller = stdout.as_ref().map(InterruptiblePipeReader::canceller);
+        let stderr_canceller = stderr.as_ref().map(InterruptiblePipeReader::canceller);
+        Self {
+            process,
+            _thread: thread,
+            job: child.job.take(),
+            pid: child.pid,
+            stdin,
+            stdout,
+            stderr,
+            stdout_canceller,
+            stderr_canceller,
+            timeout_ms: child.timeout_ms,
+            destroy_on_exit: child.destroy_on_exit,
+            proxy_enabled: child.proxy_enabled,
+            identity: std::mem::take(&mut child.identity),
+            sid_string: std::mem::take(&mut child.sid_string),
+            proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
+            teardown_done: false,
+        }
+    }
+
+    fn run_teardown(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+        self.teardown_done = true;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        if self.destroy_on_exit {
+            run_sandbox_cleanup(
+                &self.identity,
+                &self.sid_string,
+                self.proxy_enabled,
+                &mut logger,
+            );
+            sandbox_tracking::unregister_ctrl_c_cleanup();
+        }
+        self.proxy_coordinator.stop(&mut logger);
+    }
+}
+
+impl SandboxProcess for BaseContainerSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        take_boxed_write(&mut self.stdin)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.stdout)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stderr_canceller)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        match unsafe { WaitForSingleObject(self.process.get(), 0) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = 0;
+                if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
+                    return Err(std::io::Error::other("GetExitCodeProcess failed"));
+                }
+                Ok(Some(code as i32))
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // Tree-kill via the job object when the child was successfully assigned
+        // to one; otherwise fall back to terminating the root process.
+        if let Some(job) = &self.job {
+            job.terminate(u32::MAX);
+        } else {
+            unsafe {
+                let _ = TerminateProcess(self.process.get(), u32::MAX);
+            }
+        }
+        Ok(())
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        // Close our copy of any not-taken stdin so the child sees EOF and can
+        // exit reliably (an interactive command would otherwise block waiting
+        // for input).
+        self.stdin.take();
+
+        // Drain (and discard) any not-taken streams concurrently to avoid the
+        // child blocking on a full pipe buffer.
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
+
+        let result = match unsafe { WaitForSingleObject(self.process.get(), self.timeout_ms) } {
+            WAIT_OBJECT_0 => {
+                let mut code: u32 = 0;
+                if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
+                    Err(std::io::Error::other("GetExitCodeProcess failed"))
+                } else {
+                    Ok(code as i32)
+                }
+            }
+            WAIT_TIMEOUT => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("script timed out after {}ms", self.timeout_ms),
+            )),
+            _ => Err(std::io::Error::other("WaitForSingleObject failed")),
+        };
+
+        // Tree-kill (the job when assigned, else the root) so any backgrounded
+        // descendant dies *before* `run_teardown()` stops the proxy / sandbox
+        // enforcement — upholding the same invariant as `Drop`. The foreground
+        // child has already exited on the success path; on a timeout or wait
+        // failure this also terminates it. Then reap the root before releasing
+        // the pipe drains — and killing the tree closes the descendant's pipe
+        // write-ends, so the drains can finish.
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
+        cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
+        cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
+        self.run_teardown();
+        result
+    }
+}
+
+impl Drop for BaseContainerSandboxProcess {
+    fn drop(&mut self) {
+        // Kill and reap before tearing down proxy / sandbox state, so an
+        // abandoned-but-running sandbox cannot outlive its enforcement (or
+        // leak as an orphan).
+        let _ = self.kill();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
+        self.run_teardown();
     }
 }
 
@@ -1319,7 +1670,7 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
-    use wxc_common::script_runner::ScriptRunner;
+    use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
     fn validate_runner_rejects_denied_paths() {
@@ -1328,7 +1679,7 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("BaseContainer does not yet support deniedPaths");
         assert!(
             err.error_message.contains("deniedPaths"),
@@ -1344,7 +1695,7 @@ mod tests {
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("allowedHosts is not yet supported");
         assert!(err.error_message.contains("allowedHosts"));
     }
@@ -1356,7 +1707,7 @@ mod tests {
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
-            .validate_runner(&request)
+            .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
     }
@@ -1370,7 +1721,7 @@ mod tests {
         // the policy-field checks above don't fire. Skip when the host doesn't
         // expose the API.
         if BaseContainerRunner::is_base_container_api_present().is_ok() {
-            assert!(runner.validate_runner(&request).is_ok());
+            assert!(runner.validate(&request).is_ok());
         }
     }
 }

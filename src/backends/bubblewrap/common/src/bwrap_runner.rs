@@ -26,19 +26,23 @@
 //! without root.
 
 use std::fmt::Write as FmtWrite;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::time::Duration;
 
 use lxc_common::network_iptables::NetworkIptablesManager;
+use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
-use wxc_common::script_runner::ScriptRunner;
+use wxc_common::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
+    take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    WaitError,
+};
+use wxc_common::validator::validate_common;
 
 use crate::bwrap_command;
-
-/// Polling interval for timeout enforcement.
-const POLL_INTERVAL_MS: u64 = 500;
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -62,8 +66,8 @@ impl BubblewrapScriptRunner {
     }
 }
 
-impl ScriptRunner for BubblewrapScriptRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+impl SandboxBackend for BubblewrapScriptRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
@@ -85,14 +89,6 @@ impl ScriptRunner for BubblewrapScriptRunner {
             ));
         }
 
-        // Reject timeouts smaller than our polling interval.
-        if request.script_timeout > 0 && u64::from(request.script_timeout) < POLL_INTERVAL_MS {
-            return Err(ScriptResponse::error(&format!(
-                "script_timeout {}ms is below the minimum of {}ms",
-                request.script_timeout, POLL_INTERVAL_MS
-            )));
-        }
-
         if !Self::is_bwrap_available() {
             return Err(ScriptResponse::error(
                 "Bubblewrap (bwrap) is not installed or not on PATH. \
@@ -103,16 +99,34 @@ impl ScriptRunner for BubblewrapScriptRunner {
         Ok(())
     }
 
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        validate_common(request)?;
+        self.validate(request)?;
+        let child = self.spawn_bwrap(request, logger, stdio)?;
+        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+    }
+}
+
+impl BubblewrapScriptRunner {
+    /// Set up networking and spawn `bwrap`, returning a [`BwrapChild`] wrapped
+    /// by the [`SandboxProcess`] handle. With [`StdioMode::Pipes`] the child's
+    /// stdio is piped (the caller drives it); with [`StdioMode::Inherit`] it
+    /// inherits the binary's stdio (a TTY when the binary has one). bwrap is
+    /// always placed in its own process group so it can be tree-terminated.
+    fn spawn_bwrap(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<BwrapChild, ScriptResponse> {
         // 1. Start the network proxy if configured. Must happen before
         //    arg-building so the proxy's loopback address can be injected as
         //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
-        //
-        //    Pass the request's `default_network_policy` through so that a
-        //    config of `{ defaultPolicy: "block", proxy: {...}, allowedHosts:
-        //    [] }` actually denies-by-default at the proxy layer (otherwise
-        //    the empty allow list + no iptables + no --unshare-net would let
-        //    everything through).
         let mut proxy = LinuxProxyCoordinator::new();
         if request.policy.network_proxy.is_enabled() {
             if let Err(err) = proxy.start(
@@ -123,10 +137,10 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 request.policy.default_network_policy.clone(),
                 logger,
             ) {
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to start network proxy: {}",
                     err
-                ));
+                )));
             }
         }
 
@@ -148,7 +162,7 @@ impl ScriptRunner for BubblewrapScriptRunner {
             request.container_id.clone()
         };
 
-        let mut fw_manager = if needs_iptables {
+        let fw_manager = if needs_iptables {
             let _ = writeln!(
                 logger,
                 "Bubblewrap: applying iptables rules for host-level network filtering"
@@ -158,16 +172,16 @@ impl ScriptRunner for BubblewrapScriptRunner {
                 Ok(true) => {}
                 Ok(false) => {
                     proxy.stop(logger);
-                    return ScriptResponse::error(
+                    return Err(ScriptResponse::error(
                         "Bubblewrap: failed to apply iptables firewall rules.",
-                    );
+                    ));
                 }
                 Err(e) => {
                     proxy.stop(logger);
-                    return ScriptResponse::error(&format!(
+                    return Err(ScriptResponse::error(&format!(
                         "Bubblewrap: network policy error: {}",
                         e
-                    ));
+                    )));
                 }
             }
             Some(mgr)
@@ -178,77 +192,253 @@ impl ScriptRunner for BubblewrapScriptRunner {
         // 4. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        match stdio {
+            StdioMode::Pipes => {
+                command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            }
+            StdioMode::Inherit => {
+                // The child (bwrap, PID 1 of the sandbox) inherits the binary's
+                // stdio directly — a TTY when the binary has one.
+                command
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit());
+            }
+        }
+        // Pipes mode: put bwrap in its own process group so a timeout / `kill()`
+        // can tree-kill it with a single `killpg` without touching the host's
+        // group. Inherit mode keeps bwrap in the executor's group (so it retains
+        // the controlling terminal and can't be SIGTTIN-stopped reading it); it's
+        // PID 1 of the new pid namespace (`--unshare-pid`), so killing the root
+        // process alone tears the whole sandbox down.
+        let group = stdio == StdioMode::Pipes;
+        if group {
+            command.process_group(0);
+        }
 
         let mut child = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
+                let mut fw_manager = fw_manager;
                 cleanup_iptables(&mut fw_manager, logger);
                 proxy.stop(logger);
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
                     error
-                ));
+                )));
             }
         };
 
-        // 5. Drain stdout/stderr in background threads to avoid pipe-buffer
-        //    deadlock.
-        let stdout_handle = child
-            .stdout
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-        let stderr_handle = child
-            .stderr
-            .take()
-            .map(|r| std::thread::spawn(move || read_to_string(r)));
-
-        // 6. Wait with optional timeout.
+        let (stdin, stdout, stderr) = match stdio {
+            StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
+            StdioMode::Inherit => (None, None, None),
+        };
+        // Wrap the pipe reads so the caller can abandon a stream a backgrounded
+        // descendant is holding open (see `SandboxProcess::stdout_closer`)
+        // without killing the child. On failure, tear down the per-run network
+        // state we already set up before returning the error.
+        let (stdout, stdout_canceller, stderr, stderr_canceller) =
+            match (wrap_pipe(stdout), wrap_pipe(stderr)) {
+                (Ok((out, out_canceller)), Ok((err, err_canceller))) => {
+                    (out, out_canceller, err, err_canceller)
+                }
+                (out_result, err_result) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let mut fw_manager = fw_manager;
+                    cleanup_iptables(&mut fw_manager, logger);
+                    proxy.stop(logger);
+                    let error = out_result.err().or(err_result.err());
+                    return Err(ScriptResponse::error(&format!(
+                        "Bubblewrap: failed to wrap stdio pipes: {}",
+                        error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
+                    )));
+                }
+            };
         let timeout = if request.script_timeout == 0 {
             None
         } else {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
 
-        let exit_status = match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => status,
+        Ok(BwrapChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            stdout_canceller,
+            stderr_canceller,
+            group,
+            proxy,
+            fw_manager,
+            timeout,
+        })
+    }
+}
+
+/// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
+/// and the per-run network proxy / iptables state torn down once it exits.
+struct BwrapChild {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: Option<InterruptibleReader>,
+    stderr: Option<InterruptibleReader>,
+    /// Cancellers for the stdout/stderr reads, kept so the `SandboxProcess`
+    /// closers can mint a [`StreamCloser`] even after the stream is taken.
+    stdout_canceller: Option<ReadCanceller>,
+    stderr_canceller: Option<ReadCanceller>,
+    /// `true` when bwrap leads its own process group (`Pipes` mode), so
+    /// termination signals the whole group; `false` for `Inherit` mode, where
+    /// killing bwrap (pid 1 of the namespace) alone tears the sandbox down.
+    group: bool,
+    proxy: LinuxProxyCoordinator,
+    fw_manager: Option<NetworkIptablesManager>,
+    timeout: Option<Duration>,
+}
+
+impl BwrapChild {
+    /// Tear down per-run network state (iptables rules + proxy). Idempotent at
+    /// the manager level.
+    fn cleanup(&mut self, logger: &mut Logger) {
+        cleanup_iptables(&mut self.fw_manager, logger);
+        self.proxy.stop(logger);
+    }
+}
+
+/// A running `bwrap` sandbox exposed as a [`SandboxProcess`]. Wraps the spawned
+/// [`BwrapChild`] (child, pipes, and per-run network state), tearing the network
+/// state down once the child exits.
+struct BubblewrapSandboxProcess {
+    inner: BwrapChild,
+    teardown_done: bool,
+}
+
+impl BubblewrapSandboxProcess {
+    fn new(child: BwrapChild) -> Self {
+        Self {
+            inner: child,
+            teardown_done: false,
+        }
+    }
+
+    fn run_teardown(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+        self.teardown_done = true;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        self.inner.cleanup(&mut logger);
+    }
+}
+
+impl SandboxProcess for BubblewrapSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        take_boxed_write(&mut self.inner.stdin)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.inner.stdout)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.inner.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.inner.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.inner.stderr_canceller)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        Ok(self
+            .inner
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    fn id(&self) -> u32 {
+        self.inner.child.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // No-op once the child has exited and been reaped: its pid/pgid can be
+        // recycled, so signaling it could hit an unrelated process (group). A
+        // reaped `Child` returns its cached status here without a syscall.
+        if self.inner.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if self.inner.group {
+            // Pipes mode: bwrap leads its own process group — tree-kill it.
+            group_kill(&mut self.inner.child)
+        } else {
+            // Inherit mode: bwrap shares the executor's group (no
+            // `process_group(0)`), so a group-kill would hit the executor.
+            // bwrap is pid 1 of the sandbox pid namespace, so killing the root
+            // alone tears the whole namespace (every descendant) down.
+            self.inner.child.kill()
+        }
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        // Close our copy of any not-taken stdin so the child sees EOF.
+        self.inner.stdin.take();
+
+        // Drain (and discard) any not-taken stdout/stderr concurrently so the
+        // child can't block on a full pipe (taken streams are the caller's
+        // responsibility).
+        let stdout_thread = spawn_discard(self.inner.stdout.take());
+        let stderr_thread = spawn_discard(self.inner.stderr.take());
+
+        let result = match wait_with_timeout(&mut self.inner.child, self.inner.timeout) {
+            Ok(status) => Ok(status.code().unwrap_or(-1)),
             Err(WaitError::Timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                cleanup_iptables(&mut fw_manager, logger);
-                proxy.stop(logger);
-                return ScriptResponse {
-                    exit_code: -1,
-                    standard_out: join_reader(stdout_handle),
-                    standard_err: join_reader(stderr_handle),
-                    error_message: format!(
-                        "Bubblewrap: script timed out after {}ms",
-                        request.script_timeout
-                    ),
-                    ..Default::default()
-                };
+                // Tree-kill so descendants die too and release any stdout/stderr
+                // pipe write-ends (else the drain threads below could block).
+                // `kill()` group-kills in Pipes mode, and in Inherit mode kills
+                // bwrap (pid 1 of the namespace), which tears the sandbox down.
+                let _ = self.kill();
+                let _ = self.inner.child.wait();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Bubblewrap: script timed out",
+                ))
             }
             Err(WaitError::Io(error)) => {
-                cleanup_iptables(&mut fw_manager, logger);
-                proxy.stop(logger);
-                return ScriptResponse::error(&format!("Bubblewrap: wait failed: {}", error));
+                // The child may still be alive; kill+reap it before
+                // `run_teardown()` removes the iptables/proxy enforcement out
+                // from under it.
+                let _ = self.kill();
+                let _ = self.inner.child.wait();
+                Err(std::io::Error::other(format!(
+                    "Bubblewrap: wait failed: {error}"
+                )))
             }
         };
 
-        // 7. Collect output and clean up.
-        cleanup_iptables(&mut fw_manager, logger);
-        proxy.stop(logger);
+        cancel_and_join_discard(stdout_thread, &self.inner.stdout_canceller);
+        cancel_and_join_discard(stderr_thread, &self.inner.stderr_canceller);
+        self.run_teardown();
+        result
+    }
+}
 
-        ScriptResponse {
-            exit_code: exit_status.code().unwrap_or(-1),
-            standard_out: join_reader(stdout_handle),
-            standard_err: join_reader(stderr_handle),
-            error_message: String::new(),
-            ..Default::default()
-        }
+impl Drop for BubblewrapSandboxProcess {
+    fn drop(&mut self) {
+        // Kill and reap the child *before* removing network enforcement —
+        // otherwise an abandoned-but-running sandbox would keep egressing after
+        // its iptables/proxy rules were torn down, and the child would leak as
+        // a zombie. `kill()` group-kills (bwrap is PID 1 of the pid namespace),
+        // then we reap.
+        let _ = self.kill();
+        let _ = self.inner.child.wait();
+        self.run_teardown();
     }
 }
 
@@ -276,48 +466,6 @@ fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut L
     }
 }
 
-// -- I/O helpers (mirrors seatbelt_runner) --------------------------------
-
-fn read_to_string<R: std::io::Read>(mut reader: R) -> String {
-    let mut buffer = String::new();
-    let _ = reader.read_to_string(&mut buffer);
-    buffer
-}
-
-fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
-    match handle {
-        Some(h) => h.join().unwrap_or_default(),
-        None => String::new(),
-    }
-}
-
-enum WaitError {
-    Timeout,
-    Io(std::io::Error),
-}
-
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Option<Duration>,
-) -> Result<std::process::ExitStatus, WaitError> {
-    let Some(deadline) = timeout.map(|d| Instant::now() + d) else {
-        return child.wait().map_err(WaitError::Io);
-    };
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    return Err(WaitError::Timeout);
-                }
-                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
-            }
-            Err(e) => return Err(WaitError::Io(e)),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,7 +488,7 @@ mod tests {
         req.experimental_enabled = false;
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate_runner(&req).unwrap_err();
+        let err = runner.validate(&req).unwrap_err();
         assert!(
             err.error_message.contains("builtinTestServer")
                 && err.error_message.contains("--experimental"),
@@ -357,7 +505,7 @@ mod tests {
         req.script_code = String::new();
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate_runner(&req).unwrap_err();
+        let err = runner.validate(&req).unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
     }
 }

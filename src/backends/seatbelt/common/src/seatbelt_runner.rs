@@ -7,9 +7,11 @@
 //! The sandbox is applied via `sandbox_init()` inside `Command::pre_exec`,
 //! then `/bin/sh` is exec'd directly. The child inherits the parent's
 //! Mach bootstrap namespace so both CLI commands and GUI applications
-//! (when `guiAccess = true`) work correctly. The exec path uses
-//! [`mxc_pty::run_with_pty`] so the inner shell sees a real TTY and the
-//! host can stream its output as it arrives.
+//! (when `guiAccess = true`) work correctly. The exec path returns a
+//! `SandboxProcess` whose stdio follows the requested `StdioMode`:
+//! `Inherit` gives the child the host's own stdio (a real TTY when the
+//! binary runs under a pty), while `Pipes` exposes stdout/stderr/stdin
+//! handles the caller can stream.
 //!
 //! For apps that require LaunchServices (`launchMethod: "open"`), the runner
 //! writes a sandbox helper script and launches the target app via `open -n -W`,
@@ -23,12 +25,17 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome};
+use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
-use wxc_common::script_runner::ScriptRunner;
+use wxc_common::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
+    take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    WaitError,
+};
+use wxc_common::validator::validate_common;
 
 use crate::profile_builder::build_profile;
 
@@ -65,10 +72,8 @@ impl SeatbeltScriptRunner {
     }
 }
 
-const POLL_INTERVAL_MS: u64 = 500;
-
-impl ScriptRunner for SeatbeltScriptRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+impl SandboxBackend for SeatbeltScriptRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // Seatbelt cannot filter network by hostname — reject blockedHosts
         // rather than silently allowing traffic the user expects to be denied.
         if !request.policy.blocked_hosts.is_empty() {
@@ -80,40 +85,27 @@ impl ScriptRunner for SeatbeltScriptRunner {
             ));
         }
 
-        // Reject timeouts that are too small for our polling interval to
-        // enforce accurately.
-        if request.script_timeout > 0 && u64::from(request.script_timeout) < POLL_INTERVAL_MS {
-            return Err(error_response(format!(
-                "scriptTimeout {}ms is below the minimum of {}ms",
-                request.script_timeout, POLL_INTERVAL_MS
-            )));
-        }
-
         Ok(())
     }
 
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        // 1. Build the Seatbelt profile from the policy.
-        let profile = match build_profile(request) {
-            Ok(p) => p,
-            Err(e) => {
-                return ScriptResponse {
-                    exit_code: -1,
-                    standard_out: String::new(),
-                    standard_err: String::new(),
-                    error_message: e,
-                    ..Default::default()
-                }
-            }
-        };
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        validate_common(request)?;
+        self.validate(request)?;
 
-        // Determine launch method from seatbelt config.
+        // Build the Seatbelt profile from the policy.
+        let profile = build_profile(request).map_err(error_response)?;
+
+        // Determine launch method + GUI access from the seatbelt config.
         let launch_method = request
             .seatbelt
             .as_ref()
             .map(|s| s.launch_method.clone())
             .unwrap_or_default();
-
         let gui_access = request
             .seatbelt
             .as_ref()
@@ -121,249 +113,385 @@ impl ScriptRunner for SeatbeltScriptRunner {
             .unwrap_or(false);
 
         match launch_method {
-            LaunchMethod::Exec => self.execute_exec(&profile, request, gui_access, logger),
-            LaunchMethod::Open => self.execute_open(&profile, request, logger),
+            LaunchMethod::Exec => spawn_exec(&profile, request, gui_access, stdio, logger),
+            LaunchMethod::Open => spawn_open(&profile, request, stdio, logger),
         }
     }
 }
 
-impl SeatbeltScriptRunner {
-    /// Standard execution path: fork → sandbox_init → exec.
-    /// When `gui_access` is true, stdio is inherited for GUI app compatibility.
-    fn execute_exec(
-        &self,
-        profile: &str,
-        request: &ExecutionRequest,
-        gui_access: bool,
-        logger: &mut Logger,
-    ) -> ScriptResponse {
-        let mut command = match build_sandbox_command(profile, &request.script_code, logger) {
-            Ok(cmd) => cmd,
-            Err(resp) => return resp,
-        };
+/// Exec launch path: fork → sandbox_init → exec `/bin/sh -c <script>`. With
+/// [`StdioMode::Pipes`] the child gets pipes and leads its own session (so the
+/// caller can tree-terminate via the process group); with
+/// [`StdioMode::Inherit`] it inherits the process's stdio (a TTY when the
+/// binary has one) and stays in the binary's session. `gui_access` apps require
+/// inherited stdio and cannot stream.
+fn spawn_exec(
+    profile: &str,
+    request: &ExecutionRequest,
+    gui_access: bool,
+    stdio: StdioMode,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+    if gui_access && stdio == StdioMode::Pipes {
+        return Err(error_response(
+            "Seatbelt guiAccess requires inherited stdio and cannot stream over pipes".to_string(),
+        ));
+    }
 
-        // Environment setup.
-        if !request.env.is_empty() {
-            command.env_clear();
-            for kv in &request.env {
-                if let Some((key, value)) = kv.split_once('=') {
-                    command.env(key, value);
-                }
-            }
+    // Pipes → own session (setsid) so a process-group tree-kill never touches
+    // the host. Inherit/GUI → keep the binary's session and controlling
+    // terminal so the child sees a TTY exactly when the binary does.
+    let new_session = stdio == StdioMode::Pipes;
+    // Inherit mode with a finite timeout: put the child in its own process group
+    // (same session, so it keeps the controlling terminal) so the timeout branch
+    // can tree-kill its descendants instead of only the direct `/bin/sh`. A
+    // backgrounded group reading the inherited TTY can be SIGTTIN-stopped, so
+    // this is limited to timeout-bounded runs, which are inherently
+    // non-interactive.
+    let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
+    let mut command = build_sandbox_command(
+        profile,
+        &request.script_code,
+        new_session,
+        new_group,
+        logger,
+    )?;
+
+    // Always start from a cleared environment so untrusted sandboxed code never
+    // inherits the host's env.
+    apply_clean_environment(&mut command, request);
+
+    // Working directory. Also export `PWD` so the child's `getcwd()` uses its
+    // fast `$PWD` path (a single stat) instead of walking parent directories
+    // the sandbox may not let it read — which otherwise leaks
+    // "getcwd: ... Operation not permitted" to stderr.
+    let cwd = resolve_working_directory(request);
+    command.current_dir(&cwd);
+    command.env("PWD", &cwd);
+
+    match stdio {
+        StdioMode::Pipes => {
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
         }
-
-        if !request.working_directory.is_empty() {
-            command.current_dir(&request.working_directory);
-        }
-
-        if gui_access {
-            // GUI apps need inherited stdio for window interaction.
+        StdioMode::Inherit => {
+            // The child inherits the binary's stdio directly (a TTY when the
+            // binary has one) — no separate pty bridge.
             command
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
-
-            // Spawn manually — run_with_pty is not appropriate for GUI mode.
-            let mut child = match command.spawn() {
-                Ok(process) => process,
-                Err(error) => {
-                    let msg = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                        format!(
-                            "failed to spawn sandboxed process (sandbox_init likely rejected \
-                             the profile — check stderr for details): {error}"
-                        )
-                    } else {
-                        format!("failed to spawn sandboxed process: {error}")
-                    };
-                    return error_response(msg);
-                }
-            };
-
-            let timeout = if request.script_timeout == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(u64::from(request.script_timeout)))
-            };
-
-            match wait_with_timeout(&mut child, timeout) {
-                Ok(status) => ScriptResponse {
-                    exit_code: status.code().unwrap_or(-1),
-                    ..Default::default()
-                },
-                Err(WaitError::Timeout) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    ScriptResponse {
-                        exit_code: -1,
-                        error_message: format!(
-                            "Seatbelt: process timed out after {}ms",
-                            request.script_timeout
-                        ),
-                        ..Default::default()
-                    }
-                }
-                Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
-            }
-        } else {
-            // CLI mode: hand off to the shared PTY bridge so the inner shell
-            // sees a real TTY and the host can stream output as it arrives.
-            let timeout = if request.script_timeout == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(u64::from(request.script_timeout)))
-            };
-
-            let options = PtyOptions {
-                timeout,
-                ..PtyOptions::default()
-            };
-
-            match run_with_pty(command, options) {
-                Ok(PtyOutcome::Exited(status)) => ScriptResponse {
-                    exit_code: status.code().unwrap_or(-1),
-                    ..Default::default()
-                },
-                Ok(PtyOutcome::TimedOut) => {
-                    let msg = format!(
-                        "Seatbelt: script timed out after {}ms",
-                        request.script_timeout
-                    );
-                    let _ = writeln!(logger, "{msg}");
-                    error_response(msg)
-                }
-                Err(error) => error_response(format!("Seatbelt: {error}")),
-            }
         }
     }
 
-    /// LaunchServices execution path: write a sandbox helper, launch via
-    /// `open -n -W`. Required for Apple system apps with Launch Constraints
-    /// (e.g. Terminal.app).
-    fn execute_open(
-        &self,
-        profile: &str,
-        request: &ExecutionRequest,
-        logger: &mut Logger,
-    ) -> ScriptResponse {
-        let _ = writeln!(
-            logger,
-            "Seatbelt: using LaunchServices (open) launch method"
-        );
+    let mut child = command
+        .spawn()
+        .map_err(|error| error_response(spawn_error(&error)))?;
 
-        // 1. Write the profile to a secure temp file.
-        let profile_path = match write_secure_temp_file("mxc_sb_profile_", profile, 0o600) {
-            Ok(p) => p,
-            Err(e) => return error_response(format!("failed to write profile: {e}")),
-        };
+    let (stdin, stdout, stderr) = match stdio {
+        StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
+        StdioMode::Inherit => (None, None, None),
+    };
 
-        // 2. Build environment exports for the helper script.
-        let mut env_exports = String::new();
-        for kv in &request.env {
-            if let Some((key, value)) = kv.split_once('=') {
-                // Validate key is a safe shell identifier to prevent injection.
-                if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    || key.is_empty()
-                    || key.starts_with(|c: char| c.is_ascii_digit())
-                {
-                    continue; // Skip invalid env var names
-                }
-                // Shell-escape the value.
-                let escaped = value.replace('\'', "'\\''");
-                let _ = writeln!(env_exports, "export {key}='{escaped}'");
+    // Wrap the pipe reads so the caller can abandon a stream a backgrounded
+    // descendant is holding open (see `SandboxProcess::stdout_closer`), without
+    // killing the child. On failure, don't orphan the already-spawned sandboxed
+    // process — kill and reap it before returning the error.
+    let (stdout, stdout_canceller, stderr, stderr_canceller) =
+        match (wrap_pipe(stdout), wrap_pipe(stderr)) {
+            (Ok((out, out_canceller)), Ok((err, err_canceller))) => {
+                (out, out_canceller, err, err_canceller)
             }
-        }
-
-        // 3. Create the sandbox helper script.
-        // This script is executed inside the terminal app. It:
-        //   a) Calls sandbox-exec with the profile file to sandbox the shell
-        //   b) Execs the user's command inside the sandbox
-        let script_code = &request.script_code;
-        let helper_content = format!(
-            "#!/bin/sh\n\
-             # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
-             {env_exports}\
-             exec /usr/bin/sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
-            profile_path = profile_path,
-            script_escaped = script_code.replace('\'', "'\\''"),
-        );
-
-        let helper_path = match write_secure_temp_file("mxc_sb_helper_", &helper_content, 0o700) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = fs::remove_file(&profile_path);
-                return error_response(format!("failed to write helper script: {e}"));
-            }
-        };
-
-        // 4. Create the .command file that Terminal will execute.
-        let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
-        let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
-            Ok(p) => {
-                // Rename to .command extension so Terminal recognizes it.
-                let new_path = format!("{p}.command");
-                if let Err(e) = fs::rename(&p, &new_path) {
-                    let _ = fs::remove_file(&p);
-                    let _ = fs::remove_file(&profile_path);
-                    let _ = fs::remove_file(&helper_path);
-                    return error_response(format!("failed to rename to .command: {e}"));
-                }
-                new_path
-            }
-            Err(e) => {
-                let _ = fs::remove_file(&profile_path);
-                let _ = fs::remove_file(&helper_path);
-                return error_response(format!("failed to write .command file: {e}"));
-            }
-        };
-
-        let _ = writeln!(logger, "Seatbelt: launching via: open -n -W {command_path}");
-
-        // 5. Launch via `open -n -W`.
-        let mut child = match Command::new("open")
-            .args(["-n", "-W", "-a", "Terminal", &command_path])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                cleanup_files(&[&profile_path, &helper_path, &command_path]);
-                return error_response(format!("failed to launch via open: {e}"));
-            }
-        };
-
-        // 6. Wait for the terminal to close.
-        let timeout = if request.script_timeout == 0 {
-            None
-        } else {
-            Some(Duration::from_millis(u64::from(request.script_timeout)))
-        };
-
-        let result = match wait_with_timeout(&mut child, timeout) {
-            Ok(status) => ScriptResponse {
-                exit_code: status.code().unwrap_or(-1),
-                ..Default::default()
-            },
-            Err(WaitError::Timeout) => {
+            (out_result, err_result) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                ScriptResponse {
-                    exit_code: -1,
-                    error_message: format!(
-                        "Seatbelt: terminal timed out after {}ms",
-                        request.script_timeout
-                    ),
-                    ..Default::default()
-                }
+                let error = out_result.err().or(err_result.err());
+                return Err(error_response(format!(
+                    "Seatbelt: failed to wrap stdio pipes: {}",
+                    error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
+                )));
             }
-            Err(WaitError::Io(error)) => error_response(format!("wait failed: {error}")),
         };
 
-        // 7. Cleanup temp files.
-        cleanup_files(&[&profile_path, &helper_path, &command_path]);
+    Ok(Box::new(SeatbeltSandboxProcess {
+        child,
+        stdin,
+        stdout,
+        stderr,
+        stdout_canceller,
+        stderr_canceller,
+        timeout: timeout_from(request),
+        group: new_session || new_group,
+        cleanup: Vec::new(),
+    }))
+}
 
+/// LaunchServices launch path: write a sandbox helper + `.command` file and run
+/// it in Terminal.app via `open -n -W`. Required for Apple system apps with
+/// Launch Constraints (e.g. Terminal.app). The sandboxed shell runs inside
+/// Terminal, not as our child, so there are no pipes to stream — only the
+/// `open -W` waiter — and [`StdioMode::Pipes`] is rejected.
+fn spawn_open(
+    profile: &str,
+    request: &ExecutionRequest,
+    stdio: StdioMode,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+    if stdio == StdioMode::Pipes {
+        return Err(error_response(
+            "Seatbelt launchMethod 'open' launches Terminal.app and cannot stream over pipes"
+                .to_string(),
+        ));
+    }
+
+    let _ = writeln!(
+        logger,
+        "Seatbelt: using LaunchServices (open) launch method"
+    );
+
+    // 1. Write the profile to a secure temp file.
+    let profile_path = match write_secure_temp_file("mxc_sb_profile_", profile, 0o600) {
+        Ok(p) => p,
+        Err(e) => return Err(error_response(format!("failed to write profile: {e}"))),
+    };
+
+    // 2. Build environment exports for the helper script.
+    let mut env_exports = String::new();
+    for kv in &request.env {
+        if let Some((key, value)) = kv.split_once('=') {
+            // Validate key is a safe shell identifier to prevent injection.
+            if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || key.is_empty()
+                || key.starts_with(|c: char| c.is_ascii_digit())
+            {
+                continue; // Skip invalid env var names
+            }
+            // Shell-escape the value.
+            let escaped = value.replace('\'', "'\\''");
+            let _ = writeln!(env_exports, "export {key}='{escaped}'");
+        }
+    }
+
+    // 3. Create the sandbox helper script.
+    // This script is executed inside the terminal app. It:
+    //   a) Calls sandbox-exec with the profile file to sandbox the shell
+    //   b) Execs the user's command inside the sandbox
+    let script_code = &request.script_code;
+    let helper_content = format!(
+        "#!/bin/sh\n\
+         # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
+         {env_exports}\
+         exec /usr/bin/sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
+        profile_path = profile_path,
+        script_escaped = script_code.replace('\'', "'\\''"),
+    );
+
+    let helper_path = match write_secure_temp_file("mxc_sb_helper_", &helper_content, 0o700) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = fs::remove_file(&profile_path);
+            return Err(error_response(format!(
+                "failed to write helper script: {e}"
+            )));
+        }
+    };
+
+    // 4. Create the .command file that Terminal will execute.
+    let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
+    let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
+        Ok(p) => {
+            // Rename to .command extension so Terminal recognizes it.
+            let new_path = format!("{p}.command");
+            if let Err(e) = fs::rename(&p, &new_path) {
+                let _ = fs::remove_file(&p);
+                let _ = fs::remove_file(&profile_path);
+                let _ = fs::remove_file(&helper_path);
+                return Err(error_response(format!("failed to rename to .command: {e}")));
+            }
+            new_path
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&profile_path);
+            let _ = fs::remove_file(&helper_path);
+            return Err(error_response(format!(
+                "failed to write .command file: {e}"
+            )));
+        }
+    };
+
+    let _ = writeln!(logger, "Seatbelt: launching via: open -n -W {command_path}");
+
+    // 5. Launch via `open -n -W`.
+    let child = match Command::new("open")
+        .args(["-n", "-W", "-a", "Terminal", &command_path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            cleanup_files(&[&profile_path, &helper_path, &command_path]);
+            return Err(error_response(format!("failed to launch via open: {e}")));
+        }
+    };
+
+    // The `open -W` process is the thing to wait on; the sandboxed shell runs
+    // inside Terminal. No streamable stdio; the temp files are removed once the
+    // handle's `wait()` (or drop) runs.
+    Ok(Box::new(SeatbeltSandboxProcess {
+        child,
+        stdin: None,
+        stdout: None,
+        stderr: None,
+        stdout_canceller: None,
+        stderr_canceller: None,
+        timeout: timeout_from(request),
+        group: false,
+        cleanup: vec![profile_path, helper_path, command_path],
+    }))
+}
+
+/// A running Seatbelt-sandboxed process: the child plus, for the pipes path,
+/// its parent-side pipe ends. See [`SandboxProcess`] for the contract.
+struct SeatbeltSandboxProcess {
+    child: std::process::Child,
+    /// Pipe ends — `Some` only for [`StdioMode::Pipes`]; `None` for inherited
+    /// stdio / Open mode (the streams are the binary's own, or detached). The
+    /// reads are wrapped so they can be cancelled out-of-band (see the
+    /// `*_canceller` fields).
+    stdin: Option<std::process::ChildStdin>,
+    stdout: Option<InterruptibleReader>,
+    stderr: Option<InterruptibleReader>,
+    /// Cancellers for the stdout/stderr reads (`Some` alongside the pipe ends),
+    /// kept so [`stdout_closer`](SandboxProcess::stdout_closer) /
+    /// [`stderr_closer`](SandboxProcess::stderr_closer) can mint closers even
+    /// after the stream has been taken.
+    stdout_canceller: Option<ReadCanceller>,
+    stderr_canceller: Option<ReadCanceller>,
+    timeout: Option<Duration>,
+    /// The child leads its own process group (`setsid`), so termination signals
+    /// the whole group; `false` for inherited / Open mode (a single process).
+    group: bool,
+    /// Temp files to remove once the child exits (Open mode); empty otherwise.
+    cleanup: Vec<String>,
+}
+
+impl SeatbeltSandboxProcess {
+    /// Remove the Open-mode temp files (profile / helper / `.command`) once the
+    /// child has exited. Idempotent — drains `cleanup` — so it is safe to call
+    /// from both `wait()` and `drop`.
+    fn run_cleanup(&mut self) {
+        if self.cleanup.is_empty() {
+            return;
+        }
+        let files = std::mem::take(&mut self.cleanup);
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        cleanup_files(&refs);
+    }
+}
+
+impl SandboxProcess for SeatbeltSandboxProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        take_boxed_write(&mut self.stdin)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.stdout)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stderr_canceller)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        Ok(self
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // No-op once the child has exited and been reaped: its pid/pgid can be
+        // recycled, so signaling it could hit an unrelated process (group). A
+        // reaped `Child` returns its cached status here without a syscall.
+        if self.child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if self.group {
+            // The child leads its own process group — signal the whole group so
+            // sandboxed descendants are terminated too.
+            group_kill(&mut self.child)
+        } else {
+            // Inherited / Open mode: a single process sharing the binary's
+            // process group, so signal just it (a group-kill would hit the
+            // binary itself).
+            self.child.kill()
+        }
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        // Close our copy of any not-taken stdin so the child sees EOF and is
+        // not blocked waiting for input the caller never intends to send.
+        self.stdin.take();
+
+        // Drain (and discard) any not-taken stdout/stderr concurrently so the
+        // child can't block on a full pipe (taken streams are the caller's
+        // responsibility).
+        let stdout_thread = spawn_discard(self.stdout.take());
+        let stderr_thread = spawn_discard(self.stderr.take());
+
+        let result = match wait_with_timeout(&mut self.child, self.timeout) {
+            Ok(status) => Ok(status.code().unwrap_or(-1)),
+            Err(WaitError::Timeout) => {
+                // Timed out — terminate now (`kill()` SIGKILLs the group or the
+                // lone child) and reap the zombie.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Seatbelt: process timed out",
+                ))
+            }
+            Err(WaitError::Io(error)) => {
+                // The child may still be running: kill+reap it (don't orphan
+                // the sandbox) before returning.
+                let _ = self.kill();
+                let _ = self.child.wait();
+                Err(std::io::Error::other(format!("wait failed: {error}")))
+            }
+        };
+
+        cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
+        cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
+        self.run_cleanup();
         result
+    }
+}
+
+impl Drop for SeatbeltSandboxProcess {
+    fn drop(&mut self) {
+        // Don't leak a running sandboxed process (and its group) or a zombie if
+        // the handle is dropped without `wait()`, and remove any temp files.
+        // `kill()` is idempotent (its `try_wait` guard no-ops once the child has
+        // exited).
+        let _ = self.kill();
+        let _ = self.child.wait();
+        self.run_cleanup();
     }
 }
 
@@ -381,6 +509,8 @@ impl SeatbeltScriptRunner {
 fn build_sandbox_command(
     profile: &str,
     script_code: &str,
+    new_session: bool,
+    new_group: bool,
     logger: &mut Logger,
 ) -> Result<Command, ScriptResponse> {
     let profile_cstr = CString::new(profile)
@@ -390,6 +520,38 @@ fn build_sandbox_command(
 
     let mut command = Command::new(DEFAULT_SHELL);
     command.arg("-c").arg(script_code);
+
+    // When requested (streaming path), put the child in its own session /
+    // process group via `setsid()` so a caller can tree-kill it with a single
+    // `killpg` without touching the host's process group. This runs before
+    // `sandbox_init` so the detach happens regardless of the profile.
+    //
+    // SAFETY: `setsid` is async-signal-safe and runs after fork(), before
+    // exec(); the child is not a process-group leader at this point, so it
+    // succeeds. Failure is non-fatal (the caller's negative-pid kill simply
+    // targets a group that does not exist).
+    if new_session {
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    } else if new_group {
+        // Inherit-with-timeout: a new process group within the *existing*
+        // session, so the child keeps the controlling terminal yet can be
+        // tree-killed via `killpg(-pgid)` on timeout.
+        //
+        // SAFETY: `setpgid` is async-signal-safe and runs after fork(), before
+        // exec(); the child is not yet a group leader, so it succeeds. Failure
+        // is non-fatal (the timeout kill then targets the direct child only).
+        unsafe {
+            command.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+    }
 
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations
@@ -428,32 +590,70 @@ fn error_response(message: String) -> ScriptResponse {
     }
 }
 
-enum WaitError {
-    Timeout,
-    Io(std::io::Error),
+/// The optional run timeout — `None` when `scriptTimeout` is 0 (wait forever).
+fn timeout_from(request: &ExecutionRequest) -> Option<Duration> {
+    if request.script_timeout == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(u64::from(request.script_timeout)))
+    }
 }
 
-/// Wait for `child` to exit, polling at `POLL_INTERVAL_MS` intervals if a
-/// timeout is set. We poll manually rather than adding an async runtime
-/// dependency since the runner is otherwise synchronous.
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Option<Duration>,
-) -> Result<std::process::ExitStatus, WaitError> {
-    let Some(deadline) = timeout.map(|duration| Instant::now() + duration) else {
-        return child.wait().map_err(WaitError::Io);
-    };
+/// Message for a `Command::spawn` failure, calling out the likely cause
+/// (`sandbox_init` rejecting the profile) when the OS reports a permission
+/// error.
+fn spawn_error(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "failed to spawn sandboxed process (sandbox_init likely rejected \
+             the profile — check stderr for details): {error}"
+        )
+    } else {
+        format!("failed to spawn sandboxed process: {error}")
+    }
+}
 
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    return Err(WaitError::Timeout);
-                }
-                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
-            }
-            Err(error) => return Err(WaitError::Io(error)),
+/// Resolve the working directory for the sandboxed child.
+///
+/// An explicit `working_directory` always wins. Otherwise — rather than
+/// inheriting the host process's cwd, which under the deny-by-default Seatbelt
+/// profile may be inaccessible and make `getcwd()` fail (leaking a
+/// "getcwd: ... Operation not permitted" line on the child's stderr) — we pick
+/// a directory the profile is guaranteed to allow: the first readwrite path,
+/// else the first readonly path, else `/` (always readable per the baseline).
+fn resolve_working_directory(request: &ExecutionRequest) -> String {
+    if !request.working_directory.is_empty() {
+        return request.working_directory.clone();
+    }
+    let default = request
+        .policy
+        .readwrite_paths
+        .first()
+        .or_else(|| request.policy.readonly_paths.first())
+        .cloned()
+        .unwrap_or_else(|| "/".to_string());
+    // The default may be a `~`/`~/…` policy path; expand it exactly as the
+    // sandbox profile does so `Command::current_dir` never gets a literal `~`
+    // (which would fail). Fall back to the unexpanded value if `HOME` is unset.
+    crate::profile_builder::expand_tilde(&default).unwrap_or(default)
+}
+
+/// Baseline `PATH` for the sandboxed child. We always start from a cleared
+/// environment (so the host process's env — cloud creds, API tokens — never
+/// leaks into untrusted sandboxed code), which means we must supply a default
+/// `PATH` for the `/bin/sh` wrapper and common tools to resolve.
+const DEFAULT_SANDBOX_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// Populate `command`'s environment from a cleared baseline: never inherit the
+/// host environment (matching the bubblewrap `--clearenv` and AppContainer
+/// clean-block behaviour). Sets a default `PATH`, then the request's vars
+/// (which may override `PATH`). `PWD` is set separately alongside the cwd.
+fn apply_clean_environment(command: &mut Command, request: &ExecutionRequest) {
+    command.env_clear();
+    command.env("PATH", DEFAULT_SANDBOX_PATH);
+    for kv in &request.env {
+        if let Some((key, value)) = kv.split_once('=') {
+            command.env(key, value);
         }
     }
 }
@@ -529,7 +729,7 @@ mod tests {
         let mut request = base_request();
         request.policy.blocked_hosts = vec!["evil.example.com".into()];
         let runner = SeatbeltScriptRunner::new();
-        let response = runner.validate_runner(&request).unwrap_err();
+        let response = runner.validate(&request).unwrap_err();
         assert_eq!(response.exit_code, -1);
         assert!(response.error_message.contains("blockedHosts"));
         assert!(response.error_message.contains("cannot be enforced"));
