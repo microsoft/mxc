@@ -154,7 +154,7 @@ fn seatbelt_does_not_leak_host_environment() {
 fn seatbelt_env_reaches_sandboxed_process() {
     // An env entry set on the request must reach the sandboxed child.
     let mut request = seatbelt_request("echo $MXC_TEST_VAR", 10000);
-    request.set_env(vec!["MXC_TEST_VAR=injected-value".to_string()]);
+    request.set_env([("MXC_TEST_VAR", "injected-value")]);
 
     let result = spawn_and_wait(request).expect("seatbelt run should succeed");
 
