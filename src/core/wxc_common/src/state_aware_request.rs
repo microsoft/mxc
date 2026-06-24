@@ -43,22 +43,6 @@ impl Phase {
             Self::Deprovision => "deprovision",
         }
     }
-
-    /// Parses the wire-format phase string. Unknown values produce
-    /// `MxcError::MalformedRequest`.
-    pub fn from_wire(s: &str) -> Result<Self, MxcError> {
-        match s {
-            "provision" => Ok(Self::Provision),
-            "start" => Ok(Self::Start),
-            "exec" => Ok(Self::Exec),
-            "stop" => Ok(Self::Stop),
-            "deprovision" => Ok(Self::Deprovision),
-            other => Err(MxcError::malformed_request(format!(
-                "unknown phase {:?} (expected provision/start/exec/stop/deprovision)",
-                other
-            ))),
-        }
-    }
 }
 
 impl std::fmt::Display for Phase {
@@ -160,26 +144,6 @@ mod tests {
             sandbox_id: None,
             experimental_raw: exp,
         }
-    }
-
-    #[test]
-    fn phase_from_wire_round_trip_for_all_variants() {
-        for p in [
-            Phase::Provision,
-            Phase::Start,
-            Phase::Exec,
-            Phase::Stop,
-            Phase::Deprovision,
-        ] {
-            let parsed = Phase::from_wire(p.as_str()).unwrap();
-            assert_eq!(parsed, p);
-        }
-    }
-
-    #[test]
-    fn phase_from_wire_rejects_unknown() {
-        let err = Phase::from_wire("nope").unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
     }
 
     #[test]

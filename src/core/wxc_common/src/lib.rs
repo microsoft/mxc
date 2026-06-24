@@ -22,10 +22,8 @@ pub mod state_aware_request;
 pub mod ui_policy;
 pub mod validator;
 
-// Dedicated well-typed wire model + schema generation. Compiled under the
-// `schema-gen` feature for now; it is intended to become the always-compiled
-// parser deserialization target.
-#[cfg(feature = "schema-gen")]
+// Dedicated well-typed wire model. It is the parser's deserialization target;
+// the JSON Schema is generated from it under the `schema-gen` feature.
 pub mod wire;
 
 // Thin Windows-only helpers that are not backend-specific. Backend

@@ -312,7 +312,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should include filesystem with clearPolicyOnExit for microvm when policy has paths', () => {
+    it('should map clearPolicyOnExit to lifecycle.preservePolicy for microvm when policy has paths', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
@@ -322,13 +322,15 @@ describe('buildSandboxPayload', () => {
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
         assert.strictEqual(payload.containment, 'microvm');
         assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['/tmp']);
-        assert.strictEqual(payload.filesystem!.clearPolicyOnExit, true);
+        // clearPolicyOnExit is not a wire `filesystem` field; the intent is
+        // carried canonically by lifecycle.preservePolicy (default clear => not preserved).
+        assert.strictEqual(payload.lifecycle!.preservePolicy, false);
       } finally {
         restore();
       }
     });
 
-    it('should honor clearPolicyOnExit false for microvm', () => {
+    it('should honor clearPolicyOnExit false for microvm (via lifecycle.preservePolicy)', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
@@ -336,7 +338,7 @@ describe('buildSandboxPayload', () => {
           filesystem: { readwritePaths: ['/tmp'], clearPolicyOnExit: false },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.filesystem!.clearPolicyOnExit, false);
+        assert.strictEqual(payload.lifecycle!.preservePolicy, true);
       } finally {
         restore();
       }

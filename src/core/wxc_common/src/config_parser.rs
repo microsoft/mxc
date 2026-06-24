@@ -1,24 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
-
-use serde::de::IgnoredAny;
-use serde::Deserialize;
 
 use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
-    IsolationSessionConfig, IsolationSessionUser, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    IsolationSessionConfig, IsolationSessionConfigurationId, IsolationSessionUser, LifecycleConfig,
+    LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig,
+    SeatbeltConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use crate::wire;
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -36,342 +33,7 @@ pub enum ParseError {
     StateAware(MxcError),
 }
 
-// ---------- Intermediate serde structs matching the JSON schema ----------
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawProcessContainer {
-    #[serde(rename = "leastPrivilege")]
-    least_privilege: Option<bool>,
-    #[serde(rename = "learningMode")]
-    learning_mode: Option<bool>,
-    capabilities: Option<Vec<String>>,
-    ui: Option<RawBaseProcessUi>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawBaseProcessUi {
-    isolation: Option<String>,
-    #[serde(rename = "desktopSystemControl")]
-    desktop_system_control: Option<bool>,
-    #[serde(rename = "systemSettings")]
-    system_settings: Option<String>,
-    ime: Option<bool>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawFilesystem {
-    #[serde(rename = "readwritePaths")]
-    readwrite_paths: Option<Vec<String>>,
-    #[serde(rename = "readonlyPaths")]
-    readonly_paths: Option<Vec<String>>,
-    #[serde(rename = "deniedPaths")]
-    denied_paths: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawFallback {
-    #[serde(rename = "allowDaclMutation")]
-    allow_dacl_mutation: Option<bool>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawNetwork {
-    #[serde(rename = "defaultPolicy")]
-    default_policy: Option<String>,
-    #[serde(rename = "enforcementMode")]
-    enforcement_mode: Option<String>,
-    #[serde(rename = "allowLocalNetwork")]
-    allow_local_network: Option<bool>,
-    #[serde(rename = "allowedHosts")]
-    allowed_hosts: Option<Vec<String>>,
-    #[serde(rename = "blockedHosts")]
-    blocked_hosts: Option<Vec<String>>,
-    proxy: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawSandbox {
-    #[serde(rename = "idleTimeout")]
-    idle_timeout: Option<u32>,
-    #[serde(rename = "idleTimeoutMs")]
-    idle_timeout_ms: Option<u32>,
-    #[serde(rename = "daemonPipeName")]
-    daemon_pipe_name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawPortMapping {
-    #[serde(rename = "windowsPort")]
-    windows_port: u16,
-    #[serde(rename = "containerPort")]
-    container_port: u16,
-    protocol: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawContainerConfig {
-    #[serde(rename = "targetOs")]
-    target_os: Option<String>,
-    image: Option<String>,
-    #[serde(rename = "imageTarPath")]
-    image_tar_path: Option<String>,
-    #[serde(rename = "cpuCount")]
-    cpu_count: Option<u32>,
-    #[serde(rename = "memoryMb")]
-    memory_mb: Option<u64>,
-    gpu: Option<bool>,
-    #[serde(rename = "storagePath")]
-    storage_path: Option<String>,
-    #[serde(rename = "portMappings")]
-    port_mappings: Option<Vec<RawPortMapping>>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawLxc {
-    distribution: Option<String>,
-    release: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawProcess {
-    #[serde(rename = "commandLine")]
-    command_line: Option<String>,
-    cwd: Option<String>,
-    env: Option<Vec<String>>,
-    timeout: Option<u32>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawLifecycle {
-    #[serde(rename = "destroyOnExit")]
-    destroy_on_exit: Option<bool>,
-    #[serde(rename = "preservePolicy")]
-    preserve_policy: Option<bool>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawTestFeature {
-    message: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawIsolationSession {
-    #[serde(rename = "configurationId")]
-    configuration_id: Option<String>,
-    user: Option<IsolationSessionUser>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawSeatbelt {
-    #[serde(rename = "profileOverride")]
-    profile_override: Option<String>,
-    #[serde(rename = "guiAccess")]
-    gui_access: Option<bool>,
-    #[serde(rename = "launchMethod")]
-    launch_method: Option<crate::models::LaunchMethod>,
-    #[serde(rename = "nestedPty")]
-    nested_pty: Option<bool>,
-    #[serde(rename = "keychainAccess")]
-    keychain_access: Option<bool>,
-    #[serde(rename = "extraMachLookups")]
-    extra_mach_lookups: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawExperimental {
-    test: Option<RawTestFeature>,
-    #[serde(rename = "windows_sandbox")]
-    windows_sandbox: Option<RawSandbox>,
-    wslc: Option<RawContainerConfig>,
-    #[serde(rename = "isolation_session")]
-    isolation_session: Option<RawIsolationSession>,
-    #[serde(alias = "macos_sandbox")]
-    seatbelt: Option<RawSeatbelt>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawUi {
-    disable: Option<bool>,
-    clipboard: Option<String>,
-    injection: Option<bool>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawConfig {
-    version: Option<String>,
-    #[serde(rename = "containerId")]
-    container_id: Option<String>,
-    process: Option<RawProcess>,
-    lifecycle: Option<RawLifecycle>,
-    containment: Option<String>,
-    #[serde(rename = "processContainer", alias = "appContainer")]
-    process_container: Option<RawProcessContainer>,
-    lxc: Option<RawLxc>,
-    filesystem: Option<RawFilesystem>,
-    fallback: Option<RawFallback>,
-    network: Option<RawNetwork>,
-    ui: Option<RawUi>,
-    experimental: Option<RawExperimental>,
-    /// Top-level seatbelt config.
-    #[serde(alias = "macos_sandbox")]
-    seatbelt: Option<RawSeatbelt>,
-    // Captures any top-level key not matched above so unrecognised fields can
-    // be rejected at the trust boundary instead of being silently dropped.
-    // `IgnoredAny` discards each value during deserialisation, so a large or
-    // complex unknown section costs nothing beyond its key. Allowed annotation
-    // keys ($schema, _comment) are filtered out in
-    // `reject_unknown_top_level_fields`.
-    #[serde(flatten)]
-    unknown: HashMap<String, IgnoredAny>,
-}
-
-// State-aware request shape. `phase` is required (no `#[serde(default)]` on
-// the struct, no field-level default) and acts as the discriminator against
-// `RawConfig`; the other fields mirror `RawConfig`'s wire shape so
-// cross-cutting fields (filesystem/network/ui/process) populate the inner
-// `ExecutionRequest` via the same conversion path. The `experimental` block stays
-// raw — typed deserialisation happens at dispatch time keyed by backend.
-#[derive(Deserialize)]
-struct RawStateAwareRequest {
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(rename = "containerId", default)]
-    container_id: Option<String>,
-    #[serde(default)]
-    containment: Option<String>,
-    phase: String,
-    #[serde(rename = "sandboxId", default)]
-    sandbox_id: Option<String>,
-    #[serde(default)]
-    process: Option<RawProcess>,
-    #[serde(default)]
-    filesystem: Option<RawFilesystem>,
-    #[serde(default)]
-    fallback: Option<RawFallback>,
-    #[serde(default)]
-    network: Option<RawNetwork>,
-    #[serde(default)]
-    ui: Option<RawUi>,
-    #[serde(default)]
-    experimental: Option<serde_json::Value>,
-    // See `RawConfig::unknown`. Mirrored here so unrecognised top-level keys are
-    // rejected on the state-aware path too.
-    #[serde(flatten)]
-    unknown: HashMap<String, IgnoredAny>,
-}
-
-// Untagged enum: serde tries `StateAware` first (requires `phase`), falls
-// through to `OneShot` when `phase` is absent. Order matters — `OneShot` is
-// permissive enough to accept arbitrary wire shapes. Both variants are boxed
-// so the enum stays a single tagged pointer regardless of inner growth.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawMxcRequest {
-    StateAware(Box<RawStateAwareRequest>),
-    OneShot(Box<RawConfig>),
-}
-
 // ---------- Public API ----------
-
-/// Parse the `proxy` field.
-///
-/// Accepts either `{ "localhost": <port> }` for an external localhost proxy,
-/// `{ "builtinTestServer": true }` to have wxc launch its own test proxy,
-/// or `{ "url": "<url>" }` for a proxy URL (parsed into host:port).
-/// When `builtinTestServer` is set it must be the only key in the object.
-fn parse_proxy_config(value: &serde_json::Value) -> Result<ProxyConfig, WxcError> {
-    let obj = value
-        .as_object()
-        .ok_or_else(|| WxcError::ConfigParse("network.proxy must be an object".to_string()))?;
-
-    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
-
-    if let Some(builtin_value) = obj.get("builtinTestServer") {
-        if builtin_value.as_bool() != Some(true) {
-            return Err(WxcError::ConfigParse(
-                "network.proxy.builtinTestServer must be true when present".to_string(),
-            ));
-        }
-        if obj.len() != 1 {
-            return Err(WxcError::ConfigParse(
-                "When builtinTestServer is true, no other proxy options may be set".to_string(),
-            ));
-        }
-
-        return Ok(ProxyConfig {
-            address: Some(proxy_addr),
-            builtin_test_server: true,
-        });
-    }
-
-    if let Some(localhost) = obj.get("localhost") {
-        let port_val = if let Some(port) = localhost.as_u64() {
-            port
-        } else {
-            return Err(WxcError::ConfigParse(
-                "network.proxy.localhost must be a number".to_string(),
-            ));
-        };
-
-        if port_val == 0 || port_val > 65535 {
-            return Err(WxcError::ConfigParse(
-                "network.proxy.localhost must be a port between 1 and 65535".to_string(),
-            ));
-        }
-
-        // Non builtin proxy with localhost and port specified
-        proxy_addr.port = port_val as u16;
-        return Ok(ProxyConfig {
-            address: Some(proxy_addr),
-            builtin_test_server: false,
-        });
-    }
-
-    if let Some(url_value) = obj.get("url") {
-        let url_str = url_value.as_str().ok_or_else(|| {
-            WxcError::ConfigParse("network.proxy.url must be a string".to_string())
-        })?;
-
-        let parsed = url::Url::parse(url_str)
-            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
-
-        let host = parsed.host_str().ok_or_else(|| {
-            WxcError::ConfigParse(format!(
-                "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
-            ))
-        })?.to_string();
-        let port = parsed.port().ok_or_else(|| {
-            WxcError::ConfigParse(format!(
-                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
-            ))
-        })?;
-
-        return Ok(ProxyConfig {
-            address: Some(ProxyAddress::from_url(url_str, host, port)),
-            builtin_test_server: false,
-        });
-    }
-
-    Err(WxcError::ConfigParse(
-        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
-    ))
-}
 
 /// Options for [`load_mxc_request_with_options`].
 ///
@@ -419,12 +81,12 @@ pub fn load_request_with_options(
 ) -> Result<ExecutionRequest, WxcError> {
     let json_str = decode_request_input(input, logger, opts.is_base64)?;
 
-    let raw: RawConfig = serde_json::from_str(&json_str).map_err(|e| {
+    let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
     })?;
 
-    convert_raw_config_inner(raw, logger, true, opts.allow_missing_command)
+    convert_wire_config(cfg, logger, true, opts.allow_missing_command)
 }
 
 /// Build a request from an already-parsed wire-format config [`Value`], running
@@ -439,12 +101,12 @@ pub fn load_request_from_value(
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
-    let raw: RawConfig = serde_json::from_value(config).map_err(|e| {
+    let cfg: wire::MxcConfig = serde_json::from_value(config).map_err(|e| {
         logger.log_line("Error parsing JSON");
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
     })?;
 
-    convert_raw_config_inner(raw, logger, true, allow_missing_command)
+    convert_wire_config(cfg, logger, true, allow_missing_command)
 }
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
@@ -476,22 +138,31 @@ pub fn load_mxc_request_with_options(
     let json_str =
         decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
 
-    let raw: RawMxcRequest = serde_json::from_str(&json_str).map_err(|e| {
+    // Parse once into a generic value so we can (a) discriminate one-shot vs
+    // state-aware by presence of the `phase` key and (b) capture the raw
+    // `experimental` block for the state-aware path, where it is typed
+    // per-backend at dispatch time rather than at parse time.
+    let value: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
     })?;
 
-    match raw {
-        RawMxcRequest::StateAware(state_aware) => {
-            convert_raw_state_aware(*state_aware, logger, opts.allow_missing_command)
-                .map(MxcRequest::StateAware)
-                .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
-        }
-        RawMxcRequest::OneShot(one_shot) => {
-            convert_raw_config_inner(*one_shot, logger, true, opts.allow_missing_command)
-                .map(MxcRequest::OneShot)
-                .map_err(ParseError::OneShot)
-        }
+    if value.get("phase").is_some() {
+        convert_wire_state_aware(value, logger, opts.allow_missing_command)
+            .map(MxcRequest::StateAware)
+            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+    } else {
+        // Re-deserialize from the source text (not the parsed `Value`) so
+        // serde's line/column context is preserved in error messages on this
+        // trust boundary; `from_value` discards it, turning a typo or
+        // out-of-range field into an unlocalised "expected u16"-style dump.
+        let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
+            logger.log_line("Error parsing JSON");
+            ParseError::OneShot(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
+        })?;
+        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+            .map(MxcRequest::OneShot)
+            .map_err(ParseError::OneShot)
     }
 }
 
@@ -629,59 +300,95 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
     Ok(())
 }
 
-// ---------- Conversion from raw JSON to domain model ----------
+// ---------- Conversion from wire model to domain model ----------
 
-/// Top-level keys that are permitted but carry no semantic meaning: `$schema`
-/// (editor hint) and `_comment` (human annotation). They are accepted at the
-/// trust boundary but ignored by the model.
-const ALLOWED_TOP_LEVEL_ANNOTATIONS: &[&str] = &["$schema", "_comment"];
+/// Convert a typed `wire::Proxy` block into the validated domain `ProxyConfig`.
+/// Exactly one of `builtinTestServer` / `localhost` / `url` may be set.
+fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
+    // Destructure (no `..`) so a new wire field fails to compile until handled.
+    let wire::Proxy {
+        builtin_test_server,
+        localhost,
+        url,
+    } = proxy;
+    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
 
-/// Rejects unrecognised top-level fields captured by a `#[serde(flatten)]` map.
-///
-/// This is the structural half of schema enforcement at the trust boundary:
-/// typos and silently-dropped fields (for example `fileSystem` instead of
-/// `filesystem`, or a stray `policy` block) now fail loudly with a precise
-/// error instead of being ignored, which previously meant the associated
-/// policy was never applied.
-fn reject_unknown_top_level_fields<V>(
-    unknown: &HashMap<String, V>,
-    logger: &mut Logger,
-) -> Result<(), WxcError> {
-    let mut keys: Vec<&str> = unknown
-        .keys()
-        .map(String::as_str)
-        .filter(|k| !ALLOWED_TOP_LEVEL_ANNOTATIONS.contains(k))
-        .collect();
-    if keys.is_empty() {
-        return Ok(());
+    if let Some(builtin) = builtin_test_server {
+        if !builtin {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.builtinTestServer must be true when present".to_string(),
+            ));
+        }
+        if localhost.is_some() || url.is_some() {
+            return Err(WxcError::ConfigParse(
+                "When builtinTestServer is true, no other proxy options may be set".to_string(),
+            ));
+        }
+        return Ok(ProxyConfig {
+            address: Some(proxy_addr),
+            builtin_test_server: true,
+        });
     }
-    keys.sort_unstable();
-    let msg = format!(
-        "Unknown top-level field(s) in config: {}. Remove them or check for typos \
-         (field names are case-sensitive, e.g. 'filesystem' not 'fileSystem').",
-        keys.join(", ")
-    );
-    logger.log_line(&msg);
-    Err(WxcError::ConfigParse(msg))
+
+    if let Some(port) = localhost {
+        if port == 0 {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.localhost must be a port between 1 and 65535".to_string(),
+            ));
+        }
+        proxy_addr.port = port;
+        return Ok(ProxyConfig {
+            address: Some(proxy_addr),
+            builtin_test_server: false,
+        });
+    }
+
+    if let Some(url_str) = url {
+        let parsed = url::Url::parse(&url_str)
+            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| {
+                WxcError::ConfigParse(format!(
+                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
+                ))
+            })?
+            .to_string();
+        let port = parsed.port().ok_or_else(|| {
+            WxcError::ConfigParse(format!(
+                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
+            ))
+        })?;
+
+        return Ok(ProxyConfig {
+            address: Some(ProxyAddress::from_url(&url_str, host, port)),
+            builtin_test_server: false,
+        });
+    }
+
+    Err(WxcError::ConfigParse(
+        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
+    ))
 }
 
-fn present_backend_sections(raw: &RawConfig) -> Vec<&'static str> {
+fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
     let mut sections: Vec<&'static str> = Vec::new();
     let mut push = |backend: ContainmentBackend| {
         if let Some(path) = backend.section_path() {
             sections.push(path);
         }
     };
-    if raw.process_container.is_some() {
+    if cfg.process_container.is_some() {
         push(ContainmentBackend::ProcessContainer);
     }
-    if raw.lxc.is_some() {
+    if cfg.lxc.is_some() {
         push(ContainmentBackend::Lxc);
     }
-    if raw.seatbelt.is_some() {
+    if cfg.seatbelt.is_some() {
         push(ContainmentBackend::Seatbelt);
     }
-    if let Some(experimental) = raw.experimental.as_ref() {
+    if let Some(experimental) = cfg.experimental.as_ref() {
         if experimental.windows_sandbox.is_some() {
             push(ContainmentBackend::WindowsSandbox);
         }
@@ -778,54 +485,165 @@ fn validate_experimental_backend_keys(
     Err(WxcError::ConfigParse(msg))
 }
 
-// `require_process = false` allows state-aware non-exec phases to omit the
-// `process` block entirely; those phases leave `script_code` / `working_directory`
-// / `script_timeout` / `env` at their defaults and never read them.
-//
-/// Convert a raw seatbelt JSON block into the validated domain struct.
-fn make_seatbelt_config(raw_sb: RawSeatbelt) -> SeatbeltConfig {
+/// Convert a typed `wire::Seatbelt` block into the validated domain struct.
+fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
+    // Destructure (no `..`) so adding a wire field without mapping it is a
+    // compile error rather than a silent runtime drop.
+    let wire::Seatbelt {
+        profile_override,
+        gui_access,
+        launch_method,
+        nested_pty,
+        keychain_access,
+        extra_mach_lookups,
+    } = sb;
     SeatbeltConfig {
-        profile_override: raw_sb.profile_override,
-        gui_access: raw_sb.gui_access.unwrap_or(false),
-        launch_method: raw_sb.launch_method.unwrap_or_default(),
-        nested_pty: raw_sb.nested_pty.unwrap_or(true),
-        keychain_access: raw_sb.keychain_access.unwrap_or(false),
-        extra_mach_lookups: raw_sb.extra_mach_lookups.unwrap_or_default(),
+        profile_override,
+        gui_access: gui_access.unwrap_or(false),
+        launch_method: launch_method
+            .map(map_wire_launch_method)
+            .unwrap_or_default(),
+        nested_pty: nested_pty.unwrap_or(true),
+        keychain_access: keychain_access.unwrap_or(false),
+        extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
     }
 }
 
-// `allow_missing_command` further relaxes the `require_process == true` arms
-// so that a CLI command-line override (provided by the driver after parsing)
-// can stand in for `process.commandLine`. When set, a missing or empty
-// `commandLine` is silently accepted and `script_code` is left empty.
-fn convert_raw_config_inner(
-    raw: RawConfig,
+/// Map the wire Seatbelt launch method to the domain enum.
+fn map_wire_launch_method(m: wire::LaunchMethod) -> crate::models::LaunchMethod {
+    match m {
+        wire::LaunchMethod::Exec => crate::models::LaunchMethod::Exec,
+        wire::LaunchMethod::Open => crate::models::LaunchMethod::Open,
+    }
+}
+
+/// Lowercase wire-format string for a UI isolation level (matches the schema
+/// enum values consumed downstream).
+fn wire_ui_isolation_str(iso: &wire::UiIsolation) -> &'static str {
+    match iso {
+        wire::UiIsolation::Desktop => "desktop",
+        wire::UiIsolation::Handles => "handles",
+        wire::UiIsolation::Atoms => "atoms",
+        wire::UiIsolation::Container => "container",
+    }
+}
+
+/// Map the wire lifecycle phase to the domain `Phase`.
+fn map_wire_phase(p: wire::Phase) -> Phase {
+    match p {
+        wire::Phase::Provision => Phase::Provision,
+        wire::Phase::Start => Phase::Start,
+        wire::Phase::Exec => Phase::Exec,
+        wire::Phase::Stop => Phase::Stop,
+        wire::Phase::Deprovision => Phase::Deprovision,
+    }
+}
+
+/// Map the wire IsolationSession sizing profile to the domain enum.
+fn map_wire_isolation_configuration_id(
+    id: wire::IsolationConfigurationId,
+) -> IsolationSessionConfigurationId {
+    match id {
+        wire::IsolationConfigurationId::Small => IsolationSessionConfigurationId::Small,
+        wire::IsolationConfigurationId::Medium => IsolationSessionConfigurationId::Medium,
+        wire::IsolationConfigurationId::Large => IsolationSessionConfigurationId::Large,
+        wire::IsolationConfigurationId::Composable => IsolationSessionConfigurationId::Composable,
+    }
+}
+
+/// Map the wire Entra user bundle to the domain struct.
+fn map_wire_isolation_user(u: wire::IsolationUser) -> IsolationSessionUser {
+    // Destructure (no `..`) so a new wire field fails to compile until mapped.
+    let wire::IsolationUser { upn, wam_token } = u;
+    IsolationSessionUser { upn, wam_token }
+}
+
+/// Resolve the `containment` wire enum to a concrete domain backend.
+///
+/// `None` (omitted) and the abstract intent `Process` resolve to the OS-native
+/// process sandbox per target_os; `Vm` resolves to the host's VM-class backend.
+/// Deprecated spellings (`appcontainer`, `macos_sandbox`) are accepted via
+/// `#[serde(alias)]` on the wire enum and arrive here already mapped to the
+/// canonical variant. Concrete backends map verbatim.
+fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
+    use wire::Containment as W;
+    match c {
+        None | Some(W::Process) => {
+            #[cfg(target_os = "linux")]
+            {
+                ContainmentBackend::Bubblewrap
+            }
+            #[cfg(target_os = "macos")]
+            {
+                ContainmentBackend::Seatbelt
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                ContainmentBackend::ProcessContainer
+            }
+        }
+        Some(W::ProcessContainer) => ContainmentBackend::ProcessContainer,
+        Some(W::Vm) => {
+            #[cfg(target_os = "windows")]
+            {
+                ContainmentBackend::WindowsSandbox
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                ContainmentBackend::Vm
+            }
+        }
+        Some(W::WindowsSandbox) => ContainmentBackend::WindowsSandbox,
+        Some(W::Lxc) => ContainmentBackend::Lxc,
+        Some(W::Microvm) => ContainmentBackend::MicroVm,
+        Some(W::Hyperlight) => ContainmentBackend::Hyperlight,
+        Some(W::Wslc) => ContainmentBackend::Wslc,
+        Some(W::Seatbelt) => ContainmentBackend::Seatbelt,
+        Some(W::IsolationSession) => ContainmentBackend::IsolationSession,
+        Some(W::Bubblewrap) => ContainmentBackend::Bubblewrap,
+    }
+}
+
+// `allow_missing_command` relaxes the `require_process == true` arms so that a
+// CLI command-line override (provided by the driver after parsing) can stand in
+// for `process.commandLine`. When set, a missing or empty `commandLine` is
+// silently accepted and `script_code` is left empty.
+fn convert_wire_config(
+    cfg: wire::MxcConfig,
     logger: &mut Logger,
     require_process: bool,
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
-    // Reject unrecognised top-level fields before anything else, so typos and
-    // stray sections fail loudly instead of being silently ignored.
-    reject_unknown_top_level_fields(&raw.unknown, logger)?;
+    // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
+    // consumes them before delegating here, so if either is still present the
+    // input is a state-aware-shaped payload sent to a one-shot entry point;
+    // reject it loudly rather than silently executing it as a one-shot.
+    if cfg.phase.is_some() {
+        let msg = "'phase' is only valid on state-aware lifecycle requests".to_string();
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+    if cfg.sandbox_id.is_some() {
+        let msg = "'sandboxId' is only valid on state-aware lifecycle requests".to_string();
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
 
-    // Captured before `raw` fields are moved out below.
-    let present_backend_sections = present_backend_sections(&raw);
+    // Backend sections present in the config (captured before fields move out).
+    let present_backend_sections = present_backend_sections(&cfg);
 
-    // New top-level fields
-    let schema_version = raw.version.unwrap_or_default();
+    let schema_version = cfg.version.unwrap_or_default();
 
-    // Validate the schema version up front so an unsupported version fails fast,
-    // before any of the per-section conversion work below.
+    // Validate the schema version up front so an unsupported version fails fast.
     validate_schema_version(&schema_version, logger)?;
 
-    let container_id = raw.container_id.unwrap_or_default();
+    let container_id = cfg.container_id.unwrap_or_default();
 
-    // Process section: required for one-shot and for state-aware exec; absent
-    // is allowed for state-aware non-exec phases (require_process == false)
-    // or when the driver has signalled a CLI command-line override is
-    // present via `allow_missing_command`.
+    // Process section: required for one-shot and state-aware exec; optional for
+    // non-exec state-aware phases (require_process == false) or when the driver
+    // signalled a CLI command-line override (allow_missing_command).
     let command_required = require_process && !allow_missing_command;
-    let (script_code, working_directory, script_timeout, env) = match raw.process {
+    let (script_code, working_directory, script_timeout, env) = match cfg.process {
         Some(process) => {
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
@@ -844,8 +662,7 @@ fn convert_raw_config_inner(
                 _ => String::new(),
             };
 
-            // Null bytes can be used to hide malicious payloads from audit logs or
-            // other inspection.
+            // Null bytes can hide malicious payloads from audit logs.
             if script_code.contains('\0') {
                 return Err(WxcError::ConfigParse(
                     "process.commandLine must not contain null bytes".to_string(),
@@ -867,135 +684,34 @@ fn convert_raw_config_inner(
         None => (String::new(), String::new(), 0, Vec::new()),
     };
 
-    // Containment backend selection.
-    //
-    // The `containment` wire field is dual-purpose: callers may pass either
-    //   (a) an abstract intent (e.g. "process") that names a *kind* of
-    //       isolation and lets the binary pick the host-appropriate runner,
-    //   or
-    //   (b) a concrete backend id (e.g. "processcontainer", "lxc", "seatbelt")
-    //       that pins the runner explicitly.
-    //
-    // Both forms target the same internal `ContainmentBackend` enum. The
-    // match below recognises every concrete id verbatim and resolves the
-    // abstract intents into the appropriate concrete variant per
-    // target_os. Any future concrete-only backend just needs an arm; any
-    // future abstract intent should resolve here (and likewise in
-    // `parse_containment_str` below for the state-aware path).
-    //
-    // Default resolution (omitted `containment`) and the abstract intent
-    // `"process"` map to the OS-native process sandbox on each platform:
-    //   * Windows -> ProcessContainer (AppContainer)
-    //   * macOS   -> Seatbelt
-    //   * Linux   -> Bubblewrap (lightweight, unprivileged process sandbox)
-    // LXC is treated as a full Linux container and is only selected when
-    // explicitly requested via `"lxc"`; `"processcontainer"` continues to
-    // route to ProcessContainer (which `lxc-exec` falls back to LXC for).
-    let containment = match raw.containment.as_deref() {
-        None => {
-            #[cfg(target_os = "linux")]
-            {
-                ContainmentBackend::Bubblewrap
-            }
-            #[cfg(target_os = "macos")]
-            {
-                ContainmentBackend::Seatbelt
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            {
-                ContainmentBackend::ProcessContainer
-            }
-        }
-        Some("processcontainer") => ContainmentBackend::ProcessContainer,
-        Some("appcontainer") => {
-            logger.log_line(
-                "[deprecated] containment value 'appcontainer' is a legacy alias for 'processcontainer'; \
-                 update your config to use 'processcontainer' (the 'appcontainer' alias may be removed in a future schema version).",
-            );
-            ContainmentBackend::ProcessContainer
-        }
-        Some("process") => {
-            // Abstract intent: the caller wants the OS-native process
-            // sandbox. Resolves to ProcessContainer on Windows, Bubblewrap
-            // on Linux, and Seatbelt on macOS. Callers who want LXC (a
-            // full container) must request it explicitly via "lxc".
-            #[cfg(target_os = "linux")]
-            {
-                ContainmentBackend::Bubblewrap
-            }
-            #[cfg(target_os = "macos")]
-            {
-                ContainmentBackend::Seatbelt
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            {
-                ContainmentBackend::ProcessContainer
-            }
-        }
-        Some("windows_sandbox") => ContainmentBackend::WindowsSandbox,
-        Some("wslc") => ContainmentBackend::Wslc,
-        Some("lxc") => ContainmentBackend::Lxc,
-        Some("vm") => {
-            // Abstract intent: full hardware-virtualised VM isolation.
-            // Today the only concrete VM backend is Windows Sandbox; on
-            // non-Windows targets we fall through to the historical
-            // `Vm` variant which the host binaries surface as an
-            // explicit "not implemented" error.
-            #[cfg(target_os = "windows")]
-            {
-                ContainmentBackend::WindowsSandbox
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                ContainmentBackend::Vm
-            }
-        }
-        Some("microvm") => ContainmentBackend::MicroVm,
-        Some("isolation_session") => ContainmentBackend::IsolationSession,
-        Some("seatbelt") => ContainmentBackend::Seatbelt,
-        Some("macos_sandbox") => {
-            logger.log_line(
-                "[deprecated] containment value 'macos_sandbox' is a legacy alias for 'seatbelt'; \
-                 update your config to use 'seatbelt' (the 'macos_sandbox' alias may be removed in a future schema version).",
-            );
-            ContainmentBackend::Seatbelt
-        }
-        Some("hyperlight") => ContainmentBackend::Hyperlight,
-        Some("bubblewrap") => ContainmentBackend::Bubblewrap,
-        Some(other) => {
-            let msg = format!(
-                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', 'hyperlight', or 'bubblewrap')",
-                other
-            );
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
-        }
-    };
+    // Containment backend selection. The wire enum has already constrained the
+    // value to a known variant (invalid strings fail at deserialize); abstract
+    // intents and the omitted case resolve to the OS-native backend here.
+    let containment = map_wire_containment(cfg.containment.as_ref());
 
     validate_single_backend_section(containment.clone(), &present_backend_sections, logger)?;
 
     // LXC configuration
-    let lxc_config = {
-        let raw_lxc = raw.lxc.unwrap_or_default();
-        LxcConfig {
-            distribution: raw_lxc.distribution.unwrap_or_default(),
-            release: raw_lxc.release.unwrap_or_default(),
-        }
+    let lxc_config = match cfg.lxc {
+        Some(l) => LxcConfig {
+            distribution: l.distribution.unwrap_or_default(),
+            release: l.release.unwrap_or_default(),
+        },
+        None => LxcConfig::default(),
     };
 
     let mut policy = ContainerPolicy::default();
 
     // ProcessContainer section. Holds settings that apply to the Windows
-    // process-level backend regardless of whether the runner picks the
-    // legacy AppContainer implementation (which honors `capabilities`,
-    // `learningMode`, `leastPrivilege`) or the newer BaseContainer
-    // implementation (which honors `ui`).
-    if let Some(ac) = raw.process_container {
+    // process-level backend regardless of whether the runner picks the legacy
+    // AppContainer implementation (capabilities/learningMode/leastPrivilege) or
+    // the newer BaseContainer implementation (ui).
+    if let Some(ac) = cfg.process_container {
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
         }
 
-        // learningMode handling differs between debug and release
+        // learningMode handling differs between debug and release.
         if ac.learning_mode.unwrap_or(false) {
             #[cfg(debug_assertions)]
             {
@@ -1010,12 +726,11 @@ fn convert_raw_config_inner(
             }
         }
 
-        // Add explicit capabilities
         if let Some(caps) = ac.capabilities {
             policy.capabilities.extend(caps);
         }
 
-        // SECURITY: Strip permissiveLearningMode in release builds
+        // SECURITY: Strip permissiveLearningMode in release builds.
         #[cfg(not(debug_assertions))]
         {
             policy.capabilities.retain(|cap| {
@@ -1028,10 +743,14 @@ fn convert_raw_config_inner(
             });
         }
 
-        // BaseProcessContainer-specific UI config
+        // BaseProcessContainer-specific UI config.
         if let Some(raw_ui) = ac.ui {
-            policy.base_process_ui.isolation =
-                raw_ui.isolation.unwrap_or_else(|| "container".to_string());
+            policy.base_process_ui.isolation = raw_ui
+                .isolation
+                .as_ref()
+                .map(wire_ui_isolation_str)
+                .unwrap_or("container")
+                .to_string();
             policy.base_process_ui.desktop_system_control =
                 raw_ui.desktop_system_control.unwrap_or(false);
             policy.base_process_ui.system_settings =
@@ -1041,7 +760,7 @@ fn convert_raw_config_inner(
     }
 
     // Filesystem section
-    if let Some(fscfg) = raw.filesystem {
+    if let Some(fscfg) = cfg.filesystem {
         if let Some(v) = fscfg.denied_paths {
             policy.denied_paths = v;
         }
@@ -1055,16 +774,16 @@ fn convert_raw_config_inner(
     validate_filesystem_paths(&policy, logger)?;
 
     // Fallback section
-    if let Some(fbcfg) = raw.fallback {
+    if let Some(fbcfg) = cfg.fallback {
         if let Some(v) = fbcfg.allow_dacl_mutation {
             policy.fallback.allow_dacl_mutation = v;
         }
     }
 
     // Network section
-    if let Some(net) = raw.network {
-        if let Some(proxy_value) = net.proxy {
-            let proxy_config = parse_proxy_config(&proxy_value)?;
+    if let Some(net) = cfg.network {
+        if let Some(proxy) = net.proxy {
+            let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
@@ -1078,33 +797,17 @@ fn convert_raw_config_inner(
         }
 
         if let Some(p) = net.default_policy {
-            policy.default_network_policy = match p.as_str() {
-                "allow" => NetworkPolicy::Allow,
-                "block" => NetworkPolicy::Block,
-                other => {
-                    let msg = format!(
-                        "Invalid network.defaultPolicy value '{}' (must be 'allow' or 'block')",
-                        other
-                    );
-                    logger.log_line(&msg);
-                    return Err(WxcError::ConfigParse(msg));
-                }
+            policy.default_network_policy = match p {
+                wire::NetworkPolicy::Allow => NetworkPolicy::Allow,
+                wire::NetworkPolicy::Block => NetworkPolicy::Block,
             };
         }
 
         if let Some(m) = net.enforcement_mode {
-            policy.network_enforcement_mode = match m.as_str() {
-                "capabilities" => NetworkEnforcementMode::Capabilities,
-                "firewall" => NetworkEnforcementMode::Firewall,
-                "both" => NetworkEnforcementMode::Both,
-                other => {
-                    let msg = format!(
-                        "Invalid network.enforcementMode value '{}' (must be 'capabilities', 'firewall', or 'both')",
-                        other
-                    );
-                    logger.log_line(&msg);
-                    return Err(WxcError::ConfigParse(msg));
-                }
+            policy.network_enforcement_mode = match m {
+                wire::NetworkEnforcement::Capabilities => NetworkEnforcementMode::Capabilities,
+                wire::NetworkEnforcement::Firewall => NetworkEnforcementMode::Firewall,
+                wire::NetworkEnforcement::Both => NetworkEnforcementMode::Both,
             };
         }
 
@@ -1120,9 +823,8 @@ fn convert_raw_config_inner(
         }
 
         // Bubblewrap is unprivileged by design; iptables-based enforcement
-        // (firewall / both) requires CAP_NET_ADMIN, which defeats the
-        // backend's privilege story. Reject the combination explicitly so
-        // users get a clear error instead of an opaque runtime failure.
+        // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
+        // privilege story. Reject the combination explicitly.
         if containment == ContainmentBackend::Bubblewrap
             && policy.network_proxy.is_enabled()
             && matches!(
@@ -1138,13 +840,10 @@ fn convert_raw_config_inner(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
-        // External proxy (`network.proxy.url` / `network.proxy.localhost`)
-        // enforces its own policy — the runner does NOT forward
-        // `allowedHosts` / `blockedHosts` / `defaultPolicy` to it. Reject
-        // configs that combine an external proxy with host lists or a
-        // restrictive default, otherwise users get a silently weaker
-        // enforcement than a no-proxy `defaultPolicy: "block"` config
-        // would have produced.
+        // External proxy (`url` / `localhost`) enforces its own policy — the
+        // runner does NOT forward host lists to it. Reject configs that combine
+        // an external proxy with host lists or a restrictive default, otherwise
+        // users get silently weaker enforcement.
         if containment == ContainmentBackend::Bubblewrap
             && policy.network_proxy.is_enabled()
             && !policy.network_proxy.builtin_test_server
@@ -1162,14 +861,9 @@ fn convert_raw_config_inner(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
-        // Cooperative-model warning: when the builtin test proxy is paired
-        // with `defaultPolicy: "block"` and no allowlist, well-behaved
-        // HTTP clients are denied at the proxy, but raw-socket clients
-        // (anything that ignores HTTP_PROXY/HTTPS_PROXY) still reach the
-        // host network because the sandbox shares the host netns in proxy
-        // mode. Surface this at config-validation time so users porting a
-        // working hard-block config don't silently lose enforcement when
-        // they add a proxy block.
+        // Cooperative-model warning: builtin test proxy + defaultPolicy 'block'
+        // with no allowlist denies well-behaved HTTP clients at the proxy, but
+        // raw-socket clients still reach the host network.
         if containment == ContainmentBackend::Bubblewrap
             && policy.network_proxy.is_enabled()
             && policy.default_network_policy == NetworkPolicy::Block
@@ -1188,19 +882,19 @@ fn convert_raw_config_inner(
     }
 
     // Lifecycle section
-    let lifecycle = {
-        let lc = raw.lifecycle.unwrap_or_default();
-        let destroy_on_exit = lc.destroy_on_exit.unwrap_or(true);
-        let preserve_policy = lc.preserve_policy.unwrap_or(false);
-
-        LifecycleConfig {
-            destroy_on_exit,
-            preserve_policy,
-        }
+    let lifecycle = match cfg.lifecycle {
+        Some(lc) => LifecycleConfig {
+            destroy_on_exit: lc.destroy_on_exit.unwrap_or(true),
+            preserve_policy: lc.preserve_policy.unwrap_or(false),
+        },
+        None => LifecycleConfig {
+            destroy_on_exit: true,
+            preserve_policy: false,
+        },
     };
 
-    // Experimental section (parsed but only applied when --experimental flag is set)
-    let experimental = if let Some(raw_exp) = raw.experimental {
+    // Experimental section (parsed but only applied when --experimental is set).
+    let experimental = if let Some(raw_exp) = cfg.experimental {
         let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
         let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
             let mut config = WindowsSandboxConfig::default();
@@ -1244,36 +938,12 @@ fn convert_raw_config_inner(
                         logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
-                    let protocol = m
-                        .protocol
-                        .unwrap_or_else(|| "tcp".to_string())
-                        .to_lowercase();
-                    if protocol != "tcp" && protocol != "udp" {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: protocol '{protocol}' \
-                             not supported; expected 'tcp'"
-                        );
-                        logger.log_line(&msg);
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    // The WSLC SDK header (Microsoft.WSL.Containers 2.8.1,
-                    // vendored under external/wslc-sdk/) declares
-                    // WSLC_PORT_PROTOCOL_UDP = 1, but the shipped runtime
-                    // returns E_NOTIMPL (0x80004001) when UDP is actually
-                    // passed to WslcSetContainerSettingsPortMappings. Reject
-                    // UDP at parse time with a clear message until a future
-                    // SDK version implements it.
-                    if protocol == "udp" {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: protocol 'udp' is \
-                             not supported by the vendored WSLC SDK runtime \
-                             (Microsoft.WSL.Containers 2.8.1). Only 'tcp' is currently \
-                             implemented. UDP support will be enabled when a future SDK \
-                             version ships it."
-                        );
-                        logger.log_line(&msg);
-                        return Err(WxcError::ConfigParse(msg));
-                    }
+                    // Only TCP is representable in the wire model
+                    // (TransportProtocol is tcp-only); a `udp` value is rejected
+                    // at deserialize. The vendored WSLC SDK runtime
+                    // (Microsoft.WSL.Containers 2.8.1) returns E_NOTIMPL for UDP,
+                    // so only TCP is currently supported.
+                    let protocol = "tcp".to_string();
                     converted.push(PortMapping {
                         windows_port: m.windows_port,
                         container_port: m.container_port,
@@ -1282,8 +952,9 @@ fn convert_raw_config_inner(
                 }
                 // Reject duplicate (windowsPort, protocol) entries. Same host
                 // port on TCP+UDP would in principle be legal, but UDP is
-                // rejected earlier; the second protocol dimension is retained
-                // in the dedupe key in case UDP support is enabled later.
+                // rejected at deserialize (the wire model is tcp-only); the
+                // second protocol dimension is retained in the dedupe key in
+                // case UDP support is enabled later.
                 let mut seen: std::collections::HashSet<(u16, &str)> =
                     std::collections::HashSet::new();
                 for pm in &converted {
@@ -1306,26 +977,12 @@ fn convert_raw_config_inner(
         let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
             let mut config = IsolationSessionConfig::default();
             if let Some(id) = as_cfg.configuration_id {
-                use crate::models::IsolationSessionConfigurationId;
-                config.configuration_id = match id.as_str() {
-                    "small" => IsolationSessionConfigurationId::Small,
-                    "medium" => IsolationSessionConfigurationId::Medium,
-                    "large" => IsolationSessionConfigurationId::Large,
-                    "composable" => IsolationSessionConfigurationId::Composable,
-                    _ => {
-                        logger.log_line(&format!(
-                            "Unknown isolation_session configurationId '{}', defaulting to 'composable'",
-                            id
-                        ));
-                        IsolationSessionConfigurationId::Composable
-                    }
-                };
+                config.configuration_id = map_wire_isolation_configuration_id(id);
             }
-            config.user = as_cfg.user;
+            config.user = as_cfg.user.map(map_wire_isolation_user);
             config
         });
-        let seatbelt = raw_exp.seatbelt;
-        if seatbelt.is_some() {
+        if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
                 .to_string();
@@ -1344,14 +1001,14 @@ fn convert_raw_config_inner(
 
     // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
     // rejected above.
-    let seatbelt = raw.seatbelt.map(make_seatbelt_config);
+    let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
 
     // UI section
-    if let Some(raw_ui) = raw.ui {
-        let clipboard = match raw_ui.clipboard.as_deref() {
-            Some("read") => ClipboardPolicy::Read,
-            Some("write") => ClipboardPolicy::Write,
-            Some("all") => ClipboardPolicy::All,
+    if let Some(raw_ui) = cfg.ui {
+        let clipboard = match raw_ui.clipboard {
+            Some(wire::ClipboardPolicy::Read) => ClipboardPolicy::Read,
+            Some(wire::ClipboardPolicy::Write) => ClipboardPolicy::Write,
+            Some(wire::ClipboardPolicy::All) => ClipboardPolicy::All,
             _ => ClipboardPolicy::None,
         };
         policy.ui = UiPolicy {
@@ -1380,132 +1037,110 @@ fn convert_raw_config_inner(
     })
 }
 
-fn convert_raw_state_aware(
-    raw: RawStateAwareRequest,
+fn convert_wire_state_aware(
+    mut value: serde_json::Value,
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    // Reject unrecognised top-level fields on the state-aware envelope before
-    // building the one-shot surrogate (whose `unknown` map is always empty).
-    reject_unknown_top_level_fields(&raw.unknown, logger)?;
+    // Capture the raw `experimental` block before typed deserialize; it is typed
+    // per-backend at dispatch time, not here.
+    let experimental_raw = value
+        .as_object_mut()
+        .and_then(|map| map.remove("experimental"));
 
-    let phase = Phase::from_wire(&raw.phase).map_err(|e| {
-        let msg = e.message.clone();
-        logger.log_line(&msg);
-        WxcError::ConfigParse(msg)
+    let mut cfg: wire::MxcConfig = serde_json::from_value(value).map_err(|e| {
+        logger.log_line("Error parsing JSON");
+        WxcError::ConfigParse(format!("JSON parse error: {}", e))
     })?;
 
-    let containment = match raw.containment.as_deref() {
-        None => None,
-        Some(wire) => Some(parse_containment_str(wire, logger)?),
+    // `phase` is the state-aware discriminator and is constrained by the wire
+    // enum; absence here would be a logic error in the caller's discrimination.
+    let phase = match cfg.phase.take() {
+        Some(p) => map_wire_phase(p),
+        None => {
+            return Err(WxcError::ConfigParse(
+                "Missing required field: phase".to_string(),
+            ));
+        }
     };
 
-    validate_experimental_backend_keys(containment.as_ref(), raw.experimental.as_ref(), logger)?;
+    // Resolved backend, present only when the request carried `containment`.
+    let containment = cfg
+        .containment
+        .as_ref()
+        .map(|c| map_wire_containment(Some(c)));
 
-    // Build a RawConfig surrogate so the inner ExecutionRequest is populated by the
-    // same conversion path one-shot uses for cross-cutting wire fields.
-    let surrogate = RawConfig {
-        version: raw.version,
-        container_id: raw.container_id,
-        process: raw.process,
-        lifecycle: None,
-        containment: raw.containment,
-        process_container: None,
-        lxc: None,
-        filesystem: raw.filesystem,
-        fallback: raw.fallback,
-        network: raw.network,
-        ui: raw.ui,
-        // The state-aware experimental block has a different shape from the
-        // one-shot RawExperimental; it is preserved separately on
-        // ParsedStateAwareRequest as raw JSON.
-        experimental: None,
-        seatbelt: None,
-        unknown: HashMap::new(),
-    };
+    // Mirror the one-shot rejection of moved-to-stable experimental sections.
+    // The one-shot path errors on `experimental.seatbelt` in `convert_wire_config`,
+    // but the state-aware path peels `experimental` into `experimental_raw`
+    // before that runs, so without this check the block would be silently
+    // discarded (the same silent-policy-drop class as the F1 stable sections).
+    if let Some(serde_json::Value::Object(exp)) = experimental_raw.as_ref() {
+        for key in ["seatbelt", "macos_sandbox"] {
+            if exp.contains_key(key) {
+                let msg = format!(
+                    "'experimental.{key}' has moved to the stable section; \
+                     use top-level 'seatbelt' instead."
+                );
+                logger.log_line(&msg);
+                return Err(WxcError::ConfigParse(msg));
+            }
+        }
+    }
+
+    validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref(), logger)?;
+
+    let sandbox_id = cfg.sandbox_id.clone();
+
+    // State-aware requests carry only cross-cutting fields (process /
+    // filesystem / network / ui) plus the experimental backend block. One-shot-
+    // only stable sections and lifecycle are not valid here; reject them
+    // explicitly rather than silently discarding a policy the caller believes
+    // is in effect.
+    let mut stray: Vec<&'static str> = Vec::new();
+    if cfg.seatbelt.is_some() {
+        stray.push("seatbelt");
+    }
+    if cfg.process_container.is_some() {
+        stray.push("processContainer");
+    }
+    if cfg.lxc.is_some() {
+        stray.push("lxc");
+    }
+    if cfg.lifecycle.is_some() {
+        stray.push("lifecycle");
+    }
+    if !stray.is_empty() {
+        let msg = format!(
+            "State-aware lifecycle requests do not accept one-shot section(s): {}. \
+             Remove them; per-backend policy and lifecycle are fixed at provision time.",
+            stray.join(", ")
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+
+    // Populate the inner ExecutionRequest from cross-cutting fields only. Clear
+    // the state-aware-only fields (already consumed above) and the
+    // now-validated-absent stable sections so the shared one-shot converter
+    // sees a clean surrogate and its `phase`/`sandboxId` guard passes.
+    cfg.sandbox_id = None;
+    cfg.experimental = None;
+    cfg.seatbelt = None;
+    cfg.process_container = None;
+    cfg.lxc = None;
+    cfg.lifecycle = None;
 
     let require_process = phase == Phase::Exec;
-    let request =
-        convert_raw_config_inner(surrogate, logger, require_process, allow_missing_command)?;
+    let request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
 
     Ok(ParsedStateAwareRequest {
         request,
         phase,
         containment,
-        sandbox_id: raw.sandbox_id,
-        experimental_raw: raw.experimental,
+        sandbox_id,
+        experimental_raw,
     })
-}
-
-/// State-aware path: parse the `containment` wire field on a per-phase
-/// request envelope.
-///
-/// Mirrors the dual-acceptance contract of the one-shot match in
-/// `convert_raw_config_inner`: the input may be either an abstract intent
-/// (resolved per `target_os`) or a concrete backend id. Keep the two
-/// match expressions in lockstep when adding new values.
-fn parse_containment_str(s: &str, logger: &mut Logger) -> Result<ContainmentBackend, WxcError> {
-    match s {
-        "processcontainer" => Ok(ContainmentBackend::ProcessContainer),
-        "appcontainer" => {
-            logger.log_line(
-                "[deprecated] containment value 'appcontainer' is a legacy alias for 'processcontainer'; \
-                 update your config to use 'processcontainer' (the 'appcontainer' alias may be removed in a future schema version).",
-            );
-            Ok(ContainmentBackend::ProcessContainer)
-        }
-        "process" => {
-            // Abstract intent: the caller wants the OS-native process
-            // sandbox. Resolves to ProcessContainer on Windows, Bubblewrap
-            // on Linux, and Seatbelt on macOS. Callers who want LXC (a
-            // full container) must request it explicitly via "lxc".
-            #[cfg(target_os = "linux")]
-            {
-                Ok(ContainmentBackend::Bubblewrap)
-            }
-            #[cfg(target_os = "macos")]
-            {
-                Ok(ContainmentBackend::Seatbelt)
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            {
-                Ok(ContainmentBackend::ProcessContainer)
-            }
-        }
-        "windows_sandbox" => Ok(ContainmentBackend::WindowsSandbox),
-        "wslc" => Ok(ContainmentBackend::Wslc),
-        "lxc" => Ok(ContainmentBackend::Lxc),
-        "vm" => {
-            #[cfg(target_os = "windows")]
-            {
-                Ok(ContainmentBackend::WindowsSandbox)
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                Ok(ContainmentBackend::Vm)
-            }
-        }
-        "microvm" => Ok(ContainmentBackend::MicroVm),
-        "isolation_session" => Ok(ContainmentBackend::IsolationSession),
-        "seatbelt" => Ok(ContainmentBackend::Seatbelt),
-        "hyperlight" => Ok(ContainmentBackend::Hyperlight),
-        "bubblewrap" => Ok(ContainmentBackend::Bubblewrap),
-        "macos_sandbox" => {
-            logger.log_line(
-                "[deprecated] containment value 'macos_sandbox' is a legacy alias for 'seatbelt'; \
-                 update your config to use 'seatbelt' (the 'macos_sandbox' alias may be removed in a future schema version).",
-            );
-            Ok(ContainmentBackend::Seatbelt)
-        }
-        other => {
-            let msg = format!(
-                "Invalid containment value '{}' (must be 'process', 'processcontainer', 'windows_sandbox', 'isolation_session', 'wslc', 'lxc', 'vm', 'microvm', 'seatbelt', 'hyperlight', or 'bubblewrap')",
-                other
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1644,7 +1279,16 @@ mod tests {
             MxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Start);
                 assert_eq!(p.sandbox_id.as_deref(), Some("iso:abcd1234"));
-                assert!(p.experimental_raw.is_some());
+                // Assert the nested experimental payload survives extraction
+                // unchanged (not merely that the block is present), since the
+                // dispatcher types it per-backend from this raw value.
+                let exp = p.experimental_raw.expect("experimental block present");
+                assert_eq!(
+                    exp,
+                    serde_json::json!({
+                        "isolation_session": {"start": {"configurationId": "small"}}
+                    })
+                );
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
@@ -1812,8 +1456,12 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant") && msg.contains("invalid"),
+            "expected serde unknown-variant rejection, got: {msg}"
+        );
     }
 
     #[test]
@@ -1823,8 +1471,12 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant") && msg.contains("invalid"),
+            "expected serde unknown-variant rejection, got: {msg}"
+        );
     }
 
     #[test]
@@ -2251,9 +1903,8 @@ mod tests {
 
     #[test]
     fn hyperlight_containment_value_parses() {
-        // Lock in that `"hyperlight"` is accepted by the parser (mirrors
-        // the `convert_raw_config_inner` arm and keeps `parse_containment_str`
-        // in sync for the state-aware path).
+        // Lock in that `"hyperlight"` is accepted by the parser (the
+        // `map_wire_containment` arm handles both one-shot and state-aware).
         let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "hyperlight"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -2297,8 +1948,12 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant") && msg.contains("docker"),
+            "expected serde unknown-variant rejection, got: {msg}"
+        );
     }
 
     #[test]
@@ -2882,6 +2537,129 @@ mod tests {
     }
 
     #[test]
+    fn nested_unknown_field_rejected() {
+        // The stable surface is closed at every level (deny_unknown_fields):
+        // an unknown *nested* field must be rejected, not just top-level ones.
+        let json = r#"{"process": {"commandLine": "echo hi", "bogus": 1}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown field") && msg.contains("bogus"),
+            "nested unknown field should be rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn nested_proxy_unknown_field_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "network": {"proxy": {"localhost": 8080, "unexpected": true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown field") && msg.contains("unexpected"),
+            "nested proxy unknown field should be rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn invalid_clipboard_rejected() {
+        // Strict enum: an out-of-range clipboard value is rejected at deserialize.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "bogus"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unknown variant") && msg.contains("bogus"),
+            "invalid clipboard value should be rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn experimental_port_mapping_unknown_field_accepted() {
+        // The experimental surface is intentionally permissive (forward-compat):
+        // an unknown field on a nested experimental struct must be tolerated and
+        // the known fields preserved (positive proof of F2 / R2-5).
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "futureField": "ignored"}]}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let wslc = req.experimental.wslc.expect("wslc config present");
+        assert_eq!(wslc.port_mappings.len(), 1);
+        assert_eq!(wslc.port_mappings[0].windows_port, 8080);
+        assert_eq!(wslc.port_mappings[0].container_port, 80);
+    }
+
+    #[test]
+    fn experimental_isolation_user_unknown_field_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let iso = req
+            .experimental
+            .isolation_session
+            .expect("iso config present");
+        let user = iso.user.expect("user present");
+        assert_eq!(user.upn, "alice@contoso.com");
+        assert_eq!(user.wam_token, "tok");
+    }
+
+    #[test]
+    fn one_shot_rejects_phase_field() {
+        // A state-aware-shaped payload (carries `phase`) sent to a one-shot
+        // entry point must be rejected, not silently run as a one-shot.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "phase": "provision"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("phase") && msg.contains("state-aware"),
+            "one-shot path should reject 'phase', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn one_shot_rejects_sandbox_id_field() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "sandboxId": "abc"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("sandboxId") && msg.contains("state-aware"),
+            "one-shot path should reject 'sandboxId', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn top_level_macos_sandbox_alias_maps_to_seatbelt() {
+        // The deprecated `macos_sandbox` section-key alias on the top-level
+        // `seatbelt` field is still accepted and maps to `req.seatbelt`.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "macos_sandbox": {"guiAccess": true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let sb = req.seatbelt.expect("seatbelt config present via alias");
+        assert!(
+            sb.gui_access,
+            "guiAccess should be carried through the alias"
+        );
+    }
+
+    #[test]
     fn top_level_annotations_allowed() {
         // `$schema` and `_comment` are permitted but ignored.
         let json = r#"{
@@ -2908,6 +2686,114 @@ mod tests {
         assert!(
             result.is_err(),
             "unknown top-level field on a state-aware request should be rejected"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_one_shot_seatbelt_section() {
+        // A state-aware request carrying a one-shot-only `seatbelt` policy must
+        // be rejected, not silently discarded (the caller might believe the
+        // hardening is in effect).
+        let json = r#"{
+            "phase": "provision",
+            "containment": "seatbelt",
+            "seatbelt": {"guiAccess": true}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("seatbelt") && err.contains("do not accept"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_one_shot_lifecycle_section() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "lifecycle": {"destroyOnExit": false}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("lifecycle") && err.contains("do not accept"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_one_shot_processcontainer_section() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "processcontainer",
+            "processContainer": {"leastPrivilege": true}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("processContainer") && err.contains("do not accept"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_one_shot_lxc_section() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "lxc",
+            "lxc": {"distribution": "alpine"}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("lxc") && err.contains("do not accept"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_experimental_seatbelt() {
+        // `experimental.seatbelt` moved to the stable section; the state-aware
+        // path must reject it with the migration message, not silently discard
+        // it (R2-1 — the experimental-channel completion of F1).
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"seatbelt": {"guiAccess": true}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("has moved to the stable section"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_experimental_macos_sandbox_alias() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"macos_sandbox": {"guiAccess": true}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("has moved to the stable section"),
+            "got: {err}"
         );
     }
 
@@ -3180,23 +3066,27 @@ mod tests {
     }
 
     #[test]
-    fn wslc_port_mapping_protocol_normalized_to_lowercase() {
-        // "TCP" is normalized to "tcp" and accepted. (UDP rejection is
-        // covered by wslc_port_mapping_udp_rejected_with_sdk_limitation_message.)
+    fn wslc_port_mapping_uppercase_protocol_rejected() {
+        // Strict enums are case-sensitive: "TCP" is not the lowercase wire
+        // value "tcp", so it is rejected at deserialize as an unknown variant.
+        // Only lowercase "tcp" is accepted (see wslc_port_mapping_basic_tcp_parsed).
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "TCP"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
-        assert_eq!(wslc.port_mappings[0].protocol, "tcp");
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unknown variant"),
+            "expected strict-enum rejection of uppercase protocol, got: {msg}"
+        );
     }
 
     #[test]
-    fn wslc_port_mapping_udp_rejected_with_sdk_limitation_message() {
-        // The vendored WSLC SDK 2.8.1 runtime returns E_NOTIMPL for UDP. The
-        // parser must reject UDP up front with a clear message until a
-        // future SDK version implements it.
+    fn wslc_port_mapping_udp_rejected() {
+        // The wire model's TransportProtocol is tcp-only (the vendored WSLC SDK
+        // 2.8.1 runtime returns E_NOTIMPL for UDP), so "udp" is rejected at
+        // deserialize as an unknown enum variant.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -3204,7 +3094,7 @@ mod tests {
         let err = load_request(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
-            msg.contains("udp") && msg.contains("not supported"),
+            msg.contains("udp") && msg.contains("unknown variant"),
             "got: {msg}"
         );
     }
@@ -3267,6 +3157,8 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_unsupported_protocol_rejected() {
+        // An unknown protocol like "sctp" is rejected at deserialize: the
+        // tcp-only TransportProtocol enum has no matching variant.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -3274,7 +3166,7 @@ mod tests {
         let err = load_request(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
-            msg.contains("sctp") && msg.contains("not supported"),
+            msg.contains("sctp") && msg.contains("unknown variant"),
             "got: {msg}"
         );
     }
@@ -3504,16 +3396,18 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_config_unknown_defaults_to_composable() {
+    fn isolation_session_config_unknown_is_rejected() {
+        // Strict enums: an unrecognized configurationId is rejected at
+        // deserialize time rather than silently defaulting to `composable`.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown variant") && msg.contains("xlarge"),
+            "expected an unknown-variant rejection for configurationId 'xlarge', got: {msg}"
         );
     }
 

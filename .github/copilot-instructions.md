@@ -109,7 +109,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### Config flow
 
-1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into intermediate `Raw*` structs → validates and maps to `ExecutionRequest` (the internal execution model in `models.rs`)
+1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into the typed wire model (`wxc_common::wire`) → validates and maps to `ExecutionRequest` (the internal execution model in `models.rs`)
 2. `ExecutionRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
 3. The appropriate `ScriptRunner` implementation executes the process and returns `ScriptResponse`
 
@@ -163,7 +163,7 @@ State-aware lifecycle:
 New features go under the `experimental` JSON section and are only active when `--experimental` is passed. See `docs/authoring-a-new-feature.md` for the full checklist. The pattern:
 
 1. Add the field to the Rust wire model (`src/core/wxc_common/src/wire.rs`) under the `Experimental` section, then regenerate the dev schema (`cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`) — do not hand-edit the generated schema
-2. Add Rust structs to `models.rs` (`ExperimentalConfig`) and `config_parser.rs` (`RawExperimental`)
+2. Add the matching field to the wire model's `Experimental` struct (`src/core/wxc_common/src/wire.rs`) and the domain `ExperimentalConfig` in `models.rs`, then map wire→domain in `config_parser.rs`
 3. Guard execution behind `if request.experimental_enabled` in the runner
 4. Never modify files in `schemas/stable/` — those are immutable release artifacts
 
@@ -191,7 +191,7 @@ The workspace is organized into five top-level directories under `src/`:
 
 ### Config parser pattern
 
-The parser uses two layers of structs: `Raw*` structs (matching JSON with `#[serde(rename)]`) that deserialize permissively, then map to validated domain structs in `models.rs`. This keeps serde attributes separate from the internal model.
+The parser deserializes JSON directly into the typed wire model (`wxc_common::wire`), the single source of truth for the config shape (it also generates the JSON schema). `config_parser.rs` then maps the wire types to the validated domain structs in `models.rs`. The stable surface uses `deny_unknown_fields` (closed); the `experimental` block is permissive.
 
 ### TypeScript conventions
 

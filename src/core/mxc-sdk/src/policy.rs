@@ -760,8 +760,10 @@ fn apply_backend(config: &mut serde_json::Value, policy: &SandboxPolicy, contain
                 capabilities.push("privateNetworkClientServer");
             }
         }
+        // The container id is carried only at the top level (`containerId`); the
+        // wire `processContainer` object intentionally has no `name` field.
+        let _ = container_id;
         config["processContainer"] = json!({
-            "name": container_id,
             "leastPrivilege": false,
             "capabilities": capabilities,
             "ui": {

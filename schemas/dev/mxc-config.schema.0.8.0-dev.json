@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.8.0-dev.json",
   "title": "MXC Configuration",
-  "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. The parser also accepts legacy fields not listed here during the migration period.",
+  "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
   "additionalProperties": false,
   "definitions": {
     "BaseProcessUi": {
@@ -359,8 +359,7 @@
       "type": "object"
     },
     "IsolationUser": {
-      "additionalProperties": false,
-      "description": "Entra cloud-agent user bundle.",
+      "description": "Entra cloud-agent user bundle. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
       "properties": {
         "upn": {
           "description": "User principal name.",
@@ -551,8 +550,7 @@
       "type": "string"
     },
     "PortMapping": {
-      "additionalProperties": false,
-      "description": "A single host → container port forward.",
+      "description": "A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
       "properties": {
         "containerPort": {
           "description": "Container port.",

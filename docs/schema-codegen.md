@@ -105,10 +105,9 @@ CI run, and the corpus gate pins the accept-side behavior.
 ## Roadmap
 
 - The wire model generates the committed dev schema, guarded by the codegen and
-  corpus CI gates. The parser still deserializes via a separate set of
-  permissive `Raw*` structs.
-- Next: rewire the parser to deserialize directly into the wire model and delete
-  the `Raw*` structs, so the schema source and the trust boundary share one
-  definition of the wire shape and cannot drift.
-- After that: generate the SDK TypeScript types from the same schema and retire
-  the hand-maintained `*-strict.json` stable view.
+  corpus CI gates.
+- The parser deserializes directly into the wire model and the `Raw*` structs
+  are gone, so the schema source and the trust boundary share one definition of
+  the wire shape and cannot drift.
+- Next: generate the SDK TypeScript types from the same schema and retire the
+  hand-maintained `*-strict.json` stable view.

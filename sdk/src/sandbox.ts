@@ -105,13 +105,13 @@ function buildBubblewrapConfig(
  */
 function buildLinuxProcessConfig(
     config: ContainerConfig,
-    containerId: string,
 ): ContainerConfig {
+    // The container id is carried at top-level `containerId` and the teardown
+    // flag at `lifecycle.destroyOnExit`; the wire `lxc` object has only
+    // `distribution` / `release`, so do not duplicate those here.
     config.lxc = {
-        containerName: containerId,
         distribution: 'alpine',
         release: '3.23',
-        destroyOnExit: true,
     };
     applyLinuxNetworkPolicy(config);
     return config;
@@ -140,7 +140,6 @@ function buildDarwinProcessConfig(
 function buildProcessBaseContainerConfig(
     config: ContainerConfig,
     policy: SandboxPolicy,
-    containerId: string,
 ): ContainerConfig {
     const capabilities: string[] = [];
     if (policy.network?.allowOutbound) {
@@ -150,8 +149,10 @@ function buildProcessBaseContainerConfig(
         capabilities.push("privateNetworkClientServer");
     }
 
+    // The container id is carried only at the top level (`containerId`, set by
+    // createConfigFromPolicy); the wire `processContainer` object has no `name`
+    // field, so emitting it here would be rejected by the parser.
     config.processContainer = {
-        name: containerId,
         leastPrivilege: false,
         capabilities,
         ui: {
@@ -198,7 +199,6 @@ function buildMicroVmConfig(
             readwritePaths: policy.filesystem?.readwritePaths,
             readonlyPaths: policy.filesystem?.readonlyPaths,
             deniedPaths: policy.filesystem?.deniedPaths,
-            clearPolicyOnExit: policy.filesystem?.clearPolicyOnExit ?? true,
         };
     }
     config.containment = 'microvm';
@@ -344,7 +344,7 @@ export function createConfigFromPolicy(
     if (containment === 'lxc') {
         diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
         config.containment = 'lxc';
-        return buildLinuxProcessConfig(config, containerId);
+        return buildLinuxProcessConfig(config);
     }
 
     if (containment === 'process') {
@@ -369,7 +369,7 @@ export function createConfigFromPolicy(
             return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
-        return buildProcessBaseContainerConfig(config, policy, containerId);
+        return buildProcessBaseContainerConfig(config, policy);
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
