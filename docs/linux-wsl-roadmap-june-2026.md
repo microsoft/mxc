@@ -61,7 +61,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 7 | **Same-path conflict detection** | 🟡 Actionable | Same path appearing in both `readwritePaths` and `deniedPaths` (or `readonlyPaths`) is silently accepted. Shared check in `wxc_common` should reject as a validation error. | S |
+| 7 | **Same-path conflict detection** | 🟡 Actionable | Same path appearing in both `readwritePaths` and `deniedPaths` (or `readonlyPaths`) is silently accepted. Shared check in `wxc_common` should normalize via most-restrictive-wins (`deny` > `readonly` > `readwrite`). | S |
 | 8 | **Paths must exist at policy-load time** | 🟡 Actionable | No existence check today. Non-existent paths cause opaque failures at container start. Add `path_exists()` check at config parse time in `wxc_common`. | S |
 | 9 | **Denied-path masking is heuristic** | 🟡 Actionable | `is_file()` probes the rootfs to choose `/dev/null` (file) vs `tmpfs` (dir) masking. Suffers TOCTOU, symlink-follow, missing-path ambiguity, silent error swallowing. `filesystem_mounts.rs:74-97`. | M |
 
@@ -144,7 +144,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | Bwrap processes `--bind`, `--ro-bind`, `--tmpfs` left-to-right. Last matching arg wins, not longest-prefix. Shared path-tree resolver needed in `wxc_common`. | M |
 | 5 | **(D6) Object-based — validation** | 🟡 Actionable | Same as LXC — `stat()` + inode comparison in `wxc_common`. | S |
 | 6 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC — shared `access_check()` in `wxc_common`. | M |
-| 7 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC — shared check in `wxc_common`. | S |
+| 7 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC — shared most-restrictive-wins normalization in `wxc_common`. | S |
 | 8 | **Paths must exist at policy-load time** | 🟡 Actionable | Non-existent `--bind` paths fail at runtime with unclear errors. Shared `path_exists()` in `wxc_common`. | S |
 | 9 | **Denied-path file masking** | 🟡 Actionable | `--tmpfs` always treats the path as a directory. A denied *file* gets a tmpfs directory mounted over it (wrong type). Fix: use `--ro-bind /dev/null <path>` for files. | S |
 
@@ -229,7 +229,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 5 | **`deniedPaths` overlap validation** | 🟡 Actionable | At parse time, reject configs where a `deniedPaths` entry is a child of a mounted path (since the WSLC SDK cannot enforce the deny). Accept non-overlapping denied paths as implicitly enforced (unmounted = invisible). | S |
+| 5 | **`deniedPaths` overlap validation** | 🟡 Actionable | At parse time, reject configs where a `deniedPaths` entry is a child of a mounted path (since the WSLC SDK cannot enforce the deny). Accept non-overlapping denied paths as implicitly enforced (unmounted = invisible). This is a workaround; *masking* a denied subtree under a mounted parent needs an SDK exclusion primitive (see [WSLC SDK dep #4](#wslc-sdk-dependencies)). | S |
 
 > **Example (item 5).** Policy: `readwritePaths: ["C:\\project"]`, `deniedPaths: ["C:\\project\\secrets"]`. Today: `deniedPaths` silently ignored; `secrets` is fully accessible through the parent mount. Fix: reject at config time with "denied path is a child of a mounted path; WSLC cannot enforce this."
 
@@ -237,7 +237,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 |---|---|---|---|---|
 | 6 | **(D6) Object-based — validation** | 🟡 Actionable | Same as LXC/Bwrap — `stat()` + inode comparison in `wxc_common`. | S |
 | 7 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC/Bwrap — shared `access_check()` in `wxc_common`. | M |
-| 8 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC/Bwrap — shared check in `wxc_common`. | S |
+| 8 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC/Bwrap — shared most-restrictive-wins normalization in `wxc_common`. | S |
 | 9 | **Paths must exist at policy-load time** | 🟡 Actionable | Same as LXC/Bwrap — shared `path_exists()` in `wxc_common`. | S |
 | 10 | **Explicit `{ windowsPath, containerPath }` mount control** | 🟡 Actionable | Host paths always mounted at `/mnt/<drive>/`; let users specify the in-container mount point. `policy_mapping.rs:23-60`. | M |
 | 11 | **Handle UNC / non-drive paths** | 🟡 Actionable | UNC paths (`\\server\share`) silently dropped with a warning; plan is to hard-error. Branch `user/sodas/wslc-reject-unc-paths`. | S |
@@ -291,6 +291,7 @@ These items depend on the WSLC SDK team and are not unilaterally schedulable.
 | 1 | **VM-level network policy API** | Network #15–#24 | Extend CreateSession to accept IP/CIDR allow/deny rules, port/protocol filters, and inbound control, enforced at the VM hosting the container. Unblocks all iptables-dependent network enforcement on WSLC. |
 | 2 | **Deterministic `wslcsdk.dll` distribution** | Misc #31 (CI), Misc build | Today MXC pulls from `external/wslc-sdk/` which isn't reproducible from a fresh clone. Need a public NuGet or vendored signed channel. |
 | 3 | **Registry-auth handshake** | Private registry auth | WSLC can only pull from public registries. SDK ABI reserves the `auth_info` slot but the implementation (Basic/Bearer/ACR/GHCR/ECR, token caching, custom-CA HTTPS) isn't shipped yet. |
+| 4 | **Deny-mount / path-exclusion primitive** | Filesystem #5 (`deniedPaths` enforcement) | LXC and Bubblewrap mask a `deniedPaths` entry that sits under a mounted parent by overlaying it (`/dev/null` or `tmpfs`). The WSLC SDK exposes only a flat volume-mount surface with no overlay/exclusion primitive, so a denied subtree under a mounted parent cannot be masked. Today MXC works around this by rejecting such configs at parse time (Filesystem #5); real enforcement needs an SDK exclusion primitive. (Note: this is the *basic subtree-deny* gap — spec-exact D5 "visible + ACCESS_DENIED" remains non-actionable on every Linux backend regardless, see Filesystem #12.) |
 
 ---
 
@@ -298,7 +299,7 @@ These items depend on the WSLC SDK team and are not unilaterally schedulable.
 
 These show up on multiple backends and are worth coordinating to avoid divergent designs:
 
-1. **Filesystem policy alignment** — D4 (path-tree resolver), D3 (delegation check), D6 (object validation), same-path conflict detection, paths-must-exist validation all belong in `wxc_common` and serve all three backends.
+1. **Filesystem policy alignment** — D4 (path-tree resolver), D3 (delegation check), D6 (object validation), same-path conflict (most-restrictive-wins), paths-should-exist warning all belong in `wxc_common` and serve all three backends.
 2. **Network policy alignment** — N1 (default-deny), N2 (inbound), N3 (CIDR-only schema), N5 (proxy enforcement), N7 (schema migration). Shared `NetworkIptablesManager` in `wxc_common` serves LXC and Bwrap; WSLC depends on SDK VM-level API.
 3. **State-aware lifecycle** — LXC #27, Bwrap #30, WSLC #29. None of the three implement `StatefulSandboxBackend` today. WSLC has the largest payoff (slowest cold start).
 4. **Resource limits (cgroups v2)** — LXC #28, Bwrap #28. Same kernel API; build a shared `cgroup_controller` crate.
