@@ -80,6 +80,20 @@ pub struct ParseResult {
     pub ui_operation_flags: u32,
 }
 
+impl ParseResult {
+    /// True when the trace produced nothing mergeable into a config:
+    /// no access events, no capability requests, no `CONVERT_TO_GUI`
+    /// hint, and no `UI_OPERATION` flags. Callers (notably `stop::run`)
+    /// use this to skip the adjusted-config write rather than emit a
+    /// file identical to the input.
+    pub fn is_empty(&self) -> bool {
+        self.valid_access_events.is_empty()
+            && self.requested_capabilities.is_empty()
+            && !self.need_ui
+            && self.ui_operation_flags == 0
+    }
+}
+
 /// Parsed payload of a UI-injection (EventID=27) event.
 ///
 /// Pure data; the type itself lives in `crate::ui_limits::UiEvent` and is
@@ -493,13 +507,28 @@ fn normalize_file_path(p: &str) -> String {
     }
 }
 
+// Kept for unit tests / external callers; the hot path uses
+// `ParseAccumulator::is_skippable` which caches lowercased CWD forms.
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_skippable(file_path: &str, current_directory: Option<&str>, verbose: bool) -> bool {
     if let Some(cwd) = current_directory {
+        // Defensive: refuse to treat a bare drive root ("C:" / "C:\\") as a
+        // CWD prefix — otherwise the `format!("{cwd}\\")` match below would
+        // swallow every event under that drive. Equality match still applies.
+        let cwd_trimmed = cwd.trim_end_matches('\\');
+        let is_drive_root = cwd_trimmed.len() == 2
+            && cwd_trimmed.chars().nth(1) == Some(':')
+            && cwd_trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false);
         let normalized = file_path.trim_end_matches('\\');
-        if normalized.eq_ignore_ascii_case(cwd)
-            || normalized
-                .to_ascii_lowercase()
-                .starts_with(&format!("{}\\", cwd.to_ascii_lowercase()))
+        if normalized.eq_ignore_ascii_case(cwd_trimmed)
+            || (!is_drive_root
+                && normalized
+                    .to_ascii_lowercase()
+                    .starts_with(&format!("{}\\", cwd_trimmed.to_ascii_lowercase())))
         {
             if verbose {
                 println!("Skipping current-directory event: {file_path}");
@@ -538,7 +567,15 @@ fn looks_like_valid_path(path: &str) -> bool {
 /// `for_each_event_xml`) and the fixture-test seam
 /// (`parse_events_from_xml`).
 struct ParseAccumulator<'a> {
+    #[allow(dead_code)]
     current_directory: Option<&'a str>,
+    /// Cached lowercase form of `current_directory` with trailing `\` trimmed,
+    /// plus that string with one trailing `\` appended. Computed once at
+    /// construction so the hot `is_skippable` path doesn't allocate two
+    /// `String`s per event on a 100k-event trace (round-4 finding K).
+    /// `None` if `current_directory` is `None` or is a bare drive root.
+    cwd_lc_trimmed: Option<String>,
+    cwd_lc_prefix: Option<String>,
     verbose: bool,
     valid_access_events: Vec<LearningModeAccessEvent>,
     requested_capabilities: HashSet<String>,
@@ -563,8 +600,30 @@ impl<'a> ParseAccumulator<'a> {
         capability_table: Vec<extract_caps::CapabilityEntry>,
     ) -> Self {
         let capability_index = extract_caps::CapabilityIndex::from_table(&capability_table);
+        let (cwd_lc_trimmed, cwd_lc_prefix) = match current_directory {
+            Some(cwd) => {
+                let trimmed = cwd.trim_end_matches('\\');
+                let is_drive_root = trimmed.len() == 2
+                    && trimmed.chars().nth(1) == Some(':')
+                    && trimmed
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_alphabetic())
+                        .unwrap_or(false);
+                let lc = trimmed.to_ascii_lowercase();
+                let prefix = if is_drive_root {
+                    None
+                } else {
+                    Some(format!("{lc}\\"))
+                };
+                (Some(lc), prefix)
+            }
+            None => (None, None),
+        };
         Self {
             current_directory,
+            cwd_lc_trimmed,
+            cwd_lc_prefix,
             verbose,
             valid_access_events: Vec::new(),
             requested_capabilities: HashSet::new(),
@@ -575,6 +634,42 @@ impl<'a> ParseAccumulator<'a> {
             capability_table,
             capability_index,
         }
+    }
+
+    /// Hot-path CWD/path filter. Uses precomputed lowercase forms of
+    /// `current_directory` to avoid two `String` allocs per event
+    /// (round-4 finding K). Logic must stay in sync with the free
+    /// `is_skippable` function used by unit tests.
+    fn is_skippable(&self, file_path: &str) -> bool {
+        if let (Some(cwd_lc), prefix_opt) = (&self.cwd_lc_trimmed, &self.cwd_lc_prefix) {
+            let normalized = file_path.trim_end_matches('\\');
+            let normalized_lc = normalized.to_ascii_lowercase();
+            if &normalized_lc == cwd_lc
+                || prefix_opt
+                    .as_ref()
+                    .map(|p| normalized_lc.starts_with(p.as_str()))
+                    .unwrap_or(false)
+            {
+                if self.verbose {
+                    println!("Skipping current-directory event: {file_path}");
+                }
+                return true;
+            }
+        }
+        if file_path.len() < 4 {
+            if self.verbose {
+                println!("Skipping too-short path event: {file_path}");
+            }
+            return true;
+        }
+        let second = file_path.chars().nth(1);
+        if second != Some(':') {
+            if self.verbose {
+                println!("Skipping non-drive-letter path event: {file_path}");
+            }
+            return true;
+        }
+        false
     }
 
     fn consume(&mut self, xml: &str) {
@@ -673,7 +768,7 @@ impl<'a> ParseAccumulator<'a> {
         }
 
         let file_path = normalize_file_path(raw_path);
-        if is_skippable(&file_path, self.current_directory, self.verbose) {
+        if self.is_skippable(&file_path) {
             return;
         }
 
@@ -865,6 +960,26 @@ mod tests {
             Some("C:\\repo"),
             false
         ));
+    }
+
+    // Regression for round-4 finding M: a CWD of bare `C:\` (drive root)
+    // must NOT swallow every event on that drive. Only an explicit
+    // equality match against the drive root is honored.
+    #[test]
+    fn is_skippable_does_not_treat_drive_root_cwd_as_prefix() {
+        assert!(!is_skippable(
+            "C:\\Windows\\System32\\foo.dll",
+            Some("C:\\"),
+            false
+        ));
+        assert!(!is_skippable(
+            "C:\\Windows\\System32\\foo.dll",
+            Some("C:"),
+            false
+        ));
+        // Exact equality match against drive root is still skipped
+        // (it's the trace-driver's own enumeration of `C:\`).
+        assert!(is_skippable("C:\\", Some("C:\\"), false));
     }
 
     #[test]

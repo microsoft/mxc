@@ -45,6 +45,7 @@ pub const READ_MASK: u32 = READ_DATA_MASK
     | READ_CONTROL_MASK
     | SYNCHRONIZE_MASK;
 
+#[derive(Debug)]
 pub struct AddedPaths {
     pub readwrite: Vec<String>,
     pub readonly: Vec<String>,
@@ -484,28 +485,44 @@ pub fn update_from_access_events(
     })
 }
 
-/// Map a `containment` enum value (`processcontainer`, etc., as
-/// defined by the schema) to the canonical camelCase sub-object key
-/// (`processContainer`). The enum value casing and the sub-object key
-/// casing intentionally differ in the schema; PLM previously used the
-/// enum value as the sub-object key, which produced a config that
-/// failed schema validation and silently dropped capabilities on
-/// consumption (wxc's parser only recognises the camelCase form).
-fn containment_subobject_key(enum_value: &str) -> &'static str {
+/// Map a `containment` enum value (lowercase, matching the schema's
+/// `containment` enum) to the JSON sub-object key that holds its
+/// `capabilities` array, if any. Today only the ProcessContainer
+/// backend has a `capabilities` array in its schema (see
+/// `wxc_common::models::ContainmentBackend::section_path`); every
+/// other backend either does not exist on Windows or does not accept
+/// AppContainer-style capability SIDs at all.
+///
+/// Returns `Some(key)` for backends that support capability merge,
+/// `None` for backends that don't — callers must skip the merge with
+/// a diagnostic rather than misfiling capabilities into a section the
+/// runner will ignore. Round-3 fix (containment_subobject_key)
+/// previously fell through to `processContainer` for any unknown
+/// value, which silently produced a malformed config for
+/// `seatbelt`/`lxc`/`wslc`/`windows_sandbox`/`isolation_session` etc.
+fn capability_subobject_key(enum_value: &str) -> Option<&'static str> {
     match enum_value.to_ascii_lowercase().as_str() {
-        // Future-proofing: when new backends gain sub-object keys, map
-        // them here. Unknown values fall through to processContainer
-        // since that's the only backend PLM is wired up for today.
-        "processcontainer" | "appcontainer" => "processContainer",
-        _ => "processContainer",
+        "processcontainer" | "appcontainer" => Some("processContainer"),
+        // Known backends without a `capabilities` array — merge is a
+        // no-op for these (caller emits a warning).
+        "lxc" | "wslc" | "windows_sandbox" | "seatbelt" | "isolation_session" | "bubblewrap"
+        | "hyperlight" | "microvm" | "vm" => None,
+        // Genuinely unknown value (e.g. a typo or a future backend
+        // not yet wired into PLM): return None so we don't silently
+        // pollute the config.
+        _ => None,
     }
 }
 
 /// Locate (case-insensitively) or create the containment sub-object on
 /// `config` and ensure its `capabilities` array exists. Returns the key
-/// the caller should use to subsequently reach the object.
-fn resolve_containment_key(config: &mut Value, containment_name: &str) -> Result<String> {
-    let canonical = containment_subobject_key(containment_name);
+/// the caller should use to subsequently reach the object, or `None`
+/// when the containment backend has no `capabilities` array at all.
+fn resolve_containment_key(config: &mut Value, containment_name: &str) -> Result<Option<String>> {
+    let canonical = match capability_subobject_key(containment_name) {
+        Some(k) => k,
+        None => return Ok(None),
+    };
     let obj = config
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
@@ -532,7 +549,7 @@ fn resolve_containment_key(config: &mut Value, containment_name: &str) -> Result
     } else if !inner["capabilities"].is_array() {
         anyhow::bail!("`{key}.capabilities` must be a JSON array");
     }
-    Ok(key)
+    Ok(Some(key))
 }
 
 pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Result<()> {
@@ -541,7 +558,34 @@ pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Re
         _ => return Ok(()),
     };
 
-    let key = resolve_containment_key(config, &containment_name)?;
+    let key = match resolve_containment_key(config, &containment_name)? {
+        Some(k) => k,
+        None => {
+            // Backend has no `capabilities` array in its schema (or is
+            // unknown to PLM). Emit a stderr warning so the operator
+            // knows the discovered capabilities are being dropped on
+            // the floor, rather than silently writing a section the
+            // runner will reject.
+            if !requested.is_empty() {
+                eprintln!(
+                    "[plm] warning: containment '{containment_name}' has no `capabilities` \
+                     array in its schema; dropping {} discovered capabilit{}: {}",
+                    requested.len(),
+                    if requested.len() == 1 { "y" } else { "ies" },
+                    {
+                        let mut sorted: Vec<&String> = requested.iter().collect();
+                        sorted.sort();
+                        sorted
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                );
+            }
+            return Ok(());
+        }
+    };
     let caps_arr = config[&key]["capabilities"]
         .as_array()
         .cloned()
@@ -1208,6 +1252,66 @@ mod tests {
         assert!(normalize_path("\\\\?\\UNC\\server\\share\\x").is_none());
     }
 
+    // Round-4 finding T: lock current behavior on path-normalization
+    // corners that prior rounds did not cover. These are NOT
+    // necessarily the *correct* answers in every case (see comments)
+    // — they encode what `normalize_path` actually does today so a
+    // future change cannot silently widen / narrow the surface.
+
+    #[test]
+    fn normalize_path_rejects_nt_object_prefix_via_ads_guard() {
+        // `\??\C:\foo` is the NT-object form ETW occasionally emits.
+        // `config::normalize_path` does NOT have an explicit
+        // strip rule for it; the `:` at position 5 trips the ADS
+        // guard (only `:` at position 1 is the drive-letter
+        // separator) and we return None. Deny matching against a
+        // `\??\` event is therefore impossible from this layer —
+        // by design, since events are pre-normalized by
+        // `event_parser::normalize_file_path` (which DOES strip
+        // `\??\`) before they reach `update_from_access_events`.
+        // This test pins that contract.
+        assert!(normalize_path("\\??\\C:\\foo").is_none());
+    }
+
+    #[test]
+    fn normalize_path_passes_globalroot_through_unchanged() {
+        // `\\?\GLOBALROOT\Device\HarddiskVolume3\foo` strips the `\\?\`
+        // prefix and lowercases. The result is NOT a drive-letter
+        // form and won't match any drive-rooted deny entry, but the
+        // function currently returns Some(...) for it (no ADS-style
+        // `:` rejection triggers). Operators who want to deny
+        // GLOBALROOT volumes must add explicit deny entries.
+        let got = normalize_path("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\foo");
+        assert_eq!(
+            got.as_deref(),
+            Some("globalroot\\device\\harddiskvolume3\\foo")
+        );
+    }
+
+    #[test]
+    fn normalize_path_accepts_non_verbatim_unc() {
+        // `\\server\share\x` is NOT `\\?\UNC\…` so it doesn't get
+        // rejected. The leading `\\` survives lowercasing and the
+        // result starts with the same prefix. Whether UNC paths are
+        // policy-meaningful is a separate question — this test just
+        // pins the current pass-through behavior.
+        let got = normalize_path("\\\\server\\share\\x");
+        assert_eq!(got.as_deref(), Some("\\\\server\\share\\x"));
+    }
+
+    #[test]
+    fn normalize_path_passes_drive_relative_through() {
+        // `C:foo` (no separator after the colon) is Win32 drive-
+        // relative — Windows resolves it against the per-drive CWD.
+        // `normalize_path` does not currently reject these; the `:`
+        // at position 1 is the drive-letter separator so it passes
+        // the ADS guard. Caller's responsibility to either canonicalize
+        // upstream or accept that drive-relative events won't match
+        // drive-rooted deny entries.
+        let got = normalize_path("C:foo");
+        assert_eq!(got.as_deref(), Some("c:foo"));
+    }
+
     // ---- update_from_access_events ---------------------------------------
 
     fn run_update(
@@ -1218,6 +1322,17 @@ mod tests {
         initialize_filesystem(config).unwrap();
         let deny_set: HashSet<String> = deny.iter().map(|s| (*s).to_string()).collect();
         update_from_access_events(config, "__never_matches__", events, &deny_set, false).unwrap()
+    }
+
+    fn run_update_with_bin(
+        config: &mut Value,
+        bin_path: &str,
+        events: &[LearningModeAccessEvent],
+        deny: &[&str],
+    ) -> AddedPaths {
+        initialize_filesystem(config).unwrap();
+        let deny_set: HashSet<String> = deny.iter().map(|s| (*s).to_string()).collect();
+        update_from_access_events(config, bin_path, events, &deny_set, false).unwrap()
     }
 
     #[test]
@@ -1235,6 +1350,78 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    // ---- Round-4 finding G: bin_path self-event filter -------------------
+    //
+    // The round-3 fix normalizes `bin_path` and compares both the raw
+    // (verbatim or plain) form via `eq_ignore_ascii_case` AND the
+    // normalized form against the event path. Every other test in this
+    // module passes `"__never_matches__"` as bin_path; these four lock
+    // the actual self-filter behavior so a regression isn't silent.
+
+    #[test]
+    fn self_event_filter_skips_raw_bin_path() {
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "C:\\bin\\plm.exe",
+            &[ev_read("C:\\bin\\plm.exe")],
+            &[],
+        );
+        assert!(
+            added.readonly.is_empty(),
+            "events referencing the PLM binary itself must be filtered"
+        );
+    }
+
+    #[test]
+    fn self_event_filter_skips_verbatim_bin_path_against_plain_event() {
+        // Round-3 regression scenario: canonicalize() may return the
+        // verbatim form \\?\C:\..., while ETW emits the plain form.
+        // Both must self-filter.
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "\\\\?\\C:\\bin\\plm.exe",
+            &[ev_read("C:\\bin\\plm.exe")],
+            &[],
+        );
+        assert!(
+            added.readonly.is_empty(),
+            "verbatim bin_path must self-filter plain-form events"
+        );
+    }
+
+    #[test]
+    fn self_event_filter_case_insensitive() {
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "C:\\bin\\plm.exe",
+            &[ev_read("c:\\BIN\\PLM.EXE")],
+            &[],
+        );
+        assert!(
+            added.readonly.is_empty(),
+            "self-filter must be case-insensitive on Windows paths"
+        );
+    }
+
+    #[test]
+    fn non_self_event_passes_through_self_filter() {
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "C:\\bin\\plm.exe",
+            &[ev_read("C:\\Users\\foo\\bar.txt")],
+            &[],
+        );
+        assert_eq!(
+            added.readonly.len(),
+            1,
+            "non-self event must NOT be filtered: {added:?}"
+        );
     }
 
     #[test]
@@ -1404,6 +1591,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg["ui"]["clipboard"], json!("all"));
+    }
+
+    // Round-4 finding S: asymmetric / widening clipboard branches.
+
+    #[test]
+    fn apply_ui_flags_read_clipboard_only_sets_read() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_READCLIPBOARD;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_READCLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("read"));
+    }
+
+    #[test]
+    fn apply_ui_flags_write_clipboard_only_sets_write() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_WRITECLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("write"));
+    }
+
+    #[test]
+    fn apply_ui_flags_read_widens_existing_write_to_all() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_READCLIPBOARD;
+        let mut cfg = json!({ "ui": { "clipboard": "write" } });
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_READCLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("all"));
+    }
+
+    #[test]
+    fn apply_ui_flags_write_widens_existing_read_to_all() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+        let mut cfg = json!({ "ui": { "clipboard": "read" } });
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_WRITECLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("all"));
+    }
+
+    #[test]
+    fn apply_ui_flags_system_settings_widening_from_existing_parameters() {
+        // pre-existing "parameters" + new DISPLAYSETTINGS → "all"
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
+        let mut cfg = json!({ "ui": { "systemSettings": "parameters" } });
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS).unwrap();
+        assert_eq!(cfg["ui"]["systemSettings"], json!("all"));
     }
 
     #[test]
@@ -1582,5 +1812,76 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    // Round-4 finding R: merge_capabilities must silently no-op (no
+    // panic, no error) when the config has no `containment` set.
+    #[test]
+    fn merge_capabilities_silently_skips_when_containment_missing() {
+        let mut cfg = json!({});
+        let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(cfg.get("processContainer").is_none());
+    }
+
+    #[test]
+    fn merge_capabilities_silently_skips_when_containment_blank() {
+        let mut cfg = json!({ "containment": "   " });
+        let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(cfg.get("processContainer").is_none());
+    }
+
+    // Round-4 finding E: non-PC backends must NOT have capabilities
+    // misfiled into a `processContainer` sub-object. They have no
+    // `capabilities` array in their schema; the merge is a no-op.
+    #[test]
+    fn merge_capabilities_skips_for_non_processcontainer_backends() {
+        for backend in [
+            "lxc",
+            "wslc",
+            "windows_sandbox",
+            "seatbelt",
+            "isolation_session",
+        ] {
+            let mut cfg = json!({ "containment": backend });
+            let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+            merge_capabilities(&mut cfg, &req).unwrap();
+            assert!(
+                cfg.get("processContainer").is_none(),
+                "backend {backend} must not get a processContainer sub-object"
+            );
+            // Backends with their own section MAY have one pre-existing
+            // on the config; merge_capabilities must not introduce one.
+            // Verify the only top-level key is still `containment`.
+            let top_keys: Vec<&String> = cfg.as_object().unwrap().keys().collect();
+            assert_eq!(
+                top_keys.len(),
+                1,
+                "backend {backend}: unexpected top-level keys {top_keys:?}"
+            );
+        }
+    }
+
+    // Round-4 finding U: merge is additive-only. Even when the
+    // requested set is disjoint from existing capabilities, every
+    // pre-existing capability must survive the merge.
+    #[test]
+    fn merge_capabilities_preserves_existing_capability_not_in_requested_set() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": ["foo", "bar"] }
+        });
+        let req: HashSet<String> = ["baz"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        let names: Vec<&str> = cfg["processContainer"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("foo")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("bar")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("baz")));
     }
 }

@@ -34,18 +34,14 @@
         </SystemProvider>
         <EventProvider
             Id="EP_Microsoft-Windows-Kernel-General"
-            Name="a68ca8b7-004f-d7b6-a698-07e2de0f1f5d"
-            Stack="true"
-            NonPagedMemory="true">            
+            Name="a68ca8b7-004f-d7b6-a698-07e2de0f1f5d">
             <Keywords>
                 <Keyword Value="0x00"/>
             </Keywords>            
         </EventProvider>
         <EventProvider
             Id="EP_Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode"
-            Name="811a1ddb-2e69-5f25-adc0-4b186170e760"
-            Stack="true" 
-            NonPagedMemory="true">
+            Name="811a1ddb-2e69-5f25-adc0-4b186170e760">
             <Keywords>
                 <Keyword Value="0x1"/>
             </Keywords>  

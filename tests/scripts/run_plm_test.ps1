@@ -147,6 +147,26 @@ $AutomaticTests = @(
         Expect = @(
             'filesystem.readwritePaths[] += "C:\\Tessera\\plm_fs_test\\dst"'
         )
+    },
+    @{
+        # Round-4 finding W: regression for the deny-list filter. The
+        # config pre-declares C:\Tessera\plm_fs_test\denied in
+        # deniedPaths; the workload tries to read a file there (which
+        # the container blocks). PLM MUST NOT promote the denied path
+        # into readonlyPaths/readwritePaths — Forbid asserts the
+        # absence of any "denied" substring in the field-level diff.
+        Name   = 'fs_denied_not_promoted'
+        Setup  = {
+            New-Item -ItemType Directory -Path 'C:\Tessera\plm_fs_test\denied' -Force | Out-Null
+            Set-Content -Path 'C:\Tessera\plm_fs_test\denied\secret.txt' -Value 'sensitive' -NoNewline
+        }
+        Cleanup = {
+            Remove-Item -Recurse -Force 'C:\Tessera\plm_fs_test' -ErrorAction SilentlyContinue
+        }
+        Expect = @()
+        Forbid = @(
+            'C:\\Tessera\\plm_fs_test\\denied'
+        )
     }
 )
 
@@ -155,6 +175,21 @@ $AutomaticTests = @(
 $ManualTests = @(
     @{ Name = 'cap_screenshot'; Expect = @('processcontainer = {"capabilities":["graphicsCapture"]}') }
 )
+
+# Round-4 finding Q: guard against orphan configs. Every JSON under
+# plm_configs/ MUST be referenced by either $AutomaticTests or
+# $ManualTests so it's exercised in CI. New fixtures that someone drops
+# in but forgets to register fail fast here.
+$registeredNames = @($AutomaticTests + $ManualTests | ForEach-Object { $_.Name })
+$onDiskNames = $configFiles | ForEach-Object {
+    [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+}
+$orphans = @($onDiskNames | Where-Object { $_ -notin $registeredNames })
+if ($orphans.Count -gt 0) {
+    Write-Host "ERROR: plm_configs contains unreferenced configs (add to `$AutomaticTests or `$ManualTests in run_plm_test.ps1):" -ForegroundColor Red
+    foreach ($o in $orphans) { Write-Host "  $o" -ForegroundColor Red }
+    exit 1
+}
 
 if ($Config) {
     $wanted = $Config | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_) }
@@ -387,9 +422,19 @@ foreach ($cfg in $configFiles) {
         $status = 'no-trace'
         Write-Host "  (no plm log dir produced)" -ForegroundColor Yellow
     } elseif (-not $adjustedPath) {
-        $status = 'no-adjusted'
         Write-Host "  log dir: $logDir" -ForegroundColor DarkGray
         Write-Host "  (no Adjusted_*.json — trace had no mergeable findings)" -ForegroundColor Yellow
+        # Round-4 finding W: a "no-adjusted" outcome IS a pass for
+        # entries that declare no positive expectations (Expect=@()) —
+        # e.g. deny-list fixtures asserting nothing got promoted. We
+        # only flag it as a failure when the entry expected at least
+        # one observable change.
+        if ($expectEntry -and (-not $expectEntry.Expect -or $expectEntry.Expect.Count -eq 0)) {
+            $status = 'pass'
+            Write-Host "  (Expect=@(); no-adjusted satisfies the negative expectation)" -ForegroundColor Green
+        } else {
+            $status = 'no-adjusted'
+        }
     } else {
         $before = Get-Content $cfg.FullName       -Raw | ConvertFrom-Json
         $after  = Get-Content $adjustedPath       -Raw | ConvertFrom-Json
@@ -411,10 +456,28 @@ foreach ($cfg in $configFiles) {
                     $missingExpect += $needle
                 }
             }
-            if ($missingExpect.Count -gt 0) {
+            # Round-4 finding W: negative expectations — assertions that
+            # particular substrings MUST NOT appear in the diff (e.g.,
+            # confirming a deniedPaths entry is not promoted to
+            # readwritePaths). $entry.Forbid is an optional string list.
+            $forbiddenSeen = @()
+            if ($expectEntry.PSObject.Properties.Name -contains 'Forbid' -and $expectEntry.Forbid) {
+                foreach ($forbidden in $expectEntry.Forbid) {
+                    if ($joined -match [regex]::Escape($forbidden)) {
+                        $forbiddenSeen += $forbidden
+                    }
+                }
+            }
+            if ($missingExpect.Count -gt 0 -or $forbiddenSeen.Count -gt 0) {
                 $status = 'missing-expected'
-                Write-Host "  EXPECTED but not observed:" -ForegroundColor Red
-                $missingExpect | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+                if ($missingExpect.Count -gt 0) {
+                    Write-Host "  EXPECTED but not observed:" -ForegroundColor Red
+                    $missingExpect | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+                }
+                if ($forbiddenSeen.Count -gt 0) {
+                    Write-Host "  FORBIDDEN but observed:" -ForegroundColor Red
+                    $forbiddenSeen | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+                }
             } else {
                 $status = 'pass'
             }
@@ -447,6 +510,16 @@ foreach ($cfg in $configFiles) {
 Write-Host ""
 Write-Host "=== Summary ===" -ForegroundColor Cyan
 $results | Format-Table -AutoSize Config, Status, ChangeCount, AuditExit | Out-Host
+
+# AuditExit reflects the workload's own exit code as returned by
+# GetExitCodeProcess inside wxc-exec — it's NOT a harness pass/fail
+# signal. Fixtures that intentionally hit denied paths (e.g.,
+# fs_denied_not_promoted) commonly surface AuditExit=-1 because
+# AppContainer terminates the redirected `type` command with
+# 0xFFFFFFFF after the deny ACE fires. The test status is driven
+# solely by the Expect/Forbid assertions above, so a non-zero (or
+# -1) AuditExit on a `pass` row is expected and harmless.
+Write-Host "(AuditExit is informational; non-zero values, including -1 from deny-path fixtures, are expected when the workload itself fails or is sandbox-terminated.)" -ForegroundColor DarkGray
 
 $failed = $results | Where-Object { $_.Status -in @('no-trace', 'no-adjusted', 'missing-expected') }
 if ($failed) {

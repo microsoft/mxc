@@ -434,6 +434,26 @@ impl CapabilityIndex {
                 SidResolution::Capability(name.as_str())
             };
         }
+        // Round-4 perf fix: defer the LSASS-RPC LookupAccountSidW call
+        // to the caller's `verbose` branch. `lookup_nt_account` is a
+        // 2-syscall round-trip per unknown SID; on a 100k-event trace
+        // with ~4 ACEs each and ~50% unknown SIDs, calling it from
+        // here unconditionally burned ~200k RPCs (4-16 s) producing a
+        // string the production (`verbose=false`) path never reads.
+        SidResolution::Unknown
+    }
+
+    /// Verbose-only variant that performs the LSASS lookup for
+    /// diagnostic display. Kept separate so the hot path never pays
+    /// the RPC cost.
+    pub fn resolve_verbose<'a>(&'a self, sid_bytes: &[u8]) -> SidResolution<'a> {
+        if let Some((name, is_group)) = self.by_sid.get(sid_bytes) {
+            return if *is_group {
+                SidResolution::GroupCapability(name.as_str())
+            } else {
+                SidResolution::Capability(name.as_str())
+            };
+        }
         if let Some(nt) = lookup_nt_account(sid_bytes) {
             SidResolution::NtAccount(nt)
         } else {
@@ -578,22 +598,35 @@ pub fn invoke_ace_walk_with_index(
 
     while cursor < buf.len() {
         let ace = read_ace_at_offset(buf, cursor)?;
-        let resolution = index.resolve(ace.sid_bytes);
+        // Hot path: only resolve the SID; defer the LSASS RPC + string
+        // formatting to the `verbose` branch below.
+        let resolution = if verbose {
+            index.resolve_verbose(ace.sid_bytes)
+        } else {
+            index.resolve(ace.sid_bytes)
+        };
 
-        let resolved_str = match &resolution {
+        match &resolution {
             SidResolution::Capability(name) => {
                 found.insert(name.to_string());
-                format!("capability \"{name}\"")
             }
             SidResolution::GroupCapability(name) => {
                 found.insert(name.to_string());
-                format!("capability \"{name}\" (group SID)")
             }
-            SidResolution::NtAccount(s) => s.clone(),
-            SidResolution::Unknown => "<no known capability/account matches this SID>".to_string(),
-        };
+            SidResolution::NtAccount(_) | SidResolution::Unknown => {}
+        }
 
         if verbose {
+            let resolved_str = match &resolution {
+                SidResolution::Capability(name) => format!("capability \"{name}\""),
+                SidResolution::GroupCapability(name) => {
+                    format!("capability \"{name}\" (group SID)")
+                }
+                SidResolution::NtAccount(s) => s.clone(),
+                SidResolution::Unknown => {
+                    "<no known capability/account matches this SID>".to_string()
+                }
+            };
             let sid_str =
                 sid_to_string(ace.sid_bytes).unwrap_or_else(|| "<invalid SID>".to_string());
             println!(

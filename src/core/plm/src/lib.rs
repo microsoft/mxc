@@ -22,3 +22,6 @@ pub mod start;
 
 #[cfg(target_os = "windows")]
 pub mod stop;
+
+#[cfg(target_os = "windows")]
+pub mod wpr_path;

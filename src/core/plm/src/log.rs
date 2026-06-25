@@ -13,7 +13,6 @@ use chrono::Local;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{
     apply_ui_operation_flags, deny_file_set, initialize_filesystem, merge_capabilities,
@@ -22,6 +21,7 @@ use crate::config::{
 };
 use crate::event_parser::parse_events;
 use crate::start;
+use crate::wpr_path::wpr_command;
 
 fn prompt_enter(message: &str) -> Result<()> {
     print!("{message}");
@@ -36,7 +36,7 @@ fn prompt_enter(message: &str) -> Result<()> {
 }
 
 fn stop_wpr_trace(trace_file: &Path) -> Result<()> {
-    let status = Command::new("wpr")
+    let status = wpr_command()
         .args(["-stop", &trace_file.to_string_lossy()])
         .status()
         .context("failed to spawn wpr -stop")?;

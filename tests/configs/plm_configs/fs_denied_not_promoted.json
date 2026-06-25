@@ -1,0 +1,18 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "PLM-Filesystem-DenyNoPromote",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd /c \"type C:\\Tessera\\plm_fs_test\\denied\\secret.txt > NUL\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "deniedPaths": [
+      "C:\\Tessera\\plm_fs_test\\denied"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}
+
