@@ -83,48 +83,14 @@ import type {
   TransportProtocol as WireTransportProtocol,
 } from '../../src/generated/wire.js';
 
-// --- type-level assertion helpers -----------------------------------------
-
-/** Compiles only when `T` is exactly `true`. */
-type AssertTrue<T extends true> = T;
-
-/** Drop the `[k: string]: unknown` index signature the emitter writes on open objects. */
-type StripIndex<T> = { [K in keyof T as string extends K ? never : K]: T[K] };
-
-/**
- * Recursively drop index signatures (open objects nest: e.g.
- * `experimental.wslc`), so structural assignment is not tripped by an emitted
- * `[k: string]: unknown` at any depth. Modifiers (`?`) are preserved because the
- * mapped type is homomorphic over `keyof T`.
- */
-type DeepStripIndex<T> = T extends (infer E)[]
-  ? DeepStripIndex<E>[]
-  : T extends object
-    ? { [K in keyof T as string extends K ? never : K]: DeepStripIndex<T[K]> }
-    : T;
-
-/** `true` iff every value of `A` is assignable to `B` (index signatures stripped, recursively). */
-type Assignable<A, B> = [A] extends [DeepStripIndex<B>] ? true : false;
-
-/** Keys present on the public type but absent from the wire type. */
-type OnlyInPublic<Pub, Wire> = Exclude<keyof Pub, keyof Wire>;
-
-/**
- * Keys present on the wire type but absent from the public type (review finding
- * F1, gpt-5.5 pass). Because every generated wire field is optional,
- * `Public extends Wire` stays true when the SDK simply forgets a new wire field,
- * so the value/`OnlyInPublic` checks alone do NOT catch a wire-only ADDITION.
- * This closes that direction. `StripIndex` drops the `[k: string]: unknown` so
- * the open experimental objects don't make `keyof` collapse to `string`.
- */
-type OnlyInWire<Pub, Wire> = Exclude<keyof StripIndex<Wire>, keyof Pub>;
-
-/** `true` iff `A` and `B` are mutually assignable (same value set). */
-type Equivalent<A, B> = [A] extends [B]
-  ? [B] extends [A]
-    ? true
-    : false
-  : false;
+import type {
+  AssertTrue,
+  StripIndex,
+  Assignable,
+  OnlyInPublic,
+  OnlyInWire,
+  Equivalent,
+} from './conformance-helpers.js';
 
 // --- enum / union conformance ---------------------------------------------
 

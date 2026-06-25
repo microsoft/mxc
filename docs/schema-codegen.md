@@ -118,6 +118,16 @@ schema uses (enums, closed/open objects, `$ref`, `anyOf [T, null]`, arrays,
 scalars); extending the wire model with a new construct may require teaching the
 emitter about it.
 
+The conformance check covers both SDK surfaces: `wire-conformance.test.ts` pins
+the one-shot public types in `sdk/src/types.ts`, and
+`wire-conformance-state-aware.test.ts` pins the state-aware lifecycle types in
+`sdk/src/state-aware-types.ts` (the `Phase` and sizing-profile enums, the Entra
+user bundle, and the per-phase `IsolationSessionPhase` field set) against the
+same generated wire defs. Both share the assertion helpers in
+`sdk/tests/unit/conformance-helpers.ts` and check drift in both directions
+(public→wire and wire→public) so a new wire field the SDK forgets to expose also
+fails the build.
+
 ### Why a hand-written emitter (alternatives considered)
 
 The generated `wire.ts` is a **drift oracle, not the public API**. The public
