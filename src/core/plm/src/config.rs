@@ -59,21 +59,32 @@ pub fn load_config(path: &Path) -> Result<Value> {
 }
 
 /// Ensure `config.filesystem.{readwritePaths,readonlyPaths}` exist.
-pub fn initialize_filesystem(config: &mut Value) {
-    let obj = config.as_object_mut().expect("config root must be object");
+///
+/// Returns an error (rather than panicking) when the operator-supplied
+/// config has the wrong JSON shape (root is not an object, or `filesystem`
+/// exists but is not an object).
+pub fn initialize_filesystem(config: &mut Value) -> Result<()> {
+    let obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
     if !obj.contains_key("filesystem") {
         obj.insert("filesystem".into(), json!({}));
     }
     let fs = obj
         .get_mut("filesystem")
         .and_then(|v| v.as_object_mut())
-        .expect("filesystem must be object");
+        .ok_or_else(|| anyhow::anyhow!("`filesystem` must be a JSON object"))?;
     if !fs.contains_key("readwritePaths") {
         fs.insert("readwritePaths".into(), json!([]));
+    } else if !fs["readwritePaths"].is_array() {
+        anyhow::bail!("`filesystem.readwritePaths` must be a JSON array");
     }
     if !fs.contains_key("readonlyPaths") {
         fs.insert("readonlyPaths".into(), json!([]));
+    } else if !fs["readonlyPaths"].is_array() {
+        anyhow::bail!("`filesystem.readonlyPaths` must be a JSON array");
     }
+    Ok(())
 }
 
 pub fn deny_file_set(config: &Value) -> HashSet<String> {
@@ -92,18 +103,54 @@ pub fn deny_file_set(config: &Value) -> HashSet<String> {
     out
 }
 
+/// Returns true iff `file_path` is equal to, or strictly nested under,
+/// any of the entries in `paths`. The match is component-aware: a literal
+/// `str::starts_with` would treat `C:\foobar\baz` as nested under `C:\foo`,
+/// silently mishandling sibling directories that share a name prefix.
+///
+/// Both `file_path` and each entry are lowercased once. Trailing path
+/// separators on either side are ignored so that `C:\foo` and `C:\foo\`
+/// behave identically.
 fn path_starts_with_any<I: AsRef<str>>(
     file_path: &str,
     paths: impl IntoIterator<Item = I>,
 ) -> bool {
     let lower = file_path.to_ascii_lowercase();
+    let lower_trimmed = trim_trailing_separators(&lower);
     for p in paths {
         let pl = p.as_ref().to_ascii_lowercase();
-        if lower.starts_with(&pl) {
+        let pl_trimmed = trim_trailing_separators(&pl);
+        if pl_trimmed.is_empty() {
+            continue;
+        }
+        if lower_trimmed == pl_trimmed {
+            return true;
+        }
+        if lower_trimmed.len() > pl_trimmed.len()
+            && lower_trimmed.starts_with(pl_trimmed)
+            && is_path_separator(lower_trimmed.as_bytes()[pl_trimmed.len()])
+        {
             return true;
         }
     }
     false
+}
+
+fn is_path_separator(b: u8) -> bool {
+    b == b'\\' || b == b'/'
+}
+
+fn trim_trailing_separators(s: &str) -> &str {
+    s.trim_end_matches(['\\', '/'])
+}
+
+/// True iff `path` denotes a drive root like `C:\` (or `C:` / `C:/`).
+/// We refuse to widen the policy to a bare drive root in
+/// `parent_for_write` because that would grant the entire volume.
+fn is_drive_root(path: &str) -> bool {
+    let trimmed = trim_trailing_separators(path);
+    let bytes = trimmed.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn json_array_strings(v: &Value) -> Vec<String> {
@@ -128,14 +175,28 @@ fn json_array_strings(v: &Value) -> Vec<String> {
 /// returned as-is. This matches the original PowerShell `extract_paths`
 /// behavior and over-grants in the rare directory-with-a-dot case, which
 /// is the safer side to err on.
+///
+/// One bound: if the computed parent is a bare drive root (e.g. `C:\`)
+/// we refuse to widen the policy to the entire volume and fall back to
+/// the file path itself. Without this, a single write to a dotted file at
+/// a drive root (`C:\hiberfil.sys`, `C:\.git`, ...) would grant write
+/// access to every directory under `C:`.
 fn parent_for_write(file_path: &str) -> Option<String> {
     let p = Path::new(file_path);
     let file_name = p.file_name()?.to_string_lossy();
-    if file_name.contains('.') {
-        p.parent().map(|s| s.to_string_lossy().into_owned())
+    let candidate = if file_name.contains('.') {
+        p.parent()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file_path.to_string())
     } else {
-        Some(file_path.to_string())
+        file_path.to_string()
+    };
+    if is_drive_root(&candidate) {
+        // Promoting to "C:\" would grant the entire volume; keep the
+        // grant scoped to the original file path instead.
+        return Some(file_path.to_string());
     }
+    Some(candidate)
 }
 
 pub fn update_from_access_events(
@@ -144,11 +205,27 @@ pub fn update_from_access_events(
     events: &[LearningModeAccessEvent],
     deny_set: &HashSet<String>,
     verbose: bool,
-) -> AddedPaths {
+) -> Result<AddedPaths> {
     let mut added_rw: Vec<String> = Vec::new();
     let mut added_ro: Vec<String> = Vec::new();
     let mut seen_rw: HashSet<String> = HashSet::new();
     let mut seen_ro: HashSet<String> = HashSet::new();
+
+    // Seed pre-lowercased shadows of the policy arrays *outside* the loop
+    // so the hot path doesn't re-clone-and-lowercase the JSON array on
+    // every event. We only push, never read back from the JSON arrays
+    // while iterating.
+    let mut rw_existing_lower: Vec<String> =
+        json_array_strings(&config["filesystem"]["readwritePaths"])
+            .into_iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+    let mut ro_existing_lower: Vec<String> =
+        json_array_strings(&config["filesystem"]["readonlyPaths"])
+            .into_iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+    let deny_lower: Vec<String> = deny_set.iter().map(|s| s.to_ascii_lowercase()).collect();
 
     for ev in events {
         if ev.file_path.eq_ignore_ascii_case(bin_path) {
@@ -158,12 +235,11 @@ pub fn update_from_access_events(
             continue;
         }
 
-        if path_starts_with_any(&ev.file_path, deny_set) {
+        if path_starts_with_any(&ev.file_path, &deny_lower) {
             continue;
         }
 
-        let rw_existing = json_array_strings(&config["filesystem"]["readwritePaths"]);
-        if path_starts_with_any(&ev.file_path, &rw_existing) {
+        if path_starts_with_any(&ev.file_path, &rw_existing_lower) {
             continue;
         }
 
@@ -178,11 +254,35 @@ pub fn update_from_access_events(
                     continue;
                 }
             };
-            config["filesystem"]["readwritePaths"]
+            // The deny check above only covered the raw `ev.file_path`.
+            // `parent_for_write` may widen to the parent directory, which
+            // could equal-or-contain a denied entry; re-check before
+            // pushing so a non-denied sibling write inside a directory
+            // that holds a denied file does not silently grant write to
+            // the denied file.
+            if path_starts_with_any(&parent, &deny_lower)
+                || deny_lower
+                    .iter()
+                    .any(|d| path_starts_with_any(d, std::iter::once(parent.as_str())))
+            {
+                if verbose {
+                    println!(
+                        "Refusing to widen `{}` to `{}` because the parent equals or \
+                         contains a deniedPaths entry",
+                        ev.file_path, parent
+                    );
+                }
+                continue;
+            }
+            let arr = config["filesystem"]["readwritePaths"]
                 .as_array_mut()
-                .unwrap()
-                .push(Value::String(parent.clone()));
-            if seen_rw.insert(parent.to_ascii_lowercase()) {
+                .ok_or_else(|| {
+                    anyhow::anyhow!("`filesystem.readwritePaths` must be a JSON array")
+                })?;
+            arr.push(Value::String(parent.clone()));
+            let parent_lower = parent.to_ascii_lowercase();
+            rw_existing_lower.push(parent_lower.clone());
+            if seen_rw.insert(parent_lower) {
                 added_rw.push(parent);
             }
             continue;
@@ -190,31 +290,36 @@ pub fn update_from_access_events(
 
         // Process Read Requests
         if (ev.access_mask & READ_MASK) != 0 {
-            let ro_existing = json_array_strings(&config["filesystem"]["readonlyPaths"]);
-            if path_starts_with_any(&ev.file_path, &ro_existing) {
+            if path_starts_with_any(&ev.file_path, &ro_existing_lower) {
                 continue;
             }
-            config["filesystem"]["readonlyPaths"]
+            let arr = config["filesystem"]["readonlyPaths"]
                 .as_array_mut()
-                .unwrap()
-                .push(Value::String(ev.file_path.clone()));
-            if seen_ro.insert(ev.file_path.to_ascii_lowercase()) {
+                .ok_or_else(|| {
+                    anyhow::anyhow!("`filesystem.readonlyPaths` must be a JSON array")
+                })?;
+            arr.push(Value::String(ev.file_path.clone()));
+            let path_lower = ev.file_path.to_ascii_lowercase();
+            ro_existing_lower.push(path_lower.clone());
+            if seen_ro.insert(path_lower) {
                 added_ro.push(ev.file_path.clone());
             }
         }
     }
 
-    AddedPaths {
+    Ok(AddedPaths {
         readwrite: added_rw,
         readonly: added_ro,
-    }
+    })
 }
 
 /// Locate (case-insensitively) or create the containment sub-object on
 /// `config` and ensure its `capabilities` array exists. Returns the key
 /// the caller should use to subsequently reach the object.
-fn resolve_containment_key(config: &mut Value, containment_name: &str) -> String {
-    let obj = config.as_object_mut().unwrap();
+fn resolve_containment_key(config: &mut Value, containment_name: &str) -> Result<String> {
+    let obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
     let existing_key = obj
         .keys()
         .find(|k| k.eq_ignore_ascii_case(containment_name))
@@ -229,20 +334,25 @@ fn resolve_containment_key(config: &mut Value, containment_name: &str) -> String
     if !obj[&key].is_object() {
         obj[&key] = json!({});
     }
-    let inner = obj.get_mut(&key).unwrap().as_object_mut().unwrap();
+    let inner = obj
+        .get_mut(&key)
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("`{key}` must be a JSON object"))?;
     if !inner.contains_key("capabilities") {
         inner.insert("capabilities".into(), json!([]));
+    } else if !inner["capabilities"].is_array() {
+        anyhow::bail!("`{key}.capabilities` must be a JSON array");
     }
-    key
+    Ok(key)
 }
 
-pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) {
+pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Result<()> {
     let containment_name = match config.get("containment").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return,
+        _ => return Ok(()),
     };
 
-    let key = resolve_containment_key(config, &containment_name);
+    let key = resolve_containment_key(config, &containment_name)?;
     let caps_arr = config[&key]["capabilities"]
         .as_array()
         .cloned()
@@ -300,21 +410,28 @@ pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) {
             println!("  = {c}");
         }
     }
+    Ok(())
 }
 
 /// Mirror of `Set-UISubsystemEnabled` in the PowerShell version.
-pub fn set_ui_subsystem_enabled(config: &mut Value) {
-    let obj = config.as_object_mut().unwrap();
+pub fn set_ui_subsystem_enabled(config: &mut Value) -> Result<()> {
+    let obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
     if !obj.contains_key("ui") {
         obj.insert("ui".into(), json!({}));
     }
-    let ui = obj.get_mut("ui").unwrap().as_object_mut().unwrap();
+    let ui = obj
+        .get_mut("ui")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("`ui` must be a JSON object"))?;
     // CONVERT_TO_GUI violations mean the contained process needed the
     // Win32k GUI subsystem. Set `ui.disable = false` unconditionally so
     // the next run grants access (regardless of whether the key was
     // present before).
     ui.insert("disable".into(), Value::Bool(false));
     println!("Enabling access to GUI subsystem ");
+    Ok(())
 }
 
 /// Apply the relaxations implied by the OR of `JOB_OBJECT_UILIMIT_*` bits
@@ -334,7 +451,7 @@ pub fn set_ui_subsystem_enabled(config: &mut Value) {
 /// operation it is left alone; when it grants the complementary half (e.g.
 /// existing `clipboard: "read"` plus a fresh `WRITECLIPBOARD` violation)
 /// the value is widened to `"all"`.
-pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) {
+pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) -> Result<()> {
     use crate::event_parser::{
         JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
         JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
@@ -343,14 +460,19 @@ pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) {
     };
 
     if flags == 0 {
-        return;
+        return Ok(());
     }
 
-    let obj = config.as_object_mut().unwrap();
+    let obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
     if !obj.contains_key("ui") {
         obj.insert("ui".into(), json!({}));
     }
-    let ui = obj.get_mut("ui").unwrap().as_object_mut().unwrap();
+    let ui = obj
+        .get_mut("ui")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("`ui` must be a JSON object"))?;
 
     // -- clipboard ---------------------------------------------------------
     let need_read = flags & JOB_OBJECT_UILIMIT_READCLIPBOARD != 0;
@@ -422,6 +544,7 @@ pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) {
     if let Some(v) = ui.get_mut("disable") {
         *v = Value::Bool(false);
     }
+    Ok(())
 }
 
 fn clipboard_capabilities(value: &str) -> (bool, bool) {
@@ -723,3 +846,293 @@ pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose
 // Map struct used for serde_json's `preserve_order` feature lookup.
 #[allow(dead_code)]
 type _Map = Map<String, Value>;
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access_event::LearningModeAccessEvent;
+    use serde_json::json;
+
+    fn ev_write(path: &str) -> LearningModeAccessEvent {
+        LearningModeAccessEvent {
+            time_created: chrono::Utc::now(),
+            process_id: 0,
+            thread_id: 0,
+            learning_mode: String::new(),
+            resource_type: String::new(),
+            file_path: path.to_string(),
+            app_path: String::new(),
+            access_mask: FILE_WRITE_MASK,
+        }
+    }
+
+    fn ev_read(path: &str) -> LearningModeAccessEvent {
+        LearningModeAccessEvent {
+            time_created: chrono::Utc::now(),
+            process_id: 0,
+            thread_id: 0,
+            learning_mode: String::new(),
+            resource_type: String::new(),
+            file_path: path.to_string(),
+            app_path: String::new(),
+            access_mask: READ_DATA_MASK,
+        }
+    }
+
+    // ---- parent_for_write -------------------------------------------------
+
+    #[test]
+    fn parent_for_write_promotes_file_to_parent() {
+        assert_eq!(
+            parent_for_write("C:\\a\\b\\c.txt").as_deref(),
+            Some("C:\\a\\b")
+        );
+    }
+
+    #[test]
+    fn parent_for_write_treats_dotless_segment_as_directory() {
+        assert_eq!(
+            parent_for_write("C:\\a\\b\\Makefile").as_deref(),
+            Some("C:\\a\\b\\Makefile")
+        );
+    }
+
+    #[test]
+    fn parent_for_write_refuses_drive_root_promotion() {
+        // C:\hiberfil.sys would have promoted to "C:\" (whole volume);
+        // we must fall back to the file path itself.
+        assert_eq!(
+            parent_for_write("C:\\hiberfil.sys").as_deref(),
+            Some("C:\\hiberfil.sys")
+        );
+        assert_eq!(
+            parent_for_write("C:\\.git").as_deref(),
+            Some("C:\\.git")
+        );
+    }
+
+    // ---- path_starts_with_any --------------------------------------------
+
+    #[test]
+    fn starts_with_any_rejects_sibling_with_shared_prefix() {
+        // The historical bug: "c:\foobar\baz".starts_with("c:\foo") was
+        // true, silently mishandling siblings sharing a name prefix.
+        assert!(!path_starts_with_any(
+            "C:\\foobar\\baz",
+            ["C:\\foo".to_string()]
+        ));
+    }
+
+    #[test]
+    fn starts_with_any_matches_exact() {
+        assert!(path_starts_with_any("C:\\foo", ["C:\\foo".to_string()]));
+    }
+
+    #[test]
+    fn starts_with_any_matches_nested_child() {
+        assert!(path_starts_with_any(
+            "C:\\foo\\bar\\baz.txt",
+            ["C:\\foo".to_string()]
+        ));
+    }
+
+    #[test]
+    fn starts_with_any_is_case_insensitive_and_separator_tolerant() {
+        assert!(path_starts_with_any(
+            "c:\\Foo\\bar",
+            ["C:\\foo\\".to_string()]
+        ));
+    }
+
+    #[test]
+    fn is_drive_root_detects_variants() {
+        assert!(is_drive_root("C:\\"));
+        assert!(is_drive_root("C:"));
+        assert!(is_drive_root("c:/"));
+        assert!(!is_drive_root("C:\\foo"));
+        assert!(!is_drive_root(""));
+    }
+
+    // ---- update_from_access_events ---------------------------------------
+
+    fn run_update(
+        config: &mut Value,
+        events: &[LearningModeAccessEvent],
+        deny: &[&str],
+    ) -> AddedPaths {
+        initialize_filesystem(config).unwrap();
+        let deny_set: HashSet<String> = deny.iter().map(|s| (*s).to_string()).collect();
+        update_from_access_events(config, "__never_matches__", events, &deny_set, false).unwrap()
+    }
+
+    #[test]
+    fn write_to_denied_path_is_not_promoted() {
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets\\token.dat"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets\\token.dat")],
+            &["C:\\Secrets\\token.dat"],
+        );
+        assert!(added.readwrite.is_empty());
+        assert!(cfg["filesystem"]["readwritePaths"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn write_to_sibling_does_not_bypass_denied_via_parent() {
+        // Regression: write to a non-denied sibling inside a directory
+        // that holds a denied file must not promote the parent to
+        // readwrite (which would transitively grant write to the denied
+        // file).
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets\\scratch.txt")],
+            &["C:\\Secrets"],
+        );
+        assert!(
+            added.readwrite.is_empty(),
+            "expected no rw promotion, got: {:?}",
+            added.readwrite
+        );
+    }
+
+    #[test]
+    fn write_at_drive_root_does_not_grant_whole_volume() {
+        let mut cfg = json!({});
+        let added = run_update(&mut cfg, &[ev_write("C:\\hiberfil.sys")], &[]);
+        // Must NOT contain "C:\"
+        assert!(
+            !added.readwrite.iter().any(|p| is_drive_root(p)),
+            "drive-root grant leaked: {:?}",
+            added.readwrite
+        );
+    }
+
+    #[test]
+    fn read_under_existing_readonly_parent_is_not_duplicated() {
+        let mut cfg = json!({
+            "filesystem": { "readonlyPaths": ["C:\\src"] }
+        });
+        let added = run_update(&mut cfg, &[ev_read("C:\\src\\main.rs")], &[]);
+        assert!(added.readonly.is_empty());
+    }
+
+    #[test]
+    fn idempotent_on_already_writable_path() {
+        let mut cfg = json!({
+            "filesystem": { "readwritePaths": ["C:\\out"] }
+        });
+        let added = run_update(&mut cfg, &[ev_write("C:\\out\\foo.txt")], &[]);
+        assert!(added.readwrite.is_empty());
+    }
+
+    // ---- typed-error behavior --------------------------------------------
+
+    #[test]
+    fn initialize_filesystem_rejects_non_object_root() {
+        let mut cfg = json!([]);
+        assert!(initialize_filesystem(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn initialize_filesystem_rejects_wrong_typed_filesystem() {
+        let mut cfg = json!({ "filesystem": "deny" });
+        assert!(initialize_filesystem(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn set_ui_subsystem_enabled_rejects_non_object_ui() {
+        let mut cfg = json!({ "ui": "disabled" });
+        assert!(set_ui_subsystem_enabled(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn set_ui_subsystem_enabled_always_writes_false() {
+        // Was previously inverted -- this locks in the fix.
+        let mut cfg = json!({});
+        set_ui_subsystem_enabled(&mut cfg).unwrap();
+        assert_eq!(cfg["ui"]["disable"], json!(false));
+
+        let mut cfg2 = json!({ "ui": { "disable": true } });
+        set_ui_subsystem_enabled(&mut cfg2).unwrap();
+        assert_eq!(cfg2["ui"]["disable"], json!(false));
+    }
+
+    // ---- apply_ui_operation_flags ----------------------------------------
+
+    #[test]
+    fn apply_ui_flags_clipboard_widens_to_all() {
+        use crate::event_parser::{
+            JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+        };
+        let mut cfg = json!({});
+        apply_ui_operation_flags(
+            &mut cfg,
+            JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+        )
+        .unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("all"));
+    }
+
+    #[test]
+    fn apply_ui_flags_ime_sets_true() {
+        use crate::event_parser::JOB_OBJECT_UILIMIT_IME;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).unwrap();
+        assert_eq!(cfg["ui"]["ime"], json!(true));
+    }
+
+    #[test]
+    fn apply_ui_flags_desktop_or_exitwindows_sets_desktop_system_control() {
+        use crate::event_parser::{JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_EXITWINDOWS};
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DESKTOP).unwrap();
+        assert_eq!(cfg["ui"]["desktopSystemControl"], json!(true));
+
+        let mut cfg2 = json!({});
+        apply_ui_operation_flags(&mut cfg2, JOB_OBJECT_UILIMIT_EXITWINDOWS).unwrap();
+        assert_eq!(cfg2["ui"]["desktopSystemControl"], json!(true));
+    }
+
+    #[test]
+    fn apply_ui_flags_injection_sets_true() {
+        use crate::event_parser::JOB_OBJECT_UILIMIT_INJECTION;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_INJECTION).unwrap();
+        assert_eq!(cfg["ui"]["injection"], json!(true));
+    }
+
+    #[test]
+    fn apply_ui_flags_rejects_non_object_ui() {
+        let mut cfg = json!({ "ui": null });
+        use crate::event_parser::JOB_OBJECT_UILIMIT_IME;
+        assert!(apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).is_err());
+    }
+
+    // ---- merge_capabilities ----------------------------------------------
+
+    #[test]
+    fn merge_capabilities_dedups_case_insensitively_and_sorts() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processcontainer": { "capabilities": ["InternetClient"] }
+        });
+        let req: HashSet<String> = ["internetclient", "registryRead"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        let caps = cfg["processcontainer"]["capabilities"].as_array().unwrap();
+        // Only one of {InternetClient, internetclient} survives, plus
+        // registryRead. Result is case-insensitively sorted.
+        let names: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("internetclient")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("registryRead")));
+    }
+}

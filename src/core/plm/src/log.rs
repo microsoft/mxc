@@ -86,7 +86,7 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
     // name -- a blank config has none, so `merge_capabilities` is a
     // no-op; instead, print the full requested-capabilities list below.
     let mut blank: Value = json!({});
-    initialize_filesystem(&mut blank);
+    initialize_filesystem(&mut blank)?;
     let deny = deny_file_set(&blank);
 
     // For a blank config there is no app binary to skip -- pass a path
@@ -99,13 +99,13 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
         &parse.valid_access_events,
         &deny,
         verbose,
-    );
+    )?;
 
     if parse.need_ui {
-        set_ui_subsystem_enabled(&mut blank);
+        set_ui_subsystem_enabled(&mut blank)?;
     }
     if parse.ui_operation_flags != 0 {
-        apply_ui_operation_flags(&mut blank, parse.ui_operation_flags);
+        apply_ui_operation_flags(&mut blank, parse.ui_operation_flags)?;
     }
 
     // `merge_capabilities` requires a `containment` name on the config,
@@ -125,7 +125,7 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
     } else {
         // Still call through so existing call-site stays exercised even
         // when the set is empty -- this is a no-op for a blank config.
-        merge_capabilities(&mut blank, &parse.requested_capabilities);
+        merge_capabilities(&mut blank, &parse.requested_capabilities)?;
     }
 
     write_added_paths_summary(&added);

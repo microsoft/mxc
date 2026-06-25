@@ -441,15 +441,24 @@ fn read_ace_at_offset(buf: &[u8], cursor: usize) -> Result<AceSlice<'_>> {
 /// Walk every ACE in `buf` and return the case-insensitively-deduped set
 /// of capability names matched along the way. When `verbose` is true, a
 /// per-ACE diagnostic line is emitted to stdout.
-pub fn invoke_ace_walk(buf: &[u8], verbose: bool) -> Result<HashSet<String>> {
-    let table = build_capability_table();
+///
+/// The capability table is taken by reference so callers (e.g. the
+/// per-event loop in `event_parser`) can build it once and reuse it
+/// across many invocations -- building it is ~150 syscalls + heap
+/// alloc/free pairs and was previously dominating PLM's parse time on
+/// large traces.
+pub fn invoke_ace_walk_with_table(
+    buf: &[u8],
+    table: &[CapabilityEntry],
+    verbose: bool,
+) -> Result<HashSet<String>> {
     let mut found: HashSet<String> = HashSet::new();
     let mut cursor = 0usize;
     let mut ace_index = 0usize;
 
     while cursor < buf.len() {
         let ace = read_ace_at_offset(buf, cursor)?;
-        let resolution = resolve_sid(ace.sid_bytes, &table);
+        let resolution = resolve_sid(ace.sid_bytes, table);
 
         let resolved_str = match &resolution {
             SidResolution::Capability(name) => {
@@ -483,8 +492,26 @@ pub fn invoke_ace_walk(buf: &[u8], verbose: bool) -> Result<HashSet<String>> {
     Ok(found)
 }
 
+/// Convenience wrapper that builds a fresh capability table per call.
+/// Prefer `invoke_ace_walk_with_table` in any loop.
+pub fn invoke_ace_walk(buf: &[u8], verbose: bool) -> Result<HashSet<String>> {
+    let table = build_capability_table();
+    invoke_ace_walk_with_table(buf, &table, verbose)
+}
+
 /// Top-level entry point matching the script's `-HexBytes` invocation.
 pub fn extract_caps(hex_bytes: &str, verbose: bool) -> Result<HashSet<String>> {
     let bytes = parse_hex_string(hex_bytes)?;
     invoke_ace_walk(&bytes, verbose)
+}
+
+/// Per-event variant of `extract_caps` that reuses a caller-owned
+/// capability table to avoid the ~150-syscall rebuild cost per event.
+pub fn extract_caps_with_table(
+    hex_bytes: &str,
+    table: &[CapabilityEntry],
+    verbose: bool,
+) -> Result<HashSet<String>> {
+    let bytes = parse_hex_string(hex_bytes)?;
+    invoke_ace_walk_with_table(&bytes, table, verbose)
 }

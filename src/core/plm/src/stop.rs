@@ -117,7 +117,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         .with_context(|| format!("failed to copy {}", config_path.display()))?;
 
     let mut config = load_config(&dest_config)?;
-    initialize_filesystem(&mut config);
+    initialize_filesystem(&mut config)?;
     let deny = deny_file_set(&config);
 
     let bin_path_s = bin_path.to_string_lossy().into_owned();
@@ -127,17 +127,17 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         &parse.valid_access_events,
         &deny,
         opts.verbose,
-    );
+    )?;
 
     if !parse.requested_capabilities.is_empty() {
-        merge_capabilities(&mut config, &parse.requested_capabilities);
+        merge_capabilities(&mut config, &parse.requested_capabilities)?;
     }
 
     if parse.need_ui {
-        set_ui_subsystem_enabled(&mut config);
+        set_ui_subsystem_enabled(&mut config)?;
     }
     if parse.ui_operation_flags != 0 {
-        apply_ui_operation_flags(&mut config, parse.ui_operation_flags);
+        apply_ui_operation_flags(&mut config, parse.ui_operation_flags)?;
     }
 
     let adjusted = resolve_adjusted_config_path(&dest_config, opts.adjusted_config_path.as_deref());

@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 use windows::Win32::System::EventLog::{
     EvtClose, EvtNext, EvtQuery, EvtQueryFilePath, EvtQueryForwardDirection, EvtRender,
     EvtRenderEventXml, EVT_HANDLE,
@@ -21,6 +22,19 @@ use windows::Win32::System::EventLog::{
 
 use crate::access_event::LearningModeAccessEvent;
 use crate::extract_caps;
+
+/// RAII wrapper that calls `EvtClose` on drop. Replaces the previous
+/// manual `EvtClose` calls so a panic or `?`-early-return inside the
+/// rendering loop no longer leaks kernel ETW handles.
+struct EvtHandleOwned(EVT_HANDLE);
+
+impl Drop for EvtHandleOwned {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = EvtClose(self.0);
+        }
+    }
+}
 
 // File path we treat as "no useful info" and skip.
 const MOUNT_POINT_MANAGER: &str = "\\Device\\MountPointManager";
@@ -249,54 +263,74 @@ fn to_wide_z(s: &str) -> Vec<u16> {
 
 /// Read every event matching the access-failure XPath query out of an
 /// .etl file and return their rendered XML strings.
+///
+/// The `EvtNext` batch size is intentionally large (256) to reduce
+/// user→kernel transitions on traces with tens of thousands of events.
+/// `EvtNext` returns fewer slots when the channel runs out, so this is
+/// safe to oversize. End-of-stream is distinguished from real errors by
+/// matching `ERROR_NO_MORE_ITEMS`; any other error is propagated rather
+/// than silently truncating the result (which would otherwise look like
+/// a complete trace and cause PLM to under-grant on the next run).
 fn read_event_xml(trace_file: &Path) -> Result<Vec<String>> {
     let path_w = to_wide_z(&trace_file.to_string_lossy());
     let query_w = to_wide_z("*[System[EventID=14 or EventID=27]]");
 
-    let h_query = unsafe {
+    let h_query = EvtHandleOwned(unsafe {
         EvtQuery(
             None,
             PCWSTR(path_w.as_ptr()),
             PCWSTR(query_w.as_ptr()),
             EvtQueryFilePath.0 | EvtQueryForwardDirection.0,
         )
-    }?;
+    }?);
 
     let mut out = Vec::new();
+    // Reusable scratch buffer for `render_event_xml` so we don't allocate
+    // a fresh Vec<u8> per event.
+    let mut render_buf: Vec<u8> = Vec::new();
+    const BATCH: usize = 256;
     loop {
         // EvtNext takes an `&mut [isize]` of EVT_HANDLE-sized slots.
-        let mut events: [isize; 16] = [0isize; 16];
+        let mut events: [isize; BATCH] = [0isize; BATCH];
         let mut returned: u32 = 0;
         let next_ok = unsafe {
             EvtNext(
-                h_query,
+                h_query.0,
                 &mut events,
                 u32::MAX, // INFINITE
                 0,
                 &mut returned as *mut _,
             )
         };
-        if next_ok.is_err() || returned == 0 {
+        if let Err(e) = &next_ok {
+            // ERROR_NO_MORE_ITEMS is the documented end-of-stream signal;
+            // anything else is a real failure and must not be silently
+            // dropped.
+            if e.code() == ERROR_NO_MORE_ITEMS.to_hresult() {
+                break;
+            }
+            return Err(anyhow::anyhow!(
+                "EvtNext failed mid-stream (rendered {} events so far): {e}",
+                out.len()
+            ));
+        }
+        if returned == 0 {
             break;
         }
 
         for &slot in events.iter().take(returned as usize) {
-            let handle = EVT_HANDLE(slot);
-            if let Ok(xml) = render_event_xml(handle) {
+            let handle = EvtHandleOwned(EVT_HANDLE(slot));
+            if let Ok(xml) = render_event_xml(handle.0, &mut render_buf) {
                 out.push(xml);
             }
-            unsafe {
-                let _ = EvtClose(handle);
-            }
+            // handle's Drop calls EvtClose.
         }
     }
-    unsafe {
-        let _ = EvtClose(h_query);
-    }
+    // h_query's Drop calls EvtClose.
     Ok(out)
 }
 
-fn render_event_xml(event: EVT_HANDLE) -> Result<String> {
+fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
     // Two-call pattern: first call gets required buffer size, second call
     // fills it.
     let mut needed: u32 = 0;
@@ -315,7 +349,10 @@ fn render_event_xml(event: EVT_HANDLE) -> Result<String> {
     if needed == 0 {
         return Err(anyhow::anyhow!("EvtRender returned zero size"));
     }
-    let mut buf = vec![0u8; needed as usize];
+    // Grow the caller-owned buffer if needed; reuse when possible.
+    if buf.len() < needed as usize {
+        buf.resize(needed as usize, 0);
+    }
     unsafe {
         EvtRender(
             None,
@@ -504,6 +541,12 @@ pub fn parse_events(
     let mut ui_events: Vec<UiEvent> = Vec::new();
     let mut ui_operation_flags: u32 = 0;
 
+    // Build the capability table once up-front. Each entry requires a
+    // `DeriveCapabilitySidsFromName` syscall + LocalAlloc/LocalFree pair;
+    // the table is process-static so doing this per-event (the previous
+    // behavior) dominated wall-time on large traces.
+    let capability_table = extract_caps::build_capability_table();
+
     for xml in &xml_events {
         let Some(ev) = parse_event_xml(xml) else {
             continue;
@@ -578,7 +621,9 @@ pub fn parse_events(
         }
 
         if let Some(blob) = &ev.complex_data_4 {
-            if let Ok(caps) = extract_caps::extract_caps(blob, verbose) {
+            if let Ok(caps) =
+                extract_caps::extract_caps_with_table(blob, &capability_table, verbose)
+            {
                 for c in caps {
                     requested_capabilities.insert(c);
                 }
