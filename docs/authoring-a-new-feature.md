@@ -186,9 +186,9 @@ pub struct ExperimentalConfig {
 ## Step 3: Map the wire field to the domain model
 
 The parser deserializes JSON directly into the wire model (`wire::MxcConfig`),
-so there is no separate `Raw*` struct to add — your `wire::GpuIsolation` from
-Step 1 is the parse target. In `config_parser.rs`, map it to the domain struct
-inside `convert_wire_config` where the `experimental` block is converted:
+so your `wire::GpuIsolation` from Step 1 is the parse target. In
+`config_parser.rs`, map it to the domain struct inside `convert_wire_config`
+where the `experimental` block is converted:
 
 ```rust
 let experimental = if let Some(raw_exp) = cfg.experimental {

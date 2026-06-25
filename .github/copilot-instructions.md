@@ -163,7 +163,7 @@ State-aware lifecycle:
 New features go under the `experimental` JSON section and are only active when `--experimental` is passed. See `docs/authoring-a-new-feature.md` for the full checklist. The pattern:
 
 1. Add the field to the Rust wire model (`src/core/wxc_common/src/wire.rs`) under the `Experimental` section, then regenerate the dev schema (`cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`) — do not hand-edit the generated schema
-2. Add the matching field to the wire model's `Experimental` struct (`src/core/wxc_common/src/wire.rs`) and the domain `ExperimentalConfig` in `models.rs`, then map wire→domain in `config_parser.rs`
+2. Add the matching field to the wire model's `Experimental` struct (`src/core/wxc_common/src/wire.rs`) and the domain `ExperimentalConfig` in `models.rs`, then map wire→domain in `config_parser.rs` (use `From` impls beside the domain type for trivial enum/struct conversions)
 3. Guard execution behind `if request.experimental_enabled` in the runner
 4. Never modify files in `schemas/stable/` — those are immutable release artifacts
 

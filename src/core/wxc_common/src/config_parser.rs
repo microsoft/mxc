@@ -9,9 +9,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ClipboardPolicy, ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
-    IsolationSessionConfig, IsolationSessionConfigurationId, IsolationSessionUser, LifecycleConfig,
-    LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig,
-    SeatbeltConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TestFeatureConfig, UiPolicy,
+    WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -138,24 +138,24 @@ pub fn load_mxc_request_with_options(
     let json_str =
         decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
 
-    // Parse once into a generic value so we can (a) discriminate one-shot vs
-    // state-aware by presence of the `phase` key and (b) capture the raw
+    // Parse once into a generic JSON value so we can (a) discriminate one-shot
+    // vs state-aware by presence of the `phase` key and (b) capture the raw
     // `experimental` block for the state-aware path, where it is typed
     // per-backend at dispatch time rather than at parse time.
-    let value: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+    let parsed_json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
     })?;
 
-    if value.get("phase").is_some() {
-        convert_wire_state_aware(value, logger, opts.allow_missing_command)
+    if parsed_json.get("phase").is_some() {
+        convert_wire_state_aware(parsed_json, logger, opts.allow_missing_command)
             .map(MxcRequest::StateAware)
             .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
-        // Re-deserialize from the source text (not the parsed `Value`) so
-        // serde's line/column context is preserved in error messages on this
-        // trust boundary; `from_value` discards it, turning a typo or
-        // out-of-range field into an unlocalised "expected u16"-style dump.
+        // Re-deserialize from the source text (not the already-parsed
+        // `parsed_json`) so serde's line/column context is preserved in error
+        // messages on this trust boundary; `from_value` discards it, turning a
+        // typo or out-of-range field into an unlocalised "expected u16"-style dump.
         let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
             logger.log_line("Error parsing JSON");
             ParseError::OneShot(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
@@ -500,20 +500,10 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
     SeatbeltConfig {
         profile_override,
         gui_access: gui_access.unwrap_or(false),
-        launch_method: launch_method
-            .map(map_wire_launch_method)
-            .unwrap_or_default(),
+        launch_method: launch_method.map(Into::into).unwrap_or_default(),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
-    }
-}
-
-/// Map the wire Seatbelt launch method to the domain enum.
-fn map_wire_launch_method(m: wire::LaunchMethod) -> crate::models::LaunchMethod {
-    match m {
-        wire::LaunchMethod::Exec => crate::models::LaunchMethod::Exec,
-        wire::LaunchMethod::Open => crate::models::LaunchMethod::Open,
     }
 }
 
@@ -526,36 +516,6 @@ fn wire_ui_isolation_str(iso: &wire::UiIsolation) -> &'static str {
         wire::UiIsolation::Atoms => "atoms",
         wire::UiIsolation::Container => "container",
     }
-}
-
-/// Map the wire lifecycle phase to the domain `Phase`.
-fn map_wire_phase(p: wire::Phase) -> Phase {
-    match p {
-        wire::Phase::Provision => Phase::Provision,
-        wire::Phase::Start => Phase::Start,
-        wire::Phase::Exec => Phase::Exec,
-        wire::Phase::Stop => Phase::Stop,
-        wire::Phase::Deprovision => Phase::Deprovision,
-    }
-}
-
-/// Map the wire IsolationSession sizing profile to the domain enum.
-fn map_wire_isolation_configuration_id(
-    id: wire::IsolationConfigurationId,
-) -> IsolationSessionConfigurationId {
-    match id {
-        wire::IsolationConfigurationId::Small => IsolationSessionConfigurationId::Small,
-        wire::IsolationConfigurationId::Medium => IsolationSessionConfigurationId::Medium,
-        wire::IsolationConfigurationId::Large => IsolationSessionConfigurationId::Large,
-        wire::IsolationConfigurationId::Composable => IsolationSessionConfigurationId::Composable,
-    }
-}
-
-/// Map the wire Entra user bundle to the domain struct.
-fn map_wire_isolation_user(u: wire::IsolationUser) -> IsolationSessionUser {
-    // Destructure (no `..`) so a new wire field fails to compile until mapped.
-    let wire::IsolationUser { upn, wam_token } = u;
-    IsolationSessionUser { upn, wam_token }
 }
 
 /// Resolve the `containment` wire enum to a concrete domain backend.
@@ -977,9 +937,9 @@ fn convert_wire_config(
         let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
             let mut config = IsolationSessionConfig::default();
             if let Some(id) = as_cfg.configuration_id {
-                config.configuration_id = map_wire_isolation_configuration_id(id);
+                config.configuration_id = id.into();
             }
-            config.user = as_cfg.user.map(map_wire_isolation_user);
+            config.user = as_cfg.user.map(Into::into);
             config
         });
         if raw_exp.seatbelt.is_some() {
@@ -1056,7 +1016,7 @@ fn convert_wire_state_aware(
     // `phase` is the state-aware discriminator and is constrained by the wire
     // enum; absence here would be a logic error in the caller's discrimination.
     let phase = match cfg.phase.take() {
-        Some(p) => map_wire_phase(p),
+        Some(p) => p.into(),
         None => {
             return Err(WxcError::ConfigParse(
                 "Missing required field: phase".to_string(),

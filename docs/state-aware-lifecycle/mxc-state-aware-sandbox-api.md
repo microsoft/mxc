@@ -985,9 +985,9 @@ implements one trait, the other, or both, depending on its declared participatio
 MXC's parser at `src/core/wxc_common/src/config_parser.rs` deserializes the
 wire-format JSON directly into the typed wire model in
 `src/core/wxc_common/src/wire.rs` (`wire::MxcConfig`), then maps it into the
-typed domain models via `convert_*` helpers (`convert_wire_config` →
-`ExecutionRequest`) before dispatch. The state-aware path reuses this same wire
-model.
+typed domain models (`convert_wire_config` → `ExecutionRequest`, with `From`
+impls beside the domain types for the trivial enum/struct conversions) before
+dispatch. The state-aware path reuses this same wire model.
 
 ```rust
 // In config_parser.rs — discrimination is by presence of the `phase` key in

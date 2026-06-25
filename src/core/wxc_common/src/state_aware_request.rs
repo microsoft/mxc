@@ -51,6 +51,18 @@ impl std::fmt::Display for Phase {
     }
 }
 
+impl From<crate::wire::Phase> for Phase {
+    fn from(p: crate::wire::Phase) -> Self {
+        match p {
+            crate::wire::Phase::Provision => Self::Provision,
+            crate::wire::Phase::Start => Self::Start,
+            crate::wire::Phase::Exec => Self::Exec,
+            crate::wire::Phase::Stop => Self::Stop,
+            crate::wire::Phase::Deprovision => Self::Deprovision,
+        }
+    }
+}
+
 /// Parsed state-aware request. Pairs the inner `ExecutionRequest` with the
 /// state-aware-only wire fields the dispatcher consumes.
 #[derive(Debug, Clone)]

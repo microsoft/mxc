@@ -173,6 +173,15 @@ pub enum LaunchMethod {
     Open,
 }
 
+impl From<crate::wire::LaunchMethod> for LaunchMethod {
+    fn from(m: crate::wire::LaunchMethod) -> Self {
+        match m {
+            crate::wire::LaunchMethod::Exec => Self::Exec,
+            crate::wire::LaunchMethod::Open => Self::Open,
+        }
+    }
+}
+
 /// Configuration specific to the Windows Sandbox backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -212,6 +221,17 @@ pub enum IsolationSessionConfigurationId {
     Composable,
 }
 
+impl From<crate::wire::IsolationConfigurationId> for IsolationSessionConfigurationId {
+    fn from(id: crate::wire::IsolationConfigurationId) -> Self {
+        match id {
+            crate::wire::IsolationConfigurationId::Small => Self::Small,
+            crate::wire::IsolationConfigurationId::Medium => Self::Medium,
+            crate::wire::IsolationConfigurationId::Large => Self::Large,
+            crate::wire::IsolationConfigurationId::Composable => Self::Composable,
+        }
+    }
+}
+
 /// Configuration specific to the Isolation Session backend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -240,6 +260,14 @@ impl std::fmt::Debug for IsolationSessionUser {
             .field("upn", &self.upn)
             .field("wam_token", &"<redacted>")
             .finish()
+    }
+}
+
+impl From<crate::wire::IsolationUser> for IsolationSessionUser {
+    fn from(u: crate::wire::IsolationUser) -> Self {
+        // Destructure (no `..`) so a new wire field fails to compile until mapped.
+        let crate::wire::IsolationUser { upn, wam_token } = u;
+        Self { upn, wam_token }
     }
 }
 

@@ -75,12 +75,6 @@ A backend-specific config can be added later under `ExperimentalConfig` if neede
 
 ### 3. Config Parser Changes
 
-> **Note (superseded):** This plan predates the wire-model parser rewire. The
-> parser no longer uses `Raw*` structs or `convert_raw_config_inner`; it
-> deserializes into `wire::MxcConfig` (`src/core/wxc_common/src/wire.rs`) and maps
-> to the domain model in `convert_wire_config`. Translate the steps below to the
-> wire model — see [authoring-a-new-feature.md](../authoring-a-new-feature.md).
-
 **File:** `src/core/wxc_common/src/wire.rs` and `config_parser.rs`
 
 - Add a `Bubblewrap` variant to the wire `Containment` enum (or rely on the

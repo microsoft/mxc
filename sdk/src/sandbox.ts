@@ -106,9 +106,6 @@ function buildBubblewrapConfig(
 function buildLinuxProcessConfig(
     config: ContainerConfig,
 ): ContainerConfig {
-    // The container id is carried at top-level `containerId` and the teardown
-    // flag at `lifecycle.destroyOnExit`; the wire `lxc` object has only
-    // `distribution` / `release`, so do not duplicate those here.
     config.lxc = {
         distribution: 'alpine',
         release: '3.23',
@@ -149,9 +146,6 @@ function buildProcessBaseContainerConfig(
         capabilities.push("privateNetworkClientServer");
     }
 
-    // The container id is carried only at the top level (`containerId`, set by
-    // createConfigFromPolicy); the wire `processContainer` object has no `name`
-    // field, so emitting it here would be rejected by the parser.
     config.processContainer = {
         leastPrivilege: false,
         capabilities,
