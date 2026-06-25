@@ -56,11 +56,40 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
-    let bin_path: PathBuf = opts
+    // Resolve bin_path to its canonical form so the self-access filter
+    // in `config::update_from_access_events` can compare it against the
+    // verbatim-prefixed paths ETW emits. Round-3 review flagged the
+    // previous silent `unwrap_or_else(|_| exe_dir.to_path_buf())` —
+    // when an operator-supplied --bin-path failed to canonicalize the
+    // PLM exe's own directory got substituted, breaking self-filter
+    // and leaking the binary into the adjusted config with no warning.
+    //
+    // The fallback chain now (in order): canonical(--bin-path) →
+    // raw --bin-path → canonical(exe_dir) → exe_dir. Each step emits
+    // a stderr warning when it diverges from the operator's intent.
+    let bin_path_raw = opts
         .bin_path
-        .unwrap_or_else(|| exe_dir.to_path_buf())
-        .canonicalize()
-        .unwrap_or_else(|_| exe_dir.to_path_buf());
+        .clone()
+        .unwrap_or_else(|| exe_dir.to_path_buf());
+    let bin_path: PathBuf = match bin_path_raw.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "[plm] warning: could not canonicalize --bin-path {} ({}); \
+                 self-access filter will use the raw path. Events referencing \
+                 the binary via a different spelling (e.g. verbatim \\\\?\\) \
+                 may leak into the adjusted config.",
+                bin_path_raw.display(),
+                e
+            );
+            // Prefer the raw operator-supplied path over silently
+            // substituting exe_dir; only fall back to exe_dir when the
+            // operator gave us no bin_path at all.
+            opts.bin_path
+                .clone()
+                .unwrap_or_else(|| exe_dir.to_path_buf())
+        }
+    };
 
     let trace_file = if let Some(p) = opts.trace_file.as_ref() {
         // Operator supplied a pre-captured .etl -- don't try to stop a

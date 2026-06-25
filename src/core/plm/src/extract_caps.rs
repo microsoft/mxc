@@ -19,9 +19,13 @@
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(target_os = "windows")]
 use windows::core::{PCWSTR, PWSTR};
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
+#[cfg(target_os = "windows")]
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+#[cfg(target_os = "windows")]
 use windows::Win32::Security::{
     DeriveCapabilitySidsFromName, GetLengthSid, IsValidSid, LookupAccountSidW, PSID, SID_NAME_USE,
 };
@@ -185,11 +189,13 @@ pub struct CapabilityEntry {
     pub group_sid: Option<Vec<u8>>,
 }
 
+#[cfg(target_os = "windows")]
 fn to_wide_z(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// Copy a SID pointed to by `psid` into a managed byte vector.
+#[cfg(target_os = "windows")]
 unsafe fn sid_bytes_from_ptr(psid: PSID) -> Option<Vec<u8>> {
     if psid.0.is_null() {
         return None;
@@ -205,6 +211,7 @@ unsafe fn sid_bytes_from_ptr(psid: PSID) -> Option<Vec<u8>> {
 
 /// Free an array of SID pointers and the array itself, mirroring the
 /// LocalFree-loop cleanup from the PowerShell version.
+#[cfg(target_os = "windows")]
 unsafe fn free_sid_array(arr: *mut PSID, count: u32) {
     if arr.is_null() {
         return;
@@ -220,7 +227,10 @@ unsafe fn free_sid_array(arr: *mut PSID, count: u32) {
 
 /// Build the table of (capability name, AppPackage SID, Group SID) tuples
 /// by calling `DeriveCapabilitySidsFromName` for each known capability.
-/// Capabilities the OS rejects are silently skipped.
+/// Capabilities the OS rejects are silently skipped. Non-Windows targets
+/// get an empty table (the API has no cross-platform equivalent); pure
+/// ACE/byte-parsing tests remain meaningful regardless.
+#[cfg(target_os = "windows")]
 pub fn build_capability_table() -> Vec<CapabilityEntry> {
     let mut out = Vec::with_capacity(KNOWN_CAPABILITIES.len());
 
@@ -272,8 +282,18 @@ pub fn build_capability_table() -> Vec<CapabilityEntry> {
     out
 }
 
+/// Non-Windows stub: there is no equivalent to
+/// `DeriveCapabilitySidsFromName` on Linux/macOS. Returning an empty
+/// table keeps the pure parts of this module (parse_hex_string, ACE
+/// byte walker, CapabilityIndex) callable in cross-platform tests.
+#[cfg(not(target_os = "windows"))]
+pub fn build_capability_table() -> Vec<CapabilityEntry> {
+    Vec::new()
+}
+
 /// Best-effort string form of a SID for diagnostics. Returns `None` if the
 /// bytes aren't a valid SID.
+#[cfg(target_os = "windows")]
 pub fn sid_to_string(sid_bytes: &[u8]) -> Option<String> {
     let psid = PSID(sid_bytes.as_ptr() as *mut _);
     unsafe {
@@ -296,7 +316,14 @@ pub fn sid_to_string(sid_bytes: &[u8]) -> Option<String> {
     }
 }
 
+/// Non-Windows stub.
+#[cfg(not(target_os = "windows"))]
+pub fn sid_to_string(_sid_bytes: &[u8]) -> Option<String> {
+    None
+}
+
 /// Try to translate a SID to an NTAccount-style "DOMAIN\Name" string.
+#[cfg(target_os = "windows")]
 pub fn lookup_nt_account(sid_bytes: &[u8]) -> Option<String> {
     let psid = PSID(sid_bytes.as_ptr() as *mut _);
     unsafe {
@@ -353,6 +380,12 @@ pub fn lookup_nt_account(sid_bytes: &[u8]) -> Option<String> {
     }
 }
 
+/// Non-Windows stub: no NTAccount concept off Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn lookup_nt_account(_sid_bytes: &[u8]) -> Option<String> {
+    None
+}
+
 /// Result of resolving a SID against the capability table.
 pub enum SidResolution<'a> {
     Capability(&'a str),
@@ -367,37 +400,38 @@ pub enum SidResolution<'a> {
 ///
 /// The map keys are SID byte sequences; the value pairs the matched
 /// capability name with a flag distinguishing the package-SID variant
-/// (`false`) from the group-SID variant (`true`). Built once via
-/// `CapabilityIndex::from_table` and reused for every ACE.
-pub struct CapabilityIndex<'a> {
-    by_sid: HashMap<&'a [u8], (&'a str, bool)>,
+/// (`false`) from the group-SID variant (`true`). Owns its keys so it
+/// can be carried alongside the table inside `ParseAccumulator` without
+/// the self-referential lifetime headaches that the previous
+/// borrowing form imposed on callers.
+pub struct CapabilityIndex {
+    by_sid: HashMap<Vec<u8>, (String, bool)>,
 }
 
-impl<'a> CapabilityIndex<'a> {
-    pub fn from_table(table: &'a [CapabilityEntry]) -> Self {
-        let mut by_sid: HashMap<&'a [u8], (&'a str, bool)> =
-            HashMap::with_capacity(table.len() * 2);
+impl CapabilityIndex {
+    pub fn from_table(table: &[CapabilityEntry]) -> Self {
+        let mut by_sid: HashMap<Vec<u8>, (String, bool)> = HashMap::with_capacity(table.len() * 2);
         for entry in table {
             if let Some(s) = &entry.app_package_sid {
-                by_sid.insert(s.as_slice(), (entry.name.as_str(), false));
+                by_sid.insert(s.clone(), (entry.name.clone(), false));
             }
             if let Some(s) = &entry.group_sid {
                 // App-package SID wins on conflict (it's the canonical
                 // form); only insert the group SID when no entry exists.
                 by_sid
-                    .entry(s.as_slice())
-                    .or_insert((entry.name.as_str(), true));
+                    .entry(s.clone())
+                    .or_insert((entry.name.clone(), true));
             }
         }
         Self { by_sid }
     }
 
-    pub fn resolve(&self, sid_bytes: &[u8]) -> SidResolution<'a> {
+    pub fn resolve<'a>(&'a self, sid_bytes: &[u8]) -> SidResolution<'a> {
         if let Some((name, is_group)) = self.by_sid.get(sid_bytes) {
             return if *is_group {
-                SidResolution::GroupCapability(name)
+                SidResolution::GroupCapability(name.as_str())
             } else {
-                SidResolution::Capability(name)
+                SidResolution::Capability(name.as_str())
             };
         }
         if let Some(nt) = lookup_nt_account(sid_bytes) {
@@ -535,7 +569,7 @@ pub fn invoke_ace_walk_with_table(
 /// want to do it once.
 pub fn invoke_ace_walk_with_index(
     buf: &[u8],
-    index: &CapabilityIndex<'_>,
+    index: &CapabilityIndex,
     verbose: bool,
 ) -> Result<HashSet<String>> {
     let mut found: HashSet<String> = HashSet::new();
@@ -593,6 +627,8 @@ pub fn extract_caps(hex_bytes: &str, verbose: bool) -> Result<HashSet<String>> {
 
 /// Per-event variant of `extract_caps` that reuses a caller-owned
 /// capability table to avoid the ~150-syscall rebuild cost per event.
+/// Note: this still rebuilds a `CapabilityIndex` per call — prefer
+/// `extract_caps_with_index` in any hot loop.
 pub fn extract_caps_with_table(
     hex_bytes: &str,
     table: &[CapabilityEntry],
@@ -600,6 +636,19 @@ pub fn extract_caps_with_table(
 ) -> Result<HashSet<String>> {
     let bytes = parse_hex_string(hex_bytes)?;
     invoke_ace_walk_with_table(&bytes, table, verbose)
+}
+
+/// Per-event variant that takes a pre-built `CapabilityIndex` so the
+/// O(table_size) build cost is paid once per parse, not per ACE blob.
+/// This is the entry point used by the production hot loop in
+/// `event_parser::ParseAccumulator`.
+pub fn extract_caps_with_index(
+    hex_bytes: &str,
+    index: &CapabilityIndex,
+    verbose: bool,
+) -> Result<HashSet<String>> {
+    let bytes = parse_hex_string(hex_bytes)?;
+    invoke_ace_walk_with_index(&bytes, index, verbose)
 }
 
 #[cfg(test)]

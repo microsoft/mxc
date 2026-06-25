@@ -189,20 +189,37 @@ fn normalize_path(p: &str) -> Option<String> {
 /// `2·(|rw|+|ro|+|deny|)` strings per event and dominate wall time on
 /// long traces. Comparisons are pure byte-slice equality on already-
 /// lowercased data.
+///
+/// Complexity is O(N) over `paths_norm`. The hot loop short-circuits
+/// the exact-match case via a parallel `HashSet` before calling here,
+/// so the practical cost is bounded by the number of *prefix* matches.
+/// For traces that grow `readwritePaths` to >1k entries this is the
+/// dominant CPU; a follow-up could switch to a path-component trie,
+/// but a naive sorted-vec binary search is wrong here (multiple
+/// distinct prefixes can match a single event path, and the
+/// lexicographically-max element ≤ ev is not guaranteed to be one of
+/// them — see `C:\foo bar` vs `C:\foo\baz`). The early-bail on first
+/// byte below removes most cross-drive-letter false candidates.
 fn path_starts_with_any_norm<I: AsRef<str>>(
     file_path_norm: &str,
     paths_norm: impl IntoIterator<Item = I>,
 ) -> bool {
+    let fp_bytes = file_path_norm.as_bytes();
+    let fp_first = fp_bytes.first().copied();
     for p in paths_norm {
         let pn = p.as_ref();
         if pn.is_empty() {
             continue;
         }
+        let pn_bytes = pn.as_bytes();
+        if pn_bytes.first().copied() != fp_first {
+            continue;
+        }
         if file_path_norm == pn {
             return true;
         }
-        if file_path_norm.len() > pn.len()
-            && file_path_norm.as_bytes()[pn.len()] == b'\\'
+        if fp_bytes.len() > pn_bytes.len()
+            && fp_bytes[pn_bytes.len()] == b'\\'
             && file_path_norm.starts_with(pn)
         {
             return true;
@@ -337,20 +354,6 @@ pub fn update_from_access_events(
     let mut ro_existing_set: HashSet<String> = ro_existing_norm.iter().cloned().collect();
 
     for ev in events {
-        if let Some(ref bp) = bin_path_norm {
-            // bin_path is what we treat as the application binary; events
-            // whose file path equals it (case-insensitively) are
-            // self-access noise and skipped.
-            if ev.file_path.eq_ignore_ascii_case(bin_path) {
-                if verbose {
-                    println!("File {} is the binary path, skipping event.", ev.file_path);
-                }
-                continue;
-            }
-            // Also catch the verbatim-prefixed variants of the bin path.
-            let _ = bp;
-        }
-
         // Normalize this event's path once. Reject ADS-on-directory and
         // UNC-verbatim forms (`normalize_path` returns None) so they
         // can't bypass deny matching.
@@ -366,6 +369,25 @@ pub fn update_from_access_events(
                 continue;
             }
         };
+
+        // Self-access filter: events whose path equals the wxc-exec
+        // binary (in any spelling — raw, verbatim, lower/upper case)
+        // are noise and skipped. The verbatim-prefixed variant matters
+        // because `stop.rs` canonicalises bin_path via `canonicalize()`,
+        // which on Windows returns the `\\?\C:\…` form while ETW
+        // reports the plain `C:\…` form; comparing only the raw strings
+        // (round-2 behaviour) let the binary path leak into the output
+        // config as a readonly entry.
+        let is_self_event = ev.file_path.eq_ignore_ascii_case(bin_path)
+            || bin_path_norm
+                .as_ref()
+                .is_some_and(|bp_norm| bp_norm == &ev_norm);
+        if is_self_event {
+            if verbose {
+                println!("File {} is the binary path, skipping event.", ev.file_path);
+            }
+            continue;
+        }
 
         // Deny check: exact-set first (O(1)), then prefix scan over the
         // (typically very small) deny vector.
@@ -462,22 +484,40 @@ pub fn update_from_access_events(
     })
 }
 
+/// Map a `containment` enum value (`processcontainer`, etc., as
+/// defined by the schema) to the canonical camelCase sub-object key
+/// (`processContainer`). The enum value casing and the sub-object key
+/// casing intentionally differ in the schema; PLM previously used the
+/// enum value as the sub-object key, which produced a config that
+/// failed schema validation and silently dropped capabilities on
+/// consumption (wxc's parser only recognises the camelCase form).
+fn containment_subobject_key(enum_value: &str) -> &'static str {
+    match enum_value.to_ascii_lowercase().as_str() {
+        // Future-proofing: when new backends gain sub-object keys, map
+        // them here. Unknown values fall through to processContainer
+        // since that's the only backend PLM is wired up for today.
+        "processcontainer" | "appcontainer" => "processContainer",
+        _ => "processContainer",
+    }
+}
+
 /// Locate (case-insensitively) or create the containment sub-object on
 /// `config` and ensure its `capabilities` array exists. Returns the key
 /// the caller should use to subsequently reach the object.
 fn resolve_containment_key(config: &mut Value, containment_name: &str) -> Result<String> {
+    let canonical = containment_subobject_key(containment_name);
     let obj = config
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
     let existing_key = obj
         .keys()
-        .find(|k| k.eq_ignore_ascii_case(containment_name))
+        .find(|k| k.eq_ignore_ascii_case(canonical))
         .cloned();
     let key = match existing_key {
         Some(k) => k,
         None => {
-            obj.insert(containment_name.to_string(), json!({}));
-            containment_name.to_string()
+            obj.insert(canonical.to_string(), json!({}));
+            canonical.to_string()
         }
     };
     if !obj[&key].is_object() {
@@ -1422,20 +1462,77 @@ mod tests {
         assert!(cfg3.get("ui").is_none());
     }
 
+    // Round-3 finding M: explicit coverage for the systemSettings and
+    // isolation branches that were previously only exercised indirectly.
+
+    #[test]
+    fn apply_ui_flags_system_parameters_widens_system_settings() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS).unwrap();
+        assert_eq!(cfg["ui"]["systemSettings"], json!("parameters"));
+        assert_eq!(cfg["ui"]["disable"], json!(false));
+    }
+
+    #[test]
+    fn apply_ui_flags_display_settings_widens_system_settings() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS).unwrap();
+        assert_eq!(cfg["ui"]["systemSettings"], json!("display"));
+    }
+
+    #[test]
+    fn apply_ui_flags_system_params_and_display_combine_to_all() {
+        use crate::ui_limits::{
+            JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+        };
+        let mut cfg = json!({});
+        apply_ui_operation_flags(
+            &mut cfg,
+            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+        )
+        .unwrap();
+        assert_eq!(cfg["ui"]["systemSettings"], json!("all"));
+    }
+
+    #[test]
+    fn apply_ui_flags_handles_relaxes_isolation_to_atoms() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_HANDLES;
+        // Default isolation is "container" (handles + atoms restricted);
+        // granting HANDLES drops the handles restriction → "atoms".
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_HANDLES).unwrap();
+        assert_eq!(cfg["ui"]["isolation"], json!("atoms"));
+    }
+
+    #[test]
+    fn apply_ui_flags_handles_and_global_atoms_drop_to_desktop_isolation() {
+        use crate::ui_limits::{JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES};
+        let mut cfg = json!({});
+        apply_ui_operation_flags(
+            &mut cfg,
+            JOB_OBJECT_UILIMIT_HANDLES | JOB_OBJECT_UILIMIT_GLOBALATOMS,
+        )
+        .unwrap();
+        assert_eq!(cfg["ui"]["isolation"], json!("desktop"));
+    }
+
     // ---- merge_capabilities ----------------------------------------------
 
     #[test]
     fn merge_capabilities_dedups_case_insensitively_and_sorts() {
+        // Existing config pre-seeds the camelCase key the schema requires.
         let mut cfg = json!({
             "containment": "processcontainer",
-            "processcontainer": { "capabilities": ["InternetClient"] }
+            "processContainer": { "capabilities": ["InternetClient"] }
         });
         let req: HashSet<String> = ["internetclient", "registryRead"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         merge_capabilities(&mut cfg, &req).unwrap();
-        let caps = cfg["processcontainer"]["capabilities"].as_array().unwrap();
+        let caps = cfg["processContainer"]["capabilities"].as_array().unwrap();
         // Only one of {InternetClient, internetclient} survives, plus
         // registryRead. Result is case-insensitively sorted.
         let names: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
@@ -1444,5 +1541,46 @@ mod tests {
             .iter()
             .any(|n| n.eq_ignore_ascii_case("internetclient")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("registryRead")));
+    }
+
+    #[test]
+    fn merge_capabilities_creates_camel_case_subobject() {
+        // Regression for round-3 finding A: PLM previously used the
+        // `containment` enum value (lowercase `processcontainer`) as
+        // the sub-object key. The schema requires camelCase
+        // `processContainer`; the lowercase form failed validation
+        // and the wxc parser silently dropped its capabilities.
+        let mut cfg = json!({ "containment": "processcontainer" });
+        let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(
+            cfg.get("processContainer").is_some(),
+            "must use camelCase key"
+        );
+        assert!(
+            cfg.get("processcontainer").is_none(),
+            "must not insert lowercase variant"
+        );
+        let caps = cfg["processContainer"]["capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].as_str().unwrap(), "internetClient");
+    }
+
+    #[test]
+    fn merge_capabilities_preserves_existing_camel_case_subobject() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": ["foo"] }
+        });
+        let req: HashSet<String> = ["bar"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(cfg.get("processcontainer").is_none());
+        assert_eq!(
+            cfg["processContainer"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

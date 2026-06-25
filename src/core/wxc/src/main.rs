@@ -4,6 +4,7 @@
 use std::fmt::Write;
 use std::fs;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -375,6 +376,70 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) {
 }
 
 // ---------------------------------------------------------------------------
+// Graceful-exit PLM audit-trace cleanup
+// ---------------------------------------------------------------------------
+//
+// `--audit` runs `plm.exe start`, which leaves a live WPR ETW session
+// in the kernel for the duration of the workload. The matching
+// `plm.exe stop` below tears it down. If anything between those two
+// calls aborts wxc-exec — Ctrl-C, panic, `process::exit`,
+// container-runner kill — the kernel session stays allocated until
+// reboot or manual `wpr -cancel`, blocking all other WPR consumers
+// on the host (only one NT Kernel Logger session can exist at a time).
+//
+// We bracket the live-trace window with `AUDIT_ACTIVE` plus a stack-
+// owned `AuditTraceGuard`. Cleanup paths:
+//  * Normal exit and panic unwind — `AuditTraceGuard::drop` invokes
+//    `cancel_active_audit_trace()`.
+//  * Ctrl-C / Ctrl-Break / console close — the `dacl_ctrl_handler`
+//    also calls `cancel_active_audit_trace()` after handling DACLs.
+// `cancel_active_audit_trace()` is idempotent via the AtomicBool, so
+// it is safe for both paths to call it.
+//
+// Cancel uses `wpr -cancel`. Today PLM uses the global default
+// instance so this matches; if PLM gains an `-instancename` argument
+// later, plumb it through here too.
+
+#[cfg(target_os = "windows")]
+static AUDIT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Mark that the wxc-exec process owns a live PLM audit trace. Called
+/// just before `plm start` is spawned so a Ctrl-C arriving mid-spawn
+/// still triggers cleanup (over-cancelling a not-yet-started session
+/// is harmless — `wpr -cancel` returns non-zero and we discard).
+#[cfg(target_os = "windows")]
+fn mark_audit_active() {
+    AUDIT_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// Cancel an in-flight PLM audit trace iff one is active, then clear
+/// the flag. Idempotent; safe to call from the Ctrl-C handler and the
+/// stack guard's Drop. Failures (no active session, missing wpr.exe)
+/// are silenced because the call is best-effort cleanup.
+#[cfg(target_os = "windows")]
+fn cancel_active_audit_trace() {
+    if AUDIT_ACTIVE.swap(false, Ordering::SeqCst) {
+        let _ = std::process::Command::new("wpr")
+            .arg("-cancel")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// Stack-owned guard that mirrors `ParkedDaclGuard`: ensures the audit
+/// trace is cancelled on panic unwind and on normal function return.
+#[cfg(target_os = "windows")]
+struct AuditTraceGuard;
+
+#[cfg(target_os = "windows")]
+impl Drop for AuditTraceGuard {
+    fn drop(&mut self) {
+        cancel_active_audit_trace();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Graceful-exit DACL cleanup
 // ---------------------------------------------------------------------------
 //
@@ -501,6 +566,7 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     }
     // FALSE = "I did not fully handle this; run the next handler in the
     // chain (i.e. the default handler that calls ExitProcess)".
+    cancel_active_audit_trace();
     windows::core::BOOL(0)
 }
 
@@ -1075,11 +1141,20 @@ fn main() {
     // for the lifetime of the workload. The matching `plm stop` below
     // tears the trace down and (when the policy came from a file)
     // merges findings back into it. Both calls are best-effort.
+    //
+    // Bracket the live-trace window with `AUDIT_ACTIVE` + a stack guard
+    // so Ctrl-C / panic / process::exit between start and stop don't
+    // leak the kernel ETW session.
+    #[cfg(target_os = "windows")]
+    let _audit_guard: Option<AuditTraceGuard>;
     #[cfg(target_os = "windows")]
     let audit_config_file = if cli.audit {
+        mark_audit_active();
+        _audit_guard = Some(AuditTraceGuard);
         run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
         config_file_path(&cli)
     } else {
+        _audit_guard = None;
         None
     };
 
@@ -1103,6 +1178,11 @@ fn main() {
             .map(std::ffi::OsString::as_os_str)
             .collect();
         run_plm_command(&borrowed, &mut logger);
+        // Successful `plm stop` already cancelled the WPR session and
+        // merged findings into the adjusted config. Clear the flag so
+        // `AuditTraceGuard::drop` and any later Ctrl-C handler become
+        // no-ops.
+        AUDIT_ACTIVE.store(false, Ordering::SeqCst);
     }
 
     // Explicitly drop the runner before retrieving the parked DACL

@@ -16,14 +16,15 @@ clap.workspace = true
 anyhow.workspace = true
 # serde_json + chrono are needed by the portable `config` and
 # `access_event` modules, so they must compile on every target (not just
-# Windows). The Windows-only event-parsing / capability-resolution code
-# pulls in roxmltree and the windows crate via the target-gated section
-# below.
+# Windows). roxmltree is also portable — `event_parser`'s pure XML
+# parsing (round-3 testability fix) compiles on every target so its
+# unit tests can run in cross-platform CI. The `windows` crate stays
+# target-gated below since it has no non-Windows equivalent.
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
+roxmltree = "0.20"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-roxmltree = "0.20"
 windows = { workspace = true, features = [
     "Win32_System_EventLog",
 ] }

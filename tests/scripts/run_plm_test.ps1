@@ -324,35 +324,46 @@ foreach ($cfg in $configFiles) {
     # trace output, so don't bail on non-zero exit. Suppress the per-run
     # banner so the script's own output stays scannable.
     #
-    # Wrap the audit invocation in a job so a hung workload (e.g.
-    # plmtester blocked on a dialog the test driver can't dismiss)
-    # surfaces as a timeout instead of stalling the whole test pass.
-    $auditJob = Start-Job -ScriptBlock {
-        param($exe, $configPath)
-        & $exe --audit $configPath 2>&1
-        $LASTEXITCODE
-    } -ArgumentList $WxcExec, $cfg.FullName
+    # Use Start-Process + manual WaitForExit + `taskkill /T /F /PID` so
+    # a timeout kills the entire descendant tree (wxc-exec → plm.exe →
+    # workload). The previous Start-Job approach only signalled the
+    # job's PowerShell host; spawned native descendants survived and
+    # raced the next test iteration. (Round-3 reliability finding G.)
+    $stdoutFile = [IO.Path]::GetTempFileName()
+    $stderrFile = [IO.Path]::GetTempFileName()
+    try {
+        $auditProc = Start-Process -FilePath $WxcExec `
+            -ArgumentList @('--audit', $cfg.FullName) `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError  $stderrFile `
+            -NoNewWindow -PassThru
 
-    $finished = Wait-Job $auditJob -Timeout $AuditTimeoutSec
-    if ($null -eq $finished) {
-        $stdout = "ERROR: --audit timed out after ${AuditTimeoutSec}s; aborting workload."
-        $auditExit = -1
-        Stop-Job $auditJob -ErrorAction SilentlyContinue | Out-Null
-        Remove-Job $auditJob -Force -ErrorAction SilentlyContinue | Out-Null
-        # Best-effort kill of the wpr session this audit may have left behind.
-        & wpr.exe -cancel 2>$null | Out-Null
-    } else {
-        $jobOutput = Receive-Job $auditJob
-        Remove-Job $auditJob -Force -ErrorAction SilentlyContinue | Out-Null
-        # Last element is the captured $LASTEXITCODE; everything else is
-        # mixed stdout+stderr (we redirected 2>&1 inside the job).
-        if ($jobOutput.Count -gt 0) {
-            $auditExit = [int]$jobOutput[-1]
-            $stdout = $jobOutput[0..($jobOutput.Count - 2)]
+        $timeoutMs = [int]($AuditTimeoutSec * 1000)
+        if ($auditProc.WaitForExit($timeoutMs)) {
+            $auditExit = $auditProc.ExitCode
         } else {
-            $auditExit = 0
-            $stdout = @()
+            # Hard kill the wxc-exec process *tree*. /T = tree, /F = force.
+            & taskkill /T /F /PID $auditProc.Id 2>$null | Out-Null
+            $auditProc.WaitForExit()
+            $auditExit = -1
+            # Best-effort: PLM's WPR session may have outlived the tree
+            # kill if it was started before the descendants were nested
+            # under the wxc-exec job object. cancel_active_audit_trace
+            # in wxc-exec normally handles this on Ctrl-C; cover the
+            # taskkill path explicitly here.
+            & wpr.exe -cancel 2>$null | Out-Null
         }
+
+        $stdoutText = if (Test-Path $stdoutFile) { Get-Content $stdoutFile -Raw } else { '' }
+        $stderrText = if (Test-Path $stderrFile) { Get-Content $stderrFile -Raw } else { '' }
+        if ($auditExit -eq -1) {
+            $stdout = "ERROR: --audit timed out after ${AuditTimeoutSec}s; killed wxc-exec tree.`n$stdoutText`n$stderrText"
+        } else {
+            $stdout = "$stdoutText$stderrText"
+        }
+    } finally {
+        Remove-Item $stdoutFile -ErrorAction SilentlyContinue
+        Remove-Item $stderrFile -ErrorAction SilentlyContinue
     }
 
     # Find the new log dir created by this run.

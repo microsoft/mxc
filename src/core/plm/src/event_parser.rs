@@ -11,10 +11,14 @@
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use std::collections::HashSet;
+#[cfg(target_os = "windows")]
 use std::path::Path;
 
+#[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
+#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::EventLog::{
     EvtClose, EvtNext, EvtQuery, EvtQueryFilePath, EvtQueryForwardDirection, EvtRender,
     EvtRenderEventXml, EVT_HANDLE,
@@ -26,8 +30,10 @@ use crate::extract_caps;
 /// RAII wrapper that calls `EvtClose` on drop. Replaces the previous
 /// manual `EvtClose` calls so a panic or `?`-early-return inside the
 /// rendering loop no longer leaks kernel ETW handles.
+#[cfg(target_os = "windows")]
 struct EvtHandleOwned(EVT_HANDLE);
 
+#[cfg(target_os = "windows")]
 impl Drop for EvtHandleOwned {
     fn drop(&mut self) {
         unsafe {
@@ -208,6 +214,7 @@ pub fn parse_ui_event_from_named(named: &[(String, String)]) -> Option<UiEvent> 
     })
 }
 
+#[cfg(target_os = "windows")]
 fn to_wide_z(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -226,6 +233,7 @@ fn to_wide_z(s: &str) -> Vec<u16> {
 /// failure is propagated rather than silently dropped — silent failure
 /// would look like a successful but short trace and cause PLM to
 /// under-grant on the next run.
+#[cfg(target_os = "windows")]
 fn for_each_event_xml<F>(trace_file: &Path, mut on_xml: F) -> Result<()>
 where
     F: FnMut(&str) -> Result<()>,
@@ -294,40 +302,74 @@ where
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
 fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
-    // Two-call pattern: first call gets required buffer size, second call
-    // fills it.
+    use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
+
+    // Round-3 performance: skip the probe-then-call EvtRender pattern.
+    // Most events render comfortably under 8 KiB. We try with whatever
+    // capacity the caller's reusable buffer already has (~probably the
+    // peak size seen so far this trace, post-warmup) and only fall back
+    // to a probe call when EvtRender reports ERROR_INSUFFICIENT_BUFFER.
+    // This halves the EvtRender syscall count on the steady state and
+    // leaves correctness untouched.
+    const INITIAL_GUESS_BYTES: usize = 8 * 1024;
+    if buf.capacity() < INITIAL_GUESS_BYTES {
+        buf.reserve(INITIAL_GUESS_BYTES - buf.capacity());
+    }
+    let cap = buf.capacity();
+    // SAFETY: the buffer's length is set to its full capacity here so
+    // EvtRender can write into it. We never read uninitialised bytes
+    // past `needed`; the UTF-16 slice below is bounded by `needed`.
+    unsafe {
+        buf.set_len(cap);
+    }
+
     let mut needed: u32 = 0;
     let mut count: u32 = 0;
-    unsafe {
-        let _ = EvtRender(
-            None,
-            event,
-            EvtRenderEventXml.0,
-            0,
-            None,
-            &mut needed as *mut _,
-            &mut count as *mut _,
-        );
-    }
-    if needed == 0 {
-        return Err(anyhow::anyhow!("EvtRender returned zero size"));
-    }
-    // Grow the caller-owned buffer if needed; reuse when possible.
-    if buf.len() < needed as usize {
-        buf.resize(needed as usize, 0);
-    }
-    unsafe {
+    let first = unsafe {
         EvtRender(
             None,
             event,
             EvtRenderEventXml.0,
-            needed,
+            cap as u32,
             Some(buf.as_mut_ptr() as *mut _),
             &mut needed as *mut _,
             &mut count as *mut _,
-        )?;
+        )
+    };
+
+    if first.is_err() {
+        // ERROR_INSUFFICIENT_BUFFER means `needed` is now valid; grow
+        // and retry once. Any other error is fatal.
+        let win_err = unsafe { GetLastError() };
+        if win_err != ERROR_INSUFFICIENT_BUFFER {
+            return Err(anyhow::anyhow!(
+                "EvtRender failed (Win32 error {:?})",
+                win_err
+            ));
+        }
+        if needed == 0 {
+            return Err(anyhow::anyhow!("EvtRender returned zero size"));
+        }
+        if buf.capacity() < needed as usize {
+            buf.reserve(needed as usize - buf.capacity());
+        }
+        let new_cap = buf.capacity();
+        unsafe {
+            buf.set_len(new_cap);
+            EvtRender(
+                None,
+                event,
+                EvtRenderEventXml.0,
+                new_cap as u32,
+                Some(buf.as_mut_ptr() as *mut _),
+                &mut needed as *mut _,
+                &mut count as *mut _,
+            )?;
+        }
     }
+
     // Buffer is UTF-16; trim trailing NUL.
     let u16_count = (needed as usize) / 2;
     let u16_slice: &[u16] =
@@ -504,7 +546,14 @@ struct ParseAccumulator<'a> {
     ui_event_count: u32,
     ui_events: Vec<UiEvent>,
     ui_operation_flags: u32,
+    // Capability table is retained for tests / diagnostics that want to
+    // inspect the source table, but per-event resolution always goes
+    // through `capability_index` to avoid the O(table_size) HashMap
+    // rebuild that `extract_caps_with_table` would otherwise pay per
+    // ACE blob. On a 100k-event trace that's ~30M needless inserts.
+    #[allow(dead_code)]
     capability_table: Vec<extract_caps::CapabilityEntry>,
+    capability_index: extract_caps::CapabilityIndex,
 }
 
 impl<'a> ParseAccumulator<'a> {
@@ -513,6 +562,7 @@ impl<'a> ParseAccumulator<'a> {
         verbose: bool,
         capability_table: Vec<extract_caps::CapabilityEntry>,
     ) -> Self {
+        let capability_index = extract_caps::CapabilityIndex::from_table(&capability_table);
         Self {
             current_directory,
             verbose,
@@ -523,6 +573,7 @@ impl<'a> ParseAccumulator<'a> {
             ui_events: Vec::new(),
             ui_operation_flags: 0,
             capability_table,
+            capability_index,
         }
     }
 
@@ -601,7 +652,7 @@ impl<'a> ParseAccumulator<'a> {
 
         if let Some(blob) = &ev.complex_data_4 {
             if let Ok(caps) =
-                extract_caps::extract_caps_with_table(blob, &self.capability_table, self.verbose)
+                extract_caps::extract_caps_with_index(blob, &self.capability_index, self.verbose)
             {
                 for c in caps {
                     self.requested_capabilities.insert(c);
@@ -629,14 +680,22 @@ impl<'a> ParseAccumulator<'a> {
         // Skip events where the app is just accessing its own binary --
         // the app path is stored without a drive letter (HardDiskVolume
         // form), so we compare against the file path minus its drive
-        // letter.
+        // letter. Use `get(3..)` rather than `&file_path[3..]` to avoid
+        // a panic when the path contains non-ASCII bytes at indices 1-2
+        // (e.g. `C:éx` where `é` is two UTF-8 bytes straddling the slice
+        // boundary). A panic here would abort the whole parse, silently
+        // discarding every other access this trace captured.
         let app_path = ev
             .event_data
             .get(APP_PATH_INDEX)
             .cloned()
             .unwrap_or_default();
-        if !app_path.is_empty() && file_path.len() >= 3 && app_path.ends_with(&file_path[3..]) {
-            return;
+        if !app_path.is_empty() {
+            if let Some(tail) = file_path.get(3..) {
+                if !tail.is_empty() && app_path.ends_with(tail) {
+                    return;
+                }
+            }
         }
 
         if !looks_like_valid_path(&file_path) {
@@ -688,6 +747,7 @@ impl<'a> ParseAccumulator<'a> {
     }
 }
 
+#[cfg(target_os = "windows")]
 pub fn parse_events(
     trace_file: &Path,
     current_directory: Option<&str>,
@@ -909,5 +969,36 @@ mod tests {
         );
         assert_eq!(result.valid_access_events[0].access_mask, 0x1);
         assert_eq!(result.valid_access_events[1].access_mask, 0x2);
+    }
+
+    /// Round-3 finding L: when a single rendered event is malformed we
+    /// must not abort the whole trace — every subsequent valid event
+    /// would silently disappear, leaving PLM under-granting on the next
+    /// adjust pass. The accumulator's `consume` swallows parse failures
+    /// per event; this test pins that behavior.
+    #[test]
+    fn parse_events_from_xml_skips_malformed_and_continues() {
+        let valid_a = make_event_xml("C:\\Users\\test\\a.txt", "0x1");
+        let valid_b = make_event_xml("C:\\Users\\test\\b.txt", "0x2");
+        let xmls: Vec<String> = vec![
+            valid_a,
+            "not xml".to_string(),
+            "<not-an-event/>".to_string(),
+            valid_b,
+        ];
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        assert_eq!(
+            result.valid_access_events.len(),
+            2,
+            "malformed events should be skipped, valid ones still collected"
+        );
+        assert_eq!(
+            result.valid_access_events[0].file_path,
+            "C:\\Users\\test\\a.txt"
+        );
+        assert_eq!(
+            result.valid_access_events[1].file_path,
+            "C:\\Users\\test\\b.txt"
+        );
     }
 }
