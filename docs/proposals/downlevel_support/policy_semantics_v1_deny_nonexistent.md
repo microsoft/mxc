@@ -299,6 +299,12 @@ This resolves OQ-S2 only for the narrow case covered here: `D` on a
 non-existent path. It does not otherwise redesign deletion/recreation
 semantics for all intents.
 
+The outcomes above are the **intended language semantics**. Whether a
+given backend can actually deliver them depends on the tier — see
+"Enforceability by tier" below. In particular, the
+agent-creates-`P` and future-object rows are enforceable on the
+name-mediating tiers (BFS, overlay) but **not** on the DACL tier.
+
 ## Worked examples
 
 ### Example 1 — canonical future deny
@@ -360,6 +366,95 @@ Assume `C:\etc\src\git\myrepo` exists and `.cache` does not.
 This is the ergonomic case the refinement primarily serves: allow the
 repo, but reserve a subpath the agent must not create or use.
 
+## Enforceability by tier
+
+Non-existent `D` is not enforceable on every backend. It is a
+**name predicate** — "no object may come into existence at this
+name" — and only backends that mediate the namespace can enforce a
+name predicate. Backends that enforce on object identity cannot,
+because there is no object to bind a rule to until the path
+materializes, and by then it is too late.
+
+This is the sharp edge of the object-based model (F11): the
+language is object-based *once an object exists*, but a
+non-existent `D` entry is unavoidably name-predicated until
+materialization (F8 defers object resolution for absent paths).
+Enforcement splits along exactly that line.
+
+### What each backend can do
+
+| Backend | Mechanism | Non-existent `D` |
+|---|---|---|
+| Tier 1 — BFS (post-25H2) | Name-intercepting broker: sees the path of every operation before the FS object is consulted | **Enforceable.** Matches the denied path by name and returns `STATUS_ACCESS_DENIED` on the create, while passing sibling creates through. Existence-independent. The absent-path probe still returns natural not-found because the real FS has nothing there. |
+| Overlay tiers (ProjFS / namespace-mediating filters) | Same property: name-conditional interception | **Enforceable**, same reasoning as BFS. |
+| Tier 3 — DACL | Access-control entries bound to existing objects | **Not enforceable.** See below. |
+
+### Why DACL (Tier 3) cannot do it
+
+Three independent failures, any one of which is fatal:
+
+1. **No object to ACE.** The denied path does not exist, so there
+   is nowhere to attach a deny ACE. DACLs are object-bound.
+
+2. **ACEs have no name dimension.** The only available lever is the
+   *parent* directory's DACL. But creating a child requires
+   `FILE_ADD_FILE` / `FILE_ADD_SUBDIRECTORY` on the parent, and
+   there is no ACE that grants "create any child except one named
+   `.cache`." Create rights are whole-directory. You either grant
+   ADD on the parent (the agent can create the denied name) or deny
+   it (the agent can create *nothing* — the `RW` grant is broken).
+   Selective create-deny of a single name in an otherwise-writable
+   directory is inexpressible.
+
+3. **Future-object deny loses a TOCTOU race.** Because DACLs cannot
+   prevent the create, the agent does create the object. To deny it
+   retroactively, something must watch for the creation and race to
+   stamp an ACE. Between the agent's `CreateFile` and the ACL stamp
+   the agent already holds a writable handle. The deny never catches
+   up, so F12 (provenance-irrelevant; deny binds to future objects)
+   is also unenforceable on this tier.
+
+### Why the obvious DACL workaround does not work
+
+Pre-creating the denied path as an empty object and stamping a
+deny-all ACE fails on two counts:
+
+- **It materializes the path.** The intent of a non-existent `D` is
+  usually "this must never come into existence." Creating it as a
+  side effect of starting the container is exactly the host mutation
+  the design avoids. (It also forces a file-vs-directory guess we
+  cannot make.)
+- **It produces the wrong observable behavior.** A real object with a
+  deny ACE is *visible* — `GetFileAttributes` succeeds and only
+  access is refused. The semantics in this adjunct require an absent
+  denied path to read as **natural not-found** (object genuinely
+  absent). Pre-creation flips not-found into visible-but-denied,
+  which is a spec violation.
+
+Note the contrast with **existing**-path deny, which Tier 3 *can*
+enforce: when the object exists, stamping a deny ACE for the
+sandbox principal matches the round-2 `D` semantics exactly
+(visible, real metadata, `ACCESS_DENIED` on operations). It is
+specifically the non-existent and future-object cases that DACLs
+cannot reach.
+
+### Design response
+
+1. **Capability-profile entry.** Mark "name-conditional create-deny /
+   non-existent-path deny / future-object deny" as a capability of
+   the name-mediating tiers (BFS, overlay) and *not* of the DACL
+   tier, in the machine-readable backend capability profile.
+2. **Selector / validator check.** If a policy contains a
+   non-existent `D` entry (or otherwise relies on future-object deny
+   inside an `RW` subtree) and the host can offer only the DACL tier,
+   the policy is **unenforceable on that host**.
+3. **Required vs best-effort per deny clause.** Let the caller mark
+   each deny. *Required* → refuse to run on a host that cannot
+   enforce it. *Best-effort* → run, but surface a structured
+   degradation ("this deny could not be enforced; the path can be
+   created"). This is the honest alternative to silently
+   under-enforcing.
+
 ## Open questions and deferrals
 
 - **Warning policy for missing parents.** A `D` path whose parent is
@@ -370,11 +465,22 @@ repo, but reserve a subpath the agent must not create or use.
   entry for a non-existent path that the invoking user could not have
   accessed if it existed. Under F4 this is fine, because `D` is
   unconditional withdrawal. No Position 3 grant is involved.
-- **Symlinks and junctions.** F8 says canonicalization does not resolve
-  symbolic links or junctions. If a future `D` path is later reached
-  through a reparse point, does enforcement apply to the named path, the
-  resolved target, or both? This adjunct preserves F8/F11 and defers any
-  stronger alias handling.
+- **Symlinks and junctions.** Under the object-based model (F11),
+  once an object exists at a `D` path the deny binds to the object
+  and all aliases that reach it. While the path is still absent,
+  F8's object-resolution stage defers and the entry matches by
+  canonical path string only. The open question is the transition:
+  if a future `D` path is first reached through a reparse point,
+  does enforcement bind at the named path, the resolved target, or
+  both? This adjunct defers stronger alias handling for the
+  not-yet-materialized window.
+- **Required vs best-effort deny clauses.** Per "Enforceability by
+  tier" above, a non-existent `D` clause cannot be enforced on a
+  DACL-only host. Should the policy language carry a per-clause
+  required/best-effort marker, and what is the default? A safe
+  default (required → refuse on incapable hosts) trades availability
+  for guarantee; a permissive default (best-effort → run with
+  surfaced degradation) trades the reverse.
 - **Case-insensitive future materialization.** F8 normalizes drive-letter
   case and path spelling before comparison. The exact implementation
   details for case-insensitive matching of future creates are runtime
