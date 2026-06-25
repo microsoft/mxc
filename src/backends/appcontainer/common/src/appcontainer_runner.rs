@@ -21,12 +21,12 @@ use windows::Win32::System::SystemServices::SE_GROUP_ENABLED;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
     InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS,
-    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    STARTUPINFOW,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{PCWSTR, PWSTR};
 
@@ -795,8 +795,16 @@ impl AppContainerScriptRunner {
 
         let env_ptr = env_block.as_ptr() as *const core::ffi::c_void;
 
+        // Suppress the empty console window for console-subsystem children when
+        // stdio is piped (no console is shared). In console-sharing mode (ConPTY)
+        // the child inherits the parent's live console for interactive I/O, so
+        // CREATE_NO_WINDOW must not be set there.
+        let no_window_flag = if pipe_mode { CREATE_NO_WINDOW.0 } else { 0 };
         let creation_flags = PROCESS_CREATION_FLAGS(
-            EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_SUSPENDED.0 | CREATE_UNICODE_ENVIRONMENT.0,
+            EXTENDED_STARTUPINFO_PRESENT.0
+                | CREATE_SUSPENDED.0
+                | CREATE_UNICODE_ENVIRONMENT.0
+                | no_window_flag,
         );
 
         // --- Create process ---

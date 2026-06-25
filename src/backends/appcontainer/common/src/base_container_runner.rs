@@ -61,7 +61,7 @@ use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
 
 use windows::Win32::System::Threading::{
-    ResumeThread, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
 
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
@@ -886,12 +886,18 @@ impl BaseContainerRunner {
             .as_ref()
             .map(|b| b.as_ptr() as *const c_void)
             .unwrap_or(ptr::null());
+        // Suppress the empty console window for console-subsystem children when
+        // stdio is piped (no console is shared). In console-sharing mode (ConPTY)
+        // the child inherits the parent's live console for interactive I/O, so
+        // CREATE_NO_WINDOW must not be set there.
+        let no_window_flag = if pipe_mode { CREATE_NO_WINDOW.0 } else { 0 };
         // Create the child suspended so its main thread cannot spawn any
         // descendant before we've assigned it to the job object below; it is
         // resumed right after the assignment. If the sandbox create API ignores
         // CREATE_SUSPENDED on a given build, the child starts running anyway and
         // the later resume is a harmless no-op.
         let creation_flags = CREATE_SUSPENDED.0
+            | no_window_flag
             | if env_block.is_some() {
                 CREATE_UNICODE_ENVIRONMENT.0
             } else {
@@ -992,7 +998,7 @@ impl BaseContainerRunner {
                 // Retry without the environment block, but keep the child
                 // suspended (resumed after job assignment).
                 current_env_ptr = ptr::null();
-                current_creation_flags = CREATE_SUSPENDED.0;
+                current_creation_flags = CREATE_SUSPENDED.0 | no_window_flag;
                 continue;
             }
 
