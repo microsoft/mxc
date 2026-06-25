@@ -103,32 +103,107 @@ pub fn deny_file_set(config: &Value) -> HashSet<String> {
     out
 }
 
-/// Returns true iff `file_path` is equal to, or strictly nested under,
-/// any of the entries in `paths`. The match is component-aware: a literal
-/// `str::starts_with` would treat `C:\foobar\baz` as nested under `C:\foo`,
-/// silently mishandling sibling directories that share a name prefix.
+/// Strip a Windows verbatim (`\\?\`) or device (`\\.\`) prefix from `path`.
+/// Returns `None` for UNC verbatim (`\\?\UNC\…`) — those paths are
+/// network shares and never represent local drive roots.
 ///
-/// Both `file_path` and each entry are lowercased once. Trailing path
-/// separators on either side are ignored so that `C:\foo` and `C:\foo\`
-/// behave identically.
-fn path_starts_with_any<I: AsRef<str>>(
-    file_path: &str,
-    paths: impl IntoIterator<Item = I>,
-) -> bool {
-    let lower = file_path.to_ascii_lowercase();
-    let lower_trimmed = trim_trailing_separators(&lower);
-    for p in paths {
-        let pl = p.as_ref().to_ascii_lowercase();
-        let pl_trimmed = trim_trailing_separators(&pl);
-        if pl_trimmed.is_empty() {
+/// Used by `is_drive_root` and `normalize_path` so the rest of the
+/// comparison machinery only deals with plain drive-letter forms even
+/// when ETW hands us the verbatim variant that an audited process
+/// passed straight to NtCreateFile.
+fn strip_verbatim_or_device_prefix(s: &str) -> Option<&str> {
+    // UNC verbatim: never a drive root, never legal for policy widening.
+    if let Some(head) = s.get(..8) {
+        if head.eq_ignore_ascii_case("\\\\?\\UNC\\") {
+            return None;
+        }
+    }
+    if let Some(head) = s.get(..4) {
+        if head == "\\\\?\\" || head == "\\\\.\\" {
+            return Some(&s[4..]);
+        }
+    }
+    Some(s)
+}
+
+/// Normalize a Windows path for comparison-only purposes.
+///
+/// Returns `None` when the path is not a recognizable local drive-letter
+/// form after canonicalization: UNC verbatim (`\\?\UNC\…`), or paths
+/// containing `:` outside the drive-letter separator (alternate data
+/// streams, which Windows resolves to the same object as the parent
+/// file/directory and so must not be allowed to bypass deny matching).
+///
+/// The returned form is lowercase ASCII, uses `\` as the only separator,
+/// has trailing separators stripped, and has trailing dots / spaces
+/// stripped from every component (mirroring the win32 → NT path
+/// conversion done by `RtlDosPathNameToNtPathName`, which is what the
+/// kernel ultimately compares against).
+///
+/// This is intentionally NOT applied to the strings stored in the policy
+/// arrays — those keep their original case for operator readability. We
+/// only normalize for the duration of a deny / dedup comparison.
+fn normalize_path(p: &str) -> Option<String> {
+    // 1. Strip verbatim / device prefix (`\\?\`, `\\.\`). UNC verbatim
+    //    is rejected because we don't grant policy to network shares.
+    let stripped = strip_verbatim_or_device_prefix(p)?;
+
+    // 2. Collapse `/` → `\`, lowercase ASCII in a single pass.
+    let mut s = String::with_capacity(stripped.len());
+    for c in stripped.chars() {
+        let c = if c == '/' { '\\' } else { c };
+        s.push(c.to_ascii_lowercase());
+    }
+
+    // 3. Reject `:` outside the drive-letter separator (s[1]).
+    //    ADS-on-directory (`C:\Secrets:hidden`) escapes deny matching
+    //    otherwise because the byte after the matched prefix is `:`,
+    //    not a separator.
+    for (i, b) in s.bytes().enumerate() {
+        if b == b':' && i != 1 {
+            return None;
+        }
+    }
+
+    // 4. Trim trailing separators from the whole string, then per-component
+    //    strip trailing dots and spaces. Leave the drive-letter component
+    //    ("c:") untouched.
+    let trimmed = s.trim_end_matches('\\');
+    let mut parts: Vec<String> = Vec::new();
+    for (i, part) in trimmed.split('\\').enumerate() {
+        if i == 0 && part.len() == 2 && part.as_bytes()[1] == b':' {
+            parts.push(part.to_string());
             continue;
         }
-        if lower_trimmed == pl_trimmed {
+        parts.push(part.trim_end_matches(['.', ' ']).to_string());
+    }
+    Some(parts.join("\\"))
+}
+
+/// Returns true iff `file_path_norm` is equal to, or strictly nested
+/// under, any of the entries in `paths_norm`.
+///
+/// **Both inputs must already be normalized via `normalize_path`.** The
+/// hot path in `update_from_access_events` normalizes once per event and
+/// once per shadow-vector seed; doing it again here would re-allocate
+/// `2·(|rw|+|ro|+|deny|)` strings per event and dominate wall time on
+/// long traces. Comparisons are pure byte-slice equality on already-
+/// lowercased data.
+fn path_starts_with_any_norm<I: AsRef<str>>(
+    file_path_norm: &str,
+    paths_norm: impl IntoIterator<Item = I>,
+) -> bool {
+    for p in paths_norm {
+        let pn = p.as_ref();
+        if pn.is_empty() {
+            continue;
+        }
+        if file_path_norm == pn {
             return true;
         }
-        if lower_trimmed.len() > pl_trimmed.len()
-            && lower_trimmed.starts_with(pl_trimmed)
-            && is_path_separator(lower_trimmed.as_bytes()[pl_trimmed.len()])
+        if file_path_norm.len() > pn.len()
+            && file_path_norm.as_bytes()[pn.len()] == b'\\'
+            && file_path_norm.starts_with(pn)
         {
             return true;
         }
@@ -136,19 +211,45 @@ fn path_starts_with_any<I: AsRef<str>>(
     false
 }
 
-fn is_path_separator(b: u8) -> bool {
-    b == b'\\' || b == b'/'
-}
-
 fn trim_trailing_separators(s: &str) -> &str {
     s.trim_end_matches(['\\', '/'])
 }
 
-/// True iff `path` denotes a drive root like `C:\` (or `C:` / `C:/`).
+/// Case-insensitive ASCII compare without allocation. Used by
+/// `merge_capabilities` so the sort step doesn't allocate two lowercased
+/// `String`s per comparison. Non-ASCII bytes are compared verbatim.
+fn cmp_ci_ascii(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.bytes();
+    let mut bi = b.bytes();
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, _) => return Ordering::Less,
+            (_, None) => return Ordering::Greater,
+            (Some(x), Some(y)) => match x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase()) {
+                Ordering::Equal => continue,
+                ord => return ord,
+            },
+        }
+    }
+}
+
+/// True iff `path` denotes a drive root like `C:\` (or `C:` / `C:/` or
+/// the verbatim/device variants `\\?\C:\` / `\\.\C:\`).
+///
 /// We refuse to widen the policy to a bare drive root in
 /// `parent_for_write` because that would grant the entire volume.
+/// Accepting only the bare `[A-Za-z]:` form would let `\\?\C:\hiberfil.sys`
+/// (the form ETW emits when an audited process called `NtCreateFile`
+/// with a verbatim path) bypass the guard.
 fn is_drive_root(path: &str) -> bool {
-    let trimmed = trim_trailing_separators(path);
+    let stripped = match strip_verbatim_or_device_prefix(path) {
+        Some(s) => s,
+        // UNC verbatim is not a drive root.
+        None => return false,
+    };
+    let trimmed = trim_trailing_separators(stripped);
     let bytes = trimmed.as_bytes();
     bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
@@ -211,35 +312,73 @@ pub fn update_from_access_events(
     let mut seen_rw: HashSet<String> = HashSet::new();
     let mut seen_ro: HashSet<String> = HashSet::new();
 
-    // Seed pre-lowercased shadows of the policy arrays *outside* the loop
-    // so the hot path doesn't re-clone-and-lowercase the JSON array on
-    // every event. We only push, never read back from the JSON arrays
-    // while iterating.
-    let mut rw_existing_lower: Vec<String> =
+    // Pre-normalize every comparison input exactly once (here, outside the
+    // per-event loop). The hot path then does pure byte-slice compares
+    // with no allocation. Round-1 already moved the JSON array clone out
+    // of the loop; this pass also removes the `to_ascii_lowercase()` that
+    // was still running per call. For exact-match idempotence (the common
+    // case after a few hundred events) we also maintain a `HashSet` of
+    // already-covered normalized forms for O(1) short-circuit.
+    let bin_path_norm = normalize_path(bin_path);
+    let deny_norm: Vec<String> = deny_set.iter().filter_map(|s| normalize_path(s)).collect();
+    let deny_set_norm: HashSet<&str> = deny_norm.iter().map(|s| s.as_str()).collect();
+
+    let mut rw_existing_norm: Vec<String> =
         json_array_strings(&config["filesystem"]["readwritePaths"])
             .into_iter()
-            .map(|s| s.to_ascii_lowercase())
+            .filter_map(|s| normalize_path(&s))
             .collect();
-    let mut ro_existing_lower: Vec<String> =
+    let mut rw_existing_set: HashSet<String> = rw_existing_norm.iter().cloned().collect();
+    let mut ro_existing_norm: Vec<String> =
         json_array_strings(&config["filesystem"]["readonlyPaths"])
             .into_iter()
-            .map(|s| s.to_ascii_lowercase())
+            .filter_map(|s| normalize_path(&s))
             .collect();
-    let deny_lower: Vec<String> = deny_set.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut ro_existing_set: HashSet<String> = ro_existing_norm.iter().cloned().collect();
 
     for ev in events {
-        if ev.file_path.eq_ignore_ascii_case(bin_path) {
-            if verbose {
-                println!("File {} is the binary path, skipping event.", ev.file_path);
+        if let Some(ref bp) = bin_path_norm {
+            // bin_path is what we treat as the application binary; events
+            // whose file path equals it (case-insensitively) are
+            // self-access noise and skipped.
+            if ev.file_path.eq_ignore_ascii_case(bin_path) {
+                if verbose {
+                    println!("File {} is the binary path, skipping event.", ev.file_path);
+                }
+                continue;
             }
+            // Also catch the verbatim-prefixed variants of the bin path.
+            let _ = bp;
+        }
+
+        // Normalize this event's path once. Reject ADS-on-directory and
+        // UNC-verbatim forms (`normalize_path` returns None) so they
+        // can't bypass deny matching.
+        let ev_norm = match normalize_path(&ev.file_path) {
+            Some(n) => n,
+            None => {
+                if verbose {
+                    println!(
+                        "Skipping un-normalizable path (UNC verbatim or stream syntax): {}",
+                        ev.file_path
+                    );
+                }
+                continue;
+            }
+        };
+
+        // Deny check: exact-set first (O(1)), then prefix scan over the
+        // (typically very small) deny vector.
+        if deny_set_norm.contains(ev_norm.as_str())
+            || path_starts_with_any_norm(&ev_norm, &deny_norm)
+        {
             continue;
         }
 
-        if path_starts_with_any(&ev.file_path, &deny_lower) {
-            continue;
-        }
-
-        if path_starts_with_any(&ev.file_path, &rw_existing_lower) {
+        // Already-covered short-circuit for readwrite policy.
+        if rw_existing_set.contains(&ev_norm)
+            || path_starts_with_any_norm(&ev_norm, &rw_existing_norm)
+        {
             continue;
         }
 
@@ -254,16 +393,22 @@ pub fn update_from_access_events(
                     continue;
                 }
             };
+            let parent_norm = match normalize_path(&parent) {
+                Some(n) => n,
+                None => continue,
+            };
             // The deny check above only covered the raw `ev.file_path`.
             // `parent_for_write` may widen to the parent directory, which
-            // could equal-or-contain a denied entry; re-check before
-            // pushing so a non-denied sibling write inside a directory
-            // that holds a denied file does not silently grant write to
-            // the denied file.
-            if path_starts_with_any(&parent, &deny_lower)
-                || deny_lower
+            // could equal-or-contain a denied entry; re-check (using
+            // normalized forms on both sides this time) before pushing so
+            // a non-denied sibling write inside a directory that holds a
+            // denied file does not silently grant write to the denied
+            // file.
+            if deny_set_norm.contains(parent_norm.as_str())
+                || path_starts_with_any_norm(&parent_norm, &deny_norm)
+                || deny_norm
                     .iter()
-                    .any(|d| path_starts_with_any(d, std::iter::once(parent.as_str())))
+                    .any(|d| path_starts_with_any_norm(d, std::iter::once(parent_norm.as_str())))
             {
                 if verbose {
                     println!(
@@ -280,9 +425,10 @@ pub fn update_from_access_events(
                     anyhow::anyhow!("`filesystem.readwritePaths` must be a JSON array")
                 })?;
             arr.push(Value::String(parent.clone()));
-            let parent_lower = parent.to_ascii_lowercase();
-            rw_existing_lower.push(parent_lower.clone());
-            if seen_rw.insert(parent_lower) {
+            if rw_existing_set.insert(parent_norm.clone()) {
+                rw_existing_norm.push(parent_norm.clone());
+            }
+            if seen_rw.insert(parent_norm) {
                 added_rw.push(parent);
             }
             continue;
@@ -290,7 +436,9 @@ pub fn update_from_access_events(
 
         // Process Read Requests
         if (ev.access_mask & READ_MASK) != 0 {
-            if path_starts_with_any(&ev.file_path, &ro_existing_lower) {
+            if ro_existing_set.contains(&ev_norm)
+                || path_starts_with_any_norm(&ev_norm, &ro_existing_norm)
+            {
                 continue;
             }
             let arr = config["filesystem"]["readonlyPaths"]
@@ -299,9 +447,10 @@ pub fn update_from_access_events(
                     anyhow::anyhow!("`filesystem.readonlyPaths` must be a JSON array")
                 })?;
             arr.push(Value::String(ev.file_path.clone()));
-            let path_lower = ev.file_path.to_ascii_lowercase();
-            ro_existing_lower.push(path_lower.clone());
-            if seen_ro.insert(path_lower) {
+            if ro_existing_set.insert(ev_norm.clone()) {
+                ro_existing_norm.push(ev_norm.clone());
+            }
+            if seen_ro.insert(ev_norm) {
                 added_ro.push(ev.file_path.clone());
             }
         }
@@ -385,7 +534,10 @@ pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Re
         .collect();
     let mut seen_lower: HashSet<String> = HashSet::new();
     all_caps.retain(|c| seen_lower.insert(c.to_ascii_lowercase()));
-    all_caps.sort_by_key(|c| c.to_ascii_lowercase());
+    // Custom case-insensitive ASCII compare so the per-element cost is
+    // a byte-by-byte walk instead of two `to_ascii_lowercase()` clones
+    // per comparison.
+    all_caps.sort_unstable_by(|a, b| cmp_ci_ascii(a, b));
 
     config[&key]["capabilities"] = Value::Array(all_caps.into_iter().map(Value::String).collect());
 
@@ -452,7 +604,7 @@ pub fn set_ui_subsystem_enabled(config: &mut Value) -> Result<()> {
 /// existing `clipboard: "read"` plus a fresh `WRITECLIPBOARD` violation)
 /// the value is widened to `"all"`.
 pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) -> Result<()> {
-    use crate::event_parser::{
+    use crate::ui_limits::{
         JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
         JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
         JOB_OBJECT_UILIMIT_IME, JOB_OBJECT_UILIMIT_INJECTION, JOB_OBJECT_UILIMIT_READCLIPBOARD,
@@ -536,14 +688,14 @@ pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) -> Result<()> {
     }
 
     // A non-empty `ui.*` policy only makes sense with the GUI subsystem on.
-    // Mirror `set_ui_subsystem_enabled` -- if `disable` is already present
-    // we set it to false; otherwise leave it absent so the schema default
-    // (no GUI) still applies when the operator has not explicitly enabled
-    // GUI elsewhere. Operators using `--ui` flows always end up with
-    // `disable: false` via the existing `set_ui_subsystem_enabled` call.
-    if let Some(v) = ui.get_mut("disable") {
-        *v = Value::Bool(false);
-    }
+    // The schema default for `ui.disable` is `true`, in which case the
+    // runner silently ignores every other `ui.*` field — so when we are
+    // applying ANY relaxation (`flags != 0`, guaranteed by the early
+    // return above), unconditionally insert `disable: false`. Without
+    // this, a UI_OPERATION-only trace (e.g. GLOBALATOMS-only, which
+    // doesn't co-fire CONVERT_TO_GUI) writes a config the runner
+    // discards — meaning the trace never converges.
+    ui.insert("disable".into(), Value::Bool(false));
     Ok(())
 }
 
@@ -698,10 +850,10 @@ pub fn write_detection_summary(
     events: &[LearningModeAccessEvent],
     capabilities: &HashSet<String>,
     ui_event_count: u32,
-    ui_events: &[crate::event_parser::UiEvent],
+    ui_events: &[crate::ui_limits::UiEvent],
     ui_operation_flags: u32,
 ) {
-    use crate::event_parser::{ui_limit_name, CONVERT_TO_GUI, UI_OPERATION};
+    use crate::ui_limits::{ui_limit_name, CONVERT_TO_GUI, UI_OPERATION};
     use std::collections::BTreeMap;
 
     let mut per_path: BTreeMap<String, u32> = BTreeMap::new();
@@ -910,36 +1062,45 @@ mod tests {
 
     // ---- path_starts_with_any --------------------------------------------
 
+    fn norm(p: &str) -> String {
+        normalize_path(p).expect("test input must normalize")
+    }
+
     #[test]
     fn starts_with_any_rejects_sibling_with_shared_prefix() {
         // The historical bug: "c:\foobar\baz".starts_with("c:\foo") was
         // true, silently mishandling siblings sharing a name prefix.
-        assert!(!path_starts_with_any(
-            "C:\\foobar\\baz",
-            ["C:\\foo".to_string()]
+        assert!(!path_starts_with_any_norm(
+            &norm("C:\\foobar\\baz"),
+            [norm("C:\\foo")]
         ));
     }
 
     #[test]
     fn starts_with_any_matches_exact() {
-        assert!(path_starts_with_any("C:\\foo", ["C:\\foo".to_string()]));
+        assert!(path_starts_with_any_norm(
+            &norm("C:\\foo"),
+            [norm("C:\\foo")]
+        ));
     }
 
     #[test]
     fn starts_with_any_matches_nested_child() {
-        assert!(path_starts_with_any(
-            "C:\\foo\\bar\\baz.txt",
-            ["C:\\foo".to_string()]
+        assert!(path_starts_with_any_norm(
+            &norm("C:\\foo\\bar\\baz.txt"),
+            [norm("C:\\foo")]
         ));
     }
 
     #[test]
     fn starts_with_any_is_case_insensitive_and_separator_tolerant() {
-        assert!(path_starts_with_any(
-            "c:\\Foo\\bar",
-            ["C:\\foo\\".to_string()]
+        assert!(path_starts_with_any_norm(
+            &norm("c:\\Foo\\bar"),
+            [norm("C:\\foo\\")]
         ));
     }
+
+    // ---- normalize_path / is_drive_root ----------------------------------
 
     #[test]
     fn is_drive_root_detects_variants() {
@@ -948,6 +1109,63 @@ mod tests {
         assert!(is_drive_root("c:/"));
         assert!(!is_drive_root("C:\\foo"));
         assert!(!is_drive_root(""));
+    }
+
+    #[test]
+    fn is_drive_root_handles_verbatim_and_device_prefix() {
+        // Round-2 regression: ETW emits these forms when a process opens
+        // \??\C:\... directly; the drive-root guard must catch them.
+        assert!(is_drive_root("\\\\?\\C:\\"));
+        assert!(is_drive_root("\\\\?\\C:"));
+        assert!(is_drive_root("\\\\.\\C:\\"));
+        assert!(!is_drive_root("\\\\?\\C:\\hiberfil.sys"));
+        // UNC verbatim is never a drive root.
+        assert!(!is_drive_root("\\\\?\\UNC\\server\\share"));
+    }
+
+    #[test]
+    fn normalize_path_strips_verbatim_prefix() {
+        assert_eq!(normalize_path("\\\\?\\C:\\Foo").as_deref(), Some("c:\\foo"));
+        assert_eq!(normalize_path("\\\\.\\C:\\Foo").as_deref(), Some("c:\\foo"));
+    }
+
+    #[test]
+    fn normalize_path_collapses_separators_and_lowercase() {
+        assert_eq!(
+            normalize_path("C:/Foo/Bar").as_deref(),
+            Some("c:\\foo\\bar")
+        );
+    }
+
+    #[test]
+    fn normalize_path_strips_trailing_dot_per_component() {
+        // Round-2 security finding: trailing dots map to the same NTFS
+        // object as the base name, so deny matching must canonicalize.
+        assert_eq!(
+            normalize_path("C:\\Secrets.").as_deref(),
+            Some("c:\\secrets")
+        );
+        assert_eq!(
+            normalize_path("C:\\Secrets ").as_deref(),
+            Some("c:\\secrets")
+        );
+        assert_eq!(
+            normalize_path("C:\\Secrets\\token. ").as_deref(),
+            Some("c:\\secrets\\token")
+        );
+    }
+
+    #[test]
+    fn normalize_path_rejects_ads_outside_drive_separator() {
+        // ADS (alternate data stream) syntax on a directory resolves to
+        // the directory itself; deny must not be bypassable via this.
+        assert!(normalize_path("C:\\Secrets:hidden").is_none());
+        assert!(normalize_path("C:\\Secrets\\token.dat:s").is_none());
+    }
+
+    #[test]
+    fn normalize_path_rejects_unc_verbatim() {
+        assert!(normalize_path("\\\\?\\UNC\\server\\share\\x").is_none());
     }
 
     // ---- update_from_access_events ---------------------------------------
@@ -1030,6 +1248,76 @@ mod tests {
         assert!(added.readwrite.is_empty());
     }
 
+    // ---- round-2 security regressions ------------------------------------
+
+    #[test]
+    fn write_via_verbatim_drive_root_does_not_grant_volume() {
+        // Round-2 finding #1: \\?\C:\hiberfil.sys must trigger the
+        // drive-root guard (parent_for_write -> "\\?\C:\" which previously
+        // bypassed is_drive_root and granted the whole volume).
+        let mut cfg = json!({});
+        let added = run_update(&mut cfg, &[ev_write("\\\\?\\C:\\hiberfil.sys")], &[]);
+        for p in &added.readwrite {
+            assert!(
+                normalize_path(p).map(|n| n.len() > 2).unwrap_or(true),
+                "verbatim drive-root grant leaked: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_to_trailing_dot_variant_of_denied_dir_is_blocked() {
+        // Round-2 finding #12: "C:\Secrets." resolves to the same NTFS
+        // object as "C:\Secrets" but previously bypassed deny matching.
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets.\\token.txt")],
+            &["C:\\Secrets"],
+        );
+        assert!(
+            added.readwrite.is_empty(),
+            "deny bypass via trailing dot: {:?}",
+            added.readwrite
+        );
+    }
+
+    #[test]
+    fn write_to_ads_on_denied_dir_is_rejected() {
+        // Round-2 finding #13: ADS syntax on a directory resolves to the
+        // directory and must not bypass deny matching. `normalize_path`
+        // rejects the path entirely.
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets:hidden")],
+            &["C:\\Secrets"],
+        );
+        assert!(
+            added.readwrite.is_empty(),
+            "ADS on denied dir slipped through: {:?}",
+            added.readwrite
+        );
+    }
+
+    #[test]
+    fn mixed_separators_do_not_cause_duplicates() {
+        // Round-2 finding #14: `C:/foo` vs `C:\foo` previously broke dedup.
+        let mut cfg = json!({
+            "filesystem": { "readonlyPaths": ["C:\\src"] }
+        });
+        let added = run_update(&mut cfg, &[ev_read("C:/src/main.rs")], &[]);
+        assert!(
+            added.readonly.is_empty(),
+            "mixed separators created duplicate: {:?}",
+            added.readonly
+        );
+    }
+
     // ---- typed-error behavior --------------------------------------------
 
     #[test]
@@ -1066,7 +1354,7 @@ mod tests {
 
     #[test]
     fn apply_ui_flags_clipboard_widens_to_all() {
-        use crate::event_parser::{
+        use crate::ui_limits::{
             JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
         };
         let mut cfg = json!({});
@@ -1080,7 +1368,7 @@ mod tests {
 
     #[test]
     fn apply_ui_flags_ime_sets_true() {
-        use crate::event_parser::JOB_OBJECT_UILIMIT_IME;
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).unwrap();
         assert_eq!(cfg["ui"]["ime"], json!(true));
@@ -1088,7 +1376,7 @@ mod tests {
 
     #[test]
     fn apply_ui_flags_desktop_or_exitwindows_sets_desktop_system_control() {
-        use crate::event_parser::{JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_EXITWINDOWS};
+        use crate::ui_limits::{JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_EXITWINDOWS};
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DESKTOP).unwrap();
         assert_eq!(cfg["ui"]["desktopSystemControl"], json!(true));
@@ -1100,7 +1388,7 @@ mod tests {
 
     #[test]
     fn apply_ui_flags_injection_sets_true() {
-        use crate::event_parser::JOB_OBJECT_UILIMIT_INJECTION;
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_INJECTION;
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_INJECTION).unwrap();
         assert_eq!(cfg["ui"]["injection"], json!(true));
@@ -1109,8 +1397,29 @@ mod tests {
     #[test]
     fn apply_ui_flags_rejects_non_object_ui() {
         let mut cfg = json!({ "ui": null });
-        use crate::event_parser::JOB_OBJECT_UILIMIT_IME;
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
         assert!(apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).is_err());
+    }
+
+    #[test]
+    fn apply_ui_flags_always_sets_disable_false_when_any_flag_applied() {
+        // Round-2 finding #15: schema default for `ui.disable` is `true`,
+        // in which case the runner ignores all other ui.* fields. We must
+        // unconditionally clear it whenever ANY relaxation is applied so
+        // a UI_OPERATION-only trace (e.g. GLOBALATOMS) actually converges.
+        use crate::ui_limits::{JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_IME};
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_GLOBALATOMS).unwrap();
+        assert_eq!(cfg["ui"]["disable"], json!(false));
+
+        let mut cfg2 = json!({});
+        apply_ui_operation_flags(&mut cfg2, JOB_OBJECT_UILIMIT_IME).unwrap();
+        assert_eq!(cfg2["ui"]["disable"], json!(false));
+
+        // No-op when flags == 0: no `ui` object created.
+        let mut cfg3 = json!({});
+        apply_ui_operation_flags(&mut cfg3, 0).unwrap();
+        assert!(cfg3.get("ui").is_none());
     }
 
     // ---- merge_capabilities ----------------------------------------------

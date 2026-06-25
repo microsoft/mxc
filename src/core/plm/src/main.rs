@@ -14,17 +14,11 @@
 
 #![cfg(target_os = "windows")]
 
-mod access_event;
-mod config;
-mod event_parser;
-mod extract_caps;
-mod log;
-mod start;
-mod stop;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+
+use plm::{extract_caps, log, start, stop};
 
 #[derive(Parser, Debug)]
 #[command(

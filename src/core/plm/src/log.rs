@@ -54,7 +54,14 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
     prompt_enter("Press Enter to stop logging...")?;
 
     // Write the trace to a per-run file under the system temp dir.
-    let stamp = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+    // Include PID + sub-second so parallel `plm log` invocations don't
+    // collide on the same `.etl` (the previous second-resolution stamp
+    // could overwrite a peer's trace mid-run).
+    let stamp = format!(
+        "{}_pid{}",
+        Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
+        std::process::id()
+    );
     let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
     stop_wpr_trace(&trace_file)?;
 

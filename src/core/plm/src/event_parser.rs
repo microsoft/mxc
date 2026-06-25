@@ -39,62 +39,17 @@ impl Drop for EvtHandleOwned {
 // File path we treat as "no useful info" and skip.
 const MOUNT_POINT_MANAGER: &str = "\\Device\\MountPointManager";
 
-// ---------------------------------------------------------------------------
-// Learning-mode violation categories (EventID=27 `Category` field).
-//
-// Emitted by the OS-side permissive sandbox to describe *why* a containment
-// boundary was crossed. Values match the OS-side
-// `LEARNING_MODE_VIOLATION_CATEGORY_*` enum.
-// ---------------------------------------------------------------------------
-
-/// The process attempted an operation that requires the Win32k GUI subsystem
-/// while running with `DisallowWin32kSystemCalls` enabled. To relax the
-/// policy the corresponding config flips `ui.disable` from the default
-/// `true` to `false`.
-pub const CONVERT_TO_GUI: u32 = 1;
-
-/// The process attempted a UI operation that was blocked by a Job UI Limit
-/// (`JOB_OBJECT_UILIMIT_*`). The `Detail` field carries the specific
-/// `JOB_OBJECT_UILIMIT_*` bit that fired -- see the `JOB_OBJECT_UILIMIT_*`
-/// constants below.
-pub const UI_OPERATION: u32 = 2;
-
-// ---------------------------------------------------------------------------
-// Job Object UI Limit flags.
-//
-// Values match the Win32 `JOB_OBJECT_UILIMIT_*` constants from <winnt.h>.
-// When category=`UI_OPERATION`, the `Detail` field of a violation event
-// carries exactly one of these bits.
-// ---------------------------------------------------------------------------
-
-pub const JOB_OBJECT_UILIMIT_HANDLES: u32 = 0x0001;
-pub const JOB_OBJECT_UILIMIT_READCLIPBOARD: u32 = 0x0002;
-pub const JOB_OBJECT_UILIMIT_WRITECLIPBOARD: u32 = 0x0004;
-pub const JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS: u32 = 0x0008;
-pub const JOB_OBJECT_UILIMIT_DISPLAYSETTINGS: u32 = 0x0010;
-pub const JOB_OBJECT_UILIMIT_GLOBALATOMS: u32 = 0x0020;
-pub const JOB_OBJECT_UILIMIT_DESKTOP: u32 = 0x0040;
-pub const JOB_OBJECT_UILIMIT_EXITWINDOWS: u32 = 0x0080;
-pub const JOB_OBJECT_UILIMIT_IME: u32 = 0x0100;
-pub const JOB_OBJECT_UILIMIT_INJECTION: u32 = 0x0200;
-
-/// Human-readable name for a `JOB_OBJECT_UILIMIT_*` bit. Used for
-/// diagnostic output; returns `None` if the bit is not recognised.
-pub fn ui_limit_name(bit: u32) -> Option<&'static str> {
-    Some(match bit {
-        JOB_OBJECT_UILIMIT_HANDLES => "HANDLES",
-        JOB_OBJECT_UILIMIT_READCLIPBOARD => "READCLIPBOARD",
-        JOB_OBJECT_UILIMIT_WRITECLIPBOARD => "WRITECLIPBOARD",
-        JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS => "SYSTEMPARAMETERS",
-        JOB_OBJECT_UILIMIT_DISPLAYSETTINGS => "DISPLAYSETTINGS",
-        JOB_OBJECT_UILIMIT_GLOBALATOMS => "GLOBALATOMS",
-        JOB_OBJECT_UILIMIT_DESKTOP => "DESKTOP",
-        JOB_OBJECT_UILIMIT_EXITWINDOWS => "EXITWINDOWS",
-        JOB_OBJECT_UILIMIT_IME => "IME",
-        JOB_OBJECT_UILIMIT_INJECTION => "INJECTION",
-        _ => return None,
-    })
-}
+// Learning-mode violation categories + JOB_OBJECT_UILIMIT_* constants live
+// in `crate::ui_limits` so they're reachable from cross-platform code
+// (notably `config.rs` and its tests). Re-export them here so existing
+// `crate::event_parser::*` call sites keep working.
+pub use crate::ui_limits::{
+    ui_limit_name, UiEvent, CONVERT_TO_GUI, JOB_OBJECT_UILIMIT_DESKTOP,
+    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_IME,
+    JOB_OBJECT_UILIMIT_INJECTION, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+    JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD, UI_OPERATION,
+};
 
 // Event property indexes for EventID=14 access events (matches the
 // PowerShell parser's index map).
@@ -121,6 +76,12 @@ pub struct ParseResult {
 
 /// Parsed payload of a UI-injection (EventID=27) event.
 ///
+/// Pure data; the type itself lives in `crate::ui_limits::UiEvent` and is
+/// re-exported above. The decoding paths
+/// (`parse_ui_event_payload`, `parse_ui_event_from_named`) live in this
+/// Windows-only module because they share a hex-decoding helper with the
+/// ACE walker.
+///
 /// The provider emits these via a manifest whose schema isn't always
 /// available to consumers, so the event commonly surfaces inside
 /// `<ProcessingErrorData><EventPayload>` as an opaque hex blob. We
@@ -132,16 +93,6 @@ pub struct ParseResult {
 /// * `category` — 4 bytes, little-endian.
 /// * `detail` — 4 bytes, little-endian.
 /// * `denied` — 0, 1, or 4 trailing bytes; when present, non-zero means denied.
-#[derive(Debug, Clone)]
-pub struct UiEvent {
-    pub process_name: String,
-    pub process_id: u64,
-    pub sequence_number: u64,
-    pub category: u32,
-    pub detail: u32,
-    pub denied: Option<bool>,
-}
-
 fn read_u32_le(bytes: &[u8], off: &mut usize) -> Option<u32> {
     let end = off.checked_add(4)?;
     if end > bytes.len() {
@@ -261,17 +212,24 @@ fn to_wide_z(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Read every event matching the access-failure XPath query out of an
-/// .etl file and return their rendered XML strings.
+/// Stream every event matching the access-failure XPath query out of an
+/// .etl file, invoking `on_xml` once per rendered event XML string. The
+/// caller-supplied closure is responsible for accumulating state; this
+/// keeps peak memory bounded (the previous `Vec<String>` buffer could
+/// run into multi-GB on hour-long traces).
 ///
 /// The `EvtNext` batch size is intentionally large (256) to reduce
 /// user→kernel transitions on traces with tens of thousands of events.
 /// `EvtNext` returns fewer slots when the channel runs out, so this is
 /// safe to oversize. End-of-stream is distinguished from real errors by
-/// matching `ERROR_NO_MORE_ITEMS`; any other error is propagated rather
-/// than silently truncating the result (which would otherwise look like
-/// a complete trace and cause PLM to under-grant on the next run).
-fn read_event_xml(trace_file: &Path) -> Result<Vec<String>> {
+/// matching `ERROR_NO_MORE_ITEMS`; any other `EvtNext` or `EvtRender`
+/// failure is propagated rather than silently dropped — silent failure
+/// would look like a successful but short trace and cause PLM to
+/// under-grant on the next run.
+fn for_each_event_xml<F>(trace_file: &Path, mut on_xml: F) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>,
+{
     let path_w = to_wide_z(&trace_file.to_string_lossy());
     let query_w = to_wide_z("*[System[EventID=14 or EventID=27]]");
 
@@ -284,10 +242,10 @@ fn read_event_xml(trace_file: &Path) -> Result<Vec<String>> {
         )
     }?);
 
-    let mut out = Vec::new();
     // Reusable scratch buffer for `render_event_xml` so we don't allocate
     // a fresh Vec<u8> per event.
     let mut render_buf: Vec<u8> = Vec::new();
+    let mut rendered_count: usize = 0;
     const BATCH: usize = 256;
     loop {
         // EvtNext takes an `&mut [isize]` of EVT_HANDLE-sized slots.
@@ -311,7 +269,7 @@ fn read_event_xml(trace_file: &Path) -> Result<Vec<String>> {
             }
             return Err(anyhow::anyhow!(
                 "EvtNext failed mid-stream (rendered {} events so far): {e}",
-                out.len()
+                rendered_count
             ));
         }
         if returned == 0 {
@@ -320,14 +278,20 @@ fn read_event_xml(trace_file: &Path) -> Result<Vec<String>> {
 
         for &slot in events.iter().take(returned as usize) {
             let handle = EvtHandleOwned(EVT_HANDLE(slot));
-            if let Ok(xml) = render_event_xml(handle.0, &mut render_buf) {
-                out.push(xml);
-            }
+            let xml = render_event_xml(handle.0, &mut render_buf).map_err(|e| {
+                anyhow::anyhow!(
+                    "EvtRender failed at event {} of batch (rendered {} so far): {e}",
+                    rendered_count,
+                    rendered_count
+                )
+            })?;
+            on_xml(&xml)?;
+            rendered_count += 1;
             // handle's Drop calls EvtClose.
         }
     }
     // h_query's Drop calls EvtClose.
-    Ok(out)
+    Ok(())
 }
 
 fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
@@ -527,33 +491,48 @@ fn looks_like_valid_path(path: &str) -> bool {
     !path.chars().any(|c| (c as u32) < 32 || BAD.contains(&c))
 }
 
-pub fn parse_events(
-    trace_file: &Path,
-    current_directory: Option<&str>,
+/// Mutable per-trace accumulator state. Extracted so the per-event logic
+/// is reachable from both the live-ETW callback path (`parse_events` →
+/// `for_each_event_xml`) and the fixture-test seam
+/// (`parse_events_from_xml`).
+struct ParseAccumulator<'a> {
+    current_directory: Option<&'a str>,
     verbose: bool,
-) -> Result<ParseResult> {
-    let xml_events = read_event_xml(trace_file)?;
+    valid_access_events: Vec<LearningModeAccessEvent>,
+    requested_capabilities: HashSet<String>,
+    need_ui: bool,
+    ui_event_count: u32,
+    ui_events: Vec<UiEvent>,
+    ui_operation_flags: u32,
+    capability_table: Vec<extract_caps::CapabilityEntry>,
+}
 
-    let mut valid_access_events = Vec::new();
-    let mut requested_capabilities: HashSet<String> = HashSet::new();
-    let mut need_ui = false;
-    let mut ui_event_count: u32 = 0;
-    let mut ui_events: Vec<UiEvent> = Vec::new();
-    let mut ui_operation_flags: u32 = 0;
+impl<'a> ParseAccumulator<'a> {
+    fn new(
+        current_directory: Option<&'a str>,
+        verbose: bool,
+        capability_table: Vec<extract_caps::CapabilityEntry>,
+    ) -> Self {
+        Self {
+            current_directory,
+            verbose,
+            valid_access_events: Vec::new(),
+            requested_capabilities: HashSet::new(),
+            need_ui: false,
+            ui_event_count: 0,
+            ui_events: Vec::new(),
+            ui_operation_flags: 0,
+            capability_table,
+        }
+    }
 
-    // Build the capability table once up-front. Each entry requires a
-    // `DeriveCapabilitySidsFromName` syscall + LocalAlloc/LocalFree pair;
-    // the table is process-static so doing this per-event (the previous
-    // behavior) dominated wall-time on large traces.
-    let capability_table = extract_caps::build_capability_table();
-
-    for xml in &xml_events {
+    fn consume(&mut self, xml: &str) {
         let Some(ev) = parse_event_xml(xml) else {
-            continue;
+            return;
         };
 
         if ev.event_id == 27 {
-            ui_event_count += 1;
+            self.ui_event_count += 1;
 
             // Prefer the manifest-resolved EventData form (named <Data>
             // children). Fall back to manual hex-payload decoding when the
@@ -570,11 +549,11 @@ pub fn parse_events(
                     // right relaxation: CONVERT_TO_GUI -> `ui.disable=false`;
                     // UI_OPERATION -> per-bit field relaxation.
                     match ui.category {
-                        CONVERT_TO_GUI => need_ui = true,
-                        UI_OPERATION => ui_operation_flags |= ui.detail,
+                        CONVERT_TO_GUI => self.need_ui = true,
+                        UI_OPERATION => self.ui_operation_flags |= ui.detail,
                         _ => {}
                     }
-                    if verbose {
+                    if self.verbose {
                         let detail_name = if ui.category == UI_OPERATION {
                             ui_limit_name(ui.detail).unwrap_or("UNKNOWN")
                         } else {
@@ -595,7 +574,7 @@ pub fn parse_events(
                             },
                         );
                     }
-                    ui_events.push(ui);
+                    self.ui_events.push(ui);
                 }
                 None => {
                     // Undecodable payload: surface in verbose mode but
@@ -604,7 +583,7 @@ pub fn parse_events(
                     // CONVERT_TO_GUI would over-grant `ui.disable=false`
                     // for traces whose only undecoded events were
                     // UI_OPERATION variants.
-                    if verbose {
+                    if self.verbose {
                         if let Some(hex) = ev.processing_error_payload.as_deref() {
                             println!(
                                 "UI Injection event observed (payload did not match expected layout, ignored: {hex})"
@@ -617,15 +596,15 @@ pub fn parse_events(
                     }
                 }
             }
-            continue;
+            return;
         }
 
         if let Some(blob) = &ev.complex_data_4 {
             if let Ok(caps) =
-                extract_caps::extract_caps_with_table(blob, &capability_table, verbose)
+                extract_caps::extract_caps_with_table(blob, &self.capability_table, self.verbose)
             {
                 for c in caps {
-                    requested_capabilities.insert(c);
+                    self.requested_capabilities.insert(c);
                 }
             }
         }
@@ -635,16 +614,16 @@ pub fn parse_events(
         // capabilities have already been collected from the DACL above.
         let raw_path = match ev.event_data.get(FILE_PATH_INDEX) {
             Some(s) if !s.is_empty() => s,
-            _ => continue,
+            _ => return,
         };
 
         if raw_path.eq_ignore_ascii_case(MOUNT_POINT_MANAGER) {
-            continue;
+            return;
         }
 
         let file_path = normalize_file_path(raw_path);
-        if is_skippable(&file_path, current_directory, verbose) {
-            continue;
+        if is_skippable(&file_path, self.current_directory, self.verbose) {
+            return;
         }
 
         // Skip events where the app is just accessing its own binary --
@@ -657,11 +636,11 @@ pub fn parse_events(
             .cloned()
             .unwrap_or_default();
         if !app_path.is_empty() && file_path.len() >= 3 && app_path.ends_with(&file_path[3..]) {
-            continue;
+            return;
         }
 
         if !looks_like_valid_path(&file_path) {
-            continue;
+            return;
         }
 
         let learning_mode = ev
@@ -680,12 +659,12 @@ pub fn parse_events(
             .and_then(|s| parse_int_loose(s))
             .unwrap_or(0);
 
-        if verbose {
+        if self.verbose {
             println!("{app_path}");
             println!("{file_path}");
         }
 
-        valid_access_events.push(LearningModeAccessEvent {
+        self.valid_access_events.push(LearningModeAccessEvent {
             time_created: ev.time_created,
             process_id: ev.process_id,
             thread_id: ev.thread_id,
@@ -697,14 +676,57 @@ pub fn parse_events(
         });
     }
 
-    Ok(ParseResult {
-        valid_access_events,
-        requested_capabilities,
-        need_ui,
-        ui_event_count,
-        ui_events,
-        ui_operation_flags,
-    })
+    fn into_result(self) -> ParseResult {
+        ParseResult {
+            valid_access_events: self.valid_access_events,
+            requested_capabilities: self.requested_capabilities,
+            need_ui: self.need_ui,
+            ui_event_count: self.ui_event_count,
+            ui_events: self.ui_events,
+            ui_operation_flags: self.ui_operation_flags,
+        }
+    }
+}
+
+pub fn parse_events(
+    trace_file: &Path,
+    current_directory: Option<&str>,
+    verbose: bool,
+) -> Result<ParseResult> {
+    // Build the capability table once up-front. Each entry requires a
+    // `DeriveCapabilitySidsFromName` syscall + LocalAlloc/LocalFree pair;
+    // the table is process-static so doing this per-event (the previous
+    // behavior) dominated wall-time on large traces.
+    let capability_table = extract_caps::build_capability_table();
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_table);
+    for_each_event_xml(trace_file, |xml| {
+        acc.consume(xml);
+        Ok(())
+    })?;
+    Ok(acc.into_result())
+}
+
+/// Fixture-test seam: drive the same per-event accumulator the live
+/// `parse_events` uses, but pull XML strings from an iterator rather than
+/// a live ETW session. Lets tests exercise the full event-classification
+/// pipeline with canned XML strings (no .etl file, no
+/// `DeriveCapabilitySidsFromName` round-trip — pass an empty capability
+/// table for tests that don't care about DACL ACE matching).
+pub fn parse_events_from_xml<I, S>(
+    xmls: I,
+    current_directory: Option<&str>,
+    verbose: bool,
+    capability_table: Vec<extract_caps::CapabilityEntry>,
+) -> ParseResult
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_table);
+    for xml in xmls {
+        acc.consume(xml.as_ref());
+    }
+    acc.into_result()
 }
 
 /// Accept decimal or 0x-prefixed hex.
@@ -714,5 +736,178 @@ fn parse_int_loose(s: &str) -> Option<u32> {
         u32::from_str_radix(rest, 16).ok()
     } else {
         t.parse::<u32>().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- parse_event_xml -------------------------------------------------
+
+    #[test]
+    fn parse_event_xml_extracts_event_id_and_data() {
+        let xml = r#"<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+          <System>
+            <EventID>14</EventID>
+            <TimeCreated SystemTime="2024-01-02T03:04:05.000Z"/>
+            <Execution ProcessID="111" ThreadID="222"/>
+          </System>
+          <EventData>
+            <Data>Permissive</Data>
+            <Data>File</Data>
+            <Data>C:\Users\test\foo.txt</Data>
+            <Data>App.exe</Data>
+            <Data>0</Data>
+            <Data>0x1</Data>
+          </EventData>
+        </Event>"#;
+        let ev = parse_event_xml(xml).expect("xml should parse");
+        assert_eq!(ev.event_id, 14);
+        assert_eq!(ev.process_id, 111);
+        assert_eq!(ev.thread_id, 222);
+        assert_eq!(ev.event_data.len(), 6);
+        assert_eq!(ev.event_data[FILE_PATH_INDEX], "C:\\Users\\test\\foo.txt");
+        assert_eq!(ev.event_data[ACCESS_MASK_INDEX], "0x1");
+    }
+
+    #[test]
+    fn parse_event_xml_returns_none_for_malformed() {
+        assert!(parse_event_xml("not xml").is_none());
+        assert!(parse_event_xml("<not-an-event/>").is_none());
+    }
+
+    // ---- normalize_file_path / is_skippable / looks_like_valid_path -----
+
+    #[test]
+    fn normalize_file_path_strips_nt_object_prefix() {
+        assert_eq!(normalize_file_path("\\??\\C:\\foo"), "C:\\foo");
+        assert_eq!(normalize_file_path("\\??\\c:\\foo"), "c:\\foo");
+        assert_eq!(normalize_file_path("C:\\foo"), "C:\\foo");
+    }
+
+    #[test]
+    fn is_skippable_rejects_short_and_non_drive_letter() {
+        assert!(is_skippable("abc", None, false));
+        assert!(is_skippable("\\\\server\\share", None, false));
+        assert!(!is_skippable("C:\\foo", None, false));
+    }
+
+    #[test]
+    fn is_skippable_filters_current_directory() {
+        assert!(is_skippable(
+            "C:\\repo\\src\\main.rs",
+            Some("C:\\repo"),
+            false
+        ));
+        assert!(!is_skippable(
+            "C:\\not-repo\\src\\main.rs",
+            Some("C:\\repo"),
+            false
+        ));
+    }
+
+    #[test]
+    fn looks_like_valid_path_rejects_control_and_wildcards() {
+        assert!(!looks_like_valid_path("C:\\f\x00oo"));
+        assert!(!looks_like_valid_path("C:\\foo*"));
+        assert!(!looks_like_valid_path("C:\\foo?"));
+        assert!(looks_like_valid_path("C:\\foo\\bar.txt"));
+    }
+
+    // ---- parse_ui_event_payload ------------------------------------------
+
+    fn hex_for(bytes: &[u8]) -> String {
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02X}", b);
+        }
+        s
+    }
+
+    #[test]
+    fn parse_ui_event_payload_decodes_fixed_layout() {
+        // process_name="test\0", pid=1, seq=2, category=UI_OPERATION,
+        // detail=JOB_OBJECT_UILIMIT_GLOBALATOMS, denied trailing single byte 1.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"test");
+        bytes.push(0);
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&2u64.to_le_bytes());
+        bytes.extend_from_slice(&UI_OPERATION.to_le_bytes());
+        bytes.extend_from_slice(&JOB_OBJECT_UILIMIT_GLOBALATOMS.to_le_bytes());
+        bytes.push(1);
+        let ui = parse_ui_event_payload(&hex_for(&bytes)).expect("should decode");
+        assert_eq!(ui.process_name, "test");
+        assert_eq!(ui.process_id, 1);
+        assert_eq!(ui.sequence_number, 2);
+        assert_eq!(ui.category, UI_OPERATION);
+        assert_eq!(ui.detail, JOB_OBJECT_UILIMIT_GLOBALATOMS);
+        assert_eq!(ui.denied, Some(true));
+    }
+
+    #[test]
+    fn parse_ui_event_payload_rejects_truncated() {
+        // Just "test\0" with no fixed tail.
+        let bytes = b"test\0";
+        assert!(parse_ui_event_payload(&hex_for(bytes)).is_none());
+    }
+
+    #[test]
+    fn parse_ui_event_from_named_recognises_decimal_and_hex() {
+        let named = vec![
+            ("ProcessName".to_string(), "App".to_string()),
+            ("ProcessId".to_string(), "42".to_string()),
+            ("SequenceNumber".to_string(), "0x10".to_string()),
+            ("Category".to_string(), "2".to_string()),
+            ("Detail".to_string(), "0x20".to_string()),
+            ("Denied".to_string(), "true".to_string()),
+        ];
+        let ui = parse_ui_event_from_named(&named).expect("should decode");
+        assert_eq!(ui.process_name, "App");
+        assert_eq!(ui.process_id, 42);
+        assert_eq!(ui.sequence_number, 0x10);
+        assert_eq!(ui.category, UI_OPERATION);
+        assert_eq!(ui.detail, JOB_OBJECT_UILIMIT_GLOBALATOMS);
+        assert_eq!(ui.denied, Some(true));
+    }
+
+    // ---- parse_events_from_xml seam --------------------------------------
+
+    fn make_event_xml(file_path: &str, mask_hex: &str) -> String {
+        format!(
+            r#"<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+              <System>
+                <EventID>14</EventID>
+                <TimeCreated SystemTime="2024-01-02T03:04:05.000Z"/>
+                <Execution ProcessID="111" ThreadID="222"/>
+              </System>
+              <EventData>
+                <Data>Permissive</Data>
+                <Data>File</Data>
+                <Data>{file_path}</Data>
+                <Data>App.exe</Data>
+                <Data>0</Data>
+                <Data>{mask_hex}</Data>
+              </EventData>
+            </Event>"#
+        )
+    }
+
+    #[test]
+    fn parse_events_from_xml_accumulates_access_events() {
+        let xmls = [
+            make_event_xml("C:\\Users\\test\\foo.txt", "0x1"),
+            make_event_xml("C:\\Users\\test\\bar.txt", "0x2"),
+        ];
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        assert_eq!(result.valid_access_events.len(), 2);
+        assert_eq!(
+            result.valid_access_events[0].file_path,
+            "C:\\Users\\test\\foo.txt"
+        );
+        assert_eq!(result.valid_access_events[0].access_mask, 0x1);
+        assert_eq!(result.valid_access_events[1].access_mask, 0x2);
     }
 }

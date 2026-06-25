@@ -17,7 +17,7 @@
 //!     - `[8..]`  SubAuthorities      (4 bytes each)
 
 use anyhow::{anyhow, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
@@ -321,13 +321,22 @@ pub fn lookup_nt_account(sid_bytes: &[u8]) -> Option<String> {
             return None;
         }
         let mut name = vec![0u16; name_len as usize];
+        // When `domain_len` is 0 the SID has no domain (e.g. an APP_PACKAGE
+        // SID). Pass `None` for the domain pointer rather than a zero-
+        // length Vec — a non-null PWSTR backed by a length-0 buffer is a
+        // dangling pointer that LookupAccountSidW would technically be
+        // free to write to.
         let mut domain = vec![0u16; domain_len as usize];
         let ok = LookupAccountSidW(
             PCWSTR::null(),
             psid,
             Some(PWSTR(name.as_mut_ptr())),
             &mut name_len as *mut _,
-            Some(PWSTR(domain.as_mut_ptr())),
+            if domain_len == 0 {
+                None
+            } else {
+                Some(PWSTR(domain.as_mut_ptr()))
+            },
             &mut domain_len as *mut _,
             &mut sid_use as *mut _,
         );
@@ -352,6 +361,56 @@ pub enum SidResolution<'a> {
     Unknown,
 }
 
+/// Indexed view of a capability table for O(1) SID lookup. Round-1 left
+/// `resolve_sid` doing a linear scan over ~150 entries per ACE, which
+/// dominated CPU time on traces with thousands of ACEs.
+///
+/// The map keys are SID byte sequences; the value pairs the matched
+/// capability name with a flag distinguishing the package-SID variant
+/// (`false`) from the group-SID variant (`true`). Built once via
+/// `CapabilityIndex::from_table` and reused for every ACE.
+pub struct CapabilityIndex<'a> {
+    by_sid: HashMap<&'a [u8], (&'a str, bool)>,
+}
+
+impl<'a> CapabilityIndex<'a> {
+    pub fn from_table(table: &'a [CapabilityEntry]) -> Self {
+        let mut by_sid: HashMap<&'a [u8], (&'a str, bool)> =
+            HashMap::with_capacity(table.len() * 2);
+        for entry in table {
+            if let Some(s) = &entry.app_package_sid {
+                by_sid.insert(s.as_slice(), (entry.name.as_str(), false));
+            }
+            if let Some(s) = &entry.group_sid {
+                // App-package SID wins on conflict (it's the canonical
+                // form); only insert the group SID when no entry exists.
+                by_sid
+                    .entry(s.as_slice())
+                    .or_insert((entry.name.as_str(), true));
+            }
+        }
+        Self { by_sid }
+    }
+
+    pub fn resolve(&self, sid_bytes: &[u8]) -> SidResolution<'a> {
+        if let Some((name, is_group)) = self.by_sid.get(sid_bytes) {
+            return if *is_group {
+                SidResolution::GroupCapability(name)
+            } else {
+                SidResolution::Capability(name)
+            };
+        }
+        if let Some(nt) = lookup_nt_account(sid_bytes) {
+            SidResolution::NtAccount(nt)
+        } else {
+            SidResolution::Unknown
+        }
+    }
+}
+
+/// Legacy linear-scan resolver. Kept for callers that already have a
+/// `&[CapabilityEntry]` and don't want to build an index for one ACE.
+/// Prefer `CapabilityIndex::resolve` for any per-ACE hot loop.
 pub fn resolve_sid<'a>(sid_bytes: &[u8], table: &'a [CapabilityEntry]) -> SidResolution<'a> {
     for entry in table {
         if let Some(s) = &entry.app_package_sid {
@@ -373,18 +432,32 @@ pub fn resolve_sid<'a>(sid_bytes: &[u8], table: &'a [CapabilityEntry]) -> SidRes
 }
 
 pub(crate) fn parse_hex_string(hex_input: &str) -> Result<Vec<u8>> {
-    let cleaned: String = hex_input.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.is_empty() || !cleaned.len().is_multiple_of(2) {
+    // Single-pass byte decoder: walk the input once, skip whitespace,
+    // accumulate nibbles into bytes. The previous 3-pass version
+    // (filter → length/charset checks → from_str_radix per pair)
+    // allocated an intermediate `String` per call; with thousands of
+    // ACE blobs per trace that added up.
+    let mut bytes: Vec<u8> = Vec::with_capacity(hex_input.len() / 2);
+    let mut nibble: Option<u8> = None;
+    for c in hex_input.chars() {
+        if c.is_whitespace() {
+            continue;
+        }
+        let v = match c {
+            '0'..='9' => c as u8 - b'0',
+            'a'..='f' => c as u8 - b'a' + 10,
+            'A'..='F' => c as u8 - b'A' + 10,
+            _ => return Err(anyhow!("Hex string contains non-hex characters.")),
+        };
+        match nibble.take() {
+            None => nibble = Some(v),
+            Some(hi) => bytes.push((hi << 4) | v),
+        }
+    }
+    if nibble.is_some() || bytes.is_empty() {
         return Err(anyhow!(
             "Hex string must be non-empty and have an even length."
         ));
-    }
-    if !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(anyhow!("Hex string contains non-hex characters."));
-    }
-    let mut bytes = Vec::with_capacity(cleaned.len() / 2);
-    for i in (0..cleaned.len()).step_by(2) {
-        bytes.push(u8::from_str_radix(&cleaned[i..i + 2], 16)?);
     }
     Ok(bytes)
 }
@@ -452,13 +525,26 @@ pub fn invoke_ace_walk_with_table(
     table: &[CapabilityEntry],
     verbose: bool,
 ) -> Result<HashSet<String>> {
+    let index = CapabilityIndex::from_table(table);
+    invoke_ace_walk_with_index(buf, &index, verbose)
+}
+
+/// Same as `invoke_ace_walk_with_table` but accepts a pre-built
+/// `CapabilityIndex`. Use this in any hot loop that walks many ACE
+/// buffers in a row — building the index is O(table_size) and you only
+/// want to do it once.
+pub fn invoke_ace_walk_with_index(
+    buf: &[u8],
+    index: &CapabilityIndex<'_>,
+    verbose: bool,
+) -> Result<HashSet<String>> {
     let mut found: HashSet<String> = HashSet::new();
     let mut cursor = 0usize;
     let mut ace_index = 0usize;
 
     while cursor < buf.len() {
         let ace = read_ace_at_offset(buf, cursor)?;
-        let resolution = resolve_sid(ace.sid_bytes, table);
+        let resolution = index.resolve(ace.sid_bytes);
 
         let resolved_str = match &resolution {
             SidResolution::Capability(name) => {
@@ -514,4 +600,120 @@ pub fn extract_caps_with_table(
 ) -> Result<HashSet<String>> {
     let bytes = parse_hex_string(hex_bytes)?;
     invoke_ace_walk_with_table(&bytes, table, verbose)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- parse_hex_string ------------------------------------------------
+
+    #[test]
+    fn parse_hex_string_decodes_simple_bytes() {
+        let v = parse_hex_string("DEADBEEF").unwrap();
+        assert_eq!(v, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn parse_hex_string_accepts_whitespace_and_lower() {
+        let v = parse_hex_string("de ad\nbe\tef").unwrap();
+        assert_eq!(v, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn parse_hex_string_rejects_odd_length() {
+        assert!(parse_hex_string("ABC").is_err());
+    }
+
+    #[test]
+    fn parse_hex_string_rejects_empty() {
+        assert!(parse_hex_string("").is_err());
+        assert!(parse_hex_string("   \n").is_err());
+    }
+
+    #[test]
+    fn parse_hex_string_rejects_non_hex() {
+        assert!(parse_hex_string("DEADXYZZ").is_err());
+    }
+
+    // ---- read_ace_at_offset (defensive: bounds checks on attacker bytes) -
+
+    fn well_world_sid() -> Vec<u8> {
+        // S-1-1-0 "Everyone": revision=1, subAuthCount=1, IdAuth=...,
+        // SubAuthority[0]=0.
+        vec![
+            1, 1, 0, 0, 0, 0, 0, 1, // header + identifier authority
+            0, 0, 0, 0, // sub_authority[0]
+        ]
+    }
+
+    fn build_ace(mask: u32, sid: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(0u8); // ace_type
+        v.extend_from_slice(&[0, 0, 0]); // padding
+        v.extend_from_slice(&[0, 0, 0, 0]); // flags (4 bytes, low byte = ace_flags)
+        v.extend_from_slice(&mask.to_le_bytes());
+        v.extend_from_slice(sid);
+        v
+    }
+
+    #[test]
+    fn read_ace_at_offset_decodes_well_known_sid() {
+        let buf = build_ace(0xDEADBEEF, &well_world_sid());
+        let ace = read_ace_at_offset(&buf, 0).expect("should decode");
+        assert_eq!(ace.access_mask, 0xDEADBEEF);
+        assert_eq!(ace.sid_bytes, well_world_sid().as_slice());
+        assert_eq!(ace.next_cursor, buf.len());
+    }
+
+    #[test]
+    fn read_ace_at_offset_rejects_truncated_header() {
+        // Less than ACE_HEADER_SIZE + SID_FIXED_HEADER_SIZE.
+        let buf = vec![0u8; 4];
+        assert!(read_ace_at_offset(&buf, 0).is_err());
+    }
+
+    #[test]
+    fn read_ace_at_offset_rejects_truncated_subauthorities() {
+        // Pretend SubAuthorityCount is 5 but only one slot is present.
+        let mut sid = vec![1u8, 5, 0, 0, 0, 0, 0, 1]; // revision=1, count=5
+        sid.extend_from_slice(&[0, 0, 0, 0]); // only one sub_authority
+        let buf = build_ace(0, &sid);
+        assert!(read_ace_at_offset(&buf, 0).is_err());
+    }
+
+    // ---- CapabilityIndex -------------------------------------------------
+
+    #[test]
+    fn capability_index_resolves_app_package_and_group_sids() {
+        let table = vec![CapabilityEntry {
+            name: "internetClient".into(),
+            app_package_sid: Some(well_world_sid()),
+            group_sid: None,
+        }];
+        let idx = CapabilityIndex::from_table(&table);
+        match idx.resolve(&well_world_sid()) {
+            SidResolution::Capability(n) => assert_eq!(n, "internetClient"),
+            _ => panic!("expected Capability"),
+        }
+    }
+
+    #[test]
+    fn invoke_ace_walk_with_index_collects_matched_caps() {
+        let sid = well_world_sid();
+        let table = vec![CapabilityEntry {
+            name: "internetClient".into(),
+            app_package_sid: Some(sid.clone()),
+            group_sid: None,
+        }];
+        let idx = CapabilityIndex::from_table(&table);
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_ace(0, &sid));
+        buf.extend_from_slice(&build_ace(0, &sid));
+
+        let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
+        assert!(caps.contains("internetClient"));
+        assert_eq!(caps.len(), 1);
+    }
 }

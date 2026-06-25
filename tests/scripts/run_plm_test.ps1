@@ -33,7 +33,8 @@ param(
     [switch]$UI,
     [switch]$Fs,
     [switch]$Capability,
-    [switch]$KeepLogs
+    [switch]$KeepLogs,
+    [int]$AuditTimeoutSec = 300
 )
 
 $ErrorActionPreference = "Stop"
@@ -322,8 +323,37 @@ foreach ($cfg in $configFiles) {
     # Audit runs are permissive — workload failures still produce useful
     # trace output, so don't bail on non-zero exit. Suppress the per-run
     # banner so the script's own output stays scannable.
-    $stdout = & $WxcExec --audit $cfg.FullName 2>&1
-    $auditExit = $LASTEXITCODE
+    #
+    # Wrap the audit invocation in a job so a hung workload (e.g.
+    # plmtester blocked on a dialog the test driver can't dismiss)
+    # surfaces as a timeout instead of stalling the whole test pass.
+    $auditJob = Start-Job -ScriptBlock {
+        param($exe, $configPath)
+        & $exe --audit $configPath 2>&1
+        $LASTEXITCODE
+    } -ArgumentList $WxcExec, $cfg.FullName
+
+    $finished = Wait-Job $auditJob -Timeout $AuditTimeoutSec
+    if ($null -eq $finished) {
+        $stdout = "ERROR: --audit timed out after ${AuditTimeoutSec}s; aborting workload."
+        $auditExit = -1
+        Stop-Job $auditJob -ErrorAction SilentlyContinue | Out-Null
+        Remove-Job $auditJob -Force -ErrorAction SilentlyContinue | Out-Null
+        # Best-effort kill of the wpr session this audit may have left behind.
+        & wpr.exe -cancel 2>$null | Out-Null
+    } else {
+        $jobOutput = Receive-Job $auditJob
+        Remove-Job $auditJob -Force -ErrorAction SilentlyContinue | Out-Null
+        # Last element is the captured $LASTEXITCODE; everything else is
+        # mixed stdout+stderr (we redirected 2>&1 inside the job).
+        if ($jobOutput.Count -gt 0) {
+            $auditExit = [int]$jobOutput[-1]
+            $stdout = $jobOutput[0..($jobOutput.Count - 2)]
+        } else {
+            $auditExit = 0
+            $stdout = @()
+        }
+    }
 
     # Find the new log dir created by this run.
     Start-Sleep -Milliseconds 100

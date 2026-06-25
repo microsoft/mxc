@@ -41,11 +41,17 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>".
+    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>". Including
+    // the PID + sub-second component prevents collisions when multiple
+    // PLM tasks finish within the same second (e.g. parallel test
+    // harness runs all calling --audit on different configs).
     let log_dir = opts.log_dir.unwrap_or_else(|| {
-        exe_dir
-            .join("logs")
-            .join(Local::now().format("%Y-%m-%d_%H%M%S").to_string())
+        let stamp = format!(
+            "{}_pid{}",
+            Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
+            std::process::id()
+        );
+        exe_dir.join("logs").join(stamp)
     });
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
