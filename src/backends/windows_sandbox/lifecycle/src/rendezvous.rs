@@ -5,8 +5,27 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+/// Maximum time to wait for the guest agent's rendezvous file. First VM boot
+/// can take several minutes on a loaded host; 360s covers worst-case cold
+/// starts. Shared by every consumer that calls [`wait_for_rendezvous`]
+/// (the one-shot runner and the state-aware daemon) so tuning the budget
+/// for a slower CI environment happens in one place.
+pub const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(360);
+
+/// Polling interval while waiting for the rendezvous file to appear. Shared
+/// across one-shot + state-aware so the I/O cadence is uniform.
+pub const RENDEZVOUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Maximum time to wait for the host's TCP connect to the guest agent after
+/// the rendezvous file appears. Connect should be near-instant on localhost
+/// (the guest agent is already serving by the time we read the rendezvous
+/// file); the 30s budget tolerates a slow Hyper-V NAT bring-up window
+/// without hanging the caller. Shared across one-shot + state-aware.
+pub const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Poll `rendezvous_dir/rendezvous.txt` until it contains a valid `ip:port`.
 ///
