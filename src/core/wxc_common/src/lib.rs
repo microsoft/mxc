@@ -26,6 +26,12 @@ pub mod validator;
 // the JSON Schema is generated from it under the `schema-gen` feature.
 pub mod wire;
 
+// TypeScript emitter for the SDK wire types (drift oracle). Walks the generated
+// schema value and emits `sdk/src/generated/wire.ts`. Compiled with the wire
+// model under the `schema-gen` feature.
+#[cfg(feature = "schema-gen")]
+pub mod ts_emit;
+
 // Thin Windows-only helpers that are not backend-specific. Backend
 // runners live in dedicated crates under `backends/`; only utilities
 // shared across host tools (e.g. wxc_host_prep, mxc_diagnostic_console)

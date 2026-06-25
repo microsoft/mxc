@@ -524,6 +524,18 @@ mod schema_gen {
     /// `description` come from the `MxcConfig` schemars attribute / doc comment
     /// respectively.
     pub fn generate_config_schema_json() -> String {
+        let value = schema_value();
+        if let serde_json::Value::Object(map) = &value {
+            return render_root_ordered(map);
+        }
+        serde_json::to_string_pretty(&value).expect("schema serialises to JSON")
+    }
+
+    /// Build the post-processed schema as a `serde_json::Value`: run schemars,
+    /// normalize integer formats, and inject the canonical `$id`. Shared by the
+    /// JSON-schema renderer and the TypeScript emitter so both consume exactly the
+    /// same model.
+    fn schema_value() -> serde_json::Value {
         let schema = schemars::schema_for!(MxcConfig);
         let mut value = serde_json::to_value(&schema).expect("schema serialises to JSON value");
         normalize_integer_formats(&mut value);
@@ -532,9 +544,20 @@ mod schema_gen {
                 "$id".to_string(),
                 serde_json::Value::String(SCHEMA_ID.to_string()),
             );
-            return render_root_ordered(map);
         }
-        serde_json::to_string_pretty(&value).expect("schema serialises to JSON")
+        value
+    }
+
+    /// Emit the SDK's wire TypeScript types directly from the same generated schema
+    /// model — no third-party generator. The output is a drift oracle
+    /// (`sdk/src/generated/wire.ts`): the SDK's hand-written public types are
+    /// asserted to conform to it by a unit test, and a CI gate regenerates and
+    /// diffs the committed file. Deterministic: `serde_json`'s default `Map` is a
+    /// `BTreeMap`, so definitions and object properties are emitted in stable
+    /// (alphabetical) order.
+    pub fn generate_sdk_types_ts() -> String {
+        let value = schema_value();
+        crate::ts_emit::emit_ts(&value)
     }
 
     /// Render the root object as pretty JSON with a fixed key order — the schema
@@ -619,4 +642,4 @@ mod schema_gen {
 }
 
 #[cfg(feature = "schema-gen")]
-pub use schema_gen::generate_config_schema_json;
+pub use schema_gen::{generate_config_schema_json, generate_sdk_types_ts};
