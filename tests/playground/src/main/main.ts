@@ -526,14 +526,15 @@ ipcMain.handle('run-sandbox-raw', (_event, configJson: string, debug: boolean, e
     if (config.containment === 'microvm') {
       const fs = require('fs');
       // Match the SDK's binary discovery layout (sdk/src/platform.ts):
-      // npm-packaged binaries live under sdk/bin/<arch>, local dev builds
-      // under src/target/<triple>/{release,debug}.
+      // per-platform package binaries live under
+      // sdk/platform-packages/<os>-<arch>; local dev builds under
+      // src/target/<triple>/{release,debug}.
       const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
       const triple = process.arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
       const repoRoot = path.join(__dirname, '..', '..', '..');
       const candidates = [
         execPath,
-        path.join(repoRoot, 'sdk', 'bin', arch),
+        path.join(repoRoot, 'sdk', 'platform-packages', `win32-${arch}`),
         path.join(repoRoot, 'src', 'target', triple, 'release'),
         path.join(repoRoot, 'src', 'target', triple, 'debug'),
         path.join(repoRoot, 'src', 'target', 'release'),
