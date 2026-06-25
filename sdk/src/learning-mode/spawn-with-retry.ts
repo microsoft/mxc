@@ -100,6 +100,25 @@ export interface SpawnSandboxWithRetryOptions {
   onDenied: OnDeniedCallback;
 
   /**
+   * Optional real-time denial callback. Fires once for **each** denial
+   * the moment it streams off the native binary, before the batched
+   * {@link onDenied} for that attempt. Use it for live progress UI or
+   * logging; use {@link onDenied} for the approve/retry decision.
+   *
+   * `attemptIndex` matches the attempt the denial belongs to (0 for the
+   * first attempt, incrementing per retry), so a single handler can
+   * attribute live denials across retries. A plain
+   * `(resource) => void` is assignable here too — the second argument
+   * is optional for callers that don't need it.
+   *
+   * Receives the same filtered + path-normalised `DeniedResource` that
+   * lands in the attempt's `denials` array (the default noise filters
+   * are applied first). Throwing from this callback is not recommended;
+   * it propagates out of the attempt.
+   */
+  onDenial?: (resource: DeniedResource, attemptIndex: number) => void;
+
+  /**
    * Optional. Forwarded into `spawnSandboxFromConfig` for each
    * attempt. The wrapper picks the right `usePty` value based on
    * its top-level `usePty` option (see below) -- callers that try
@@ -438,6 +457,26 @@ async function runOnce(
 }
 
 /**
+ * Builds the per-denial sink the single-attempt runners hand to
+ * {@link parseDenialStream}: it records each denial for the attempt's
+ * batch (consumed by `onDenied`) and forwards it to the optional
+ * real-time {@link SpawnSandboxWithRetryOptions.onDenial} callback,
+ * tagged with the attempt index.
+ *
+ * Exported for tests; not part of the public API.
+ */
+export function makeDenialSink(
+  denials: DeniedResource[],
+  options: SpawnSandboxWithRetryOptions,
+  attemptIndex: number,
+): (resource: DeniedResource) => void {
+  return (resource) => {
+    denials.push(resource);
+    options.onDenial?.(resource, attemptIndex);
+  };
+}
+
+/**
  * Non-PTY single-attempt runner. Workload runs with separate
  * stdin/stdout/stderr; captureDenials uses stderr as the transport
  * (the 0x1E demuxer + workload-stderr passthrough split the bytes
@@ -468,7 +507,7 @@ async function runOnceChild(
 
   const streamP = parseDenialStream(child.stderr!, {
     filters: defaultDenialFilters,
-    onDenial: (r) => denials.push(r),
+    onDenial: makeDenialSink(denials, options, attemptIndex),
     onSummary: (s) => { summary = s; },
     onPassthrough: (c) => stderrChunks.push(c),
   });
@@ -525,7 +564,7 @@ async function runOncePty(
   const streamP = sideChannel.denialStream.then((socket: Socket) =>
     parseDenialStream(socket, {
       filters: defaultDenialFilters,
-      onDenial: (r) => denials.push(r),
+      onDenial: makeDenialSink(denials, options, attemptIndex),
       onSummary: (s) => { summary = s; },
       // No passthrough channel in PTY mode -- the workload's stderr
       // is merged into stdout (the PTY). Nothing should land here.

@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
   driveRetryLoop,
+  makeDenialSink,
   type RetryAttemptResult,
   type SpawnSandboxWithRetryOptions,
 } from '../../src/learning-mode/spawn-with-retry.js';
@@ -398,5 +399,52 @@ describe('driveRetryLoop', () => {
       async (_p, i) => attempt(i, 0, [], /* captureDenialsActive */ false),
     );
     assert.strictEqual(result.stopReason, 'capture-inactive');
+  });
+});
+
+// ---- makeDenialSink (real-time onDenial forwarding) -----------------------
+
+describe('makeDenialSink', () => {
+  it('records each denial into the batch array', () => {
+    const denials: DeniedResource[] = [];
+    const sink = makeDenialSink(denials, baseOptions(), 0);
+    const a = fileDenial('C:\\a.txt');
+    const b = fileDenial('C:\\b.txt');
+    sink(a);
+    sink(b);
+    assert.deepStrictEqual(denials, [a, b]);
+  });
+
+  it('forwards every denial to the real-time onDenial with the attempt index', () => {
+    const seen: Array<{ path: string; attemptIndex: number }> = [];
+    const options = baseOptions({
+      onDenial: (r, attemptIndex) => seen.push({ path: r.path, attemptIndex }),
+    });
+    const denials: DeniedResource[] = [];
+    const sink = makeDenialSink(denials, options, 2);
+    sink(fileDenial('C:\\a.txt'));
+    sink(fileDenial('C:\\b.txt'));
+    assert.deepStrictEqual(seen, [
+      { path: 'C:\\a.txt', attemptIndex: 2 },
+      { path: 'C:\\b.txt', attemptIndex: 2 },
+    ]);
+  });
+
+  it('still records into the batch when no onDenial is provided', () => {
+    const denials: DeniedResource[] = [];
+    const sink = makeDenialSink(denials, baseOptions(), 0); // no onDenial override
+    const r = fileDenial('C:\\only-batch.txt');
+    assert.doesNotThrow(() => sink(r));
+    assert.deepStrictEqual(denials, [r]);
+  });
+
+  it('feeds onDenial the same record object that lands in the batch', () => {
+    const forwarded: DeniedResource[] = [];
+    const options = baseOptions({ onDenial: (r) => forwarded.push(r) });
+    const denials: DeniedResource[] = [];
+    const sink = makeDenialSink(denials, options, 0);
+    const r = fileDenial('C:\\same.txt');
+    sink(r);
+    assert.strictEqual(forwarded[0], denials[0], 'real-time and batch see the same object');
   });
 });
