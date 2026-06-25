@@ -847,7 +847,6 @@ pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose
 #[allow(dead_code)]
 type _Map = Map<String, Value>;
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,10 +905,7 @@ mod tests {
             parent_for_write("C:\\hiberfil.sys").as_deref(),
             Some("C:\\hiberfil.sys")
         );
-        assert_eq!(
-            parent_for_write("C:\\.git").as_deref(),
-            Some("C:\\.git")
-        );
+        assert_eq!(parent_for_write("C:\\.git").as_deref(), Some("C:\\.git"));
     }
 
     // ---- path_starts_with_any --------------------------------------------
@@ -977,7 +973,10 @@ mod tests {
             &["C:\\Secrets\\token.dat"],
         );
         assert!(added.readwrite.is_empty());
-        assert!(cfg["filesystem"]["readwritePaths"].as_array().unwrap().is_empty());
+        assert!(cfg["filesystem"]["readwritePaths"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1132,7 +1131,9 @@ mod tests {
         // registryRead. Result is case-insensitively sorted.
         let names: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
         assert_eq!(names.len(), 2);
-        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("internetclient")));
+        assert!(names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("internetclient")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("registryRead")));
     }
 }
