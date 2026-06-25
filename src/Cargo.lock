@@ -1660,7 +1660,6 @@ dependencies = [
  "clap",
  "mxc_build_common",
  "roxmltree",
- "serde",
  "serde_json",
  "windows 0.58.0",
 ]
