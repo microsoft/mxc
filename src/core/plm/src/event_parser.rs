@@ -255,7 +255,7 @@ fn read_event_xml(trace_file: &Path) -> Result<Vec<String>> {
 
     let h_query = unsafe {
         EvtQuery(
-            EVT_HANDLE::default(),
+            None,
             PCWSTR(path_w.as_ptr()),
             PCWSTR(query_w.as_ptr()),
             EvtQueryFilePath.0 | EvtQueryForwardDirection.0,
@@ -303,7 +303,7 @@ fn render_event_xml(event: EVT_HANDLE) -> Result<String> {
     let mut count: u32 = 0;
     unsafe {
         let _ = EvtRender(
-            EVT_HANDLE::default(),
+            None,
             event,
             EvtRenderEventXml.0,
             0,
@@ -318,7 +318,7 @@ fn render_event_xml(event: EVT_HANDLE) -> Result<String> {
     let mut buf = vec![0u8; needed as usize];
     unsafe {
         EvtRender(
-            EVT_HANDLE::default(),
+            None,
             event,
             EvtRenderEventXml.0,
             needed,

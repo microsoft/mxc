@@ -15,10 +15,7 @@ anyhow.workspace = true
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 roxmltree = "0.20"
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
+windows = { workspace = true, features = [
     "Win32_System_EventLog",
 ] }
 

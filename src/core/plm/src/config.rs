@@ -116,15 +116,26 @@ fn json_array_strings(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Derive the writable-policy entry for `file_path` purely from the path
+/// string -- the trace may reference paths that do not exist on the host
+/// (sandbox-only paths, deleted files, paths under a virtual mount), so
+/// querying the live filesystem with `Path::is_file()` / `is_dir()` would
+/// silently drop those write findings.
+///
+/// Heuristic: if the final path segment contains a `.` it is treated as a
+/// file and the parent directory is returned (so the directory becomes
+/// writable). Otherwise the path itself is treated as a directory and
+/// returned as-is. This matches the original PowerShell `extract_paths`
+/// behavior and over-grants in the rare directory-with-a-dot case, which
+/// is the safer side to err on.
 fn parent_for_write(file_path: &str) -> Option<String> {
     let p = Path::new(file_path);
-    if p.is_file() {
-        return p.parent().map(|s| s.to_string_lossy().into_owned());
+    let file_name = p.file_name()?.to_string_lossy();
+    if file_name.contains('.') {
+        p.parent().map(|s| s.to_string_lossy().into_owned())
+    } else {
+        Some(file_path.to_string())
     }
-    if p.is_dir() {
-        return Some(file_path.to_string());
-    }
-    None
 }
 
 pub fn update_from_access_events(
@@ -298,11 +309,11 @@ pub fn set_ui_subsystem_enabled(config: &mut Value) {
         obj.insert("ui".into(), json!({}));
     }
     let ui = obj.get_mut("ui").unwrap().as_object_mut().unwrap();
-    if !ui.contains_key("disable") {
-        ui.insert("disable".into(), Value::Bool(true));
-    } else {
-        ui.insert("disable".into(), Value::Bool(false));
-    }
+    // CONVERT_TO_GUI violations mean the contained process needed the
+    // Win32k GUI subsystem. Set `ui.disable = false` unconditionally so
+    // the next run grants access (regardless of whether the key was
+    // present before).
+    ui.insert("disable".into(), Value::Bool(false));
     println!("Enabling access to GUI subsystem ");
 }
 

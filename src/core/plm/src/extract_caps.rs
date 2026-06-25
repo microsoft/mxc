@@ -212,10 +212,10 @@ unsafe fn free_sid_array(arr: *mut PSID, count: u32) {
     for i in 0..count as isize {
         let p = *arr.offset(i);
         if !p.0.is_null() {
-            let _ = LocalFree(HLOCAL(p.0));
+            let _ = LocalFree(Some(HLOCAL(p.0)));
         }
     }
-    let _ = LocalFree(HLOCAL(arr as *mut _));
+    let _ = LocalFree(Some(HLOCAL(arr as *mut _)));
 }
 
 /// Build the table of (capability name, AppPackage SID, Group SID) tuples
@@ -291,7 +291,7 @@ pub fn sid_to_string(sid_bytes: &[u8]) -> Option<String> {
         }
         let slice = std::slice::from_raw_parts(out.0, len);
         let s = String::from_utf16_lossy(slice);
-        let _ = LocalFree(HLOCAL(out.0 as *mut _));
+        let _ = LocalFree(Some(HLOCAL(out.0 as *mut _)));
         Some(s)
     }
 }
@@ -311,9 +311,9 @@ pub fn lookup_nt_account(sid_bytes: &[u8]) -> Option<String> {
         let _ = LookupAccountSidW(
             PCWSTR::null(),
             psid,
-            PWSTR::null(),
+            None,
             &mut name_len as *mut _,
-            PWSTR::null(),
+            None,
             &mut domain_len as *mut _,
             &mut sid_use as *mut _,
         );
@@ -325,9 +325,9 @@ pub fn lookup_nt_account(sid_bytes: &[u8]) -> Option<String> {
         let ok = LookupAccountSidW(
             PCWSTR::null(),
             psid,
-            PWSTR(name.as_mut_ptr()),
+            Some(PWSTR(name.as_mut_ptr())),
             &mut name_len as *mut _,
-            PWSTR(domain.as_mut_ptr()),
+            Some(PWSTR(domain.as_mut_ptr())),
             &mut domain_len as *mut _,
             &mut sid_use as *mut _,
         );

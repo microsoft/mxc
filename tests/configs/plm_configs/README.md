@@ -4,8 +4,9 @@ JSON step configurations for `wxc-exec.exe` (or the equivalent MXC
 runner) that drive `plmtester.exe` through baseline Win32 surface
 probes inside a plain processcontainer.
 
-All configs assume `plmtester.exe` is at
-`C:\Users\AdminUser\Desktop\lily\plmtester.exe`.
+All configs invoke `plmtester.exe` without an absolute path, so it must
+be on `PATH` (or co-located with `wxc-exec.exe` / the MXC runner) at the
+time the config is run.
 
 ## Files
 

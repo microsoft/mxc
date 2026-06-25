@@ -3,7 +3,7 @@
   "containerId": "PLM-DisplaySettings-Basic",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "c:\\users\\adminuser\\desktop\\lily\\plmtester.exe display-settings",
+    "commandLine": "plmtester.exe display-settings",
     "timeout": 30000
   },
   "ui": {

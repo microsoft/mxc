@@ -3,7 +3,7 @@
   "containerId": "PLM-FindWindow-Basic",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "c:\\users\\adminuser\\desktop\\lily\\plmtester.exe ui-isolation find-window",
+    "commandLine": "plmtester.exe ui-isolation find-window",
     "timeout": 30000
   },
   "ui": {

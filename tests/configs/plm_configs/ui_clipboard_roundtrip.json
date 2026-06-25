@@ -3,7 +3,7 @@
   "containerId": "PLM-Clipboard-Roundtrip-Basic",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "c:\\users\\adminuser\\desktop\\lily\\plmtester.exe clipboard roundtrip \"plm-roundtrip-probe\"",
+    "commandLine": "plmtester.exe clipboard roundtrip \"plm-roundtrip-probe\"",
     "timeout": 30000
   },
   "ui": {

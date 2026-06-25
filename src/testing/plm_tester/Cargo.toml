@@ -13,6 +13,12 @@ clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 win-screenshot = "4"
 
+# NOTE: pinned to windows 0.58 (vs workspace 0.62) on purpose -- the
+# Graphics_Capture / DXGI / clipboard APIs we use here have breaking
+# signature changes between 0.58 and 0.62 (HWND/HANDLE/HMODULE became
+# Option<T>, IAsyncOperation::get was removed, etc.). Migrating
+# plmtester to 0.62 is tracked separately; this crate is build-only
+# test collateral and is not linked into shipping binaries.
 [dependencies.windows]
 version = "0.58"
 features = [
