@@ -135,9 +135,19 @@ extends:
               inputs:
                 targetType: inline
                 script: |
+                  $ErrorActionPreference = 'Stop'
+                  # Enumerate matches first so a stale/empty pattern fails fast
+                  # with a clear message, instead of a generic Copy-Item error or
+                  # a silently-empty folder in the vpack.
+                  $scriptsSrc = Get-ChildItem "$(Build.SourcesDirectory)\tests\scripts\*isolation_session*" -File
+                  $configsSrc = Get-ChildItem "$(Build.SourcesDirectory)\tests\configs\*isolation_session*" -File
+                  if (-not $scriptsSrc) { throw "No *isolation_session* scripts found under tests\scripts" }
+                  if (-not $configsSrc) { throw "No *isolation_session* configs found under tests\configs" }
+
                   $scriptsDest = "$(ob_outputDirectory)\isolation_session\main\scripts"
                   $configsDest = "$(ob_outputDirectory)\isolation_session\main\configs"
                   New-Item -ItemType Directory -Force -Path $scriptsDest | Out-Null
                   New-Item -ItemType Directory -Force -Path $configsDest | Out-Null
-                  Copy-Item -Force "$(Build.SourcesDirectory)\tests\scripts\*isolation_session*" $scriptsDest
-                  Copy-Item -Force "$(Build.SourcesDirectory)\tests\configs\*isolation_session*" $configsDest
+                  $scriptsSrc | Copy-Item -Destination $scriptsDest -Force
+                  $configsSrc | Copy-Item -Destination $configsDest -Force
+                  Write-Host "Staged $($scriptsSrc.Count) scripts and $($configsSrc.Count) configs into isolation_session\main"
