@@ -1,5 +1,5 @@
 {
-  "version": "0.5.0-alpha",
+  "version": "0.7.0-alpha",
   "containerId": "PLM-DisplaySettings-Basic",
   "containment": "processcontainer",
   "process": {
@@ -7,7 +7,11 @@
     "timeout": 30000
   },
   "ui": {
-    "disable": false,
-    "systemSettings": "none"
+    "disable": false
+  },
+  "processContainer": {
+    "ui": {
+      "systemSettings": "none"
+    }
   }
 }

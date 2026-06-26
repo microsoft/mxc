@@ -24,7 +24,7 @@ time the config is run.
 
 All configs use:
 
-- `version`: `0.5.0-alpha`
+- `version`: `0.7.0-alpha`
 - `containment`: `processcontainer` (no `leastPrivilege`, no `permissiveLearningMode` — plain Medium-IL baseline)
 - `process.timeout`: 30000 ms
 - `ui.disable`: `false`

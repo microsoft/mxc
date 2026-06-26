@@ -316,7 +316,16 @@ fn main() -> Result<()> {
             // On the normal path `log::run` performs its own
             // `wpr -stop` and the trace is no longer live; clear the
             // flag so the Ctrl+C handler doesn't issue a stale cancel.
-            clear_plm_trace_active();
+            // On the error path the trace may still be live (e.g.
+            // stdin EOF on the "press Enter to stop" prompt, or
+            // `wpr -stop` returned non-zero) — issue a `wpr -cancel`
+            // so the NT Kernel Logger session doesn't leak until
+            // reboot.
+            if result.is_ok() {
+                clear_plm_trace_active();
+            } else {
+                cancel_active_plm_trace();
+            }
             result
         }
     }

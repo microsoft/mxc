@@ -710,13 +710,20 @@ pub fn set_ui_subsystem_enabled(config: &mut Value) -> Result<()> {
 /// contained process tripped; the corresponding `ui.*` field is widened
 /// just enough to let the operation succeed next time.
 ///
-/// Per `docs/base-process-container/UIPolicy_Schema.md`:
+/// Per `docs/base-process-container/UIPolicy_Schema.md` and the 0.7-alpha
+/// schema, cross-platform fields live at top-level `ui` while backend-
+/// specific fields live under `processContainer.ui`:
+///
+/// Top-level `ui` (cross-platform):
 /// * `READCLIPBOARD` / `WRITECLIPBOARD`  -> `ui.clipboard`
-/// * `SYSTEMPARAMETERS` / `DISPLAYSETTINGS` -> `ui.systemSettings`
-/// * `HANDLES` / `GLOBALATOMS` -> `ui.isolation`
-/// * `DESKTOP` / `EXITWINDOWS` -> `ui.desktopSystemControl = true`
-/// * `IME` -> `ui.ime = true`
 /// * `INJECTION` -> `ui.injection = true`
+/// * `disable` is also cleared at top-level when any flag is applied.
+///
+/// `processContainer.ui` (Windows / process-container only):
+/// * `SYSTEMPARAMETERS` / `DISPLAYSETTINGS` -> `processContainer.ui.systemSettings`
+/// * `HANDLES` / `GLOBALATOMS` -> `processContainer.ui.isolation`
+/// * `DESKTOP` / `EXITWINDOWS` -> `processContainer.ui.desktopSystemControl = true`
+/// * `IME` -> `processContainer.ui.ime = true`
 ///
 /// The function is additive: when a field already grants the requested
 /// operation it is left alone; when it grants the complementary half (e.g.
@@ -734,87 +741,123 @@ pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) -> Result<()> {
         return Ok(());
     }
 
+    // Pre-compute which sub-trees we'll need so we can validate JSON
+    // shape up-front (one error per malformed branch) before mutating.
+    let need_top_ui = flags
+        & (JOB_OBJECT_UILIMIT_READCLIPBOARD
+            | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+            | JOB_OBJECT_UILIMIT_INJECTION)
+        != 0
+        || flags != 0; // `disable: false` always written when flags != 0
+    let need_pc_ui = flags
+        & (JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+            | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+            | JOB_OBJECT_UILIMIT_HANDLES
+            | JOB_OBJECT_UILIMIT_GLOBALATOMS
+            | JOB_OBJECT_UILIMIT_DESKTOP
+            | JOB_OBJECT_UILIMIT_EXITWINDOWS
+            | JOB_OBJECT_UILIMIT_IME)
+        != 0;
+
     let obj = config
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
-    if !obj.contains_key("ui") {
-        obj.insert("ui".into(), json!({}));
-    }
-    let ui = obj
-        .get_mut("ui")
-        .and_then(|v| v.as_object_mut())
-        .ok_or_else(|| anyhow::anyhow!("`ui` must be a JSON object"))?;
 
-    // -- clipboard ---------------------------------------------------------
-    let need_read = flags & JOB_OBJECT_UILIMIT_READCLIPBOARD != 0;
-    let need_write = flags & JOB_OBJECT_UILIMIT_WRITECLIPBOARD != 0;
-    if need_read || need_write {
-        let current = ui
-            .get("clipboard")
-            .and_then(|v| v.as_str())
-            .unwrap_or("none")
-            .to_string();
-        let (cur_r, cur_w) = clipboard_capabilities(&current);
-        let new = pick_clipboard(cur_r || need_read, cur_w || need_write);
-        ui.insert("clipboard".into(), Value::String(new.into()));
-    }
+    // -- top-level `ui` (clipboard / injection / disable) -----------------
+    if need_top_ui {
+        if !obj.contains_key("ui") {
+            obj.insert("ui".into(), json!({}));
+        }
+        let ui = obj
+            .get_mut("ui")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| anyhow::anyhow!("`ui` must be a JSON object"))?;
 
-    // -- systemSettings ----------------------------------------------------
-    let need_params = flags & JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS != 0;
-    let need_display = flags & JOB_OBJECT_UILIMIT_DISPLAYSETTINGS != 0;
-    if need_params || need_display {
-        let current = ui
-            .get("systemSettings")
-            .and_then(|v| v.as_str())
-            .unwrap_or("none")
-            .to_string();
-        let (cur_p, cur_d) = system_settings_capabilities(&current);
-        let new = pick_system_settings(cur_p || need_params, cur_d || need_display);
-        ui.insert("systemSettings".into(), Value::String(new.into()));
-    }
+        let need_read = flags & JOB_OBJECT_UILIMIT_READCLIPBOARD != 0;
+        let need_write = flags & JOB_OBJECT_UILIMIT_WRITECLIPBOARD != 0;
+        if need_read || need_write {
+            let current = ui
+                .get("clipboard")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let (cur_r, cur_w) = clipboard_capabilities(&current);
+            let new = pick_clipboard(cur_r || need_read, cur_w || need_write);
+            ui.insert("clipboard".into(), Value::String(new.into()));
+        }
 
-    // -- isolation ---------------------------------------------------------
-    let need_other_handles = flags & JOB_OBJECT_UILIMIT_HANDLES != 0;
-    let need_global_atoms = flags & JOB_OBJECT_UILIMIT_GLOBALATOMS != 0;
-    if need_other_handles || need_global_atoms {
-        let current = ui
-            .get("isolation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("container")
-            .to_string();
-        // `(handles_restricted, atoms_restricted)` for the current value.
-        let (cur_h, cur_a) = isolation_restrictions(&current);
-        // Removing a restriction = the process now needs that access.
-        let new_h = cur_h && !need_other_handles;
-        let new_a = cur_a && !need_global_atoms;
-        let new = pick_isolation(new_h, new_a);
-        ui.insert("isolation".into(), Value::String(new.into()));
+        if flags & JOB_OBJECT_UILIMIT_INJECTION != 0 {
+            ui.insert("injection".into(), Value::Bool(true));
+        }
+
+        // A non-empty `ui.*` policy only makes sense with the GUI subsystem on.
+        // The schema default for `ui.disable` is `true`, in which case the
+        // runner silently ignores every other `ui.*` field — so when we are
+        // applying ANY relaxation (`flags != 0`), unconditionally insert
+        // `disable: false`. Without this, a UI_OPERATION-only trace (e.g.
+        // GLOBALATOMS-only, which doesn't co-fire CONVERT_TO_GUI) writes
+        // a config the runner discards — meaning the trace never converges.
+        ui.insert("disable".into(), Value::Bool(false));
     }
 
-    // -- desktopSystemControl (bundled DESKTOP + EXITWINDOWS) -------------
-    if flags & (JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_EXITWINDOWS) != 0 {
-        ui.insert("desktopSystemControl".into(), Value::Bool(true));
+    // -- processContainer.ui (Windows backend-specific) -------------------
+    if need_pc_ui {
+        if !obj.contains_key("processContainer") {
+            obj.insert("processContainer".into(), json!({}));
+        }
+        let pc = obj
+            .get_mut("processContainer")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| anyhow::anyhow!("`processContainer` must be a JSON object"))?;
+        if !pc.contains_key("ui") {
+            pc.insert("ui".into(), json!({}));
+        }
+        let pc_ui = pc
+            .get_mut("ui")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| anyhow::anyhow!("`processContainer.ui` must be a JSON object"))?;
+
+        // -- systemSettings -----------------------------------------------
+        let need_params = flags & JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS != 0;
+        let need_display = flags & JOB_OBJECT_UILIMIT_DISPLAYSETTINGS != 0;
+        if need_params || need_display {
+            let current = pc_ui
+                .get("systemSettings")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let (cur_p, cur_d) = system_settings_capabilities(&current);
+            let new = pick_system_settings(cur_p || need_params, cur_d || need_display);
+            pc_ui.insert("systemSettings".into(), Value::String(new.into()));
+        }
+
+        // -- isolation ----------------------------------------------------
+        let need_other_handles = flags & JOB_OBJECT_UILIMIT_HANDLES != 0;
+        let need_global_atoms = flags & JOB_OBJECT_UILIMIT_GLOBALATOMS != 0;
+        if need_other_handles || need_global_atoms {
+            let current = pc_ui
+                .get("isolation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("container")
+                .to_string();
+            let (cur_h, cur_a) = isolation_restrictions(&current);
+            let new_h = cur_h && !need_other_handles;
+            let new_a = cur_a && !need_global_atoms;
+            let new = pick_isolation(new_h, new_a);
+            pc_ui.insert("isolation".into(), Value::String(new.into()));
+        }
+
+        // -- desktopSystemControl (DESKTOP + EXITWINDOWS) -----------------
+        if flags & (JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_EXITWINDOWS) != 0 {
+            pc_ui.insert("desktopSystemControl".into(), Value::Bool(true));
+        }
+
+        // -- ime ----------------------------------------------------------
+        if flags & JOB_OBJECT_UILIMIT_IME != 0 {
+            pc_ui.insert("ime".into(), Value::Bool(true));
+        }
     }
 
-    // -- ime ---------------------------------------------------------------
-    if flags & JOB_OBJECT_UILIMIT_IME != 0 {
-        ui.insert("ime".into(), Value::Bool(true));
-    }
-
-    // -- injection ---------------------------------------------------------
-    if flags & JOB_OBJECT_UILIMIT_INJECTION != 0 {
-        ui.insert("injection".into(), Value::Bool(true));
-    }
-
-    // A non-empty `ui.*` policy only makes sense with the GUI subsystem on.
-    // The schema default for `ui.disable` is `true`, in which case the
-    // runner silently ignores every other `ui.*` field — so when we are
-    // applying ANY relaxation (`flags != 0`, guaranteed by the early
-    // return above), unconditionally insert `disable: false`. Without
-    // this, a UI_OPERATION-only trace (e.g. GLOBALATOMS-only, which
-    // doesn't co-fire CONVERT_TO_GUI) writes a config the runner
-    // discards — meaning the trace never converges.
-    ui.insert("disable".into(), Value::Bool(false));
     Ok(())
 }
 
@@ -1682,9 +1725,12 @@ mod tests {
     fn apply_ui_flags_system_settings_widening_from_existing_parameters() {
         // pre-existing "parameters" + new DISPLAYSETTINGS → "all"
         use crate::ui_limits::JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
-        let mut cfg = json!({ "ui": { "systemSettings": "parameters" } });
+        let mut cfg = json!({ "processContainer": { "ui": { "systemSettings": "parameters" } } });
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS).unwrap();
-        assert_eq!(cfg["ui"]["systemSettings"], json!("all"));
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("all")
+        );
     }
 
     #[test]
@@ -1692,7 +1738,7 @@ mod tests {
         use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).unwrap();
-        assert_eq!(cfg["ui"]["ime"], json!(true));
+        assert_eq!(cfg["processContainer"]["ui"]["ime"], json!(true));
     }
 
     #[test]
@@ -1700,11 +1746,17 @@ mod tests {
         use crate::ui_limits::{JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_EXITWINDOWS};
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DESKTOP).unwrap();
-        assert_eq!(cfg["ui"]["desktopSystemControl"], json!(true));
+        assert_eq!(
+            cfg["processContainer"]["ui"]["desktopSystemControl"],
+            json!(true)
+        );
 
         let mut cfg2 = json!({});
         apply_ui_operation_flags(&mut cfg2, JOB_OBJECT_UILIMIT_EXITWINDOWS).unwrap();
-        assert_eq!(cfg2["ui"]["desktopSystemControl"], json!(true));
+        assert_eq!(
+            cfg2["processContainer"]["ui"]["desktopSystemControl"],
+            json!(true)
+        );
     }
 
     #[test]
@@ -1751,7 +1803,10 @@ mod tests {
         use crate::ui_limits::JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS).unwrap();
-        assert_eq!(cfg["ui"]["systemSettings"], json!("parameters"));
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("parameters")
+        );
         assert_eq!(cfg["ui"]["disable"], json!(false));
     }
 
@@ -1760,7 +1815,10 @@ mod tests {
         use crate::ui_limits::JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS).unwrap();
-        assert_eq!(cfg["ui"]["systemSettings"], json!("display"));
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("display")
+        );
     }
 
     #[test]
@@ -1774,7 +1832,10 @@ mod tests {
             JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
         )
         .unwrap();
-        assert_eq!(cfg["ui"]["systemSettings"], json!("all"));
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("all")
+        );
     }
 
     #[test]
@@ -1784,7 +1845,7 @@ mod tests {
         // granting HANDLES drops the handles restriction → "atoms".
         let mut cfg = json!({});
         apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_HANDLES).unwrap();
-        assert_eq!(cfg["ui"]["isolation"], json!("atoms"));
+        assert_eq!(cfg["processContainer"]["ui"]["isolation"], json!("atoms"));
     }
 
     #[test]
@@ -1796,7 +1857,7 @@ mod tests {
             JOB_OBJECT_UILIMIT_HANDLES | JOB_OBJECT_UILIMIT_GLOBALATOMS,
         )
         .unwrap();
-        assert_eq!(cfg["ui"]["isolation"], json!("desktop"));
+        assert_eq!(cfg["processContainer"]["ui"]["isolation"], json!("desktop"));
     }
 
     // ---- merge_capabilities ----------------------------------------------

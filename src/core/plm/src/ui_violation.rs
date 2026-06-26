@@ -325,12 +325,13 @@ mod tests {
             "UI_OPERATION (not CONVERT_TO_GUI) must not set need_ui",
         );
 
-        let mut config = serde_json::json!({ "ui": { "isolation": "handles" } });
+        let mut config =
+            serde_json::json!({ "processContainer": { "ui": { "isolation": "handles" } } });
         crate::config::apply_ui_operation_flags(&mut config, parse.ui_operation_flags)
             .expect("apply_ui_operation_flags");
         assert_eq!(
-            config["ui"]["isolation"], "desktop",
-            "HANDLES relaxation should widen ui.isolation handles -> desktop"
+            config["processContainer"]["ui"]["isolation"], "desktop",
+            "HANDLES relaxation should widen processContainer.ui.isolation handles -> desktop"
         );
     }
 

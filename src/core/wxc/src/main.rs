@@ -119,8 +119,13 @@ struct Cli {
 
     /// Audit mode: inject the `permissiveLearningMode` capability into the
     /// AppContainer policy so denied operations are logged but allowed.
-    /// In release builds this still relaxes the runner's release-only
-    /// rejection of `permissiveLearningMode` — use with care.
+    /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
+    /// `request.audit` consumer (AppContainer) have no cross-platform
+    /// counterpart, so accepting the flag elsewhere would print a misleading
+    /// "restrictions will NOT be enforced" warning while the bubblewrap/
+    /// seatbelt backends silently ignore both the flag and the injected
+    /// capability.
+    #[cfg(target_os = "windows")]
     #[arg(long)]
     audit: bool,
 
@@ -1014,7 +1019,10 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
-    request.audit = cli.audit;
+    #[cfg(target_os = "windows")]
+    {
+        request.audit = cli.audit;
+    }
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
@@ -1034,6 +1042,8 @@ fn main() {
     // --audit injects permissiveLearningMode so denied operations are logged
     // but allowed. Works in both debug and release builds; in release the
     // runner-side rejection is relaxed because request.audit is set.
+    // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
+    #[cfg(target_os = "windows")]
     if cli.audit
         && !request
             .policy
