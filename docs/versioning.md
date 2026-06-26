@@ -18,7 +18,7 @@ When a consumer specifies a SandboxPolicy version (e.g.,
 ```typescript
 // sdk/src/types.ts
 const policy: SandboxPolicy = {
-  version: "0.4.0-alpha",
+  version: "0.6.0-alpha",
   filesystem: { ... },
   network: { ... },
   timeoutMs: 30000,
@@ -29,7 +29,7 @@ The config JSON carries this same version:
 
 ```json
 {
-  "version": "0.4.0-alpha",
+  "version": "0.6.0-alpha",
   "process": { ... },
   "filesystem": { ... },
   "network": { ... }
@@ -229,7 +229,7 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 User writes SandboxPolicy (policy + environment, versioned)
         │
         ▼
-Config JSON (version: "0.4.0-alpha")
+Config JSON (version: "0.6.0-alpha")
         │
         ▼
 MXC parses → validates schema version
@@ -325,9 +325,9 @@ on the roadmap.
 ## Version Negotiation
 
 ```
-1. User sends SandboxPolicy with version "0.4.0-alpha"
+1. User sends SandboxPolicy with version "0.6.0-alpha"
 
-2. MXC validates: is "0.4.0-alpha" ≤ SUPPORTED_VERSION?
+2. MXC validates: is "0.6.0-alpha" ≤ SUPPORTED_VERSION?
    Yes → continue
    No  → error: "upgrade wxc-exec"
 

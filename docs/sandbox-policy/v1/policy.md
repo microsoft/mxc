@@ -55,11 +55,11 @@ Omitted policy fields = most restrictive permissions. Adding a field opts *in* t
 
 ```typescript
 // Fully locked down:
-spawnSandbox("script.sh", { version: "0.5.0-dev" });
+spawnSandbox("script.sh", { version: "0.6.0-alpha" });
 
 // Allow outbound network:
 spawnSandbox("script.sh", {
-  version: "0.5.0-dev",
+  version: "0.6.0-alpha",
   network: { allowOutbound: true },
 });
 ```
@@ -242,7 +242,7 @@ Execution timeout in milliseconds. Omitted = SDK default (no timeout).
 An empty policy is fully locked down:
 
 ```typescript
-spawnSandbox("script.sh", { version: "0.5.0-dev" });
+spawnSandbox("script.sh", { version: "0.6.0-alpha" });
 // No filesystem, no network, no UI, no input injection.
 ```
 
@@ -274,7 +274,7 @@ type ContainerConfig =
 
 ```json
 {
-  "version": "0.5.0-dev",
+  "version": "0.6.0-alpha",
   "containment": "process",
   "process": {
     "commandLine": "node agent.js",
@@ -324,7 +324,7 @@ cross-platform fields mapped from Policy.
 
 ```json
 {
-  "version": "0.5.0-dev",
+  "version": "0.6.0-alpha",
   "containment": "lxc",
   "process": {
     "commandLine": "bash run.sh",
@@ -406,7 +406,7 @@ Only `"process"` is end-to-end implemented today.
 
 ```typescript
 const policy: SandboxPolicy = {
-  version: "0.5.0-dev",
+  version: "0.6.0-alpha",
   filesystem: { readwritePaths: ["C:\\workspace"] },
   network: {},
   ui: {
@@ -560,7 +560,7 @@ thing they modify.
 ### "What happens if I omit all policy fields?"
 
 ```typescript
-spawnSandbox("script.sh", { version: "0.5.0-dev" });
+spawnSandbox("script.sh", { version: "0.6.0-alpha" });
 ```
 
 Produces a fully locked-down config: no filesystem access, no network, UI disabled, no input

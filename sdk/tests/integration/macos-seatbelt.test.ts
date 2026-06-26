@@ -16,8 +16,8 @@ import {
 
 const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
 
-// Schema version 0.5.0-alpha is the minimum that supports seatbelt.
-const schemaVersion = '0.5.0-alpha';
+// Seatbelt requires at least schema 0.5.0; the corpus floor is now 0.6.0-alpha.
+const schemaVersion = '0.6.0-alpha';
 
 // Clipboard tests require a running pasteboard service. Probe once at
 // module load and skip clipboard tests when the service is unavailable

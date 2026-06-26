@@ -56,7 +56,7 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
 
     try {
       const policy = {
-        version: '0.5.0-alpha',
+        version: '0.6.0-alpha',
         network: { allowOutbound: true },
         filesystem: { readwritePaths: [mountDir] },
       };
@@ -107,7 +107,7 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
     const CONTAINER_PORT = 8080;
 
     const policy = {
-      version: '0.5.0-alpha',
+      version: '0.6.0-alpha',
       network: { allowOutbound: true },
       filesystem: {},
     };
@@ -209,7 +209,7 @@ srv.handle_request()
     // SDK type narrows `protocol` to `'tcp'`, so a cast is required here to
     // exercise the parser path that rejects an out-of-type value at runtime.
     const policy = {
-      version: '0.5.0-alpha',
+      version: '0.6.0-alpha',
       network: { allowOutbound: true },
       filesystem: {},
     };

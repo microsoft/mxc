@@ -70,7 +70,7 @@ This avoids the 30-60s boot cost for subsequent executions.
 
 ```json
 {
-  "version": "0.5.0-alpha",
+  "version": "0.6.0-alpha",
   "containment": "windows_sandbox",
   "process": {
     "commandLine": "python -S -B -c \"print('hello')\"",
