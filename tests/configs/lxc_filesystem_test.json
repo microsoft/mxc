@@ -1,5 +1,5 @@
 {
-  "version": "0.4.0-alpha",
+  "version": "0.6.0-alpha",
   "containerId": "CLI-LXC-Filesystem-Test",
   "containment": "lxc",
   "process": {

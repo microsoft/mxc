@@ -273,7 +273,7 @@ Create a test config that exercises your feature:
 
 ```json
 {
-  "version": "0.5.0-alpha",
+  "version": "0.6.0-alpha",
   "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo gpu isolation test"

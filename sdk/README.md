@@ -24,7 +24,7 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy({
-  version: '0.5.0-alpha',
+  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,    // PATH, PYTHONPATH, JAVA_HOME, …
     readwritePaths: temp.readwritePaths,    // %TEMP% / $TMPDIR
@@ -55,9 +55,9 @@ child.on('close', (code) => console.log('exit:', code));
 
 | Version | Status | Schema file |
 | --- | --- | --- |
-| `0.4.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
-| `0.5.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
-| `0.6.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
+| `0.4.0-alpha` | Retired — below the `0.6.0-alpha` floor (no longer accepted) | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
+| `0.5.0-alpha` | Retired — below the `0.6.0-alpha` floor (no longer accepted) | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
+| `0.6.0-alpha` | Stable (minimum supported) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
 | `0.7.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
 | `0.8.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.8.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json) |
 
@@ -102,7 +102,7 @@ const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy(
   {
-    version: '0.5.0-alpha',
+    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
@@ -142,7 +142,7 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const pty = spawnSandbox('python script.py', {
-  version: '0.5.0-alpha',
+  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
@@ -169,7 +169,7 @@ const temp  = getTemporaryFilesPolicy();
 const result = await spawnSandboxAsync(
   'python -c "import sys; print(sys.version)"',
   {
-    version: '0.5.0-alpha',
+    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
@@ -215,7 +215,7 @@ Backend-specific tuning lives on the returned `ContainerConfig`. The full set of
 - Stable backends: [`schemas/stable/`](https://github.com/microsoft/mxc/tree/main/schemas/stable/)
 - Experimental backends: [`schemas/dev/`](https://github.com/microsoft/mxc/tree/main/schemas/dev/)
 
-Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.5.0-alpha.json`) and look up `processContainer`, `lxc`, `experimental.wslc`, `experimental.windows_sandbox`, etc.
+Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.6.0-alpha.json`) and look up `processContainer`, `lxc`, `experimental.wslc`, `experimental.windows_sandbox`, etc.
 
 </details>
 
@@ -265,7 +265,7 @@ const profile = getUserProfilePolicy();               // %LOCALAPPDATA%\Programs
 const tmp     = getTemporaryFilesPolicy();            // %TEMP% / $TMPDIR
 
 const policy = {
-  version: '0.5.0-alpha',
+  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
     readwritePaths: tmp.readwritePaths,
@@ -284,13 +284,13 @@ Each helper returns `{ readonlyPaths, readwritePaths }` — merge what you want 
 
 ### UI is blocked by default on 0.5.0+ — some shells need it
 
-The `policy.ui` block is enforced starting with schema `0.5.0-alpha` (it has no effect on `0.4.0-alpha`). When you use `0.5.0-alpha`, `0.6.0-alpha`, or `0.7.0-alpha`, `policy.ui.allowWindows` defaults to `false`. Most non-interactive command-line tools work fine, but on Windows some shells make win32k system calls during startup and fail without UI access. **All versions of PowerShell are affected** — both Windows PowerShell 5.1 (`powershell.exe`) and PowerShell 7 (`pwsh.exe`). Set `ui.allowWindows: true` when launching a shell:
+The `policy.ui` block is enforced on all supported schema versions, and `policy.ui.allowWindows` defaults to `false`. Most non-interactive command-line tools work fine, but on Windows some shells make win32k system calls during startup and fail without UI access. **All versions of PowerShell are affected** — both Windows PowerShell 5.1 (`powershell.exe`) and PowerShell 7 (`pwsh.exe`). Set `ui.allowWindows: true` when launching a shell:
 
 ```typescript
 import { spawnSandboxFromConfig, createConfigFromPolicy } from '@microsoft/mxc-sdk';
 
 const config = createConfigFromPolicy({
-  version: '0.5.0-alpha',
+  version: '0.6.0-alpha',
   ui: { allowWindows: true },     // ← required for powershell.exe to start
 });
 config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
@@ -330,7 +330,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.4.0-alpha`, `0.5.0-alpha`, `0.6.0-alpha`, `0.7.0-alpha`, or `0.8.0-alpha`. See [Compatibility](#compatibility). |
+| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, or `0.8.0-alpha`. See [Compatibility](#compatibility). |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 

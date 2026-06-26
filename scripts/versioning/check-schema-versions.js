@@ -57,7 +57,7 @@ expectConst(
   /const CURRENT_SCHEMA_VERSION:\s*&str\s*=\s*"([^"]+)"/,
   maxSupported
 );
-// SUPPORTED_VERSION is a semver range like ">=0.4, <=0.7"; its bounds must
+// SUPPORTED_VERSION is a semver range like ">=0.6, <=0.8"; its bounds must
 // match the canonical min/maxSupported major.minor.
 const supMatch = /const SUPPORTED_VERSION:\s*&str\s*=\s*">=([^,]+),\s*<=([^"]+)"/.exec(
   parser
