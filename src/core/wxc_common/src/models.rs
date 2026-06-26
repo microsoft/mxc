@@ -173,6 +173,15 @@ pub enum LaunchMethod {
     Open,
 }
 
+impl From<crate::wire::LaunchMethod> for LaunchMethod {
+    fn from(m: crate::wire::LaunchMethod) -> Self {
+        match m {
+            crate::wire::LaunchMethod::Exec => Self::Exec,
+            crate::wire::LaunchMethod::Open => Self::Open,
+        }
+    }
+}
+
 /// Configuration specific to the Windows Sandbox backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -212,6 +221,17 @@ pub enum IsolationSessionConfigurationId {
     Composable,
 }
 
+impl From<crate::wire::IsolationConfigurationId> for IsolationSessionConfigurationId {
+    fn from(id: crate::wire::IsolationConfigurationId) -> Self {
+        match id {
+            crate::wire::IsolationConfigurationId::Small => Self::Small,
+            crate::wire::IsolationConfigurationId::Medium => Self::Medium,
+            crate::wire::IsolationConfigurationId::Large => Self::Large,
+            crate::wire::IsolationConfigurationId::Composable => Self::Composable,
+        }
+    }
+}
+
 /// Configuration specific to the Isolation Session backend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -240,6 +260,14 @@ impl std::fmt::Debug for IsolationSessionUser {
             .field("upn", &self.upn)
             .field("wam_token", &"<redacted>")
             .finish()
+    }
+}
+
+impl From<crate::wire::IsolationUser> for IsolationSessionUser {
+    fn from(u: crate::wire::IsolationUser) -> Self {
+        // Destructure (no `..`) so a new wire field fails to compile until mapped.
+        let crate::wire::IsolationUser { upn, wam_token } = u;
+        Self { upn, wam_token }
     }
 }
 
@@ -574,6 +602,12 @@ pub struct ExecutionRequest {
     pub seatbelt: Option<SeatbeltConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
+    /// Whether the --allow-testing-features flag was passed. Gates testing-only,
+    /// deliberately-permissive helpers (currently `network.proxy.builtinTestServer`)
+    /// that must never activate from a stock production config. This is a distinct
+    /// axis from `experimental_enabled`: "experimental" means unstable/new, whereas
+    /// this means "not-for-production testing scaffolding".
+    pub testing_features_enabled: bool,
     /// Experimental feature configs (only applied when experimental_enabled is true).
     pub experimental: ExperimentalConfig,
     /// Dry-run mode: validate config and runner setup then return success
@@ -592,6 +626,11 @@ pub enum FailurePhase {
     LaunchFailed,
     /// The process was created but exited with a non-zero code.
     ProcessExited,
+    /// The process was force-terminated because it exceeded `scriptTimeout`.
+    /// Distinct from [`ProcessExited`] (it did not exit on its own) so callers
+    /// can detect a timeout uniformly across backends rather than inferring it
+    /// from `exit_code == -1` (which collides with other failures).
+    Timeout,
     /// The selected containment backend is unavailable on this host: the API is
     /// missing, or present but not usable (e.g. feature-disabled). Distinct from
     /// [`LaunchFailed`] so callers can fall back to a lower tier rather than

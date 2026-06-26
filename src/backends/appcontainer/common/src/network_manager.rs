@@ -28,20 +28,80 @@ pub enum DefaultPolicy {
     Block,
 }
 
+/// `RPC_E_CHANGED_MODE`: `CoInitializeEx` returns this when COM is already
+/// initialized on the calling thread with a *different* apartment model. The
+/// existing initialization is reused and must **not** be balanced by our own
+/// `CoUninitialize`.
+const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
+
+/// RAII guard for a per-call COM apartment on the **current** thread.
+///
+/// Every firewall operation creates one of these, does all of its COM work
+/// (`CoCreateInstance`, interface use, release) while it is alive, and lets it
+/// drop — running the matching `CoUninitialize` — before returning. Because no
+/// COM interface or apartment state is ever cached on [`NetworkManager`] across
+/// calls, teardown (`remove_firewall_rules`) can run on a *different* thread
+/// than setup (`apply_firewall_rules`) without ever using an interface from
+/// another apartment or pairing `CoInitializeEx`/`CoUninitialize` across
+/// threads. That self-containment is what makes the `unsafe impl Send` on the
+/// owning sandbox handle sound.
+struct ComApartment {
+    /// Whether *this* guard performed the initialization that it must balance
+    /// with `CoUninitialize`. `false` when COM was already initialized on this
+    /// thread under a different model (`RPC_E_CHANGED_MODE`).
+    owns_init: bool,
+}
+
+impl ComApartment {
+    /// Join (or initialize) an apartment-threaded COM apartment for the current
+    /// thread. `S_OK`/`S_FALSE` both count as an initialization this guard must
+    /// balance; `RPC_E_CHANGED_MODE` reuses an existing apartment without
+    /// taking ownership of its teardown.
+    fn new() -> Result<Self, WxcError> {
+        // SAFETY: `CoInitializeEx` is always safe to call; the matching
+        // `CoUninitialize` runs in `Drop` on this same thread when we own it.
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_ok() {
+            Ok(Self { owns_init: true })
+        } else if hr.0 as u32 == RPC_E_CHANGED_MODE {
+            Ok(Self { owns_init: false })
+        } else {
+            Err(WxcError::Firewall(format!(
+                "CoInitializeEx failed: 0x{:08X}",
+                hr.0 as u32
+            )))
+        }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.owns_init {
+            // SAFETY: balances the `CoInitializeEx` in `new` on the same thread.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
 pub struct NetworkManager {
-    fw_policy: Option<INetFwPolicy2>,
     created_rule_names: Vec<String>,
-    com_initialized: bool,
     wsa_initialized: bool,
     proxy_coordinator: ProxyCoordinator,
+}
+
+/// Invariant context for creating firewall rules within a single
+/// `apply_firewall_rules` call: the firewall interface (valid only for the
+/// current COM apartment / thread) and the AppContainer principal the rules are
+/// scoped to. Bundled so the rule helpers stay within the argument-count lint.
+struct RuleContext<'a> {
+    fw_policy: &'a INetFwPolicy2,
+    principal_id: &'a str,
 }
 
 impl NetworkManager {
     pub fn new() -> Self {
         Self {
-            fw_policy: None,
             created_rule_names: Vec::new(),
-            com_initialized: false,
             wsa_initialized: false,
             proxy_coordinator: ProxyCoordinator::new(),
         }
@@ -84,7 +144,13 @@ impl NetworkManager {
             return Ok(true);
         }
 
-        self.initialize_firewall(logger)?;
+        // Open a COM apartment and create the firewall interface for the
+        // duration of *this* call only — nothing is cached on `self`. See
+        // [`ComApartment`] for why this self-containment matters.
+        let _com = ComApartment::new()?;
+        let fw_policy: INetFwPolicy2 =
+            unsafe { CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|e| WxcError::Firewall(format!("Failed to create NetFwPolicy2: {e}")))?;
         self.ensure_wsa_initialized(logger)?;
 
         let now = std::time::SystemTime::now()
@@ -100,43 +166,35 @@ impl NetworkManager {
             sanitized_principal_id.truncate(MAX_PRINCIPAL_ID_LEN);
         }
         let rule_prefix = format!("WXC_{}_{}", sanitized_principal_id, millis);
+        let ctx = RuleContext {
+            fw_policy: &fw_policy,
+            principal_id,
+        };
 
         if default_policy == DefaultPolicy::Block {
             let block_all_name = format!("{}_BlockAll", rule_prefix);
-            if !self.create_rule(
-                &block_all_name,
-                principal_id,
-                NET_FW_ACTION_BLOCK,
-                "",
-                logger,
-            )? {
+            if !self.create_rule(&ctx, &block_all_name, NET_FW_ACTION_BLOCK, "", logger)? {
                 return Ok(false);
             }
             self.created_rule_names.push(block_all_name);
             self.process_host_list(
+                &ctx,
                 &policy.allowed_hosts,
                 &rule_prefix,
-                principal_id,
                 NET_FW_ACTION_ALLOW,
                 "Allow",
                 logger,
             )?;
         } else {
             let allow_all_name = format!("{}_AllowAll", rule_prefix);
-            if !self.create_rule(
-                &allow_all_name,
-                principal_id,
-                NET_FW_ACTION_ALLOW,
-                "*",
-                logger,
-            )? {
+            if !self.create_rule(&ctx, &allow_all_name, NET_FW_ACTION_ALLOW, "*", logger)? {
                 return Ok(false);
             }
             self.created_rule_names.push(allow_all_name);
             self.process_host_list(
+                &ctx,
                 &policy.blocked_hosts,
                 &rule_prefix,
-                principal_id,
                 NET_FW_ACTION_BLOCK,
                 "Block",
                 logger,
@@ -148,9 +206,9 @@ impl NetworkManager {
 
     fn process_host_list(
         &mut self,
+        ctx: &RuleContext,
         hosts: &[String],
         rule_prefix: &str,
-        principal_id: &str,
         action: NET_FW_ACTION,
         action_name: &str,
         logger: &mut Logger,
@@ -169,7 +227,7 @@ impl NetworkManager {
             };
 
             let rule_name = format!("{}_{}_{}", rule_prefix, action_name, index);
-            match self.create_rule(&rule_name, principal_id, action, &ip_address, logger) {
+            match self.create_rule(ctx, &rule_name, action, &ip_address, logger) {
                 Ok(true) => {
                     self.created_rule_names.push(rule_name);
                 }
@@ -236,13 +294,19 @@ impl NetworkManager {
     }
 
     pub fn remove_firewall_rules(&mut self, logger: &mut Logger) -> Result<bool, WxcError> {
-        let fw_policy = match &self.fw_policy {
-            Some(p) => p.clone(),
-            None => {
-                logger.log_line("Firewall policy not initialized");
-                return Ok(false);
-            }
-        };
+        if self.created_rule_names.is_empty() {
+            return Ok(true);
+        }
+
+        // Re-acquire a fresh firewall interface in its own apartment on the
+        // current thread. Windows Firewall rules persist by name independently
+        // of the COM client that created them, so removal does not need (and
+        // must not reuse) the interface or apartment `apply_firewall_rules`
+        // used — which may have run on a different thread. See [`ComApartment`].
+        let _com = ComApartment::new()?;
+        let fw_policy: INetFwPolicy2 =
+            unsafe { CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|e| WxcError::Firewall(format!("Failed to create NetFwPolicy2: {e}")))?;
 
         let rules = unsafe { fw_policy.Rules() }
             .map_err(|e| WxcError::Firewall(format!("Failed to get firewall rules: {}", e)))?;
@@ -255,60 +319,10 @@ impl NetworkManager {
             }
         }
         self.created_rule_names.clear();
+        if !all_success {
+            logger.log_line("Warning: some firewall rules could not be removed");
+        }
         Ok(all_success)
-    }
-
-    fn initialize_firewall(&mut self, _logger: &mut Logger) -> Result<(), WxcError> {
-        if self.fw_policy.is_some() {
-            return Ok(());
-        }
-
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        // CoInitializeEx returns HRESULT directly in windows 0.58
-        if hr.is_ok() {
-            self.com_initialized = true;
-        } else {
-            // RPC_E_CHANGED_MODE (0x80010106) means COM is already initialized
-            // with a different threading model — that's acceptable.
-            let code = hr.0 as u32;
-            if code == 0x80010106 {
-                self.com_initialized = false;
-            } else {
-                return Err(WxcError::Firewall(format!(
-                    "CoInitializeEx failed: 0x{:08X}",
-                    code
-                )));
-            }
-        }
-
-        match unsafe {
-            CoCreateInstance::<_, INetFwPolicy2>(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER)
-        } {
-            Ok(policy) => {
-                self.fw_policy = Some(policy);
-                Ok(())
-            }
-            Err(e) => {
-                if self.com_initialized {
-                    unsafe { CoUninitialize() };
-                    self.com_initialized = false;
-                }
-                Err(WxcError::Firewall(format!(
-                    "Failed to create NetFwPolicy2: {}",
-                    e
-                )))
-            }
-        }
-    }
-
-    fn cleanup_firewall(&mut self) {
-        if let Some(policy) = self.fw_policy.take() {
-            drop(policy);
-        }
-        if self.com_initialized {
-            unsafe { CoUninitialize() };
-            self.com_initialized = false;
-        }
     }
 
     fn ensure_wsa_initialized(&mut self, _logger: &mut Logger) -> Result<(), WxcError> {
@@ -336,18 +350,13 @@ impl NetworkManager {
 
     fn create_rule(
         &self,
+        ctx: &RuleContext,
         rule_name: &str,
-        principal_id: &str,
         action: NET_FW_ACTION,
         remote_addresses: &str,
         _logger: &mut Logger,
     ) -> Result<bool, WxcError> {
-        let fw_policy = self
-            .fw_policy
-            .as_ref()
-            .ok_or_else(|| WxcError::Firewall("Firewall policy not initialized".into()))?;
-
-        let rules = unsafe { fw_policy.Rules() }
+        let rules = unsafe { ctx.fw_policy.Rules() }
             .map_err(|e| WxcError::Firewall(format!("Failed to get firewall rules: {}", e)))?;
 
         let rule: windows::Win32::NetworkManagement::WindowsFirewall::INetFwRule =
@@ -366,7 +375,7 @@ impl NetworkManager {
                 .map_err(|e| WxcError::Firewall(format!("put_Description failed: {}", e)))?;
 
             rule3
-                .SetLocalAppPackageId(&BSTR::from(principal_id))
+                .SetLocalAppPackageId(&BSTR::from(ctx.principal_id))
                 .map_err(|e| WxcError::Firewall(format!("put_LocalAppPackageId failed: {}", e)))?;
 
             rule.SetDirection(NET_FW_RULE_DIR_OUT)
@@ -411,7 +420,10 @@ impl Default for NetworkManager {
 
 impl Drop for NetworkManager {
     fn drop(&mut self) {
-        self.cleanup_firewall();
+        // No COM state is cached across calls (each firewall op is
+        // apartment-self-contained), so there is nothing COM-related to undo
+        // here. Only the process-global Winsock refcount — which is
+        // thread-agnostic — needs balancing.
         self.cleanup_wsa();
     }
 }
@@ -528,9 +540,7 @@ mod tests {
     #[test]
     fn test_default_creates_new_manager() {
         let mgr = NetworkManager::default();
-        assert!(mgr.fw_policy.is_none());
         assert!(mgr.created_rule_names.is_empty());
-        assert!(!mgr.com_initialized);
         assert!(!mgr.wsa_initialized);
     }
 

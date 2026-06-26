@@ -312,7 +312,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should include filesystem with clearPolicyOnExit for microvm when policy has paths', () => {
+    it('should map clearPolicyOnExit to lifecycle.preservePolicy for microvm when policy has paths', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
@@ -322,13 +322,15 @@ describe('buildSandboxPayload', () => {
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
         assert.strictEqual(payload.containment, 'microvm');
         assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['/tmp']);
-        assert.strictEqual(payload.filesystem!.clearPolicyOnExit, true);
+        // clearPolicyOnExit is not a wire `filesystem` field; the intent is
+        // carried canonically by lifecycle.preservePolicy (default clear => not preserved).
+        assert.strictEqual(payload.lifecycle!.preservePolicy, false);
       } finally {
         restore();
       }
     });
 
-    it('should honor clearPolicyOnExit false for microvm', () => {
+    it('should honor clearPolicyOnExit false for microvm (via lifecycle.preservePolicy)', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
@@ -336,7 +338,7 @@ describe('buildSandboxPayload', () => {
           filesystem: { readwritePaths: ['/tmp'], clearPolicyOnExit: false },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.filesystem!.clearPolicyOnExit, false);
+        assert.strictEqual(payload.lifecycle!.preservePolicy, true);
       } finally {
         restore();
       }
@@ -1138,6 +1140,60 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       const decoded = Buffer.from(args[idx + 1], 'base64').toString('utf-8');
       const envelope = JSON.parse(decoded);
       assert.strictEqual(envelope.containment, 'appcontainer');
+    });
+  });
+
+  describe('builtinTestServer testing-features gate', () => {
+    it('forwards --allow-testing-features when the caller opts in via allowTestingFeatures', () => {
+      const config: ContainerConfig = {
+        version: '0.5.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hi' },
+        network: { proxy: { builtinTestServer: true } },
+      };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+        allowTestingFeatures: true,
+      });
+      assert.ok(
+        args.includes('--allow-testing-features'),
+        'expected --allow-testing-features to be forwarded',
+      );
+    });
+
+    it('throws when builtinTestServer is used without allowTestingFeatures', () => {
+      const config: ContainerConfig = {
+        version: '0.5.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hi' },
+        network: { proxy: { builtinTestServer: true } },
+      };
+      assert.throws(
+        () =>
+          resolveExecutableAndArgs(config, {
+            executablePath: fakeExe,
+            skipPlatformCheck: true,
+          }),
+        { message: /allowTestingFeatures: true/ },
+      );
+    });
+
+    it('does not forward --allow-testing-features for a non-test proxy', () => {
+      const config: ContainerConfig = {
+        version: '0.5.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hi' },
+        network: { proxy: { url: 'http://localhost:8080' } },
+      };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      });
+      assert.ok(
+        !args.includes('--allow-testing-features'),
+        'did not expect --allow-testing-features for a url proxy',
+      );
     });
   });
 });

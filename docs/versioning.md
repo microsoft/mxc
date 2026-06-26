@@ -104,11 +104,13 @@ lxc-exec config.json --experimental
 wxc-exec.exe --experimental config.json
 ```
 
-When `--experimental` is passed:
-- The parser reads the `experimental` section from the config JSON
-- Features from the experimental section are applied alongside the stable features
-- Without the flag, the `experimental` section is **silently ignored** — no error,
-  just skipped
+The parser **always** parses and preserves the `experimental` section regardless
+of the flag; parsing is flag-independent. The `--experimental` flag only sets
+`request.experimental_enabled`:
+- When set, the runners apply the parsed experimental features alongside the
+  stable features
+- When unset, `experimental_enabled` is false and the runners **ignore** the
+  parsed experimental section — no error, the features are just not applied
 
 **2. SDK (`@microsoft/mxc-sdk`):**
 ```typescript
@@ -134,20 +136,25 @@ The SDK passes `--experimental` to the underlying binary when this option is set
 Developers adding experimental features follow this pattern. For a detailed
 step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 
-**In `config_parser.rs`:**
+**In `wire.rs` (the parse + schema source of truth):**
 ```rust
-struct RawConfig {
+pub struct MxcConfig {
     // ... stable fields ...
-    experimental: Option<RawExperimental>,
+    pub experimental: Option<Experimental>,
 }
 
-struct RawExperimental {
-    compartments: Option<RawCompartments>,
-    #[serde(rename = "gpuIsolation")]
-    gpu_isolation: Option<RawGpuIsolation>,
+// The `experimental` block is intentionally permissive (no deny_unknown_fields)
+// so in-flux feature shapes stay forward-compatible.
+pub struct Experimental {
+    pub compartments: Option<Compartments>,
+    pub gpu_isolation: Option<GpuIsolation>,
     // ... add new experimental features here ...
 }
 ```
+
+After editing `wire.rs`, regenerate the schema
+(`cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json`)
+— do not hand-edit the generated schema.
 
 **In `models.rs`:**
 ```rust
@@ -162,6 +169,9 @@ pub struct ExecutionRequest {
     pub experimental: ExperimentalConfig,
 }
 ```
+
+**In `config_parser.rs`:** map the wire `Experimental` field to the domain
+`ExperimentalConfig` inside `convert_wire_config` (there is no `Raw*` struct).
 
 **In the runner (e.g., `appcontainer.rs`):**
 ```rust
@@ -181,10 +191,13 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 ```
 
 **Promotion process:** When an experimental feature is ready to ship:
-1. Move the property from `experimental` to a top-level property in the schema
-   (e.g., `experimental.gpuIsolation` → `gpuIsolation`)
+1. Move the field from the wire `Experimental` struct to top-level `MxcConfig`
+   (e.g., `experimental.gpuIsolation` → top-level `gpuIsolation`), then
+   regenerate the schema with `mxc_schema_gen`
 2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
-3. Move the field from `RawExperimental` to `RawConfig`
+3. Map the now-top-level wire field in `convert_wire_config`; add
+   `deny_unknown_fields` to the wire struct so the promoted stable surface is
+   closed
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version
 6. Add a parser error for configs still referencing the feature under
@@ -199,41 +212,16 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
    - In `wxc_common::config_parser`, rename the matching entry in
      `present_backend_sections` and `owned_backend_section` from
      `experimental.<name>` to `<name>`.
-   - In the JSON schema's top-level `allOf`, rekey the matching `if/then`
-     clause so it checks the new top-level section instead of
-     `experimental.<name>`.
 
-   Concretely, if `wslc` graduates the clause changes from
+   The single-backend-section rule is a cross-field constraint enforced by the
+   parser (the trust boundary), **not** by the JSON schema — the generated
+   schema intentionally omits the old top-level `allOf` `if/then` clauses. So
+   there is no schema edit for this step; the parser change is sufficient.
 
-   ```json
-   {
-     "if": {
-       "required": ["experimental"],
-       "properties": { "experimental": { "required": ["wslc"] } }
-     },
-     "then": {
-       "required": ["containment"],
-       "properties": { "containment": { "enum": ["wslc"] } }
-     }
-   }
-   ```
-
-   to
-
-   ```json
-   {
-     "if": { "required": ["wslc"] },
-     "then": {
-       "required": ["containment"],
-       "properties": { "containment": { "enum": ["wslc"] } }
-     }
-   }
-   ```
-
-   The `then` branch is unchanged: a backend section requires `containment`
-   to be set, and the value must be either the concrete backend name or any
-   abstract intent that resolves to it on at least one platform (for
-   example, `processContainer` accepts both `processcontainer` and `process`).
+   The rule itself is unchanged: a backend section requires `containment` to be
+   set, and the value must be either the concrete backend name or any abstract
+   intent that resolves to it on at least one platform (for example,
+   `processContainer` accepts both `processcontainer` and `process`).
 
 ## Data Flow
 
@@ -262,6 +250,77 @@ MXC calls OS: CreateProcessInSandbox(flatbuffer)
         ▼
 Process runs in sandbox
 ```
+
+## Wire Model vs Runtime Model
+
+MXC deliberately keeps **two** Rust representations of a config with a mapping at
+the parse boundary, rather than one shared type:
+
+- **Wire model** (`wxc_common::wire::MxcConfig`) — a faithful 1:1 mirror of the
+  config JSON: every field `Option`, `camelCase`, `experimental` carried as a raw
+  `serde_json::Value`, no invariants enforced. It is the parser's deserialization
+  target **and** the single source of truth the JSON schema (via schemars) and the
+  SDK TypeScript types are generated from.
+- **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
+  validated, defaults-applied, invariant-rich model the backends consume:
+  abstract containment resolved to a concrete backend, `process.commandLine`
+  reshaped to `script_code`, enums resolved to domain enums, required fields no
+  longer `Option`.
+
+The parser (`config_parser`) is the one validate/normalize boundary between them;
+trivial enum/struct conversions are `From` impls beside the domain type, and the
+larger reshaping lives in `convert_wire_config`.
+
+### Why two layers (pros)
+
+- **One validate/normalize boundary.** Defaults, invariant enforcement,
+  abstract→concrete backend resolution, and field reshaping all happen in exactly
+  one place; backends receive a type whose invariants already hold.
+- **Parse, don't validate.** The domain type makes illegal states
+  unrepresentable (required fields non-`Option`, enums resolved, containment
+  always concrete), so a backend never re-checks "is this set / known?".
+- **The wire model stays a pure schema/DTO source.** Being exactly the JSON shape
+  is what makes schemars-from-types and SDK TS codegen clean — and it is what the
+  per-field stability attributes (stable/experimental/deprecated, for the
+  stable-vs-dev schema views and the promotion guard) hang on. A merged type would
+  entangle schema-generation concerns with runtime fields.
+- **Decoupled evolution.** The wire format can change (rename, alias, restructure
+  `experimental`) without touching backend code, and vice-versa; the blast radius
+  of either is bounded by the parser.
+- **Backends don't couple to JSON quirks** — camelCase renames, deprecated-spelling
+  serde aliases, the raw-`Value` experimental block, `$schema`/`_comment`
+  passthrough — none leak into runner code.
+
+### Costs (cons)
+
+- **Boilerplate.** Two definitions plus a mapping for each object; adding a field
+  touches the wire struct, the domain struct, and the parser (`From` impls only
+  soften the trivial cases).
+- **Internal drift risk.** The two Rust types can fall out of sync. This is
+  mitigated by destructuring wire structs without `..` in conversions (a new wire
+  field then fails to compile until mapped), but that is a convention, not a
+  guarantee everywhere.
+- **Indirection.** Tracing one field means hopping wire struct → mapping → domain
+  struct → runner.
+
+### Why the split is the right call for MXC
+
+It earns its keep because of three load-bearing facts: (a) the wire model is
+*also* the schema + SDK codegen source, a job that wants a pure JSON-shaped type;
+(b) there is genuine wire↔runtime impedance (containment resolution, field
+reshaping, defaults, deprecated-spelling aliases) that must live somewhere, and
+concentrating it in the parser beats scattering it across backends; (c) the
+per-field stability attributes need the wire model as a distinct annotatable
+layer. For a config that was a thin pass-through, a single layer would be the
+better call — here it is not.
+
+The real costs (boilerplate, internal drift) are addressable **without merging**
+— e.g. a derive/macro for the trivial wire→domain `From` impls, or a compile-time
+totality check on the mapping — which captures most of the single-layer ergonomics
+while preserving the separation the schema/SDK codegen and stability-attribute work
+depend on. No planned phase merges the two models; 2B already reduced three layers
+(`Raw*` → … → domain) to two (wire → domain), and a single layer is explicitly not
+on the roadmap.
 
 ## Version Negotiation
 
@@ -355,11 +414,15 @@ mirrors that behavior. We do *not* gate alias acceptance on schema version (i.e.
    removal in a future minor release; gating buys little and costs review
    complexity in every layer that re-checks containment.
 
-**Observability.** Each legacy-value encounter emits a one-line deprecation hint
-via the existing diagnostic channel (Rust: `Logger`; TypeScript SDK: `diagLog`,
-dedup'd per legacy value per process). The hint names the canonical replacement.
-No throw, no stderr write — the deprecation is observable only to callers who
-opt into the diagnostic stream.
+**Observability.** Legacy *value* aliases are mapped to their canonical form by
+serde (`#[serde(alias = "...")]`) during deserialization, so the Rust parser no
+longer emits a per-value deprecation hint for them — serde normalizes the alias
+before any parser code runs, and the wire model is the trust boundary. Aliases
+are still accepted; they are simply silent in the native parser. The TypeScript
+SDK validator may still surface a deprecation hint via `diagLog` where it
+inspects the raw config before serialization. (Earlier revisions emitted a
+`Logger` line from the hand-written parser for each legacy value; that path was
+removed when the parser was rewired onto the wire model.)
 
 **Removal.** When an alias is removed in a future release, the change goes
 through the same promotion-style migration: a single release that turns the

@@ -9,6 +9,20 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
     if request.script_code.is_empty() {
         return Err(ScriptResponse::error("Script content must not be empty."));
     }
+
+    // Enforce the testing-only-features gate centrally so it applies uniformly
+    // to all backends — every backend runs `validate_common` before executing.
+    // Currently this gates `network.proxy.builtinTestServer` (a deliberately-
+    // permissive test proxy); see `ExecutionRequest::testing_features_enabled`
+    // for the rationale behind the dedicated `--allow-testing-features` axis.
+    if request.policy.network_proxy.builtin_test_server && !request.testing_features_enabled {
+        return Err(ScriptResponse::error(
+            "network.proxy.builtinTestServer is a testing-only feature and requires the \
+             --allow-testing-features flag. For production, point network.proxy at a real \
+             HTTP proxy via 'localhost' or 'url'.",
+        ));
+    }
+
     Ok(())
 }
 
@@ -85,5 +99,35 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_exec_common(&req).is_ok());
+    }
+
+    #[test]
+    fn rejects_builtin_test_server_without_testing_features() {
+        let mut req = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+        req.policy.network_proxy.builtin_test_server = true;
+        req.testing_features_enabled = false;
+
+        let err = validate_common(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("builtinTestServer")
+                && err.error_message.contains("--allow-testing-features"),
+            "expected testing-gate error, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn accepts_builtin_test_server_with_testing_features() {
+        let mut req = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+        req.policy.network_proxy.builtin_test_server = true;
+        req.testing_features_enabled = true;
+
+        assert!(validate_common(&req).is_ok());
     }
 }

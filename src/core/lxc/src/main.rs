@@ -19,6 +19,8 @@ use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
 #[cfg(feature = "microvm")]
 use nanvix_runner::NanVixScriptRunner;
+#[cfg(target_os = "linux")]
+use wxc_common::sandbox_process::Runner;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -50,6 +52,12 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Allow testing-only features that must never run in production, currently
+    /// `network.proxy.builtinTestServer` (a bundled, deliberately-permissive
+    /// test HTTP proxy). Distinct from --experimental.
+    #[arg(long = "allow-testing-features")]
+    allow_testing_features: bool,
 
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
@@ -204,6 +212,7 @@ fn main() {
     };
 
     request.experimental_enabled = cli.experimental;
+    request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
     log_request(&request, &mut logger);
@@ -254,7 +263,7 @@ fn main() {
         ContainmentBackend::Bubblewrap => {
             #[cfg(target_os = "linux")]
             {
-                Box::new(BubblewrapScriptRunner::new())
+                Box::new(Runner::new(BubblewrapScriptRunner::new()))
             }
             #[cfg(not(target_os = "linux"))]
             {

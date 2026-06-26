@@ -16,8 +16,5 @@
     },
     "network": {
         "defaultPolicy": "block"
-    },
-    "seatbelt": {
-        "mode": "exec"
     }
 }

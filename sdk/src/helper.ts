@@ -267,7 +267,28 @@ export function resolveExecutableAndArgs(
     }
   }
 
-  return resolveBinaryAndCommonArgs(JSON.stringify(config), options);
+  // `network.proxy.builtinTestServer` is testing-only, deliberately-permissive
+  // scaffolding that the native binary gates behind `--allow-testing-features`.
+  // Mirror that fail-closed posture at the SDK boundary: the caller must opt in
+  // explicitly via `allowTestingFeatures` (a distinct axis from `experimental`).
+  // Forwarding the flag automatically whenever the policy used the feature would
+  // make the gate meaningless — requesting the dangerous feature would silently
+  // enable the gate that is supposed to guard it.
+  const proxy = config.network?.proxy as { builtinTestServer?: boolean } | undefined;
+  const usesBuiltinTestServer = proxy?.builtinTestServer === true;
+  if (usesBuiltinTestServer && !options.allowTestingFeatures) {
+    throw new Error(
+      "network.proxy.builtinTestServer is a testing-only feature. Set " +
+      "'allowTestingFeatures: true' in SandboxSpawnOptions to enable it. For " +
+      "production, point network.proxy at a real HTTP proxy via 'localhost' or 'url'.",
+    );
+  }
+
+  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(config), options);
+  if (usesBuiltinTestServer) {
+    resolved.args.push('--allow-testing-features');
+  }
+  return resolved;
 }
 
 /**

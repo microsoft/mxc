@@ -75,11 +75,13 @@ A backend-specific config can be added later under `ExperimentalConfig` if neede
 
 ### 3. Config Parser Changes
 
-**File:** `src/core/wxc_common/src/config_parser.rs`
+**File:** `src/core/wxc_common/src/wire.rs` and `config_parser.rs`
 
-- Add `RawBubblewrap` struct (placeholder — empty for now, reserved for future backend-specific fields)
-- Add `bubblewrap` field to `RawExperimental` (optional, for future use)
-- Add `"bubblewrap"` arm to containment match in `convert_raw_config_inner()`
+- Add a `Bubblewrap` variant to the wire `Containment` enum (or rely on the
+  abstract `process` intent resolving to `Bubblewrap` on Linux)
+- Add any backend-specific fields to the wire model (under `experimental` while
+  experimental), then regenerate the schema with `mxc_schema_gen`
+- Map the new `containment` value in `map_wire_containment`
 - Optionally: make `"process"` resolve to `Bubblewrap` on Linux when LXC is unavailable
   (or add a `"process"` → bwrap fallback chain)
 
@@ -337,7 +339,8 @@ policy gap is a design decision, not an implementation challenge.
 - `src/core/lxc/Cargo.toml` — add `bwrap_common` dependency
 - `src/core/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
 - `src/core/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `ExecutionRequest`
-- `src/core/wxc_common/src/config_parser.rs` — add `RawBubblewrap`, parsing, containment match arm
+- `src/core/wxc_common/src/wire.rs` — add the `Bubblewrap` containment variant (and any backend fields), then regenerate the schema
+- `src/core/wxc_common/src/config_parser.rs` — map the new containment value in `map_wire_containment`
 
 ### Schema (modify)
 - `schemas/dev/mxc-config.schema.0.6.0-dev.json` — add `"bubblewrap"` to enum, add config block

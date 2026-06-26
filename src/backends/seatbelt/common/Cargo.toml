@@ -12,7 +12,3 @@ wxc_common = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
-# Pty bridge is shared with the LXC backend via mxc_pty; that crate owns
-# the openpty + pre_exec (setsid + TIOCSCTTY) plumbing and the libc/nix
-# deps that go with it.
-mxc_pty = { workspace = true }

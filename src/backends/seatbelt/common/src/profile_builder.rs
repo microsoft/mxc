@@ -59,11 +59,11 @@ pub fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
     // Filesystem — read-only system paths every process needs.
     out.push_str(SYSTEM_READ_ALLOW);
 
-    // Pseudo-terminal access — the seatbelt runner attaches the inner
-    // shell to a freshly-allocated pty (see `mxc_pty::run_with_pty`) so
-    // callers can stream output and the shell sees a real TTY. Without
-    // these rules, `isatty()` / `tcgetattr()` / `ttyname()` fail with
-    // EPERM because the kernel calls block on the secondary fd.
+    // Pseudo-terminal access — when the executor binary runs under a pty
+    // the sandboxed shell inherits that TTY, so it sees a real terminal
+    // and calls `isatty()` / `tcgetattr()` / `ttyname()` against it.
+    // Without these rules, those calls fail with EPERM because the
+    // kernel calls block on the secondary fd.
     out.push_str(TTY_ALLOW);
 
     // Policy-derived allow rules.
@@ -136,7 +136,7 @@ const SYSTEM_READ_ALLOW: &str = "\
 /// at startup, and read access to `/dev/fd` for the `/dev/stdout` etc.
 /// indirection some tools use.
 const TTY_ALLOW: &str = "\
-;; --- pseudo-terminal access (pty bridge in mxc_pty::run_with_pty) ---
+;; --- pseudo-terminal access (inherited TTY when run under a pty) ---
 (allow file-read* file-write* file-ioctl
     (literal \"/dev/tty\")
     (regex #\"^/dev/ttys[0-9]+$\"))
@@ -422,7 +422,7 @@ fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
 
 /// Expand a leading `~` or `~/` to the current user's home directory.
 /// Returns an error if `HOME` is not set and the path requires expansion.
-fn expand_tilde(path: &str) -> Result<String, String> {
+pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
     if path == "~" || path.starts_with("~/") {
         let home = std::env::var("HOME").map_err(|_| {
             format!("HOME environment variable not set; cannot expand '{path}' in seatbelt profile")

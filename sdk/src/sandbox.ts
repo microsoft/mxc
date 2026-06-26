@@ -105,13 +105,10 @@ function buildBubblewrapConfig(
  */
 function buildLinuxProcessConfig(
     config: ContainerConfig,
-    containerId: string,
 ): ContainerConfig {
     config.lxc = {
-        containerName: containerId,
         distribution: 'alpine',
         release: '3.23',
-        destroyOnExit: true,
     };
     applyLinuxNetworkPolicy(config);
     return config;
@@ -140,7 +137,6 @@ function buildDarwinProcessConfig(
 function buildProcessBaseContainerConfig(
     config: ContainerConfig,
     policy: SandboxPolicy,
-    containerId: string,
 ): ContainerConfig {
     const capabilities: string[] = [];
     if (policy.network?.allowOutbound) {
@@ -151,7 +147,6 @@ function buildProcessBaseContainerConfig(
     }
 
     config.processContainer = {
-        name: containerId,
         leastPrivilege: false,
         capabilities,
         ui: {
@@ -198,7 +193,6 @@ function buildMicroVmConfig(
             readwritePaths: policy.filesystem?.readwritePaths,
             readonlyPaths: policy.filesystem?.readonlyPaths,
             deniedPaths: policy.filesystem?.deniedPaths,
-            clearPolicyOnExit: policy.filesystem?.clearPolicyOnExit ?? true,
         };
     }
     config.containment = 'microvm';
@@ -344,7 +338,7 @@ export function createConfigFromPolicy(
     if (containment === 'lxc') {
         diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
         config.containment = 'lxc';
-        return buildLinuxProcessConfig(config, containerId);
+        return buildLinuxProcessConfig(config);
     }
 
     if (containment === 'process') {
@@ -369,7 +363,7 @@ export function createConfigFromPolicy(
             return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
-        return buildProcessBaseContainerConfig(config, policy, containerId);
+        return buildProcessBaseContainerConfig(config, policy);
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
@@ -412,6 +406,17 @@ export interface SandboxSpawnOptions {
    * Enable experimental features
    */
   experimental?: boolean;
+
+  /**
+   * Allow testing-only, deliberately-permissive features that must never run
+   * in production — currently `network.proxy.builtinTestServer` (a bundled
+   * test HTTP proxy with no auth, no body limits, minimal hop-by-hop header
+   * handling). This is a distinct axis from {@link experimental}: a policy
+   * that requests such a feature is rejected unless this is explicitly set,
+   * keeping the gate fail-closed at the SDK boundary (it maps to the native
+   * `--allow-testing-features` flag).
+   */
+  allowTestingFeatures?: boolean;
 
   /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.

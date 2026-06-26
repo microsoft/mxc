@@ -1,0 +1,27 @@
+[package]
+name = "mxc-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Importable library for starting MXC sandboxes in-process (no pty, streaming stdio)."
+
+[lib]
+name = "mxc_sdk"
+path = "src/lib.rs"
+
+[dependencies]
+wxc_common.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+appcontainer_common = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bwrap_common = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+seatbelt_common = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = { workspace = true }

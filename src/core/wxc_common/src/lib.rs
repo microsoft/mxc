@@ -14,12 +14,17 @@ pub mod logger;
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
+pub mod sandbox_process;
 pub mod script_runner;
 pub mod state_aware_backend;
 pub mod state_aware_dispatch;
 pub mod state_aware_request;
 pub mod ui_policy;
 pub mod validator;
+
+// Dedicated well-typed wire model. It is the parser's deserialization target;
+// the JSON Schema is generated from it under the `schema-gen` feature.
+pub mod wire;
 
 // Thin Windows-only helpers that are not backend-specific. Backend
 // runners live in dedicated crates under `backends/`; only utilities
@@ -33,6 +38,10 @@ pub mod filesystem_dacl;
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod string_util;
+
+// Unix-specific modules (shared by the Seatbelt and Bubblewrap backends).
+#[cfg(unix)]
+pub mod interruptible_reader;
 
 // Linux-specific modules
 #[cfg(target_os = "linux")]

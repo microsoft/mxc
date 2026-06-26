@@ -4,6 +4,7 @@ members = [
     "core/wxc_common",
     "core/lxc",
     "core/mxc_darwin",
+    "core/mxc-sdk",
     "core/mxc_pty",
     "core/mxc_build_common",
     "core/generated/base_container_specification",
@@ -30,6 +31,7 @@ members = [
     "testing/linux_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
+    "tools/mxc_schema_gen",
 ]
 exclude = ["testing/fuzz"]
 resolver = "3"
@@ -101,6 +103,7 @@ libc = "0.2"
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
 lxc_common = { path = "backends/lxc/common" }
 bwrap_common = { path = "backends/bubblewrap/common" }
+seatbelt_common = { path = "backends/seatbelt/common" }
 wslc_common = { path = "backends/wslc/common" }
 isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 mxc_pty = { path = "core/mxc_pty" }

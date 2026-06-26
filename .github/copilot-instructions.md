@@ -109,7 +109,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### Config flow
 
-1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into intermediate `Raw*` structs → validates and maps to `ExecutionRequest` (the internal execution model in `models.rs`)
+1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into the typed wire model (`wxc_common::wire`) → validates and maps to `ExecutionRequest` (the internal execution model in `models.rs`)
 2. `ExecutionRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
 3. The appropriate `ScriptRunner` implementation executes the process and returns `ScriptResponse`
 
@@ -122,7 +122,7 @@ The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (n
 ### Schema system
 
 - **Stable schemas**: released, immutable schemas live in [`schemas/stable/`](../schemas/stable) (one file per released version, plus a `-strict` view) — never edit them after release.
-- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev).
+- **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev). It is **generated** from the Rust wire model (`src/core/wxc_common/src/wire.rs`) by the `mxc_schema_gen` tool — **do not hand-edit it**. To change the dev schema, edit the wire model and regenerate with `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`. `scripts/versioning/check-schema-codegen.js` is a CI gate that regenerates and fails if the committed schema drifts. See [`docs/schema-codegen.md`](../docs/schema-codegen.md).
 - **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file. See [`docs/versioning.md`](../docs/versioning.md) for the full design.
 - Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
@@ -162,8 +162,8 @@ State-aware lifecycle:
 
 New features go under the `experimental` JSON section and are only active when `--experimental` is passed. See `docs/authoring-a-new-feature.md` for the full checklist. The pattern:
 
-1. Add the property schema to `schemas/dev/` under `experimental`
-2. Add Rust structs to `models.rs` (`ExperimentalConfig`) and `config_parser.rs` (`RawExperimental`)
+1. Add the field to the Rust wire model (`src/core/wxc_common/src/wire.rs`) under the `Experimental` section, then regenerate the dev schema (`cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`) — do not hand-edit the generated schema
+2. Add the matching field to the wire model's `Experimental` struct (`src/core/wxc_common/src/wire.rs`) and the domain `ExperimentalConfig` in `models.rs`, then map wire→domain in `config_parser.rs` (use `From` impls beside the domain type for trivial enum/struct conversions)
 3. Guard execution behind `if request.experimental_enabled` in the runner
 4. Never modify files in `schemas/stable/` — those are immutable release artifacts
 
@@ -173,7 +173,7 @@ The workspace is organized into five top-level directories under `src/`:
 
 | Directory | Purpose | Examples |
 |-----------|---------|----------|
-| `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
+| `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc-sdk/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
 | `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,build_common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
 | `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
 | `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `linux_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
@@ -182,7 +182,8 @@ The workspace is organized into five top-level directories under `src/`:
 - `wxc_common` is the **cross-platform foundation**: config parsing, models, errors, logger, `ScriptRunner` / `StatefulSandboxBackend` traits, state-aware dispatch helpers, validators, ids, ui-policy, encoding. Plus a few thin Windows API helpers shared by host tools and backends (`process_util`, `string_util`, `filesystem_dacl`, `diagnostic`). It must not depend on any `backends/*` crate.
 - Each Windows containment backend lives in its own `backends/*/common` crate (e.g. `appcontainer_common`, `windows_sandbox_common`, `isolation_session_common`, `hyperlight_common`, `nanvix_runner`). Backend crates depend on `wxc_common`; there are no cross-edges between backend crates.
 - `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common` and the per-backend crates
-- `mxc_pty` is the shared pty bridge used by the unix-side backends (`lxc_common::lxc_bindings::attach_run` on Linux and `seatbelt_common::seatbelt_runner` on macOS) so the inner shell sees a real TTY and host stdio is streamed live
+- `mxc-sdk` is an **importable library** for starting sandboxes in-process without a pty: `spawn_sandbox` takes a `SandboxRequest` (from `build_request`), selects the host backend, and returns a `Sandbox` handle for persistent bidirectional stdio (`take_stdin`/`take_stdout`/`take_stderr`), `kill()`, and `wait()` (which drains and discards any untaken stdout/stderr and returns a `WaitOutcome` — `Exited(i32)` or `TimedOut` — as `io::Result`, reserving `Err` for an actual OS/wait failure), or `wait_with_output()` (consumes the handle, drains both streams concurrently, returns an `Output` with the `WaitOutcome` + captured `stdout`/`stderr`). It additionally ports the SDK's config-building surface so callers don't need the TypeScript module: `mxc_sdk::policy` (`SandboxPolicy` + `build_request` → `SandboxRequest` (opaque wrapper mapping to the internal `ExecutionRequest`), the port of `createConfigFromPolicy`; plus `available_tools_policy`/`user_profile_policy`/`temporary_files_policy` discovery helpers) and `mxc_sdk::platform_support` (port of `getPlatformSupport`, using the in-process probe on Windows). It depends on the backend crates (cfg-split: appcontainer on Windows, bubblewrap on Linux, seatbelt on macOS) — so it can't live in `wxc_common`. The public surface is deliberately minimal (streaming only): the `dispatch` and `platform` modules are private and only their used items are re-exported at the crate root (`platform_support`, `PlatformSupport`); `policy` is the one public submodule (callers name `mxc_sdk::policy::{SandboxPolicy sections}`). The execution surface lives in `wxc_common::sandbox_process`: the `SandboxBackend` trait (`validate` + `spawn(request, logger, StdioMode) -> Box<dyn SandboxProcess>` + a `diagnose_exit` hook for enriching launch-failure exits) and the generic `Runner<B>` adapter that bridges any `SandboxBackend` to the run-to-completion `ScriptRunner` (by calling `spawn(StdioMode::Inherit)` then `wait()`). `StdioMode::Pipes` hands the caller live stdin/stdout/stderr (what `mxc-sdk` uses); `StdioMode::Inherit` lets the child inherit the host process's own stdio (what the executor binaries use, preserving the TTY under a pty). `SandboxBackend` is implemented for every library backend — Seatbelt (macOS), Bubblewrap (Linux), and Windows ProcessContainer (AppContainer + BaseContainer). The `wxc`/`lxc`/`mxc_darwin` executor binaries do **not** depend on `mxc-sdk`; they keep their own backend dispatch (sharing only the lower-level `appcontainer_common::dispatcher::dispatch_with_fallback`). The `mxc-sdk` in-crate backend dispatch (`dispatch.rs`) and host probing (`platform.rs`) are **provisional** — a follow-up will move them into a dedicated `mxc` engine crate that both `mxc-sdk` and the executor binaries call into.
+- `mxc_pty` is the shared pty bridge used by the LXC backend (`lxc_common::lxc_bindings::attach_run`) so the inner shell sees a real TTY and host stdio is streamed live. (Seatbelt and Bubblewrap no longer use it: they spawn directly and let the child inherit the host's stdio — a TTY when the executor binary runs under a pty — via `SandboxBackend::spawn(StdioMode::Inherit)`.)
 - `mxc_build_common` is a build-time helper crate — all Windows binary crates use it in their `build.rs` to embed VersionInfo (ProductName, FileDescription, copyright, version+commit). When adding a new Windows binary crate, add `mxc_build_common` as a build-dependency and call `mxc_build_common::embed_version_info()` from `build.rs`
 - `nanvix_build_common` is a **build-only** helper crate (never linked into the runtime): it stages NanVix binaries next to the executable and resolves the `NANVIX_BIN` prefetch directory. The `nanvix_binaries`, `wxc`, and `lxc` build scripts consume it as a `[build-dependencies]` entry. Runtime constants it needs (binary/snapshot filenames) stay in `nanvix_common`. Keep build-only file-staging logic here, not in `nanvix_common` (which is a runtime dependency of `nanvix_runner`).
 - Platform-specific modules use `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "linux")]`
@@ -190,7 +191,7 @@ The workspace is organized into five top-level directories under `src/`:
 
 ### Config parser pattern
 
-The parser uses two layers of structs: `Raw*` structs (matching JSON with `#[serde(rename)]`) that deserialize permissively, then map to validated domain structs in `models.rs`. This keeps serde attributes separate from the internal model.
+The parser deserializes JSON directly into the typed wire model (`wxc_common::wire`), the single source of truth for the config shape (it also generates the JSON schema). `config_parser.rs` then maps the wire types to the validated domain structs in `models.rs`. The stable surface uses `deny_unknown_fields` (closed); the `experimental` block is permissive.
 
 ### TypeScript conventions
 

@@ -112,67 +112,52 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `schemas/dev/mxc-config.schema.0.8.0-dev.json` | Add `gpuIsolation` as a feature under `experimental` |
+| `src/core/wxc_common/src/wire.rs` | Add a `gpuIsolation` field + `GpuIsolation` struct to the wire `Experimental` model (the schema is generated from this) |
+| `schemas/dev/mxc-config.schema.0.8.0-dev.json` | **Generated** — regenerate with `mxc_schema_gen` after editing the wire model; do not hand-edit |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
-| `src/core/wxc_common/src/config_parser.rs` | Add `gpuIsolation` field to `RawExperimental` |
+| `src/core/wxc_common/src/config_parser.rs` | Map the new wire field to the domain struct in `convert_wire_config` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
-## Step 1: Update the schema
+## Step 1: Add the field to the wire model (the schema source of truth)
 
-In `schemas/dev/mxc-config.schema.0.8.0-dev.json`, the `experimental` section already
-exists with `compartments` as a feature. Add `gpuIsolation` as a new
-feature with its own typed schema:
+The JSON schema is **generated** from the Rust wire model
+(`src/core/wxc_common/src/wire.rs`); you never hand-edit
+`schemas/dev/mxc-config.schema.0.8.0-dev.json`. Add your feature as a typed field
+on the wire `Experimental` struct (which is intentionally permissive — no
+`deny_unknown_fields` — so in-flux experimental shapes stay forward-compatible):
 
-```json
-"experimental": {
-  "type": "object",
-  "description": "Experimental features. Only active when --experimental is passed.",
-  "properties": {
-    "compartments": {
-      "type": "object",
-      "description": "Network compartment isolation (experimental).",
-      "properties": {
-        "namespace": {
-          "type": "string",
-          "description": "Compartment namespace identifier."
-        },
-        "isolationLevel": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Isolation level (1 = shared network, 2 = separate stack, 3 = full isolation)."
-        }
-      }
-    },
-    "gpuIsolation": {
-      "type": "object",
-      "description": "GPU device isolation (experimental).",
-      "properties": {
-        "deviceIndex": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "GPU device index to assign to the container."
-        },
-        "memoryLimitMb": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "GPU memory limit in megabytes. 0 = no limit."
-        },
-        "allowCuda": {
-          "type": "boolean",
-          "default": false,
-          "description": "Allow CUDA runtime access inside the container."
-        }
-      },
-      "required": ["deviceIndex", "memoryLimitMb"]
-    }
-  }
+```rust
+// in wire.rs
+pub struct Experimental {
+    pub compartments: Option<Compartments>,
+    pub gpu_isolation: Option<GpuIsolation>,            // ← add this
+    // ...
+}
+
+/// GPU device isolation (experimental).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct GpuIsolation {
+    /// GPU device index to assign to the container.
+    pub device_index: Option<u32>,
+    /// GPU memory limit in megabytes. 0 = no limit.
+    pub memory_limit_mb: Option<u32>,
+    /// Allow CUDA runtime access inside the container.
+    pub allow_cuda: Option<bool>,
 }
 ```
 
-Each experimental feature is its own typed property under `experimental` —
-the same pattern as stable features (`filesystem`, `network`) under the
-top-level config. This gives editors full autocomplete and validation.
+The `///` doc comments become schema `description`s and `#[schemars(...)]`
+attributes become constraints. Then regenerate the committed schema:
+
+```
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json
+```
+
+The `check-schema-codegen.js` CI gate fails if the committed schema drifts from
+the wire model, so the regenerate step is mandatory.
 
 ## Step 2: Add the model struct
 
@@ -198,74 +183,39 @@ pub struct ExperimentalConfig {
 }
 ```
 
-## Step 3: Parse the experimental section
+## Step 3: Map the wire field to the domain model
 
-In `src/core/wxc_common/src/config_parser.rs`, the `RawExperimental` struct already
-exists with `compartments`. Add `gpu_isolation`:
-
-```rust
-#[derive(Deserialize, Default)]
-struct RawExperimental {
-    compartments: Option<RawCompartments>,          // existing
-    #[serde(rename = "gpuIsolation")]
-    gpu_isolation: Option<RawGpuIsolation>,         // ← add this
-}
-
-#[derive(Deserialize)]
-struct RawGpuIsolation {
-    #[serde(rename = "deviceIndex")]
-    device_index: u32,
-    #[serde(rename = "memoryLimitMb")]
-    memory_limit_mb: u32,
-    #[serde(rename = "allowCuda")]
-    allow_cuda: Option<bool>,
-}
-```
-
-In `convert_raw_config()`, map it directly — no name matching needed. Each
-feature should own its parsing via a constructor:
+The parser deserializes JSON directly into the wire model (`wire::MxcConfig`),
+so your `wire::GpuIsolation` from Step 1 is the parse target. In
+`config_parser.rs`, map it to the domain struct inside `convert_wire_config`
+where the `experimental` block is converted:
 
 ```rust
-let mut experimental = ExperimentalConfig::default();
-
-if let Some(raw_exp) = raw.experimental {
-    if let Some(c) = raw_exp.compartments {
-        experimental.compartments = Some(CompartmentsConfig::from_raw(c)?);
+let experimental = if let Some(raw_exp) = cfg.experimental {
+    // ... existing feature mappings ...
+    let gpu_isolation = raw_exp.gpu_isolation.map(|g| GpuIsolationConfig {
+        device_index: g.device_index.unwrap_or(0),
+        memory_limit_mb: g.memory_limit_mb.unwrap_or(0),
+        allow_cuda: g.allow_cuda.unwrap_or(false),
+    });
+    ExperimentalConfig {
+        // ... existing fields ...
+        gpu_isolation,
     }
-    if let Some(g) = raw_exp.gpu_isolation {
-        experimental.gpu_isolation = Some(GpuIsolationConfig::from_raw(g)?);
-    }
-}
+} else {
+    ExperimentalConfig::default()
+};
 ```
 
-Each feature implements its own `from_raw()` constructor to keep
-`convert_raw_config()` clean:
-
-```rust
-impl GpuIsolationConfig {
-    fn from_raw(raw: RawGpuIsolation) -> Result<Self, String> {
-        Ok(Self {
-            device_index: raw.device_index,
-            memory_limit_mb: raw.memory_limit_mb,
-            allow_cuda: raw.allow_cuda.unwrap_or(false),
-        })
-    }
-}
-```
+Prefer destructuring the wire struct (`let wire::GpuIsolation { device_index, .. }`)
+in any standalone mapping helper so that adding a wire field without mapping it
+becomes a compile error rather than a silent runtime drop.
 
 Add tests to verify:
-- `gpuIsolation` config parses correctly
+- `gpuIsolation` config parses correctly and maps to `ExecutionRequest.experimental`
 - Missing optional fields use defaults
-- Unknown fields under `experimental` are ignored (forward compatibility)
-
-Also ensure that `convert_raw_config()` populates `ExecutionRequest.experimental`:
-
-```rust
-Ok(ExecutionRequest {
-    // ... existing fields ...
-    experimental,   // ← include the parsed experimental config
-})
-```
+- Unknown fields under `experimental` are tolerated (forward compatibility — the
+  experimental surface is intentionally permissive)
 
 ## Step 4: Implement the feature in the runner
 
@@ -374,10 +324,13 @@ The SDK passes `--experimental` to the underlying binary when this is set.
 
 When your experimental feature is ready to ship:
 
-1. Move the property from `experimental` to a top-level property in the schema
-   (e.g., `experimental.gpuIsolation` → `gpuIsolation`)
+1. Move the field from the wire `Experimental` struct to the top-level
+   `MxcConfig` (e.g., `experimental.gpuIsolation` → top-level `gpuIsolation`),
+   then regenerate the schema with `mxc_schema_gen`
 2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
-3. Move the field from `RawExperimental` to `RawConfig`
+3. Map the now-top-level wire field in `convert_wire_config` (and add
+   `deny_unknown_fields` to the wire struct so the promoted, stable surface is
+   closed)
 4. Remove the `if request.experimental_enabled` guard
 5. Bump the minor version
 6. Add a parser error for configs still referencing the feature under

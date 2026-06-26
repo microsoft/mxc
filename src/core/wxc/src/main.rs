@@ -26,6 +26,7 @@ use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
+use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
@@ -62,6 +63,12 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Allow testing-only features that must never run in production, currently
+    /// `network.proxy.builtinTestServer` (a bundled, deliberately-permissive
+    /// test HTTP proxy). Distinct from --experimental.
+    #[arg(long = "allow-testing-features")]
+    allow_testing_features: bool,
 
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
@@ -439,7 +446,7 @@ fn main() {
     // Best-effort: reap any orphaned DACL state files left behind by
     // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
     // `wxc-exec --probe` is the canonical recovery trigger consumers
-    // (Win25H2Safe-Tests Phase 6, SDK warm-start) rely on. Errors here
+    // (WinProcessContainer-Tests Phase 6, SDK warm-start) rely on. Errors here
     // are non-fatal and only surface via stderr. On a healthy host
     // with zero state files this is sub-millisecond.
     match wxc_common::filesystem_dacl::recover_orphaned_state() {
@@ -696,6 +703,7 @@ fn main() {
 
     let mut request = request;
     request.experimental_enabled = cli.experimental;
+    request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
     // Apply the CLI command-line override to one-shot requests. State-aware
@@ -853,7 +861,7 @@ fn main() {
                     }
                 }
             } else {
-                Box::new(AppContainerScriptRunner::new())
+                Box::new(Runner::new(AppContainerScriptRunner::new()))
             }
         }
         ContainmentBackend::Wslc => {

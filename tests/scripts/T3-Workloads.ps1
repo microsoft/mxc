@@ -4,7 +4,7 @@
 # T3-Workloads.ps1 — explore what real workloads can run inside the
 # Tier 3 (AppContainer + DACL) sandbox on a 25H2 host.
 #
-# Companion to Win25H2Safe-Tests.ps1: that script proves the T3
+# Companion to WinProcessContainer-Tests.ps1: that script proves the T3
 # *primitives* (rw / ro / denied / control matrix, crash recovery, UI
 # mitigations) work; this one asks whether useful programs — pwsh 7
 # and git in particular — can run on top of those primitives.

@@ -115,7 +115,8 @@ mxc/src/
 │   └── src/
 │       ├── lib.rs                    # Add: pub mod nanvix_runner (1 line)
 │       ├── models.rs                 # Add: NanVixConfig struct, ContainmentBackend::MicroVm
-│       ├── config_parser.rs          # Add: RawNanVix struct, "microvm" parsing
+│       ├── wire.rs                   # Add: MicroVm containment variant (schema source); regenerate schema
+│       ├── config_parser.rs          # Add: map_wire_containment "microvm" arm
 │       ├── error.rs                  # Add: WxcError::NanVix variant
 │       ├── nanvix_runner.rs          # NEW — NanVixScriptRunner implementation
 │       ├── appcontainer.rs           # UNCHANGED
@@ -239,7 +240,7 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 
 **What changed:**
 - `models.rs` — Added `MicroVm` variant to `ContainmentBackend`, added `NanVixConfig` struct, added `nanvix_config` field to `ExecutionRequest`
-- `config_parser.rs` — Added `RawNanVix` serde struct, `"microvm"` containment parsing, NanVix config section parsing
+- `config_parser.rs` — Added `"microvm"` containment parsing and NanVix config section parsing (originally via `Raw*` structs; the parser has since been rewired onto the `wire::MxcConfig` model — new work maps the wire types in `convert_wire_config`)
 - `error.rs` — Added `WxcError::NanVix(String)` variant
 - `nanvix_runner.rs` — **NEW** — `NanVixScriptRunner` implementing `ScriptRunner` trait
 - `lib.rs` — Added `pub mod nanvix_runner`

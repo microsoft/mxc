@@ -24,7 +24,7 @@ run_one() {
     local sentinel="$3"
     echo "Running Bubblewrap network proxy test: $label..."
     local out
-    if ! out=$("$LXC_EXEC" --experimental "$REPO_DIR/tests/configs/$config" 2>&1); then
+    if ! out=$("$LXC_EXEC" --experimental --allow-testing-features "$REPO_DIR/tests/configs/$config" 2>&1); then
         echo "$out"
         echo "FAIL: $label (lxc-exec returned non-zero)"
         return 1

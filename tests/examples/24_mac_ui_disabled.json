@@ -11,8 +11,5 @@
     },
     "ui": {
         "disable": true
-    },
-    "seatbelt": {
-        "mode": "exec"
     }
 }

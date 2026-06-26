@@ -65,7 +65,7 @@ elaborates.
 |---|---|---|
 | TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
-| Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (private to parser, matching `RawConfig` pattern). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
+| Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (the `wire::MxcConfig` parse target). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
 | Plug-in surface (§11) | Implement `StatefulSandboxBackend` (in addition to or instead of `ScriptRunner`). Define typed per-(backend, phase) `*Config` interfaces. Declare the backend's `ID_PREFIX` and `BACKEND_KEY` consts on the trait impl. Document the cross-cutting policy honor matrix. | Ephemeral-only backends require no changes. The `ContainmentBackend` Rust enum is extended, not replaced. |
 
@@ -982,70 +982,54 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Wire envelope (Rust mirror)
 
-MXC's existing parser at `src/core/wxc_common/src/config_parser.rs` uses private `Raw*`
-intermediate structs that mirror the wire-format JSON shape (with serde renames to handle
-camelCase keys), then converts them into typed domain models via `convert_*` helpers
-(e.g., `RawConfig` → `ExecutionRequest`) before dispatch. The state-aware path extends this
-same pattern.
+MXC's parser at `src/core/wxc_common/src/config_parser.rs` deserializes the
+wire-format JSON directly into the typed wire model in
+`src/core/wxc_common/src/wire.rs` (`wire::MxcConfig`), then maps it into the
+typed domain models (`convert_wire_config` → `ExecutionRequest`, with `From`
+impls beside the domain types for the trivial enum/struct conversions) before
+dispatch. The state-aware path reuses this same wire model.
 
 ```rust
-// In config_parser.rs — private to the parser, alongside the existing Raw* structs.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawMxcRequest {
-    StateAware(RawStateAwareRequest),
-    OneShot(RawConfig),
-}
-
-#[derive(Deserialize)]
-struct RawStateAwareRequest {
-    version: Option<String>,
-    containment: Option<String>,
-    phase: String,
-    #[serde(rename = "sandboxId")]
-    sandbox_id: Option<String>,
-    process: Option<RawProcess>,
-    filesystem: Option<RawFilesystem>,
-    network: Option<RawNetwork>,
-    ui: Option<RawUi>,
-    experimental: Option<RawStateAwareExperimental>,
-}
-
-#[derive(Deserialize)]
-struct RawStateAwareExperimental {
-    #[serde(rename = "isolation_session")]
-    isolation_session: Option<RawIsolationSessionConfigs>,
-    // future state-aware-capable backends add typed entries here
-}
-
-#[derive(Deserialize)]
-struct RawIsolationSessionConfigs {
-    start: Option<RawIsolationSessionStartConfig>,
-    // omit phases without config
+// In config_parser.rs — discrimination is by presence of the `phase` key in
+// the decoded JSON; both shapes deserialize into the one wire::MxcConfig type,
+// which declares `phase` / `sandboxId` and the per-backend `experimental` block.
+let value: serde_json::Value = serde_json::from_str(&json_str)?;
+if value.get("phase").is_some() {
+    // state-aware: peel off the raw `experimental` block (typed per-backend at
+    // dispatch), deserialize the rest into wire::MxcConfig, then map.
+    convert_wire_state_aware(value, logger, allow_missing_command)
+} else {
+    // one-shot: deserialize wire::MxcConfig from the source text (preserving
+    // serde line/column diagnostics) and map.
+    let cfg: wire::MxcConfig = serde_json::from_str(&json_str)?;
+    convert_wire_config(cfg, logger, true, allow_missing_command)
 }
 ```
 
-Discrimination is by presence of the `phase` field. With `#[serde(untagged)]`, serde
-attempts each variant in order; the state-aware variant requires `phase`, so its absence
-falls through to the one-shot branch. Per-phase requirements (`containment` for
-`provision`, `sandboxId` for the others) are enforced in the conversion step rather
-than at the deserialiser; the `Raw*` struct accepts both fields as optional.
+`wire::MxcConfig` is closed (`deny_unknown_fields`) on its stable surface, so
+unknown fields are rejected at the trust boundary. `phase` maps to the
+`wire::Phase` enum. The `experimental` block stays permissive and is captured as
+a raw `serde_json::Value` on the state-aware path so the dispatcher can type each
+backend's per-phase config from it (`experimental.<backend>.<phase>`).
 
-Conversion from `Raw*` into the typed domain model is the existing
-`convert_raw_config` → `ExecutionRequest` path, used for both one-shot and state-aware
-requests. The cross-cutting wire fields (`filesystem`, `network`, `ui`) populate
-`ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the one-shot path does today,
-and `process` populates `ExecutionRequest`'s flat `script_code` / `working_directory` /
-`script_timeout` / `env` fields via the existing `RawProcess` intermediate. The
-state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`) are
-extracted alongside the `ExecutionRequest` and bundled into a `ParsedStateAwareRequest`
-domain model — `{ request: ExecutionRequest, phase: Phase, containment:
-Option<ContainmentBackend>, sandbox_id: Option<String>, experimental_raw: ... }` —
-that the dispatcher consumes (§9.3). The bundling does not modify `ExecutionRequest`'s
-shape. There is no unified Rust "policy" type — Rust reads cross-cutting fields
-directly from `request.policy` (a `ContainerPolicy`), exactly as the one-shot path does
-today. Domain models are exposed to the dispatch layer; the `Raw*` types stay private
-to the parser.
+Per-phase requirements (`containment` for `provision`, `sandboxId` for the
+others) are enforced in the conversion step, not at the deserializer. The
+one-shot path rejects `phase` / `sandboxId`, and the state-aware path rejects
+one-shot-only sections (`seatbelt` / `processContainer` / `lxc` / `lifecycle`),
+so each mode only accepts its valid fields.
+
+Conversion populates the cross-cutting wire fields (`filesystem`, `network`,
+`ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
+one-shot path does, and `process` populates `ExecutionRequest`'s flat
+`script_code` / `working_directory` / `script_timeout` / `env` fields. The
+state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`)
+are extracted alongside the `ExecutionRequest` and bundled into a
+`ParsedStateAwareRequest` domain model — `{ request: ExecutionRequest, phase:
+Phase, containment: Option<ContainmentBackend>, sandbox_id: Option<String>,
+experimental_raw: Option<serde_json::Value> }` — that the dispatcher consumes
+(§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
+are exposed to the dispatch layer; the wire types are an implementation detail of
+the parser and schema generation.
 
 ### 9.2 The trait
 
@@ -1215,7 +1199,7 @@ pub struct ExecHandle {
 ```
 
 Trait methods take `&ExecutionRequest` (the existing one-shot domain model from
-`wxc_common::models`, populated by the same `convert_raw_config` parser path that
+`wxc_common::models`, populated by the same `convert_wire_config` parser path that
 serves one-shot calls), plus `sandbox_id` for non-provision phases and an optional
 backend-specific typed config (`Self::<Phase>Config`). Cross-cutting policy fields
 flow through `request.policy` (a `ContainerPolicy`); per-exec process info flows
@@ -1619,10 +1603,9 @@ capability mismatches automatically (§9.4).
 ### 11.5 Add a config-parser case
 
 The state-aware wire format expects `experimental.<backend>.<phase>` blocks for backends
-that declare per-phase configs. Add typed `Raw*` intermediate structs in
-`config_parser.rs` (matching the existing `RawConfig` pattern) that deserialise the new
-backend's JSON shape. Add a converter that produces the typed domain models the
-dispatch layer consumes.
+that declare per-phase configs. Add typed fields to the `experimental` block of the wire
+model (`wire.rs`) for the new backend's JSON shape, then regenerate the schema. Add a
+converter that produces the typed domain models the dispatch layer consumes.
 
 ### 11.6 Document the backend
 
