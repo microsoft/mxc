@@ -302,7 +302,8 @@ mod tests {
     }
 
     /// The parser produces a `ui_operation_flags` bitmap;
-    /// `apply_ui_operation_flags` rewrites the config's `ui.*` fields.
+    /// `apply_ui_operation_flags` rewrites the config's `ui.*` and
+    /// `processContainer.ui.*` fields.
     /// The two halves are tested individually but their bit-value
     /// contract is not — this integration test pins it. A drift between
     /// `JOB_OBJECT_UILIMIT_*` here and in `config.rs` will fail this

@@ -707,8 +707,9 @@ pub fn set_ui_subsystem_enabled(config: &mut Value) -> Result<()> {
 
 /// Apply the relaxations implied by the OR of `JOB_OBJECT_UILIMIT_*` bits
 /// observed in `UI_OPERATION` violations. Each bit names a UI limit the
-/// contained process tripped; the corresponding `ui.*` field is widened
-/// just enough to let the operation succeed next time.
+/// contained process tripped; the corresponding `ui.*` or
+/// `processContainer.ui.*` field is widened just enough to let the
+/// operation succeed next time.
 ///
 /// Per `docs/base-process-container/UIPolicy_Schema.md` and the 0.7-alpha
 /// schema, cross-platform fields live at top-level `ui` while backend-
@@ -1095,7 +1096,7 @@ pub fn write_detection_summary(
         }
         if ui_operation > 0 {
             println!(
-                "  + ui.* policy will be relaxed for blocked operations (flags=0x{:04X}):",
+                "  + ui.* / processContainer.ui.* policy will be relaxed for blocked operations (flags=0x{:04X}):",
                 ui_operation_flags
             );
             for bit_pos in 0..16 {
