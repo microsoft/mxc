@@ -8,7 +8,7 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ClipboardPolicy, ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
+    ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
     IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
     PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TestFeatureConfig, UiPolicy,
     WindowsSandboxConfig, WslcConfig,
@@ -507,60 +507,15 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
     }
 }
 
-/// Lowercase wire-format string for a UI isolation level (matches the schema
-/// enum values consumed downstream).
-fn wire_ui_isolation_str(iso: &wire::UiIsolation) -> &'static str {
-    match iso {
-        wire::UiIsolation::Desktop => "desktop",
-        wire::UiIsolation::Handles => "handles",
-        wire::UiIsolation::Atoms => "atoms",
-        wire::UiIsolation::Container => "container",
-    }
-}
-
-/// Resolve the `containment` wire enum to a concrete domain backend.
+/// Resolve the optional `containment` wire enum to a concrete domain backend.
 ///
-/// `None` (omitted) and the abstract intent `Process` resolve to the OS-native
-/// process sandbox per target_os; `Vm` resolves to the host's VM-class backend.
-/// Deprecated spellings (`appcontainer`, `macos_sandbox`) are accepted via
-/// `#[serde(alias)]` on the wire enum and arrive here already mapped to the
-/// canonical variant. Concrete backends map verbatim.
+/// An omitted `containment` (`None`) resolves identically to the abstract
+/// `process` intent: the OS-native process sandbox. Concrete and abstract
+/// variants are mapped by `From<wire::Containment>`.
 fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
-    use wire::Containment as W;
     match c {
-        None | Some(W::Process) => {
-            #[cfg(target_os = "linux")]
-            {
-                ContainmentBackend::Bubblewrap
-            }
-            #[cfg(target_os = "macos")]
-            {
-                ContainmentBackend::Seatbelt
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            {
-                ContainmentBackend::ProcessContainer
-            }
-        }
-        Some(W::ProcessContainer) => ContainmentBackend::ProcessContainer,
-        Some(W::Vm) => {
-            #[cfg(target_os = "windows")]
-            {
-                ContainmentBackend::WindowsSandbox
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                ContainmentBackend::Vm
-            }
-        }
-        Some(W::WindowsSandbox) => ContainmentBackend::WindowsSandbox,
-        Some(W::Lxc) => ContainmentBackend::Lxc,
-        Some(W::Microvm) => ContainmentBackend::MicroVm,
-        Some(W::Hyperlight) => ContainmentBackend::Hyperlight,
-        Some(W::Wslc) => ContainmentBackend::Wslc,
-        Some(W::Seatbelt) => ContainmentBackend::Seatbelt,
-        Some(W::IsolationSession) => ContainmentBackend::IsolationSession,
-        Some(W::Bubblewrap) => ContainmentBackend::Bubblewrap,
+        Some(c) => c.clone().into(),
+        None => wire::Containment::Process.into(),
     }
 }
 
@@ -708,7 +663,7 @@ fn convert_wire_config(
             policy.base_process_ui.isolation = raw_ui
                 .isolation
                 .as_ref()
-                .map(wire_ui_isolation_str)
+                .map(wire::UiIsolation::as_str)
                 .unwrap_or("container")
                 .to_string();
             policy.base_process_ui.desktop_system_control =
@@ -757,18 +712,11 @@ fn convert_wire_config(
         }
 
         if let Some(p) = net.default_policy {
-            policy.default_network_policy = match p {
-                wire::NetworkPolicy::Allow => NetworkPolicy::Allow,
-                wire::NetworkPolicy::Block => NetworkPolicy::Block,
-            };
+            policy.default_network_policy = p.into();
         }
 
         if let Some(m) = net.enforcement_mode {
-            policy.network_enforcement_mode = match m {
-                wire::NetworkEnforcement::Capabilities => NetworkEnforcementMode::Capabilities,
-                wire::NetworkEnforcement::Firewall => NetworkEnforcementMode::Firewall,
-                wire::NetworkEnforcement::Both => NetworkEnforcementMode::Both,
-            };
+            policy.network_enforcement_mode = m.into();
         }
 
         if let Some(v) = net.allow_local_network {
@@ -965,12 +913,7 @@ fn convert_wire_config(
 
     // UI section
     if let Some(raw_ui) = cfg.ui {
-        let clipboard = match raw_ui.clipboard {
-            Some(wire::ClipboardPolicy::Read) => ClipboardPolicy::Read,
-            Some(wire::ClipboardPolicy::Write) => ClipboardPolicy::Write,
-            Some(wire::ClipboardPolicy::All) => ClipboardPolicy::All,
-            _ => ClipboardPolicy::None,
-        };
+        let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
             disable: raw_ui.disable.unwrap_or(true),
             clipboard,
@@ -1108,6 +1051,7 @@ mod tests {
     use super::*;
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
+    use crate::models::ClipboardPolicy;
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)

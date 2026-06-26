@@ -211,6 +211,18 @@ pub enum UiIsolation {
     Container,
 }
 
+impl UiIsolation {
+    /// Lowercase wire-format string matching the schema enum values.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UiIsolation::Desktop => "desktop",
+            UiIsolation::Handles => "handles",
+            UiIsolation::Atoms => "atoms",
+            UiIsolation::Container => "container",
+        }
+    }
+}
+
 /// LXC container settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]

@@ -81,6 +81,54 @@ impl ContainmentBackend {
     }
 }
 
+impl From<crate::wire::Containment> for ContainmentBackend {
+    /// Resolve a `containment` wire value to a concrete domain backend.
+    ///
+    /// The abstract intents resolve per host: `process` → the OS-native process
+    /// sandbox, `vm` → the host's VM-class backend. Concrete backends map
+    /// verbatim. Deprecated spellings (`appcontainer`, `macos_sandbox`) are
+    /// accepted via `#[serde(alias)]` on the wire enum and arrive here already
+    /// mapped to the canonical variant.
+    fn from(c: crate::wire::Containment) -> Self {
+        use crate::wire::Containment as W;
+        match c {
+            W::Process => {
+                #[cfg(target_os = "linux")]
+                {
+                    Self::Bubblewrap
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    Self::Seatbelt
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    Self::ProcessContainer
+                }
+            }
+            W::ProcessContainer => Self::ProcessContainer,
+            W::Vm => {
+                #[cfg(target_os = "windows")]
+                {
+                    Self::WindowsSandbox
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Self::Vm
+                }
+            }
+            W::WindowsSandbox => Self::WindowsSandbox,
+            W::Lxc => Self::Lxc,
+            W::Microvm => Self::MicroVm,
+            W::Hyperlight => Self::Hyperlight,
+            W::Wslc => Self::Wslc,
+            W::Seatbelt => Self::Seatbelt,
+            W::IsolationSession => Self::IsolationSession,
+            W::Bubblewrap => Self::Bubblewrap,
+        }
+    }
+}
+
 /// Configuration specific to the Seatbelt backend.
 /// Used under the top-level `seatbelt` key when `containment == Seatbelt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +347,15 @@ pub enum NetworkPolicy {
     Block,
 }
 
+impl From<crate::wire::NetworkPolicy> for NetworkPolicy {
+    fn from(p: crate::wire::NetworkPolicy) -> Self {
+        match p {
+            crate::wire::NetworkPolicy::Allow => Self::Allow,
+            crate::wire::NetworkPolicy::Block => Self::Block,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkEnforcementMode {
@@ -306,6 +363,16 @@ pub enum NetworkEnforcementMode {
     Capabilities,
     Firewall,
     Both,
+}
+
+impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
+    fn from(m: crate::wire::NetworkEnforcement) -> Self {
+        match m {
+            crate::wire::NetworkEnforcement::Capabilities => Self::Capabilities,
+            crate::wire::NetworkEnforcement::Firewall => Self::Firewall,
+            crate::wire::NetworkEnforcement::Both => Self::Both,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +442,17 @@ pub enum ClipboardPolicy {
     Write,
     #[serde(rename = "all")]
     All,
+}
+
+impl From<crate::wire::ClipboardPolicy> for ClipboardPolicy {
+    fn from(c: crate::wire::ClipboardPolicy) -> Self {
+        match c {
+            crate::wire::ClipboardPolicy::None => Self::None,
+            crate::wire::ClipboardPolicy::Read => Self::Read,
+            crate::wire::ClipboardPolicy::Write => Self::Write,
+            crate::wire::ClipboardPolicy::All => Self::All,
+        }
+    }
 }
 
 /// Cross-platform UI policy parsed from the `ui` JSON section.
