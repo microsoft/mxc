@@ -593,27 +593,41 @@ pub fn invoke_ace_walk_with_index(
     verbose: bool,
 ) -> Result<HashSet<String>> {
     let mut found: HashSet<String> = HashSet::new();
+    invoke_ace_walk_with_index_into(buf, index, verbose, &mut found)?;
+    Ok(found)
+}
+
+/// R5-17: variant that writes directly into a caller-provided
+/// `&mut HashSet<String>`. Avoids allocating + draining a throwaway
+/// `HashSet` per ACE blob in the hot loop.
+pub fn invoke_ace_walk_with_index_into(
+    buf: &[u8],
+    index: &CapabilityIndex,
+    verbose: bool,
+    found: &mut HashSet<String>,
+) -> Result<()> {
     let mut cursor = 0usize;
     let mut ace_index = 0usize;
 
     while cursor < buf.len() {
         let ace = read_ace_at_offset(buf, cursor)?;
-        // Hot path: only resolve the SID; defer the LSASS RPC + string
-        // formatting to the `verbose` branch below.
+        let is_allow_ace = matches!(ace.ace_type, 0x00 | 0x09);
         let resolution = if verbose {
             index.resolve_verbose(ace.sid_bytes)
         } else {
             index.resolve(ace.sid_bytes)
         };
 
-        match &resolution {
-            SidResolution::Capability(name) => {
-                found.insert(name.to_string());
+        if is_allow_ace {
+            match &resolution {
+                SidResolution::Capability(name) => {
+                    found.insert(name.to_string());
+                }
+                SidResolution::GroupCapability(name) => {
+                    found.insert(name.to_string());
+                }
+                SidResolution::NtAccount(_) | SidResolution::Unknown => {}
             }
-            SidResolution::GroupCapability(name) => {
-                found.insert(name.to_string());
-            }
-            SidResolution::NtAccount(_) | SidResolution::Unknown => {}
         }
 
         if verbose {
@@ -642,7 +656,7 @@ pub fn invoke_ace_walk_with_index(
         ace_index += 1;
     }
 
-    Ok(found)
+    Ok(())
 }
 
 /// Convenience wrapper that builds a fresh capability table per call.
@@ -682,6 +696,18 @@ pub fn extract_caps_with_index(
 ) -> Result<HashSet<String>> {
     let bytes = parse_hex_string(hex_bytes)?;
     invoke_ace_walk_with_index(&bytes, index, verbose)
+}
+
+/// R5-17: hot-path variant that writes directly into a caller-provided
+/// `&mut HashSet<String>` to skip the per-blob throwaway HashSet.
+pub fn extract_caps_with_index_into(
+    hex_bytes: &str,
+    index: &CapabilityIndex,
+    verbose: bool,
+    found: &mut HashSet<String>,
+) -> Result<()> {
+    let bytes = parse_hex_string(hex_bytes)?;
+    invoke_ace_walk_with_index_into(&bytes, index, verbose, found)
 }
 
 #[cfg(test)]
@@ -780,6 +806,16 @@ mod tests {
         }
     }
 
+    fn build_ace_typed(ace_type: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(ace_type);
+        v.extend_from_slice(&[0, 0, 0]);
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v.extend_from_slice(&mask.to_le_bytes());
+        v.extend_from_slice(sid);
+        v
+    }
+
     #[test]
     fn invoke_ace_walk_with_index_collects_matched_caps() {
         let sid = well_world_sid();
@@ -797,5 +833,27 @@ mod tests {
         let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
         assert!(caps.contains("internetClient"));
         assert_eq!(caps.len(), 1);
+    }
+
+    #[test]
+    fn invoke_ace_walk_skips_access_denied_ace() {
+        // R5-6: an ACCESS_DENIED ACE (type 0x01) for a capability SID
+        // does NOT grant the capability and must not be promoted.
+        let sid = well_world_sid();
+        let table = vec![CapabilityEntry {
+            name: "internetClient".into(),
+            app_package_sid: Some(sid.clone()),
+            group_sid: None,
+        }];
+        let idx = CapabilityIndex::from_table(&table);
+
+        let buf = build_ace_typed(0x01, 0, &sid);
+        let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
+        assert!(caps.is_empty(), "deny ACE must not produce capability");
+
+        // Allow-callback ACE (0x09) should still grant.
+        let buf = build_ace_typed(0x09, 0, &sid);
+        let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
+        assert!(caps.contains("internetClient"));
     }
 }

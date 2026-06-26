@@ -443,16 +443,24 @@ fn cancel_active_audit_trace() {
     }
 }
 
-/// Resolve `%SystemRoot%\System32\wpr.exe`. Mirrors plm's
-/// `wpr_path::wpr_command` helper (which we can't depend on directly
-/// because wxc has no Cargo dep on plm).
+/// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. Round-5
+/// security finding #1: the round-4 fix read `%SystemRoot%` from the
+/// process env, but UAC inherits env from the unelevated parent — a
+/// standard user could `setx SystemRoot=C:\\Users\\Public\\evil` and
+/// plant `wpr.exe` for a later admin run. `GetSystemDirectoryW` is
+/// kernel-published and not env-spoofable.
 #[cfg(target_os = "windows")]
 fn resolve_system32_wpr() -> std::path::PathBuf {
-    let system_root = std::env::var_os("SystemRoot")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| std::ffi::OsString::from("C:\\Windows"));
-    let mut p = std::path::PathBuf::from(system_root);
-    p.push("System32");
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = vec![0u16; 260];
+    // SAFETY: buf is initialized; we pass valid length and own the
+    // memory for the duration of the call.
+    let n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
+    if n == 0 || (n as usize) > buf.len() {
+        return std::path::PathBuf::from("C:\\Windows\\System32\\wpr.exe");
+    }
+    let dir = String::from_utf16_lossy(&buf[..n as usize]);
+    let mut p = std::path::PathBuf::from(dir);
     p.push("wpr.exe");
     p
 }
@@ -476,20 +484,37 @@ impl Drop for AuditTraceGuard {
 /// first run's findings. We acquire a named mutex (`Global\\` so it's
 /// machine-wide; admins have SeCreateGlobalPrivilege so this works)
 /// and refuse to start if another wxc-exec audit is already running.
-/// The handle is owned by the returned guard, released by `Drop`.
+///
+/// Round-5 correctness finding #1: the handle is stashed in a static
+/// atomic (not just the stack guard) so the explicit cleanup before
+/// `process::exit` — which skips destructors — can release it too.
+/// `AuditSingletonGuard::drop` is now just a thin shim over
+/// `release_audit_singleton`; both paths are idempotent.
 #[cfg(target_os = "windows")]
-struct AuditSingletonGuard {
-    handle: windows::Win32::Foundation::HANDLE,
-}
+static AUDIT_SINGLETON_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+struct AuditSingletonGuard;
 
 #[cfg(target_os = "windows")]
 impl Drop for AuditSingletonGuard {
     fn drop(&mut self) {
-        if !self.handle.is_invalid() {
-            unsafe {
-                let _ = windows::Win32::System::Threading::ReleaseMutex(self.handle);
-                let _ = windows::Win32::Foundation::CloseHandle(self.handle);
-            }
+        release_audit_singleton();
+    }
+}
+
+/// Release the host-wide audit singleton if held. Idempotent: safe to
+/// call from `Drop`, from the explicit pre-`process::exit` cleanup,
+/// and from error paths.
+#[cfg(target_os = "windows")]
+fn release_audit_singleton() {
+    let raw = AUDIT_SINGLETON_HANDLE.swap(0, Ordering::SeqCst);
+    if raw != 0 {
+        let handle = windows::Win32::Foundation::HANDLE(raw as *mut _);
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(handle);
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
         }
     }
 }
@@ -519,7 +544,8 @@ fn try_acquire_audit_singleton() -> Result<AuditSingletonGuard, String> {
              Logger session can exist per host)",
         ));
     }
-    Ok(AuditSingletonGuard { handle })
+    AUDIT_SINGLETON_HANDLE.store(handle.0 as isize, Ordering::SeqCst);
+    Ok(AuditSingletonGuard)
 }
 
 // ---------------------------------------------------------------------------
@@ -953,7 +979,7 @@ fn main() {
             .policy
             .capabilities
             .iter()
-            .any(|c| c == "permissiveLearningMode")
+            .any(|c| c.eq_ignore_ascii_case("permissiveLearningMode"))
     {
         request
             .policy
@@ -1228,10 +1254,18 @@ fn main() {
     // Bracket the live-trace window with `AUDIT_ACTIVE` + a stack guard
     // so Ctrl-C / panic / process::exit between start and stop don't
     // leak the kernel ETW session.
-    #[cfg(target_os = "windows")]
-    let _audit_guard: Option<AuditTraceGuard>;
+    //
+    // Round-5 reliability finding #1: declaration order matters. Rust
+    // drops locals in REVERSE declaration order, and on the cleanup
+    // path we want the trace guard (`AuditTraceGuard`, which calls
+    // `wpr -cancel`) to run BEFORE the singleton handle is released —
+    // otherwise a concurrent wxc-exec could acquire the freed mutex
+    // and start its own trace, only to have our stale `wpr -cancel`
+    // tear it down. Declare the singleton first so it drops last.
     #[cfg(target_os = "windows")]
     let _audit_singleton: Option<AuditSingletonGuard>;
+    #[cfg(target_os = "windows")]
+    let _audit_guard: Option<AuditTraceGuard>;
     #[cfg(target_os = "windows")]
     let audit_config_file = if cli.audit {
         // Round-4 finding I: refuse to start a second concurrent
@@ -1250,7 +1284,32 @@ fn main() {
         }
         mark_audit_active();
         _audit_guard = Some(AuditTraceGuard);
-        let _ = run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
+        // Round-5 reliability finding #2: previously this was
+        // `let _ = run_plm_command(...)`, which discarded the failure
+        // status. If plm start failed (missing plm.exe, wpr session
+        // conflict not resolved, etc.), the workload ran with
+        // `permissiveLearningMode` injected into the sandbox policy
+        // but with zero WPR recording — an empty Adjusted_*.json
+        // looked like "no denials." Bail explicitly on start failure
+        // so the operator sees the error and the policy isn't
+        // silently relaxed.
+        let start_ok = run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
+        if !start_ok {
+            let _ = writeln!(
+                logger,
+                "[audit] plm start failed; refusing to run the workload with \
+                 permissiveLearningMode but no WPR recording"
+            );
+            eprintln!(
+                "error: plm start failed; refusing to run --audit without an \
+                 active trace. See logs for details."
+            );
+            // cancel_active_audit_trace is idempotent and safe to call
+            // even if start never began a session — it inspects the
+            // AUDIT_ACTIVE flag and only invokes wpr -cancel if set.
+            cancel_active_audit_trace();
+            std::process::exit(1);
+        }
         config_file_path(&cli)
     } else {
         _audit_guard = None;
@@ -1306,6 +1365,21 @@ fn main() {
     // next startup covers everything else.)
     drop(runner);
     drop(take_parked_dacl());
+
+    // Round-5 correctness finding #1: the `process::exit` below skips
+    // destructors, so `AuditTraceGuard::drop` (which calls
+    // `cancel_active_audit_trace`) and `AuditSingletonGuard::drop`
+    // (which releases the host-wide named mutex) never run on the
+    // normal path. The round-4-B comment promised "leave AUDIT_ACTIVE
+    // set so cleanup guards run wpr -cancel on stop failure" — but
+    // that's only true on the panic-unwind / Ctrl-C path, not here.
+    // Manually invoke the cleanups so a stop-failure path actually
+    // tears the kernel ETW session down and frees the singleton.
+    #[cfg(target_os = "windows")]
+    {
+        cancel_active_audit_trace();
+        release_audit_singleton();
+    }
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);

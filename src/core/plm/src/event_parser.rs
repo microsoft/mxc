@@ -298,8 +298,20 @@ where
             break;
         }
 
-        for &slot in events.iter().take(returned as usize) {
-            let handle = EvtHandleOwned(EVT_HANDLE(slot));
+        // R5-9 handle-leak fix: wrap ALL returned slots into
+        // `EvtHandleOwned` up front. If `render_event_xml` or
+        // `on_xml(&xml)` propagates mid-batch via `?`, the still-owned
+        // slots after the failing index are dropped (and their
+        // `EvtClose` runs) as part of unwinding `owned`. The
+        // previous code only converted slots one at a time inside the
+        // loop and leaked any unconverted slots on the early-return
+        // path.
+        let owned: Vec<EvtHandleOwned> = events
+            .iter()
+            .take(returned as usize)
+            .map(|&slot| EvtHandleOwned(EVT_HANDLE(slot)))
+            .collect();
+        for handle in &owned {
             let xml = render_event_xml(handle.0, &mut render_buf).map_err(|e| {
                 anyhow::anyhow!(
                     "EvtRender failed at event {} of batch (rendered {} so far): {e}",
@@ -309,8 +321,8 @@ where
             })?;
             on_xml(&xml)?;
             rendered_count += 1;
-            // handle's Drop calls EvtClose.
         }
+        // owned's Drop closes any remaining handles.
     }
     // h_query's Drop calls EvtClose.
     Ok(())
@@ -451,6 +463,11 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 
     // <EventData> child: zero or more Data/ComplexData nodes in order.
     let mut event_data = Vec::new();
+    // R5-14: `event_data_named` is only consumed by the EventID=27 UI
+    // event path. Skip building it for every other event (~99.99% of a
+    // typical access trace). ~1.2M `(String,String)` allocs saved per
+    // 100k events.
+    let need_named = event_id == 27;
     let mut event_data_named: Vec<(String, String)> = Vec::new();
     let mut complex_data_4: Option<String> = None;
     if let Some(ed) = root.children().find(|n| n.has_tag_name("EventData")) {
@@ -459,10 +476,15 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
             let tag = child.tag_name().name();
             if tag == "Data" || tag == "ComplexData" {
                 let text = child.text().unwrap_or("").to_string();
-                event_data.push(text.clone());
-                if let Some(name) = child.attribute("Name") {
-                    event_data_named.push((name.to_string(), text));
+                if need_named {
+                    if let Some(name) = child.attribute("Name") {
+                        // R5-15: clone only when we actually emit the named
+                        // entry. Most <Data> children have no `Name=` so
+                        // the clone was pure overhead.
+                        event_data_named.push((name.to_string(), text.clone()));
+                    }
                 }
+                event_data.push(text);
             }
             if tag == "ComplexData" {
                 if complex_index == 4 {
@@ -638,18 +660,31 @@ impl<'a> ParseAccumulator<'a> {
 
     /// Hot-path CWD/path filter. Uses precomputed lowercase forms of
     /// `current_directory` to avoid two `String` allocs per event
-    /// (round-4 finding K). Logic must stay in sync with the free
-    /// `is_skippable` function used by unit tests.
+    /// (round-4 finding K). R5-12: byte-wise ASCII comparison
+    /// against the cached lowercase forms — `to_ascii_lowercase` on
+    /// every event allocated ~12 MB / 100k events for nothing.
+    /// Logic must stay in sync with the free `is_skippable` function
+    /// used by unit tests.
     fn is_skippable(&self, file_path: &str) -> bool {
         if let (Some(cwd_lc), prefix_opt) = (&self.cwd_lc_trimmed, &self.cwd_lc_prefix) {
+            // Trim only trailing backslashes (single byte each).
             let normalized = file_path.trim_end_matches('\\');
-            let normalized_lc = normalized.to_ascii_lowercase();
-            if &normalized_lc == cwd_lc
-                || prefix_opt
-                    .as_ref()
-                    .map(|p| normalized_lc.starts_with(p.as_str()))
-                    .unwrap_or(false)
-            {
+            let nb = normalized.as_bytes();
+            let cwd_b = cwd_lc.as_bytes();
+            let cwd_eq = nb.len() == cwd_b.len()
+                && nb.iter().zip(cwd_b).all(|(a, b)| a.eq_ignore_ascii_case(b));
+            let prefix_match = prefix_opt
+                .as_deref()
+                .map(|p| {
+                    let pb = p.as_bytes();
+                    nb.len() >= pb.len()
+                        && nb[..pb.len()]
+                            .iter()
+                            .zip(pb)
+                            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                })
+                .unwrap_or(false);
+            if cwd_eq || prefix_match {
                 if self.verbose {
                     println!("Skipping current-directory event: {file_path}");
                 }
@@ -673,7 +708,7 @@ impl<'a> ParseAccumulator<'a> {
     }
 
     fn consume(&mut self, xml: &str) {
-        let Some(ev) = parse_event_xml(xml) else {
+        let Some(mut ev) = parse_event_xml(xml) else {
             return;
         };
 
@@ -746,13 +781,13 @@ impl<'a> ParseAccumulator<'a> {
         }
 
         if let Some(blob) = &ev.complex_data_4 {
-            if let Ok(caps) =
-                extract_caps::extract_caps_with_index(blob, &self.capability_index, self.verbose)
-            {
-                for c in caps {
-                    self.requested_capabilities.insert(c);
-                }
-            }
+            // R5-17: write directly into the accumulator's HashSet.
+            let _ = extract_caps::extract_caps_with_index_into(
+                blob,
+                &self.capability_index,
+                self.verbose,
+                &mut self.requested_capabilities,
+            );
         }
 
         // EventID=14 file-access event. Pull the file path; absent paths
@@ -780,10 +815,13 @@ impl<'a> ParseAccumulator<'a> {
         // (e.g. `C:éx` where `é` is two UTF-8 bytes straddling the slice
         // boundary). A panic here would abort the whole parse, silently
         // discarding every other access this trace captured.
+        // R5-13: take the strings out of `ev.event_data` rather than
+        // cloning. `consume` owns `ev` and these slots are not read
+        // again after this point. Saves ~3 allocs/event.
         let app_path = ev
             .event_data
-            .get(APP_PATH_INDEX)
-            .cloned()
+            .get_mut(APP_PATH_INDEX)
+            .map(std::mem::take)
             .unwrap_or_default();
         if !app_path.is_empty() {
             if let Some(tail) = file_path.get(3..) {
@@ -799,13 +837,13 @@ impl<'a> ParseAccumulator<'a> {
 
         let learning_mode = ev
             .event_data
-            .get(LEARNING_MODE_INDEX)
-            .cloned()
+            .get_mut(LEARNING_MODE_INDEX)
+            .map(std::mem::take)
             .unwrap_or_default();
         let resource_type = ev
             .event_data
-            .get(RESOURCE_TYPE_INDEX)
-            .cloned()
+            .get_mut(RESOURCE_TYPE_INDEX)
+            .map(std::mem::take)
             .unwrap_or_default();
         let access_mask = ev
             .event_data

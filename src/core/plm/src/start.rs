@@ -7,9 +7,32 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 
 use crate::wpr_path::wpr_command;
+
+/// Abstraction over wpr.exe invocations so the retry-on-conflict
+/// state machine in `start_plm_trace_with` is testable without
+/// actually spawning processes. The production impl is `WprExe`; tests
+/// supply a fake that returns canned exit codes (R5-7).
+pub trait WprLauncher {
+    fn start(&mut self, profile_arg: &str) -> Result<ExitStatus>;
+    fn cancel(&mut self);
+}
+
+pub struct WprExe;
+
+impl WprLauncher for WprExe {
+    fn start(&mut self, profile_arg: &str) -> Result<ExitStatus> {
+        wpr_command()
+            .args(["-start", profile_arg, "-filemode"])
+            .status()
+            .context("failed to spawn wpr -start")
+    }
+    fn cancel(&mut self) {
+        cancel_existing_wpr_trace();
+    }
+}
 
 /// Discard any previous in-memory trace session before starting a new one.
 /// `wpr -cancel` aborts an active trace without writing the .etl, freeing
@@ -38,27 +61,17 @@ pub fn cancel_existing_wpr_trace() {
         .status();
 }
 
-/// Invoke `wpr -start <profile> -filemode` once.
-fn try_start(wprp_arg: &str) -> Result<std::process::ExitStatus> {
-    wpr_command()
-        .args(["-start", wprp_arg, "-filemode"])
-        .status()
-        .context("failed to spawn wpr -start")
-}
-
-pub fn start_plm_trace(wprp_path: &Path) -> Result<()> {
+/// Core try-then-cancel-then-retry state machine, parameterised on a
+/// `WprLauncher` so tests can drive the conflict + retry branches
+/// deterministically.
+pub fn start_plm_trace_with<L: WprLauncher>(launcher: &mut L, wprp_path: &Path) -> Result<()> {
     let arg = format!("{}!AccessFailureProfile", wprp_path.display());
-    // First attempt: try to start without disturbing any pre-existing
-    // session. wpr returns non-zero (locale-invariant) when a
-    // conflicting session is already active.
-    let first = try_start(&arg)?;
+    let first = launcher.start(&arg)?;
     if first.success() {
         return Ok(());
     }
-    // Conflict (or other failure): cancel whatever's running and
-    // retry exactly once. If the retry also fails we propagate.
-    cancel_existing_wpr_trace();
-    let second = try_start(&arg)?;
+    launcher.cancel();
+    let second = launcher.start(&arg)?;
     if !second.success() {
         anyhow::bail!(
             "wpr -start exited with {second} (also failed after retry following wpr -cancel)"
@@ -67,9 +80,71 @@ pub fn start_plm_trace(wprp_path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn start_plm_trace(wprp_path: &Path) -> Result<()> {
+    start_plm_trace_with(&mut WprExe, wprp_path)
+}
+
 /// Back-compat shim: external callers (and tests) used to call
 /// `stop_existing_wpr_trace` to clear any session prior to start. The
 /// `start` path now handles that automatically, but the standalone
 /// `cancel` is still useful from cleanup handlers (Ctrl-C, panic
 /// guard). Re-export it under the legacy name as well.
 pub use cancel_existing_wpr_trace as stop_existing_wpr_trace;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::process::ExitStatusExt;
+    use std::path::PathBuf;
+
+    struct FakeLauncher {
+        starts: Vec<ExitStatus>,
+        idx: usize,
+        cancels: usize,
+    }
+    impl FakeLauncher {
+        fn new(codes: &[u32]) -> Self {
+            Self {
+                starts: codes.iter().map(|c| ExitStatus::from_raw(*c)).collect(),
+                idx: 0,
+                cancels: 0,
+            }
+        }
+    }
+    impl WprLauncher for FakeLauncher {
+        fn start(&mut self, _arg: &str) -> Result<ExitStatus> {
+            let s = self.starts[self.idx];
+            self.idx += 1;
+            Ok(s)
+        }
+        fn cancel(&mut self) {
+            self.cancels += 1;
+        }
+    }
+
+    #[test]
+    fn start_plm_trace_first_attempt_success_does_not_cancel() {
+        let mut f = FakeLauncher::new(&[0]);
+        start_plm_trace_with(&mut f, &PathBuf::from("plm.wprp")).unwrap();
+        assert_eq!(f.idx, 1);
+        assert_eq!(f.cancels, 0);
+    }
+
+    #[test]
+    fn start_plm_trace_retries_once_after_conflict() {
+        // First attempt fails (non-zero), cancel runs, second succeeds.
+        let mut f = FakeLauncher::new(&[1, 0]);
+        start_plm_trace_with(&mut f, &PathBuf::from("plm.wprp")).unwrap();
+        assert_eq!(f.idx, 2);
+        assert_eq!(f.cancels, 1);
+    }
+
+    #[test]
+    fn start_plm_trace_propagates_when_retry_also_fails() {
+        let mut f = FakeLauncher::new(&[1, 1]);
+        let err = start_plm_trace_with(&mut f, &PathBuf::from("plm.wprp")).unwrap_err();
+        assert!(format!("{err}").contains("failed after retry"));
+        assert_eq!(f.idx, 2);
+        assert_eq!(f.cancels, 1);
+    }
+}

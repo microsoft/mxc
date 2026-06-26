@@ -27,6 +27,7 @@ roxmltree = "0.20"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
     "Win32_System_EventLog",
+    "Win32_System_SystemInformation",
 ] }
 
 [build-dependencies]

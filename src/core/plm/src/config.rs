@@ -123,6 +123,17 @@ fn strip_verbatim_or_device_prefix(s: &str) -> Option<&str> {
         if head == "\\\\?\\" || head == "\\\\.\\" {
             return Some(&s[4..]);
         }
+        // Round-5 finding #8: `\??\` is the NT-object-manager
+        // equivalent of `\\?\`. ETW kernel events sometimes surface
+        // paths in this form (NtCreateFile resolves both). The
+        // event_parser layer strips it via `normalize_file_path`, but
+        // any call site that bypasses that pre-normalization (e.g.,
+        // the self-event filter that consumes a raw `file_path`)
+        // would otherwise leave the literal prefix and miss
+        // comparisons like the PLM self-binary path.
+        if head == "\\??\\" {
+            return Some(&s[4..]);
+        }
     }
     Some(s)
 }
@@ -145,8 +156,12 @@ fn strip_verbatim_or_device_prefix(s: &str) -> Option<&str> {
 /// arrays — those keep their original case for operator readability. We
 /// only normalize for the duration of a deny / dedup comparison.
 fn normalize_path(p: &str) -> Option<String> {
-    // 1. Strip verbatim / device prefix (`\\?\`, `\\.\`). UNC verbatim
-    //    is rejected because we don't grant policy to network shares.
+    // 1. Strip verbatim / device prefix (`\\?\`, `\\.\`, and the
+    //    NT-object `\??\` prefix). UNC verbatim is rejected because
+    //    we don't grant policy to network shares. Round-5 finding #8:
+    //    `\??\` was previously stripped only by `event_parser`, so
+    //    events that bypassed that layer leaked the literal prefix
+    //    into config storage.
     let stripped = strip_verbatim_or_device_prefix(p)?;
 
     // 2. Collapse `/` → `\`, lowercase ASCII in a single pass.
@@ -169,14 +184,43 @@ fn normalize_path(p: &str) -> Option<String> {
     // 4. Trim trailing separators from the whole string, then per-component
     //    strip trailing dots and spaces. Leave the drive-letter component
     //    ("c:") untouched.
+    //
+    //    Round-5 correctness finding #2: `..` and `.` segments break
+    //    the deny-prefix invariant — `C:\Windows\.\System32\evil` and
+    //    `C:\dir\..\Secrets\token.dat` would normalize to forms that
+    //    miss a deny entry on the canonical parent. Rather than
+    //    canonicalize (which requires filesystem access we don't
+    //    have here), reject any input containing a `.` or `..`
+    //    pure-segment. Callers fall back to "no match" semantics,
+    //    which for a deny rule is the safe failure mode (the policy
+    //    won't widen on an event we can't prove safe).
     let trimmed = s.trim_end_matches('\\');
     let mut parts: Vec<String> = Vec::new();
+    let mut in_leading_unc = true;
     for (i, part) in trimmed.split('\\').enumerate() {
         if i == 0 && part.len() == 2 && part.as_bytes()[1] == b':' {
             parts.push(part.to_string());
+            in_leading_unc = false;
             continue;
         }
-        parts.push(part.trim_end_matches(['.', ' ']).to_string());
+        // Leading empty segments (UNC `\\server\share\x` splits to
+        // `["", "", "server", ...]`) are preserved verbatim; deny
+        // matching treats UNC as pass-through. Once we see a
+        // non-empty segment, leave the leading-UNC mode and any
+        // future empty segment is an error (doubled backslash etc).
+        if part.is_empty() && in_leading_unc && i < 2 {
+            parts.push(String::new());
+            continue;
+        }
+        in_leading_unc = false;
+        let stripped = part.trim_end_matches(['.', ' ']);
+        // Reject pure traversal segments and other empty segments
+        // (`..` or `.`, or empty after trim — these arise from
+        // malformed inputs or doubled backslashes in non-UNC paths).
+        if part == "." || part == ".." || stripped.is_empty() {
+            return None;
+        }
+        parts.push(stripped.to_string());
     }
     Some(parts.join("\\"))
 }
@@ -1259,18 +1303,15 @@ mod tests {
     // future change cannot silently widen / narrow the surface.
 
     #[test]
-    fn normalize_path_rejects_nt_object_prefix_via_ads_guard() {
-        // `\??\C:\foo` is the NT-object form ETW occasionally emits.
-        // `config::normalize_path` does NOT have an explicit
-        // strip rule for it; the `:` at position 5 trips the ADS
-        // guard (only `:` at position 1 is the drive-letter
-        // separator) and we return None. Deny matching against a
-        // `\??\` event is therefore impossible from this layer —
-        // by design, since events are pre-normalized by
-        // `event_parser::normalize_file_path` (which DOES strip
-        // `\??\`) before they reach `update_from_access_events`.
-        // This test pins that contract.
-        assert!(normalize_path("\\??\\C:\\foo").is_none());
+    fn normalize_path_strips_nt_object_prefix() {
+        // Round-5 finding #8 fix: `\??\C:\foo` is the NT-object form
+        // ETW occasionally emits. `config::normalize_path` now
+        // explicitly strips the `\??\` prefix (mirroring `\\?\` /
+        // `\\.\` handling) so call sites that bypass
+        // `event_parser::normalize_file_path` still get a comparable
+        // drive-letter form. Without this, the self-event filter
+        // would miss `\??\C:\plm\plm.exe`.
+        assert_eq!(normalize_path("\\??\\C:\\foo").as_deref(), Some("c:\\foo"));
     }
 
     #[test]
@@ -1883,5 +1924,83 @@ mod tests {
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("foo")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("bar")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("baz")));
+    }
+
+    // R5-31: load_config rejects malformed JSON files with a useful
+    // error rather than panicking or silently returning the empty
+    // object.
+    #[test]
+    fn load_config_rejects_malformed_json() {
+        let tmp =
+            std::env::temp_dir().join(format!("plm_load_cfg_test_{}.json", std::process::id()));
+        std::fs::write(&tmp, b"{not valid json").unwrap();
+        let err = load_config(&tmp).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            format!("{err}").to_ascii_lowercase().contains("json")
+                || format!("{err}").contains("parse")
+        );
+    }
+
+    // R5-36: merge_capabilities returns a clean error when an existing
+    // `processContainer.capabilities` field is the wrong JSON shape
+    // (e.g. a bare string). It must NOT panic on `as_array().unwrap()`
+    // or silently drop the malformed value.
+    #[test]
+    fn merge_capabilities_handles_non_array_existing_field() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": "internetClient" }
+        });
+        let req: HashSet<String> = ["registryRead"].iter().map(|s| s.to_string()).collect();
+        let err = merge_capabilities(&mut cfg, &req).unwrap_err();
+        assert!(
+            format!("{err}").contains("capabilities") && format!("{err}").contains("array"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // R5-37: full widening — existing caps + requested set are unioned
+    // and the result is sorted (case-insensitively) and dedup'd.
+    #[test]
+    fn merge_capabilities_unions_existing_and_requested_sorted() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": ["existingOne", "alpha"] }
+        });
+        let req: HashSet<String> = ["registryRead", "ALPHA"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        let names: Vec<String> = cfg["processContainer"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        // Three unique caps (alpha dedup'd cross-set, case-insensitively).
+        assert_eq!(names.len(), 3, "got {names:?}");
+        // Sorted (case-insensitively).
+        let mut expected = names.clone();
+        expected.sort_by_key(|a| a.to_ascii_lowercase());
+        assert_eq!(names, expected);
+    }
+
+    // R5-42: cross-set case-insensitive dedup — `EXISTING` in cfg and
+    // `existing` in requested must collapse to one entry, NOT two.
+    #[test]
+    fn merge_capabilities_cross_set_case_insensitive_dedup() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": ["INTERNETCLIENT"] }
+        });
+        let req: HashSet<String> = ["internetclient", "internetClient"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        let caps = cfg["processContainer"]["capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 1, "expected single dedup'd cap, got {caps:?}");
     }
 }

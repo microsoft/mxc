@@ -8,9 +8,19 @@
 //! unprivileged user who can drop a `wpr.exe` into a directory an
 //! admin later runs PLM from would gain code execution as that admin.
 //!
-//! This module resolves `%SystemRoot%\System32\wpr.exe` once at first
-//! call and caches the result. All PLM call sites must go through
-//! `wpr_command()` instead of `Command::new("wpr")` directly.
+//! Round-5 security finding #1: the round-4 fix read `%SystemRoot%`
+//! from the process environment block, but UAC inherits the
+//! unelevated parent's env verbatim. A standard user can `setx
+//! SystemRoot=C:\\Users\\Public\\evil`, plant
+//! `evil\\System32\\wpr.exe`, and the next admin-elevated
+//! `wxc-exec --audit` (or any cleanup-path `wpr -cancel`) launches the
+//! attacker binary as administrator — strictly worse than the
+//! original CWD plant because env travels with elevation.
+//!
+//! This module resolves the System directory via `GetSystemDirectoryW`
+//! (kernel-published, not env-spoofable) once at first call and caches
+//! the result. All PLM call sites must go through `wpr_command()`
+//! instead of `Command::new("wpr")` directly.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,16 +29,27 @@ use std::sync::OnceLock;
 /// Cached absolute path to `wpr.exe`, resolved on first use.
 static WPR_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-/// Resolve `%SystemRoot%\System32\wpr.exe`. Falls back to plain
-/// `"wpr.exe"` only when `%SystemRoot%` is unset or empty (which
-/// shouldn't happen on a real Windows install) — that fallback exists
-/// solely so unit tests that mock the env don't panic.
+/// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. The kernel
+/// publishes this value at process creation and the env block cannot
+/// override it, so this is safe even when the parent (unelevated)
+/// process set `SystemRoot` to an attacker-controlled directory.
+///
+/// Falls back to `C:\\Windows\\System32\\wpr.exe` only if the API call
+/// itself fails (which on a real Windows install does not happen).
+#[cfg(target_os = "windows")]
 fn resolve_wpr_path() -> PathBuf {
-    let system_root = std::env::var_os("SystemRoot")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| std::ffi::OsString::from("C:\\Windows"));
-    let mut p = PathBuf::from(system_root);
-    p.push("System32");
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = vec![0u16; 260];
+    // SAFETY: buf is initialized; we pass a valid length and own the
+    // memory for the duration of the call.
+    let n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
+    if n == 0 || (n as usize) > buf.len() {
+        // API failed or buffer somehow too small: use a hardcoded
+        // fallback rather than reading the env block.
+        return PathBuf::from("C:\\Windows\\System32\\wpr.exe");
+    }
+    let dir = String::from_utf16_lossy(&buf[..n as usize]);
+    let mut p = PathBuf::from(dir);
     p.push("wpr.exe");
     p
 }
@@ -45,8 +66,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolves_under_system_root_when_set() {
-        std::env::set_var("SystemRoot", "C:\\Windows");
+    fn resolves_absolute_system_directory_wpr() {
         let p = resolve_wpr_path();
         assert!(
             p.is_absolute(),
@@ -54,20 +74,37 @@ mod tests {
             p.display()
         );
         assert!(
-            p.ends_with("System32\\wpr.exe") || p.ends_with("System32/wpr.exe"),
-            "unexpected wpr path: {}",
+            p.ends_with("wpr.exe"),
+            "wpr path must end with wpr.exe: {}",
+            p.display()
+        );
+        // The result must be under a `System32` (or `Sysnative` /
+        // `SysWOW64`) directory — never under user-writable paths.
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        assert!(
+            s.contains("\\system32\\") || s.contains("\\sysnative\\") || s.contains("\\syswow64\\"),
+            "wpr path must be under a system directory; got: {}",
             p.display()
         );
     }
 
+    /// Round-5 security regression guard: setting `SystemRoot` in the
+    /// process env MUST NOT change which `wpr.exe` we resolve, because
+    /// the kernel-published system directory is the source of truth.
     #[test]
-    fn falls_back_to_default_system_root_when_env_missing() {
-        std::env::remove_var("SystemRoot");
+    fn ignores_system_root_env_var() {
+        let original = std::env::var_os("SystemRoot");
+        std::env::set_var("SystemRoot", "C:\\Users\\Public\\evil");
         let p = resolve_wpr_path();
-        assert!(p.is_absolute());
-        // Default fallback is C:\Windows; just assert it starts with
-        // a drive root rather than a relative path.
-        let s = p.to_string_lossy();
-        assert!(s.contains(":\\") || s.contains(":/"), "got: {s}");
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        assert!(
+            !s.contains("public") && !s.contains("evil"),
+            "resolve_wpr_path honored attacker-controlled SystemRoot: {}",
+            p.display()
+        );
+        match original {
+            Some(v) => std::env::set_var("SystemRoot", v),
+            None => std::env::remove_var("SystemRoot"),
+        }
     }
 }
