@@ -50,6 +50,13 @@ extends:
     cloudvault:
       enabled: false
 
+    globalSdl:
+      evidence:
+        enabled: false
+      # Use evidenceV2 for the new evidence format instead of deprecated v1 job.
+      evidenceV2:
+        enabled: true
+
     stages:
     - stage: vpack
       displayName: 'Create OS vpack'
@@ -118,3 +125,19 @@ extends:
                   # _manifest/spdx_2.2/ at the top of VPackContents. The
                   # per-arch SBOMs are identical source-wise, so promote x64's.
                   Copy-Item -Recurse -Force "$(ob_outputDirectory)\x64\_manifest" "$(ob_outputDirectory)\_manifest"
+
+            # Stage the current isolation_session test collateral into the vpack
+            # under isolation_session/main/, so the OS side can run these tests.
+            # Copies every *isolation_session* file from tests/scripts and
+            # tests/configs into scripts/ and configs/ subfolders.
+            - task: PowerShell@2
+              displayName: Stage isolation_session tests for vpack
+              inputs:
+                targetType: inline
+                script: |
+                  $scriptsDest = "$(ob_outputDirectory)\isolation_session\main\scripts"
+                  $configsDest = "$(ob_outputDirectory)\isolation_session\main\configs"
+                  New-Item -ItemType Directory -Force -Path $scriptsDest | Out-Null
+                  New-Item -ItemType Directory -Force -Path $configsDest | Out-Null
+                  Copy-Item -Force "$(Build.SourcesDirectory)\tests\scripts\*isolation_session*" $scriptsDest
+                  Copy-Item -Force "$(Build.SourcesDirectory)\tests\configs\*isolation_session*" $configsDest
