@@ -149,27 +149,23 @@ fn spawn_process_container(
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use appcontainer_common::appcontainer_runner::AppContainerScriptRunner;
-    use wxc_common::config_parser::is_base_container_version;
+    use appcontainer_common::fallback_detector::is_base_container_usable;
     use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
-    // The AppContainer fast path vs the native BaseContainer (OS sandbox API):
-    // unlike the executor binaries' run-to-completion fallback, streaming does
-    // NOT route through `dispatch_with_fallback` — there is no AppContainer-BFS
-    // / AppContainer-DACL fallback for streaming.
+    // ProcessContainer resolves to a concrete backend purely by host
+    // capability: prefer the native BaseContainer (OS sandbox API) when usable,
+    // otherwise AppContainer. The schema version does not influence this choice.
     //
-    // Why: `dispatch_with_fallback` yields a run-to-completion
-    // `Box<dyn ScriptRunner>` plus a `DaclManager` guard, neither of which
-    // fits the streaming handle (the DACL tier would require the returned
-    // `SandboxProcess` to own the guard so ACE restore outlives the child).
-    //
-    // Consequence (intentional, fail-closed): an experimental / newer-schema
-    // config on a host that lacks the native BaseContainer API fails here with
-    // a clear "BaseContainer API unavailable" error from
-    // `BaseContainerRunner`'s validation, whereas the binaries' fallback would
-    // drop to an AppContainer tier. Streaming therefore requires the native
-    // BaseContainer API for those configs.
-    let version_implies_base_container = is_base_container_version(&request.schema_version);
-    if request.experimental_enabled || version_implies_base_container {
+    // Unlike the executor binaries' run-to-completion path, streaming does NOT
+    // route through `dispatch_with_fallback` — that yields a run-to-completion
+    // `Box<dyn ScriptRunner>` plus a `DaclManager` guard, neither of which fits
+    // the streaming handle (the DACL tier would require the returned
+    // `SandboxProcess` to own the guard so ACE restore outlives the child). So
+    // streaming has no AppContainer-BFS / AppContainer-DACL tiering: it picks
+    // BaseContainer when the API is usable and plain AppContainer otherwise,
+    // using the same `is_base_container_usable()` probe the dispatcher's Tier 1
+    // selection uses, so the two paths agree on the BC-vs-AC decision.
+    if is_base_container_usable() {
         let mut runner = appcontainer_common::base_container_runner::BaseContainerRunner::new();
         return runner
             .spawn(request, logger, StdioMode::Pipes)
