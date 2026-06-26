@@ -22,7 +22,9 @@ The schema mapping for UI relaxations is documented in [`docs/base-process-conta
 | `src/start.rs`        | `wpr -cancel` (best-effort) + `wpr -start …!AccessFailureProfile -filemode`         |
 | `src/stop.rs`         | `wpr -stop` (or skip with `--trace-file`) + parse + merge + write `Adjusted_*.json` |
 | `src/log.rs`          | Interactive mode: Enter to start, Enter to stop, then diff vs a blank config        |
-| `src/event_parser.rs` | `EvtQuery` / `EvtRender` walk; EventID=14 + EventID=27 decoders                     |
+| `src/event_parser.rs`   | `EvtQuery` / `EvtRender` walk; shared `ParseAccumulator` + per-event dispatcher |
+| `src/access_failure.rs` | `EventID=14` decoder: file-path normalization, post-XPath filters, ACE-blob ingestion |
+| `src/ui_violation.rs`   | `EventID=27` decoder: hex-payload + named-data parsers, category classification |
 | `src/extract_caps.rs` | ACE blob walk + `DeriveCapabilitySidsFromName` capability resolution                |
 | `src/config.rs`       | JSON load/mutate/save; path & capability merge; `apply_ui_operation_flags`          |
 | `src/access_event.rs` | `LearningModeAccessEvent` plain struct                                              |
@@ -151,8 +153,8 @@ The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`); on
 | 14      | `Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode`    | File / capability access that would have been denied | `valid_access_events`, `requested_capabilities` |
 | 27      | `Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode`    | UI operation blocked by Job UI Limits or Win32k disable | `need_ui` (CONVERT_TO_GUI) or `ui_operation_flags` (UI_OPERATION) |
 
-The full `JOB_OBJECT_UILIMIT_*` constant set is mirrored in
-[`src/event_parser.rs`](src/event_parser.rs) alongside the
+The full `JOB_OBJECT_UILIMIT_*` constant set lives in
+[`src/ui_limits.rs`](src/ui_limits.rs) alongside the
 `CONVERT_TO_GUI` / `UI_OPERATION` category constants. UI events whose payload
 cannot be decoded are surfaced in `--verbose-logging` output and otherwise
 ignored — they do not contribute to either relaxation.

@@ -225,10 +225,10 @@ mod tests {
         );
 
         // The harness depends on the Privacy-Auditing-PLM event
-        // provider for its event-id=14 / event-id=23 / event-id=27
-        // detection paths. Sanity-check that the profile still
-        // references it; dropping it (by name OR GUID) silently
-        // disables every meaningful detection.
+        // provider for its event-id=14 / event-id=27 detection paths.
+        // Sanity-check that the profile still references it; dropping
+        // it (by name OR GUID) silently disables every meaningful
+        // detection.
         let mentions_plm_provider = wprp
             .contains("Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode")
             || wprp.contains("811a1ddb-2e69-5f25-adc0-4b186170e760");
@@ -236,7 +236,7 @@ mod tests {
             mentions_plm_provider,
             "plm.wprp must enable the Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode \
              provider (GUID 811a1ddb-2e69-5f25-adc0-4b186170e760); without it the \
-             event-id=14/23/27 detection pipeline has nothing to consume",
+             event-id=14/27 detection pipeline has nothing to consume",
         );
 
         // The profile also wires the kernel collector for process/loader
