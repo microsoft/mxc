@@ -46,3 +46,6 @@ pathrel_test.exe
 
 # Claude
 .claude/
+
+# iterative-review channel artifacts (working files, not committed)
+.review/
