@@ -449,8 +449,9 @@ impl AppContainerScriptRunner {
                          Container will learn and record access patterns.",
                     );
                 } else {
-                    return Ok(ScriptResponse::error(
-                        "SECURITY: permissiveLearningMode not allowed in release builds (pass --audit to override)",
+                    return Err(WxcError::Validation(
+                        "SECURITY: permissiveLearningMode not allowed in release builds (pass --audit to override)"
+                            .to_string(),
                     ));
                 }
             }
