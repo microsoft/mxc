@@ -20,7 +20,7 @@ hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 appcontainer_common = { workspace = true }
-windows_sandbox_common = { workspace = true }
+windows_sandbox_lifecycle = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }
 nanvix_runner = { workspace = true, optional = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }

@@ -9,9 +9,9 @@ members = [
     "core/mxc_build_common",
     "core/generated/base_container_specification",
     "backends/appcontainer/common",
-    "backends/windows_sandbox/daemon",
     "backends/windows_sandbox/guest",
     "backends/windows_sandbox/common",
+    "backends/windows_sandbox/lifecycle",
     "backends/isolation_session/bindings",
     "backends/isolation_session/common",
     "backends/hyperlight/common",
@@ -93,6 +93,7 @@ clap = { version = "4", features = ["derive"] }
 wxc_common = { path = "core/wxc_common" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
+windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 isolation_session_common = { path = "backends/isolation_session/common" }
 hyperlight_common = { path = "backends/hyperlight/common" }
 nanvix_runner = { path = "backends/nanvix/runner" }
