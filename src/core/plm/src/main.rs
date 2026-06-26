@@ -29,10 +29,10 @@ use plm::{extract_caps, log, profile_gen, start, stop};
 /// `plm start` and the operator's matching `plm stop`) still tears
 /// down the kernel ETW session instead of leaking it.
 ///
-/// the `wxc-exec --audit` path has its
-/// own AUDIT_ACTIVE flag + SetConsoleCtrlHandler; the standalone
-/// `plm log` interactive flow had neither, so Ctrl+C left the NT
-/// Kernel Logger session live until reboot or manual `wpr -cancel`.
+/// The `wxc-exec --audit` path has its own AUDIT_ACTIVE flag +
+/// SetConsoleCtrlHandler; the standalone `plm log` interactive flow
+/// had neither, so Ctrl+C left the NT Kernel Logger session live
+/// until reboot or manual `wpr -cancel`.
 static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Raw `HANDLE` value of the named-mutex singleton acquired by
@@ -40,10 +40,10 @@ static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// static so the console-control handler can release the host-wide
 /// guard before `ExitProcess` runs and skips Rust destructors.
 ///
-/// `plm log` / direct `plm start` /
-/// direct `plm stop` previously bypassed the `Global\Mxc_Plm_Audit`
-/// singleton entirely, so the retry-on-conflict path in
-/// `start_plm_trace` could silently `wpr -cancel` a peer PLM trace.
+/// `plm log` / direct `plm start` / direct `plm stop` previously
+/// bypassed the `Global\Mxc_Plm_Audit` singleton entirely, so the
+/// retry-on-conflict path in `start_plm_trace` could silently
+/// `wpr -cancel` a peer PLM trace.
 static PLM_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
 /// Mark the kernel ETW session as live; called immediately after

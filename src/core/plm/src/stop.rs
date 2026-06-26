@@ -18,12 +18,12 @@ use crate::config::{
 use crate::event_parser::{parse_events, ParseResult};
 use crate::wpr_path::wpr_command;
 
-/// the "skip adjusted config" predicate extracted
-/// from the inline check in `run`. A trace that produced no access
-/// events, no capability requests, no `CONVERT_TO_GUI` hint, and no
-/// `UI_OPERATION` flags has nothing to merge — emitting an
-/// `Adjusted_*.json` byte-identical to the input would only confuse
-/// the harness's diff-based pass/fail signal.
+/// "Skip adjusted config" predicate extracted from the inline check
+/// in `run`. A trace that produced no access events, no capability
+/// requests, no `CONVERT_TO_GUI` hint, and no `UI_OPERATION` flags has
+/// nothing to merge — emitting an `Adjusted_*.json` byte-identical to
+/// the input would only confuse the harness's diff-based pass/fail
+/// signal.
 pub fn should_skip_adjusted(parse: &ParseResult) -> bool {
     parse.is_empty()
 }

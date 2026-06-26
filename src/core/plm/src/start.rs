@@ -220,7 +220,7 @@ mod tests {
             .any(|n| n.attribute("Name") == Some("AccessFailureProfile"));
         assert!(
             has_profile,
-            "plm.wprp must declare a <Profile Name=\"AccessFailureProfile\"> \
+            "EMBEDDED_WPRP must declare a <Profile Name=\"AccessFailureProfile\"> \
              element — the runtime hard-codes this name in start_plm_trace",
         );
 
@@ -234,7 +234,7 @@ mod tests {
             || wprp.contains("811a1ddb-2e69-5f25-adc0-4b186170e760");
         assert!(
             mentions_plm_provider,
-            "plm.wprp must enable the Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode \
+            "EMBEDDED_WPRP must enable the Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode \
              provider (GUID 811a1ddb-2e69-5f25-adc0-4b186170e760); without it the \
              event-id=14/27 detection pipeline has nothing to consume",
         );
@@ -249,7 +249,7 @@ mod tests {
             .any(|n| n.attribute("Id") == Some("SC_Kernel"));
         assert!(
             has_kernel_collector,
-            "plm.wprp must declare the SC_Kernel SystemCollector that the \
+            "EMBEDDED_WPRP must declare the SC_Kernel SystemCollector that the \
              AccessFailureProfile recording references",
         );
     }

@@ -83,8 +83,7 @@ pub const EMBEDDED_WPRP: &str = r#"<!--
 "#;
 
 /// Default filename for the staged profile. Lowercase to match what
-/// `build.rs` writes and what `main.rs` defaults to (case-sensitive
-/// trees fail opaquely otherwise).
+/// `main.rs` defaults to (case-sensitive trees fail opaquely otherwise).
 pub const WPRP_FILENAME: &str = "plm.wprp";
 
 /// Ensure `plm.wprp` exists in `exe_dir`. If a file is already

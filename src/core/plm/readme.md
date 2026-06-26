@@ -28,6 +28,9 @@ The schema mapping for UI relaxations is documented in [`docs/base-process-conta
 | `src/extract_caps.rs` | ACE blob walk + `DeriveCapabilitySidsFromName` capability resolution                |
 | `src/config.rs`       | JSON load/mutate/save; path & capability merge; `apply_ui_operation_flags`          |
 | `src/access_event.rs` | `LearningModeAccessEvent` plain struct                                              |
+| `src/ui_limits.rs`    | `JOB_OBJECT_UILIMIT_*` constants + UI-violation category constants                  |
+| `src/coordination.rs` | Cross-process singleton named-mutex + bypass-env-var coordination for `plm log`     |
+| `src/wpr_path.rs`     | Resolves `wpr.exe` to its absolute `%SystemRoot%\System32` path (PATH-spoof-safe)   |
 | `src/profile_gen.rs`  | Inline WPR profile (`EMBEDDED_WPRP`) + run-time writer that drops `plm.wprp` next to `plm.exe` when missing |
 
 Keys in the input config are preserved in order via `serde_json`'s `preserve_order` feature; merged blocks slot in next to existing `filesystem` / `<containment>` / `ui` sections without reformatting the file.
