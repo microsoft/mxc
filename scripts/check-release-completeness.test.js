@@ -147,7 +147,7 @@ test("fails when meta pins a zombie package with no on-disk source", () => {
     fixture({
       optionalDependencies: {
         "@microsoft/mxc-sdk-win32-x64": "0.7.0",
-        "@microsoft/mxc-sdk-darwin-x64": "0.7.0", // no on-disk dir
+        "@microsoft/mxc-sdk-freebsd-x64": "0.7.0", // no on-disk dir
       },
       platformPackages: {
         "win32-x64": { name: "@microsoft/mxc-sdk-win32-x64", version: "0.7.0" },
@@ -156,7 +156,7 @@ test("fails when meta pins a zombie package with no on-disk source", () => {
     }),
   );
   assert.strictEqual(r.ok, false);
-  assert.ok(r.pinIssues.some((p) => p.includes("darwin-x64")));
+  assert.ok(r.pinIssues.some((p) => p.includes("freebsd-x64")));
 });
 
 test("ignores non-tgz files in the tarball dir", () => {

@@ -91,10 +91,10 @@ describe('on-disk platform packages match the runtime support matrix (#512)', ()
     assert.strictEqual(onDisk.size, SUPPORTED_TUPLES.size, 'tuple set size mismatch');
   });
 
-  it('Intel macOS (darwin-x64) is not shipped', () => {
+  it('Intel macOS (darwin-x64) is shipped (closes #571)', () => {
     assert.ok(
-      !platformDirs.includes('darwin-x64'),
-      'darwin-x64 must not be shipped (Intel macOS is unsupported)',
+      platformDirs.includes('darwin-x64'),
+      'darwin-x64 must be shipped (Intel macOS support)',
     );
   });
 });
