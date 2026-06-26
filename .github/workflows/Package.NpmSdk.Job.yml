@@ -19,53 +19,120 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/package-lock.json
 
-      # Download all five build artifacts into the sdk/bin layout the SDK
-      # packager expects. Windows-x64 + Linux-x64 both land under bin/x64
-      # but the binaries have disjoint filenames so they don't collide.
-      - name: Download wxc-binaries x64
+      # Download each platform's binaries straight into its per-platform package
+      # directory (sdk/platform-packages/<os>-<arch>/). The meta package ships no
+      # binaries; each platform package ships exactly its own host's payload.
+      - name: Download win32-x64 binaries
         uses: actions/download-artifact@v4
         with:
           name: wxc-binaries-x86_64-pc-windows-msvc
-          path: sdk/bin/x64
-      - name: Download wxc-binaries arm64
+          path: sdk/platform-packages/win32-x64
+      - name: Download win32-arm64 binaries
         uses: actions/download-artifact@v4
         with:
           name: wxc-binaries-aarch64-pc-windows-msvc
-          path: sdk/bin/arm64
-      - name: Download lxc-binaries x64
+          path: sdk/platform-packages/win32-arm64
+      - name: Download linux-x64 binaries
         uses: actions/download-artifact@v4
         with:
           name: lxc-binaries-x86_64-unknown-linux-gnu
-          path: sdk/bin/x64
-      - name: Download lxc-binaries arm64
+          path: sdk/platform-packages/linux-x64
+      - name: Download linux-arm64 binaries
         uses: actions/download-artifact@v4
         with:
           name: lxc-binaries-aarch64-unknown-linux-gnu
-          path: sdk/bin/arm64
-      - name: Download mxc-binaries arm64 (mac)
+          path: sdk/platform-packages/linux-arm64
+      - name: Download darwin-arm64 binaries
         uses: actions/download-artifact@v4
         with:
           name: mxc-binaries-aarch64-apple-darwin
-          path: sdk/bin/arm64
+          path: sdk/platform-packages/darwin-arm64
 
-      # Artifact downloads strip Unix execute permissions. Restore +x.
-      # Path is `bin` (not `sdk/bin`) because of the job's working-directory default.
+      # Artifact downloads strip Unix execute permissions. Restore +x on the
+      # Linux/macOS executors so the packed tarballs preserve them.
       - name: Restore execute permissions
+        working-directory: .
         shell: bash
         run: |
           set -euo pipefail
-          for name in lxc-exec linux-test-proxy mxc-exec-mac; do
-            find bin -name "$name" -exec chmod +x {} +
-          done
+          find sdk/platform-packages -name lxc-exec -exec chmod +x {} +
+          find sdk/platform-packages -name mxc-exec-mac -exec chmod +x {} +
+
+      # Symbols ship separately; dev/test-only proxies are not shipped.
+      - name: Strip symbols and dev/test-only binaries
+        working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf sdk/platform-packages/*/symbols
+          rm -f sdk/platform-packages/*/wxc-test-proxy.exe
+          rm -f sdk/platform-packages/*/linux-test-proxy
 
       - run: npm ci
-      - run: npm run build
-      - run: npm pack
 
-      - name: Upload SDK package
+      - run: npm run build
+
+      - name: Check platform package versions
+        working-directory: .
+        run: node scripts/sync-platform-package-versions.js --check
+
+      - name: Pack meta package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/out/packages"
+          npm pack --pack-destination "$GITHUB_WORKSPACE/out/packages"
+
+      # Pack each platform package only when its expected primary executor is
+      # present (an allowlist, not an "any extra file" denylist).
+      - name: Pack platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="$GITHUB_WORKSPACE/out/platform-packages"
+          mkdir -p "$dest"
+          for d in platform-packages/*/; do
+            name=$(basename "$d")
+            case "$name" in
+              win32-*)  primary="wxc-exec.exe" ;;
+              linux-*)  primary="lxc-exec" ;;
+              darwin-*) primary="mxc-exec-mac" ;;
+              *) echo "Unknown platform package dir: $name" >&2; exit 1 ;;
+            esac
+            if [ -f "$d/$primary" ]; then
+              ( cd "$d" && npm pack --pack-destination "$dest" )
+              echo "Packed platform package: $name"
+            else
+              echo "Skipping $name: primary binary $primary not staged"
+            fi
+          done
+          ls -la "$dest"
+
+      # Release-completeness gate. The on-disk platform-packages dir is the
+      # canonical source: the set must be non-empty, the meta package must pin
+      # exactly those packages at their versions, every expected platform
+      # tarball must be packed, and NO stray/extra .tgz may be present.
+      - name: Verify release completeness
+        shell: bash
+        run: |
+          set -euo pipefail
+          META_PKG="$GITHUB_WORKSPACE/sdk/package.json" \
+          PLATFORM_PACKAGES_DIR="$GITHUB_WORKSPACE/sdk/platform-packages" \
+          TARBALL_DIR="$GITHUB_WORKSPACE/out/platform-packages" \
+          node "$GITHUB_WORKSPACE/scripts/check-release-completeness.js"
+
+      - name: Upload meta package
         uses: actions/upload-artifact@v4
         with:
           name: npm-packages
-          path: sdk/*.tgz
+          path: out/packages/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload platform packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-platform-packages
+          path: out/platform-packages/*.tgz
           if-no-files-found: error
           retention-days: 1

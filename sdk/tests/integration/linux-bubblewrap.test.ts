@@ -14,6 +14,7 @@ import {
   debugSpawnOptions,
   spawnFromConfigAsync,
   startLinuxTestProxy,
+  isTestProxyAvailable,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
 
@@ -90,6 +91,8 @@ const PROXY_SCHEMA = '0.6.0-alpha';
 describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
   skip: !isLinuxBubblewrap
     ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
+    : !isTestProxyAvailable('linux-test-proxy')
+    ? 'linux-test-proxy unavailable (excluded from shipped package per #512; set MXC_TEST_PROXY_DIR or build the Rust binaries locally)'
     : undefined,
 }, () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-'));

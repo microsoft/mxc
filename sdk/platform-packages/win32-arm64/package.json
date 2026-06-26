@@ -1,0 +1,30 @@
+{
+  "name": "@microsoft/mxc-sdk-win32-arm64",
+  "version": "0.7.0",
+  "description": "MXC SDK native binaries for win32-arm64 (aarch64-pc-windows-msvc).",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "wxc-exec.exe",
+    "wxc-windows-sandbox-guest.exe",
+    "wxc-windows-sandbox-daemon.exe",
+    "winhttp-proxy-shim.exe",
+    "wxc-host-prep.exe",
+    "wslcsdk.dll",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node -e \"if(!require('fs').existsSync('wxc-exec.exe')){console.error('prepack: wxc-exec.exe not staged; refusing to pack an empty platform package');process.exit(1)}\""
+  },
+  "license": "MIT",
+  "author": "Microsoft Corporation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/mxc.git",
+    "directory": "sdk/platform-packages/win32-arm64"
+  }
+}

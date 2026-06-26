@@ -278,8 +278,10 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 ./build-mac.sh --rust-only
 ```
 
-The script writes to `sdk/bin/<arch>/mxc-exec-mac` so the SDK's
-`findDarwinExecutable()` picks up the dev build automatically.
+The script stages the binary into `sdk/platform-packages/darwin-<arch>/mxc-exec-mac`
+so the SDK's `findSeatbeltExecutable()` picks up the dev build automatically.
+(When the platform package is not present, discovery also falls back to the
+`src/target/<triple>/{release,debug}/` Cargo output.)
 
 ### Codesigning and notarization
 
