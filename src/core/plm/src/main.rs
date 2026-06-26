@@ -2,7 +2,7 @@
 //!
 //! Subcommands:
 //! - `start`: cancel any active WPR trace and start a new one using
-//!   `PLM.wprp!AccessFailureProfile` (port of `start_plm_logging.ps1`).
+//!   `plm.wprp!AccessFailureProfile` (port of `start_plm_logging.ps1`).
 //! - `stop`: stop the trace, parse events, merge findings into a config
 //!   (port of `stop_plm_logging.ps1`).
 //!
@@ -171,9 +171,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Start a new WPR trace using PLM.wprp!AccessFailureProfile.
+    /// Start a new WPR trace using plm.wprp!AccessFailureProfile.
     Start {
-        /// Override path to PLM.wprp. Defaults to <exe dir>\PLM.wprp.
+        /// Override path to plm.wprp. Defaults to <exe dir>\plm.wprp.
         #[arg(long)]
         wprp: Option<PathBuf>,
     },
@@ -214,7 +214,7 @@ enum Cmd {
     /// Interactive: press Enter to start logging, press Enter again to
     /// stop, then print the changes a blank config would receive.
     Log {
-        /// Override path to PLM.wprp. Defaults to <exe dir>\PLM.wprp.
+        /// Override path to plm.wprp. Defaults to <exe dir>\plm.wprp.
         #[arg(long)]
         wprp: Option<PathBuf>,
         /// Emit per-event/per-ACE diagnostic output.
@@ -243,7 +243,12 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Start { wprp } => {
             let _singleton = acquire_singleton_if_needed()?;
-            let wprp_path = wprp.unwrap_or_else(|| exe.join("PLM.wprp"));
+            // Round-8 coverage finding #4: filename must match the
+            // lowercase `plm.wprp` written by `build.rs`. Mismatched
+            // casing works on default case-insensitive NTFS but fails
+            // opaquely on per-directory case-sensitive trees (WSL-
+            // adjacent, `git core.ignorecase=false`).
+            let wprp_path = wprp.unwrap_or_else(|| exe.join("plm.wprp"));
             start::start_plm_trace(&wprp_path)?;
             // `plm start` exits immediately and leaves the kernel ETW
             // session running until a later `plm stop` / `wpr -stop`.
@@ -292,7 +297,9 @@ fn main() -> Result<()> {
             verbose_logging,
         } => {
             let _singleton = acquire_singleton_if_needed()?;
-            let wprp_path = wprp.unwrap_or_else(|| exe.join("PLM.wprp"));
+            // Round-8 coverage finding #4: see `Cmd::Start` above —
+            // lowercase to match `build.rs` staging.
+            let wprp_path = wprp.unwrap_or_else(|| exe.join("plm.wprp"));
             // The interactive `log` flow is the only standalone path
             // that holds a live trace inside a single process. Mark
             // the trace active so a Ctrl+C between the start and the

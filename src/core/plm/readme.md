@@ -6,7 +6,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 
 ## How it works
 
-1. **Capture** — `plm start` calls `wpr -start <PLM.wprp>!AccessFailureProfile -filemode`, enabling the `Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode` and `Microsoft-Windows-Kernel-General` ETW providers in a secure realtime collector.
+1. **Capture** — `plm start` calls `wpr -start <plm.wprp>!AccessFailureProfile -filemode`, enabling the `Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode` and `Microsoft-Windows-Kernel-General` ETW providers in a secure realtime collector.
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs an `EventID=14` for every file/capability access that *would* have been denied, and an `EventID=27` for every UI operation that *would* have been blocked by a Win32k or Job UI Limit. Operations are allowed to proceed regardless.
 3. **Stop** — `plm stop` calls `wpr -stop <trace.etl>` and walks the `.etl` with `EvtQuery` / `EvtRender`.
 4. **Parse** — for each `EventID=14`, the parser pulls the file path / access mask and feeds the embedded DACL ACE blob to `DeriveCapabilitySidsFromName` to identify any AppContainer capability the process needed. For each `EventID=27`, it decodes the violation `Category` (`CONVERT_TO_GUI` or `UI_OPERATION`) and `Detail` bit (`JOB_OBJECT_UILIMIT_*`).
@@ -42,7 +42,7 @@ plm.exe start [--wprp <path>]
 
 | Flag       | Default                | Purpose                                                       |
 |------------|------------------------|---------------------------------------------------------------|
-| `--wprp`   | `<exe dir>\PLM.wprp`   | Override the WPR profile path (staged next to the exe by default). |
+| `--wprp`   | `<exe dir>\plm.wprp`   | Override the WPR profile path (staged next to the exe by default). |
 
 ### `plm stop`
 

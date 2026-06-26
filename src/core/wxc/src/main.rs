@@ -683,11 +683,15 @@ impl Drop for ParkedDaclGuard {
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     if let Some(slot) = DACL_CLEANUP_SLOT.get() {
         use std::time::{Duration, Instant};
-        // 5s mirrors the WaitForSingleObject pattern recommended for
-        // graceful-shutdown handlers; tuned to be longer than a worst-
-        // case `SetNamedSecurityInfoW` on a deep tree but well under
-        // the Windows default 10s shutdown-handler budget.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Round-8 reliability finding #2: shrunk from 5s to 2s. The
+        // handler now runs TWO bounded waits (this one + the
+        // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
+        // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
+        // ~5s OS-imposed kill budget. Keeping each wait under half of
+        // that budget guarantees the cancel actually runs even on
+        // console close. 2s is still longer than a real-world
+        // `SetNamedSecurityInfoW` on a deep tree.
+        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Ok(mut guard) = slot.try_lock() {
                 // Either main already took the manager (guard is None)
@@ -720,9 +724,17 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     // implemented by `plm::coordination::wait_until_cleared`, the
     // same tested helper `plm.exe`'s console-control handler uses.
     // Drift between the two handlers can no longer happen.
+    //
+    // Round-8 reliability finding #2: bounded at 2s (was 5s) so the
+    // combined budget of this wait + the DACL wait above stays under
+    // the ~5s OS-imposed kill budget for CTRL_CLOSE / LOGOFF /
+    // SHUTDOWN. `wpr -start` round-trips are typically sub-second; on
+    // timeout we proceed to cancel anyway — even racing a not-yet-
+    // engaged session is strictly better than being force-killed
+    // before cancel runs.
     let _ = plm::coordination::wait_until_cleared(
         &AUDIT_START_IN_FLIGHT,
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(2),
         std::time::Duration::from_millis(50),
     );
     cancel_active_audit_trace();

@@ -1,7 +1,7 @@
 //! Port of `start_plm_logging.ps1`.
 //!
 //! Starts a new permissive-learning-mode trace using the
-//! `AccessFailureProfile` defined in the sibling `PLM.wprp`. If a
+//! `AccessFailureProfile` defined in the sibling `plm.wprp`. If a
 //! pre-existing WPR session blocks our start, we cancel it and retry
 //! exactly once.
 

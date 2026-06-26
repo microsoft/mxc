@@ -1497,6 +1497,12 @@ mod tests {
         );
     }
 
+    // Round-8 correctness finding #1: these tests indirectly call
+    // `parent_for_write`, which uses `Path::new(...).parent()`. On non-Windows
+    // hosts `\` is not a path separator, so `Path::new("C:\\hiberfil.sys").parent()`
+    // returns `Some("")` instead of `Some("C:\\")`, producing spurious failures
+    // when the Linux CI job runs the plm lib tests.
+    #[cfg(target_os = "windows")]
     #[test]
     fn write_at_drive_root_does_not_grant_whole_volume() {
         let mut cfg = json!({});
@@ -1518,6 +1524,7 @@ mod tests {
         assert!(added.readonly.is_empty());
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn idempotent_on_already_writable_path() {
         let mut cfg = json!({
@@ -1529,6 +1536,7 @@ mod tests {
 
     // ---- round-2 security regressions ------------------------------------
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn write_via_verbatim_drive_root_does_not_grant_volume() {
         // Round-2 finding #1: \\?\C:\hiberfil.sys must trigger the

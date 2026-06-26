@@ -3,7 +3,7 @@
 
 //! Build script for plm — embeds Windows VersionInfo and stages `plm.wprp`
 //! next to the compiled `plm.exe` so the runtime can locate the trace
-//! profile via `<exe dir>\PLM.wprp`.
+//! profile via `<exe dir>\plm.wprp`.
 
 use std::path::{Path, PathBuf};
 
