@@ -167,8 +167,12 @@ impl WindowsSandboxScriptRunner {
         if response_line.starts_with("RESULT ") {
             match DaemonResult::parse(response_line) {
                 Ok(result) => {
-                    let stdout_text = String::from_utf8(result.stdout).unwrap_or_default();
-                    let stderr_text = String::from_utf8(result.stderr).unwrap_or_default();
+                    // Lossy decode: the daemon transports raw bytes, so a
+                    // single invalid UTF-8 byte must not discard the entire
+                    // stream (which `String::from_utf8(...).unwrap_or_default()`
+                    // would do). Replace invalid sequences with U+FFFD instead.
+                    let stdout_text = String::from_utf8_lossy(&result.stdout).into_owned();
+                    let stderr_text = String::from_utf8_lossy(&result.stderr).into_owned();
                     ScriptResponse {
                         exit_code: result.exit_code,
                         standard_out: stdout_text,
@@ -235,5 +239,28 @@ mod tests {
             WindowsSandboxScriptRunner::pipe_name_to_port("custom-pipe"),
             daemon_pipe_name_to_port("custom-pipe")
         );
+    }
+
+    #[test]
+    fn parse_daemon_response_preserves_non_utf8_output() {
+        // A single invalid UTF-8 byte must not discard the whole stream.
+        let line = DaemonResult {
+            exit_code: 0,
+            stdout: vec![b'h', b'i', 0xFF, b'!'],
+            stderr: vec![0xFE, b'e', b'r', b'r'],
+            error_message: String::new(),
+        }
+        .to_line();
+
+        let resp = WindowsSandboxScriptRunner::parse_daemon_response(line.trim());
+
+        assert_eq!(resp.exit_code, 0);
+        // U+FFFD replacement char is kept; the surrounding bytes survive.
+        assert!(resp.standard_out.contains("hi"));
+        assert!(resp.standard_out.contains('!'));
+        assert!(resp.standard_out.contains('\u{FFFD}'));
+        assert!(resp.standard_err.contains("err"));
+        // error_message falls back to stderr text when empty.
+        assert!(resp.error_message.contains("err"));
     }
 }
