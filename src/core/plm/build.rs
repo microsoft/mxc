@@ -1,9 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for plm — embeds Windows VersionInfo and stages `plm.wprp`
-//! next to the compiled `plm.exe` so the runtime can locate the trace
-//! profile via `<exe dir>\plm.wprp`.
+//! Build script for plm — embeds Windows VersionInfo and stages
+//! `plm.wprp` next to the compiled `plm.exe`.
 
 use std::path::{Path, PathBuf};
 

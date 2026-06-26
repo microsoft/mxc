@@ -1,12 +1,6 @@
 //! Library surface for the permissive learning mode (PLM) crate.
-//!
-//! All modules now compile cross-platform: Windows-only items inside
-//! each module are gated with `#[cfg(target_os = "windows")]`, while
-//! pure-data parsers (XML, hex, ACE bytes, normalization,
-//! `CapabilityIndex`, `ParseAccumulator`) compile on every target so
-//! their unit tests run in Linux/macOS CI.
-//!
-//! The thin `plm` binary lives in `main.rs` and is itself Windows-only.
+//! Pure-data modules compile cross-platform; Windows-only items are
+//! gated per-module. The `plm` binary in `main.rs` is Windows-only.
 
 pub mod access_event;
 pub mod config;

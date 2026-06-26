@@ -61,9 +61,7 @@ impl WprStopper for WprExeStopper {
     }
 }
 
-/// Core success/failure mapping for `wpr -stop`, parameterised on a
-/// `WprStopper` so tests can drive the non-zero-exit and spawn-error
-/// branches deterministically without an actual `wpr.exe`.
+/// Testable wrapper for `wpr -stop` status handling.
 pub fn stop_plm_trace_with<S: WprStopper>(stopper: &mut S, trace_file: &Path) -> Result<()> {
     let status = stopper.stop(trace_file)?;
     if !status.success() {
@@ -76,20 +74,16 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
     stop_plm_trace_with(&mut WprExeStopper, trace_file)
 }
 
-/// Resolve `--bin-path` (or the calling exe directory as a fallback)
-/// to its canonical form so the self-access filter in
-/// `config::update_from_access_events` can compare it against the
-/// verbatim-prefixed paths ETW emits.
+/// Resolve `--bin-path` (or fall back to the calling exe directory)
+/// to its canonical form for the self-access filter in
+/// `config::update_from_access_events`. Returns the resolved path
+/// plus an optional warning when canonicalize diverged from operator
+/// intent.
 ///
-/// Returns the resolved path plus an optional warning string when the
-/// canonicalize step diverged from the operator's intent. Extracted
-/// from `run()` so the fallback chain
-/// is unit-testable without spawning wpr or building a real ETL.
-///
-/// Fallback chain (in order):
+/// Fallback chain:
 ///   1. `canonicalize(opt.bin_path)` if `Some`
 ///   2. raw `opt.bin_path` if `Some` (with a warning)
-///   3. `exe_dir` (no warning — no operator intent to diverge from)
+///   3. `exe_dir` (no warning)
 pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<String>) {
     let Some(raw) = opt else {
         return (exe_dir.to_path_buf(), None);
@@ -114,10 +108,9 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>". Including
-    // the PID + sub-second component prevents collisions when multiple
-    // PLM tasks finish within the same second (e.g. parallel test
-    // harness runs all calling --audit on different configs).
+    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
+    // Including PID + sub-second component avoids collisions when
+    // parallel PLM tasks finish in the same second.
     let log_dir = opts.log_dir.unwrap_or_else(|| {
         let stamp = format!(
             "{}_pid{}",
@@ -176,10 +169,9 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    // Write an adjusted config whenever the trace yielded anything
-    // mergeable: file paths, capabilities, a CONVERT_TO_GUI hint, or a
-    // UI_OPERATION relaxation. Bailing early on file/capability emptiness
-    // alone would silently drop UI-only traces.
+    // Skip the adjusted config only when the trace yielded nothing
+    // mergeable. Bailing on file/capability emptiness alone would
+    // silently drop UI-only traces.
     if should_skip_adjusted(&parse) {
         return Ok(());
     }
@@ -255,8 +247,8 @@ mod tests {
         }
     }
 
-    // pin the "skip adjusted config" predicate
-    // against each single-signal ParseResult plus the all-empty case.
+    // Pin the "skip adjusted config" predicate against each
+    // single-signal ParseResult plus the all-empty case.
 
     #[test]
     fn should_skip_when_completely_empty() {

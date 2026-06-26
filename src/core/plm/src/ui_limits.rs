@@ -1,11 +1,8 @@
 //! Cross-platform constants for `JOB_OBJECT_UILIMIT_*` flags, the
-//! learning-mode violation categories, and the parsed `UiEvent` shape.
-//!
-//! These items are pure data (mirrored from `<winnt.h>` and the OS-side
-//! `LEARNING_MODE_VIOLATION_CATEGORY_*` enum) and have no Win32
-//! dependencies, so they live in a portable module that compiles on every
-//! target. This lets `config` and tests reason about UI relaxations
-//! without pulling in the Windows-only event-parsing code.
+//! learning-mode violation categories, and the parsed `UiEvent`
+//! shape. Pure data — no Win32 deps — so `config` and tests can
+//! reason about UI relaxations without pulling in the Windows-only
+//! event-parsing code.
 
 // ---------------------------------------------------------------------------
 // Learning-mode violation categories (EventID=27 `Category` field).

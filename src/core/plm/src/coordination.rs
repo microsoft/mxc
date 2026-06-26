@@ -1,22 +1,8 @@
 //! Cross-process coordination primitives shared by `plm.exe` and the
-//! `wxc-exec --audit` driver in the `wxc` crate.
-//!
-//! the env-var name and the bypass check
-//! used to be a string literal in `plm/src/main.rs` and a separate
-//! `Command::env("MXC_PLM_AUDIT_SINGLETON_HELD", "1")` literal in
-//! `wxc/src/main.rs`. If either drifted from the other, the child
-//! `plm.exe` would attempt to re-acquire `Global\Mxc_Plm_Audit` while
-//! its parent already held it — instant deadlock — and no test would
-//! catch it. This module centralises both the name and the bypass
-//! check; the `wxc` crate now depends on `plm` (lib) so they both
-//! import the same constant.
-//!
-//! the bounded "wait for an
-//! `AtomicBool` to clear" loop used by both console-control handlers
-//! (`dacl_ctrl_handler` in wxc-exec and `plm_ctrl_handler` in
-//! plm.exe) used to be inlined inside `unsafe extern "system"`
-//! functions — unreachable from tests. Lift it here as a pure free
-//! function so both handlers call the same tested implementation.
+//! `wxc-exec --audit` driver in the `wxc` crate. Centralises the
+//! singleton bypass env-var name and the `wait_until_cleared` ctrl-
+//! handler helper so the two binaries cannot drift apart and can both
+//! exercise the same tested implementation.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

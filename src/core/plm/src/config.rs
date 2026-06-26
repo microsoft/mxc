@@ -123,14 +123,10 @@ fn strip_verbatim_or_device_prefix(s: &str) -> Option<&str> {
         if head == "\\\\?\\" || head == "\\\\.\\" {
             return Some(&s[4..]);
         }
-        // `\??\` is the NT-object-manager
-        // equivalent of `\\?\`. ETW kernel events sometimes surface
-        // paths in this form (NtCreateFile resolves both). The
-        // event_parser layer strips it via `normalize_file_path`, but
-        // any call site that bypasses that pre-normalization (e.g.,
-        // the self-event filter that consumes a raw `file_path`)
-        // would otherwise leave the literal prefix and miss
-        // comparisons like the PLM self-binary path.
+        // `\??\` is the NT-object-manager equivalent of `\\?\`.
+        // Strip it here so any call site that bypasses
+        // `normalize_file_path` (e.g. the self-event filter on a raw
+        // `file_path`) still produces a comparable form.
         if head == "\\??\\" {
             return Some(&s[4..]);
         }
@@ -138,23 +134,18 @@ fn strip_verbatim_or_device_prefix(s: &str) -> Option<&str> {
     Some(s)
 }
 
-/// Normalize a Windows path for comparison-only purposes.
+/// Normalize a Windows path for comparison-only use (returned form is
+/// lowercase ASCII, `\`-separated, trailing separators / dots /
+/// spaces stripped from every component — mirrors
+/// `RtlDosPathNameToNtPathName`).
 ///
-/// Returns `None` when the path is not a recognizable local drive-letter
-/// form after canonicalization: UNC verbatim (`\\?\UNC\…`), or paths
-/// containing `:` outside the drive-letter separator (alternate data
-/// streams, which Windows resolves to the same object as the parent
-/// file/directory and so must not be allowed to bypass deny matching).
+/// Returns `None` for UNC verbatim (`\\?\UNC\…`) or paths containing
+/// `:` outside the drive-letter separator (alternate data streams,
+/// which the kernel resolves to the parent object — must not bypass
+/// deny matching).
 ///
-/// The returned form is lowercase ASCII, uses `\` as the only separator,
-/// has trailing separators stripped, and has trailing dots / spaces
-/// stripped from every component (mirroring the win32 → NT path
-/// conversion done by `RtlDosPathNameToNtPathName`, which is what the
-/// kernel ultimately compares against).
-///
-/// This is intentionally NOT applied to the strings stored in the policy
-/// arrays — those keep their original case for operator readability. We
-/// only normalize for the duration of a deny / dedup comparison.
+/// Not applied to strings stored in policy arrays — those keep their
+/// original case for operator readability.
 fn normalize_path(p: &str) -> Option<String> {
     // 1. Strip verbatim / device prefix (`\\?\`, `\\.\`, and the
     //    NT-object `\??\` prefix). UNC verbatim is rejected because

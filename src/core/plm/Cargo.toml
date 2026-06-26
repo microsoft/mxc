@@ -14,12 +14,9 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 anyhow.workspace = true
-# serde_json + chrono are needed by the portable `config` and
-# `access_event` modules, so they must compile on every target (not just
-# Windows). roxmltree is also portable — `event_parser`'s pure XML
-# parsing compiles on every target so its
-# unit tests can run in cross-platform CI. The `windows` crate stays
-# target-gated below since it has no non-Windows equivalent.
+# Portable deps (config / access_event / event_parser) must compile on
+# every target so their unit tests run in cross-platform CI. The
+# `windows` crate stays target-gated below.
 serde_json = { version = "1", features = ["preserve_order"] }
 chrono = "0.4"
 roxmltree = "0.20"

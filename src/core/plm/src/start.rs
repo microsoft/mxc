@@ -11,10 +11,9 @@ use std::process::{ExitStatus, Stdio};
 
 use crate::wpr_path::wpr_command;
 
-/// Abstraction over wpr.exe invocations so the retry-on-conflict
-/// state machine in `start_plm_trace_with` is testable without
-/// actually spawning processes. The production impl is `WprExe`; tests
-/// supply a fake that returns canned exit codes (R5-7).
+/// Trait for testable `wpr.exe` start/cancel invocations. Tests
+/// supply a fake that returns canned exit codes; production uses
+/// `WprExe`.
 pub trait WprLauncher {
     fn start(&mut self, profile_arg: &str) -> Result<ExitStatus>;
     fn cancel(&mut self);
@@ -24,12 +23,10 @@ pub struct WprExe;
 
 impl WprLauncher for WprExe {
     fn start(&mut self, profile_arg: &str) -> Result<ExitStatus> {
-        // surface the resolved wpr.exe
-        // path in the spawn-failure context so operators on hosts
-        // without the Windows Performance Toolkit installed (Server
-        // SKUs stripped of WPT, etc.) get an actionable hint instead
-        // of a bare `os error 2`. The path itself is kernel-published
-        // and is safe to surface.
+        // Surface the resolved wpr.exe path in the spawn-failure
+        // context so hosts missing the Windows Performance Toolkit
+        // (e.g. stripped Server SKUs) get an actionable hint instead
+        // of a bare `os error 2`.
         let cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
         wpr_command()
@@ -42,10 +39,9 @@ impl WprLauncher for WprExe {
     }
 }
 
-/// Wrap a `wpr.exe` spawn `io::Error` in an `anyhow::Error` carrying
-/// the resolved absolute path so the failure message is actionable
-/// (e.g. `wpr.exe not present at <path> — install the Windows
-/// Performance Toolkit`).
+/// Wrap a `wpr.exe` spawn `io::Error` with the resolved absolute path
+/// so failures are actionable (`wpr.exe not present at <path> —
+/// install the Windows Performance Toolkit`).
 fn describe_wpr_spawn_error(verb: &str, resolved: &str, e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
         anyhow::anyhow!(
@@ -59,21 +55,18 @@ fn describe_wpr_spawn_error(verb: &str, resolved: &str, e: std::io::Error) -> an
     }
 }
 
-/// Discard any previous in-memory trace session before starting a new one.
-/// `wpr -cancel` aborts an active trace without writing the .etl, freeing
-/// the kernel session. If no session is active wpr returns non-zero --
-/// that's expected, so we ignore the exit code and suppress output.
+/// Cancel any pre-existing in-memory WPR session before starting a
+/// new one. Returns non-zero when no session was active — we ignore
+/// the exit code and silence output.
 ///
-/// Only one NT Kernel Logger session can exist host-wide, so when this
-/// runs we are necessarily terminating an existing recording (PLM's
-/// previous run or an unrelated tool). We emit a warning to stderr so
-/// an operator running a parallel recording sees what happened.
+/// Only one NT Kernel Logger session can exist host-wide, so this
+/// necessarily terminates any concurrent recording (PLM's previous
+/// run or an unrelated tool); we log a warning to stderr.
 ///
-/// A `wpr -status` probe is deliberately NOT used to gate this call:
-/// its English-only stdout match defeats the scope narrowing on every
-/// localized Windows install. Cancel is invoked only on the retry path
-/// after `wpr -start` itself reports a conflict, which is
-/// locale-invariant by construction.
+/// We deliberately do NOT gate this on `wpr -status` — its English-
+/// only stdout match breaks on every localized Windows install.
+/// Cancel is invoked only on the retry path after `wpr -start`
+/// itself reports a conflict (locale-invariant).
 pub fn cancel_existing_wpr_trace() {
     eprintln!(
         "[plm] cancelling pre-existing WPR session via `wpr -cancel`; \
@@ -110,11 +103,8 @@ pub fn start_plm_trace(wprp_path: &Path) -> Result<()> {
     start_plm_trace_with(&mut WprExe, wprp_path)
 }
 
-/// Back-compat shim: external callers (and tests) used to call
-/// `stop_existing_wpr_trace` to clear any session prior to start. The
-/// `start` path now handles that automatically, but the standalone
-/// `cancel` is still useful from cleanup handlers (Ctrl-C, panic
-/// guard). Re-export it under the legacy name as well.
+/// Back-compat alias for the legacy `stop_existing_wpr_trace` name
+/// still used by cleanup handlers (Ctrl-C, panic guard).
 pub use cancel_existing_wpr_trace as stop_existing_wpr_trace;
 
 #[cfg(test)]
@@ -210,26 +200,18 @@ mod tests {
         assert!(s.contains("stop"), "verb must appear: {s}");
     }
 
-    /// the shipped `plm.wprp` is copied
-    /// verbatim by `build.rs` with no validation. If a future edit
-    /// produces malformed XML, removes the `AccessFailureProfile`
-    /// recording, or drops a referenced provider GUID, the build
-    /// stays green and the failure mode is "wpr -start fails at
-    /// runtime" with an opaque exit-code error. Catch that whole
-    /// class of regressions at `cargo test` time.
-    ///
-    /// We re-use `roxmltree` (already a plm dep for event-XML
-    /// parsing) so this test costs nothing beyond what's already in
-    /// the dep tree.
+    /// Pin that the shipped `plm.wprp` is well-formed XML and still
+    /// declares the `AccessFailureProfile` recording referenced by
+    /// `start_plm_trace_with`. `build.rs` copies the file verbatim
+    /// with no validation, so without this test a bad edit would
+    /// only surface as an opaque `wpr -start` failure at runtime.
     #[test]
     fn plm_wprp_resource_is_well_formed_and_declares_access_failure_profile() {
         let wprp = include_str!("plm.wprp");
         let doc = roxmltree::Document::parse(wprp).expect("plm.wprp must parse as well-formed XML");
 
-        // `start_plm_trace_with` builds the wpr -start argument as
-        // `<wprp_path>!AccessFailureProfile` — if that recording
-        // name ever drifts the runtime fails with a confusing exit
-        // code. Pin both the existence and the spelling.
+        // The recording name must stay `AccessFailureProfile` —
+        // `start_plm_trace_with` builds `<wprp_path>!AccessFailureProfile`.
         let has_profile = doc
             .descendants()
             .filter(|n| n.has_tag_name("Profile"))

@@ -33,12 +33,11 @@ use windows::Win32::Security::{
 const ACE_HEADER_SIZE: usize = 1 + 3 + 4 + 4; // type + 3 padding + 4 flags + 4 mask
 const SID_FIXED_HEADER_SIZE: usize = 1 + 1 + 6; // revision + subauth count + id auth
 
-/// Capability names we want to recognize when their SID appears in an ACE.
-/// Mirrors the `$knownCapabilities` list from `extract_caps.ps1`. Sourced
-/// from the public MSDN "App capability declarations" + restricted
-/// capability + device capability lists. Names rejected by
-/// `DeriveCapabilitySidsFromName` on this OS are silently skipped at
-/// table-build time.
+/// Capability names we want to recognize when their SID appears in an
+/// ACE. Mirrors the `$knownCapabilities` list from `extract_caps.ps1`
+/// (sourced from MSDN's App / restricted / device capability
+/// declarations). Names rejected by `DeriveCapabilitySidsFromName` on
+/// this OS are silently skipped at table-build time.
 const KNOWN_CAPABILITIES: &[&str] = &[
     // General-use capabilities
     "internetClient",
