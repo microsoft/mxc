@@ -7,6 +7,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process;
 
 /// Canonical WPR profile. Edited here directly — there is no
 /// sibling `plm.wprp` file to keep in sync. `start.rs`'s
@@ -88,27 +89,54 @@ pub const WPRP_FILENAME: &str = "plm.wprp";
 
 /// Ensure `plm.wprp` exists in `exe_dir`. If a file is already
 /// present there, leave it untouched (an operator may have hand-
-/// edited it) and return its path. Otherwise write `EMBEDDED_WPRP`
-/// to that path and return it.
+/// edited it) and return its path. Otherwise atomically write
+/// `EMBEDDED_WPRP` to that path and return it.
 ///
-/// Uses `create_new` to avoid clobbering a file that appeared
-/// between the existence check and the write (TOCTOU); the loser of
-/// that race silently adopts the winner's copy.
+/// Atomic write: stage into `plm.wprp.tmp.<pid>`, fsync, then
+/// `rename` over `plm.wprp`. This prevents a partial write (disk
+/// full, AV hold, Ctrl+C, OS-budget kill) from leaving an empty or
+/// truncated `plm.wprp` that every later run would silently adopt
+/// via the early-return existence check. The temp file is removed
+/// on any error path before the rename.
 pub fn ensure_wprp_next_to_exe(exe_dir: &Path) -> io::Result<PathBuf> {
     let dst = exe_dir.join(WPRP_FILENAME);
     if dst.exists() {
         return Ok(dst);
     }
-    match std::fs::OpenOptions::new()
+    let tmp = exe_dir.join(format!("{}.tmp.{}", WPRP_FILENAME, process::id()));
+    match write_then_rename(&tmp, &dst) {
+        Ok(()) => Ok(dst),
+        Err(e) => {
+            // Best-effort cleanup; ignore secondary errors so the
+            // caller sees the original failure.
+            let _ = std::fs::remove_file(&tmp);
+            // Lost a race with a concurrent staging: adopt the
+            // winner's copy rather than fail.
+            if e.kind() == io::ErrorKind::AlreadyExists && dst.exists() {
+                return Ok(dst);
+            }
+            Err(e)
+        }
+    }
+}
+
+fn write_then_rename(tmp: &Path, dst: &Path) -> io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&dst)
-    {
-        Ok(mut f) => {
-            f.write_all(EMBEDDED_WPRP.as_bytes())?;
-            Ok(dst)
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(dst),
+        .open(tmp)?;
+    f.write_all(EMBEDDED_WPRP.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+    // `rename` over a nonexistent dst is atomic on Windows + Unix.
+    // If another writer beat us to it, surface AlreadyExists so the
+    // caller can adopt the winner.
+    match std::fs::rename(tmp, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if dst.exists() => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("plm.wprp already exists: {e}"),
+        )),
         Err(e) => Err(e),
     }
 }
@@ -142,6 +170,22 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&p).unwrap(),
             "operator-edited contents"
+        );
+    }
+
+    #[test]
+    fn leaves_no_temp_file_after_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_wprp_next_to_exe(tmp.path()).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("plm.wprp.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "stale tmp files: {:?}",
+            leftovers.iter().map(|e| e.file_name()).collect::<Vec<_>>()
         );
     }
 }
