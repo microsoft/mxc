@@ -26,6 +26,12 @@ nanvix_runner = { workspace = true, optional = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
+# Round-7 coverage finding #1: depend on plm-as-a-lib so the
+# MXC_PLM_AUDIT_SINGLETON_HELD env-var name and the shared
+# `wait_until_cleared` helper come from a single source of truth.
+# Previously each crate had its own string literal / loop body, with
+# no test to detect drift.
+plm = { path = "../plm" }
 
 [build-dependencies]
 mxc_build_common.workspace = true

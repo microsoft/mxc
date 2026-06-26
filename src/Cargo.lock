@@ -3093,6 +3093,7 @@ dependencies = [
  "nanvix_binaries",
  "nanvix_build_common",
  "nanvix_runner",
+ "plm",
  "serde_json",
  "windows 0.62.2",
  "windows_sandbox_common",

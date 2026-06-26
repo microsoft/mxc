@@ -208,4 +208,64 @@ mod tests {
         assert!(s.contains("C:\\Windows\\System32\\wpr.exe"), "got: {s}");
         assert!(s.contains("stop"), "verb must appear: {s}");
     }
+
+    /// Round-7 coverage finding #3: the shipped `plm.wprp` is copied
+    /// verbatim by `build.rs` with no validation. If a future edit
+    /// produces malformed XML, removes the `AccessFailureProfile`
+    /// recording, or drops a referenced provider GUID, the build
+    /// stays green and the failure mode is "wpr -start fails at
+    /// runtime" with an opaque exit-code error. Catch that whole
+    /// class of regressions at `cargo test` time.
+    ///
+    /// We re-use `roxmltree` (already a plm dep for event-XML
+    /// parsing) so this test costs nothing beyond what's already in
+    /// the dep tree.
+    #[test]
+    fn plm_wprp_resource_is_well_formed_and_declares_access_failure_profile() {
+        let wprp = include_str!("plm.wprp");
+        let doc = roxmltree::Document::parse(wprp).expect("plm.wprp must parse as well-formed XML");
+
+        // `start_plm_trace_with` builds the wpr -start argument as
+        // `<wprp_path>!AccessFailureProfile` — if that recording
+        // name ever drifts the runtime fails with a confusing exit
+        // code. Pin both the existence and the spelling.
+        let has_profile = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("Profile"))
+            .any(|n| n.attribute("Name") == Some("AccessFailureProfile"));
+        assert!(
+            has_profile,
+            "plm.wprp must declare a <Profile Name=\"AccessFailureProfile\"> \
+             element — the runtime hard-codes this name in start_plm_trace",
+        );
+
+        // The harness depends on the Privacy-Auditing-PLM event
+        // provider for its event-id=14 / event-id=23 / event-id=27
+        // detection paths. Sanity-check that the profile still
+        // references it; dropping it (by name OR GUID) silently
+        // disables every meaningful detection.
+        let mentions_plm_provider = wprp
+            .contains("Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode")
+            || wprp.contains("811a1ddb-2e69-5f25-adc0-4b186170e760");
+        assert!(
+            mentions_plm_provider,
+            "plm.wprp must enable the Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode \
+             provider (GUID 811a1ddb-2e69-5f25-adc0-4b186170e760); without it the \
+             event-id=14/23/27 detection pipeline has nothing to consume",
+        );
+
+        // The profile also wires the kernel collector for process/loader
+        // events the parser uses to attribute access failures to a
+        // specific application binary. Verify the collector reference
+        // still exists.
+        let has_kernel_collector = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("SystemCollector"))
+            .any(|n| n.attribute("Id") == Some("SC_Kernel"));
+        assert!(
+            has_kernel_collector,
+            "plm.wprp must declare the SC_Kernel SystemCollector that the \
+             AccessFailureProfile recording references",
+        );
+    }
 }

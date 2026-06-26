@@ -18,7 +18,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::time::Duration;
 
+use plm::coordination::{singleton_bypass_requested, wait_until_cleared, PLM_LOG_START_IN_FLIGHT};
 use plm::{extract_caps, log, start, stop};
 
 /// Set to `true` while a `wpr -start` has succeeded but the matching
@@ -43,13 +45,6 @@ static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// singleton entirely, so the retry-on-conflict path in
 /// `start_plm_trace` could silently `wpr -cancel` a peer PLM trace.
 static PLM_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
-
-/// Env var set by `wxc-exec --audit` before spawning `plm.exe`. When
-/// present, the spawned `plm` binary skips its own singleton mutex
-/// acquisition because the outer `wxc-exec` already holds it for the
-/// whole audit window. Avoids a deadlock between parent and child on
-/// the same `Global\Mxc_Plm_Audit` name.
-const SINGLETON_HELD_BY_PARENT_ENV: &str = "MXC_PLM_AUDIT_SINGLETON_HELD";
 
 /// Mark the kernel ETW session as live; called immediately after
 /// `start::start_plm_trace` succeeds.
@@ -101,7 +96,7 @@ impl Drop for AcquiredSingleton {
 }
 
 fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
-    if std::env::var_os(SINGLETON_HELD_BY_PARENT_ENV).is_some() {
+    if singleton_bypass_requested() {
         // Outer process holds the mutex for the whole audit window;
         // re-acquiring here would deadlock.
         return Ok(None);
@@ -135,6 +130,20 @@ fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
 /// session and releases the singleton mutex before the default handler
 /// calls `ExitProcess` (which skips Rust destructors).
 unsafe extern "system" fn plm_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
+    // Round-7 reliability finding #1: if `plm log`'s `wpr -start` is
+    // still in flight when Ctrl+C arrives, briefly wait for it to
+    // settle before deciding whether to issue `wpr -cancel`. Without
+    // this wait, a cancel that races a not-yet-engaged session is a
+    // no-op and the kernel session leaks past `plm.exe` exit. Bounded
+    // at 5 s to match the wxc-exec `dacl_ctrl_handler` budget (the
+    // Windows default shutdown-handler budget is 10 s). Polls via
+    // the shared `wait_until_cleared` helper so the same loop is
+    // tested in one place — see `plm::coordination::tests`.
+    let _ = wait_until_cleared(
+        &PLM_LOG_START_IN_FLIGHT,
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+    );
     cancel_active_plm_trace();
     release_plm_singleton();
     // Return FALSE so the default handler still runs and terminates

@@ -332,28 +332,31 @@ where
 fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
     use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
 
-    // Round-3 performance: skip the probe-then-call EvtRender pattern.
-    // Most events render comfortably under 8 KiB. We try with whatever
-    // capacity the caller's reusable buffer already has (~probably the
-    // peak size seen so far this trace, post-warmup) and only fall back
-    // to a probe call when EvtRender reports ERROR_INSUFFICIENT_BUFFER.
-    // This halves the EvtRender syscall count on the steady state and
-    // leaves correctness untouched.
+    // Round-6 reliability finding #3 / round-7 perf #3: keep `buf` at
+    // `len == 0` while we call `EvtRender`. The Win32 API writes
+    // through the raw pointer using the explicit size argument and
+    // does not care about Rust's `Vec::len`, so we don't need to
+    // extend it up-front. Only extend `len` to `needed` on the
+    // SUCCESS path; on every error path leave the Vec empty so callers
+    // reusing `render_buf` across events never observe uninitialized
+    // bytes.
+    //
+    // `set_len(0)` runs BEFORE the reserve below so that
+    // `Vec::reserve(additional)` — which guarantees
+    // `capacity ≥ len + additional`, not `capacity ≥ additional` —
+    // actually reaches the INITIAL_GUESS_BYTES target on the first
+    // call where `len` had been left non-zero by the previous event.
+    // (Round-7 perf #3: the old order computed
+    // `reserve(INITIAL_GUESS_BYTES - capacity)` past a non-zero `len`,
+    // which silently no-op'd when capacity was already > len so the
+    // 8 KiB target was never reached on a buffer freshly resized to
+    // a small event.)
     const INITIAL_GUESS_BYTES: usize = 8 * 1024;
-    if buf.capacity() < INITIAL_GUESS_BYTES {
-        buf.reserve(INITIAL_GUESS_BYTES - buf.capacity());
-    }
-    // Round-6 reliability finding #3: keep `buf` at `len == 0` while we
-    // call `EvtRender`. The Win32 API writes through the raw pointer
-    // using the explicit size argument and does not care about Rust's
-    // `Vec::len`, so we don't need to extend it up-front. Only extend
-    // `len` to `needed` on the SUCCESS path; on every error path leave
-    // the Vec empty so callers reusing `render_buf` across events
-    // never observe uninitialized bytes (previously `set_len(cap)`
-    // before the fallible call left the Vec exposing uninit memory
-    // when EvtRender failed).
     unsafe {
         buf.set_len(0);
+    }
+    if buf.capacity() < INITIAL_GUESS_BYTES {
+        buf.reserve(INITIAL_GUESS_BYTES);
     }
     let cap = buf.capacity();
 
@@ -560,18 +563,63 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 /// devices (`\\.\C:` -> `C:`); device names that aren't drive letters
 /// (e.g. `\\.\PhysicalDrive0`) are still rejected downstream by the
 /// `path[1] == ':'` gate which is the desired behavior.
+///
+/// Kept (in addition to `normalize_file_path_in_place`) so unit
+/// tests can exercise the prefix-strip on a `&str` input. The hot
+/// path in `ParseAccumulator::consume` uses the in-place variant
+/// to avoid an allocation per accepted event (round-7 perf #1).
+#[cfg(test)]
 fn normalize_file_path(p: &str) -> String {
-    let trimmed = p.trim();
-    if trimmed.len() >= 4 {
-        let head = &trimmed[..4];
-        if head.eq_ignore_ascii_case("\\??\\")
-            || head.eq_ignore_ascii_case("\\\\?\\")
-            || head.eq_ignore_ascii_case("\\\\.\\")
-        {
-            return trimmed[4..].to_string();
+    let mut s = p.to_string();
+    normalize_file_path_in_place(&mut s);
+    s
+}
+
+/// In-place sibling of `normalize_file_path`. Round-7 perf #1: the
+/// hot loop in `ParseAccumulator::consume` takes ownership of the
+/// raw path via `mem::take` and reuses the buffer through this
+/// in-place normaliser plus a trailing-`\\` truncate to eliminate
+/// the double allocation the previous code performed
+/// (`normalize_file_path` → `String`, then `.trim_matches('\\').to_string()`
+/// → second `String`).
+fn normalize_file_path_in_place(s: &mut String) {
+    // Trim leading + trailing ASCII whitespace in place.
+    let lead = s.len() - s.trim_start().len();
+    if lead > 0 {
+        s.drain(..lead);
+    }
+    let end_len = s.trim_end().len();
+    s.truncate(end_len);
+
+    // Strip a 4-byte Windows path-namespace prefix if present.
+    // All three are pure ASCII / non-letter, so byte equality matches
+    // the previous `eq_ignore_ascii_case` exactly.
+    // The three prefixes share `h[0]=='\\'` and `h[3]=='\\'`; the middle
+    // two bytes are one of `??`, `\?`, or `\.`. Encode the recogniser
+    // as a 2-byte tuple match so clippy doesn't ask us to "simplify" a
+    // form that obscures the prefix list.
+    if s.len() >= 4 {
+        let h = s.as_bytes();
+        let prefix_match = h[0] == b'\\'
+            && h[3] == b'\\'
+            && matches!((h[1], h[2]), (b'?', b'?') | (b'\\', b'?') | (b'\\', b'.'));
+        if prefix_match {
+            s.drain(..4);
         }
     }
-    trimmed.to_string()
+}
+
+/// Strip leading + trailing `\\` from a `String` in place. Mirrors
+/// `str::trim_matches('\\')` semantics but avoids the trailing
+/// `.to_string()` round-trip the consume hot path used to do
+/// (round-7 perf #1).
+fn trim_backslashes_in_place(s: &mut String) {
+    let lead = s.len() - s.trim_start_matches('\\').len();
+    if lead > 0 {
+        s.drain(..lead);
+    }
+    let end_len = s.trim_end_matches('\\').len();
+    s.truncate(end_len);
 }
 
 // Kept for unit tests / external callers; the hot path uses
@@ -847,16 +895,23 @@ impl<'a> ParseAccumulator<'a> {
         // EventID=14 file-access event. Pull the file path; absent paths
         // typically indicate capability-resource access events whose
         // capabilities have already been collected from the DACL above.
-        let raw_path = match ev.event_data.get(FILE_PATH_INDEX) {
-            Some(s) if !s.is_empty() => s,
+        //
+        // Round-7 perf #1: take the path out of `ev.event_data` so we
+        // can normalise + trim in place. The previous code allocated
+        // twice — once in `normalize_file_path` and once in
+        // `.trim_matches('\\').to_string()` at push time — for every
+        // accepted event. On large traces (100k+ events) this was the
+        // last remaining per-event double-alloc in the consume hot path.
+        let mut file_path = match ev.event_data.get_mut(FILE_PATH_INDEX) {
+            Some(s) if !s.is_empty() => std::mem::take(s),
             _ => return,
         };
 
-        if raw_path.eq_ignore_ascii_case(MOUNT_POINT_MANAGER) {
+        if file_path.eq_ignore_ascii_case(MOUNT_POINT_MANAGER) {
             return;
         }
 
-        let file_path = normalize_file_path(raw_path);
+        normalize_file_path_in_place(&mut file_path);
         if self.is_skippable(&file_path) {
             return;
         }
@@ -910,13 +965,18 @@ impl<'a> ParseAccumulator<'a> {
             println!("{file_path}");
         }
 
+        // Round-7 perf #1: trim the leading/trailing `\\` in place
+        // (matches the semantics of the previous `.trim_matches('\\')`)
+        // so the push doesn't need a fresh allocation.
+        trim_backslashes_in_place(&mut file_path);
+
         self.valid_access_events.push(LearningModeAccessEvent {
             time_created: ev.time_created,
             process_id: ev.process_id,
             thread_id: ev.thread_id,
             learning_mode,
             resource_type,
-            file_path: file_path.trim_matches('\\').to_string(),
+            file_path,
             app_path,
             access_mask,
         });

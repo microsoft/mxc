@@ -1160,7 +1160,16 @@ mod tests {
     }
 
     // ---- parent_for_write -------------------------------------------------
+    //
+    // Round-7 correctness #2: gated to Windows because the impl uses
+    // `std::path::Path` which only recognises `\` as a separator on
+    // Windows. On Linux `Path::new("C:\\a\\b\\c.txt")` is a single
+    // component and `parent()` returns `Some("")`, which would make
+    // these assertions fail in the cross-platform `cargo test -p plm
+    // --lib` leg added in this PR. Production impact is nil — plm.exe
+    // is Windows-only.
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn parent_for_write_promotes_file_to_parent() {
         assert_eq!(
@@ -1169,6 +1178,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn parent_for_write_treats_dotless_segment_as_directory() {
         assert_eq!(
@@ -1177,6 +1187,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn parent_for_write_refuses_drive_root_promotion() {
         // C:\hiberfil.sys would have promoted to "C:\" (whole volume);

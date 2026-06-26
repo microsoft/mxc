@@ -379,7 +379,12 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
         // that mutex for the whole audit window — tell the child to
         // skip its own acquisition so we don't deadlock on the same
         // global name.
-        .env("MXC_PLM_AUDIT_SINGLETON_HELD", "1")
+        //
+        // Round-7 coverage finding #1: the env-var name comes from
+        // `plm::coordination::SINGLETON_HELD_BY_PARENT_ENV` rather
+        // than a duplicated string literal, so the plm and wxc
+        // crates can't drift out of sync without a compile error.
+        .env(plm::coordination::SINGLETON_HELD_BY_PARENT_ENV, "1")
         .status()
     {
         Ok(s) if s.success() => true,
@@ -710,14 +715,16 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     // match the DACL handler budget; on timeout we proceed anyway —
     // the next-startup `recover_orphaned_state` scan plus a manual
     // `wpr -cancel` would catch any residue.
-    use std::time::{Duration as StdDuration, Instant as StdInstant};
-    let cancel_deadline = StdInstant::now() + StdDuration::from_secs(5);
-    while AUDIT_START_IN_FLIGHT.load(Ordering::SeqCst) {
-        if StdInstant::now() >= cancel_deadline {
-            break;
-        }
-        std::thread::sleep(StdDuration::from_millis(50));
-    }
+    //
+    // Round-7 testability finding #3 / coverage #1: the wait loop is
+    // implemented by `plm::coordination::wait_until_cleared`, the
+    // same tested helper `plm.exe`'s console-control handler uses.
+    // Drift between the two handlers can no longer happen.
+    let _ = plm::coordination::wait_until_cleared(
+        &AUDIT_START_IN_FLIGHT,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(50),
+    );
     cancel_active_audit_trace();
     windows::core::BOOL(0)
 }

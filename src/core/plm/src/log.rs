@@ -19,9 +19,11 @@ use crate::config::{
     set_ui_subsystem_enabled, update_from_access_events, write_added_paths_summary,
     write_detection_summary, write_requested_capabilities_summary,
 };
+use crate::coordination::PLM_LOG_START_IN_FLIGHT;
 use crate::event_parser::parse_events;
 use crate::start;
 use crate::wpr_path::wpr_command;
+use std::sync::atomic::Ordering;
 
 fn prompt_enter(message: &str) -> Result<()> {
     print!("{message}");
@@ -48,7 +50,15 @@ fn stop_wpr_trace(trace_file: &Path) -> Result<()> {
 
 pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
     prompt_enter("Press Enter to start logging...")?;
-    start::start_plm_trace(wprp_path)?;
+    // Round-7 reliability finding #1: bracket the `wpr -start` spawn
+    // so the console-control handler in `plm/src/main.rs` waits for
+    // it to drain before deciding whether to issue `wpr -cancel`.
+    // Closes the same race the wxc-exec side closed in round 6
+    // (`AUDIT_START_IN_FLIGHT`).
+    PLM_LOG_START_IN_FLIGHT.store(true, Ordering::SeqCst);
+    let start_result = start::start_plm_trace(wprp_path);
+    PLM_LOG_START_IN_FLIGHT.store(false, Ordering::SeqCst);
+    start_result?;
     println!("Logging started.");
 
     prompt_enter("Press Enter to stop logging...")?;

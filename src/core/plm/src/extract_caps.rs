@@ -491,16 +491,23 @@ pub(crate) fn parse_hex_string(hex_input: &str) -> Result<Vec<u8>> {
     // (filter → length/charset checks → from_str_radix per pair)
     // allocated an intermediate `String` per call; with thousands of
     // ACE blobs per trace that added up.
+    //
+    // Round-7 perf #2: iterate `as_bytes()` rather than `chars()`. The
+    // input is always ASCII hex emitted by the Windows event renderer
+    // (`<ComplexData>` text nodes from EvtRender), so per-codepoint
+    // UTF-8 decoding is pure overhead. Non-hex / non-whitespace bytes
+    // still surface the same error.
     let mut bytes: Vec<u8> = Vec::with_capacity(hex_input.len() / 2);
     let mut nibble: Option<u8> = None;
-    for c in hex_input.chars() {
-        if c.is_whitespace() {
+    for b in hex_input.as_bytes() {
+        let b = *b;
+        if b.is_ascii_whitespace() {
             continue;
         }
-        let v = match c {
-            '0'..='9' => c as u8 - b'0',
-            'a'..='f' => c as u8 - b'a' + 10,
-            'A'..='F' => c as u8 - b'A' + 10,
+        let v = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
             _ => return Err(anyhow!("Hex string contains non-hex characters.")),
         };
         match nibble.take() {
