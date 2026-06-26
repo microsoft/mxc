@@ -20,6 +20,10 @@ parameters:
       os: linux
     - name: macos
       os: macos
+      vmImage: macOS-15-arm64
+    - name: macos_x64
+      os: macos
+      vmImage: macOS-13
 
 jobs:
 - ${{ each target in parameters.targets }}:
@@ -39,9 +43,10 @@ jobs:
         # macOS is not available on the 1ES managed pool
         # (Azure-Pipelines-1ESPT-ExDShared does not offer macOS images).
         # Use the Microsoft-hosted 'Azure Pipelines' pool instead which
-        # uses 'vmImage' (not 'image') per ADO hosted-pool schema.
+        # uses 'vmImage' (not 'image') per ADO hosted-pool schema. The image is
+        # per-target so the Intel (macOS-13) and Apple-Silicon lanes coexist.
         name: Azure Pipelines
-        vmImage: macOS-15-arm64
+        vmImage: ${{ target.vmImage }}
         os: macOS
 
     variables:

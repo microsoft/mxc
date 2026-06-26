@@ -312,16 +312,15 @@ function computeSupport(): PlatformSupport {
   const platform = hostId().platform;
   const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
 
-  // Reject (platform, arch) tuples MXC ships no binary for — most importantly
-  // Intel macOS (darwin-x64) and 32-bit/other archs. Without this gate the SDK
-  // would report "supported" and then synthesize a platform-package name that
-  // 404s on the registry.
+  // Reject (platform, arch) tuples MXC ships no binary for (32-bit or other
+  // archs, non-shipped OSes). Without this gate the SDK would report "supported"
+  // and then synthesize a platform-package name that 404s on the registry.
   if (!isSupportedPlatformTuple()) {
     support.reason =
       `${platform}-${getSdkArch()} is not a supported MXC target. Supported ` +
-      `targets are win32/linux (x64, arm64) and macOS arm64; Intel macOS is not ` +
-      `supported. Build from source, or pass an explicit executablePath, or set ` +
-      `both skipPlatformCheck and MXC_BIN_DIR.`;
+      `targets are win32/linux (x64, arm64) and macOS (x64, arm64). Build from ` +
+      `source, or pass an explicit executablePath, or set both skipPlatformCheck ` +
+      `and MXC_BIN_DIR.`;
     return support;
   }
 
@@ -440,6 +439,7 @@ export const SUPPORTED_TUPLES: ReadonlySet<string> = new Set([
   'linux-x64',
   'linux-arm64',
   'darwin-arm64',
+  'darwin-x64',
 ]);
 
 /**
@@ -455,10 +455,10 @@ function getSdkArch(): string {
 
 /**
  * True when the host (platform, arch) tuple is one MXC ships a binary for. The
- * shipped set is win32/linux × x64/arm64 plus darwin-arm64. `darwin-x64` (Intel
- * macOS) and any 32-bit/other arch are **not** supported — npm publishes no
- * package for them, so callers must give an accurate "unsupported" message
- * rather than synthesize a package name that 404s.
+ * shipped set is win32/linux × x64/arm64 plus darwin × x64/arm64. 32-bit and
+ * other archs are **not** supported — npm publishes no package for them, so
+ * callers must give an accurate "unsupported" message rather than synthesize a
+ * package name that 404s.
  */
 export function isSupportedPlatformTuple(
   platform: NodeJS.Platform = hostId().platform,

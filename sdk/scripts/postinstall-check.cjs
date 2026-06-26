@@ -18,14 +18,15 @@ const path = require("path");
 const fs = require("fs");
 
 // (platform, arch) tuples MXC ships a native binary for — must match
-// SUPPORTED_TUPLES in src/platform.ts. Intel macOS (darwin-x64) and 32-bit /
-// other archs are intentionally NOT supported.
+// SUPPORTED_TUPLES in src/platform.ts. 32-bit / other archs are intentionally
+// NOT supported.
 const SUPPORTED_TUPLES = new Set([
   "win32-x64",
   "win32-arm64",
   "linux-x64",
   "linux-arm64",
   "darwin-arm64",
+  "darwin-x64",
 ]);
 
 function sdkArch(arch) {
@@ -52,7 +53,7 @@ function executableBinaryName(platform) {
 function evaluate({ platform, arch, resolve, existsSync, scriptDir }) {
   const tuple = `${platform}-${sdkArch(arch)}`;
 
-  // Unsupported (platform, arch) — e.g. Intel macOS (darwin-x64) or 32-bit. Do
+  // Unsupported (platform, arch) — e.g. a 32-bit or other non-shipped arch. Do
   // NOT synthesize a package name that 404s; explain the host isn't supported.
   if (!SUPPORTED_TUPLES.has(tuple)) {
     return {
@@ -60,10 +61,10 @@ function evaluate({ platform, arch, resolve, existsSync, scriptDir }) {
       message:
         `\nwarning (@microsoft/mxc-sdk): this host (${tuple}) is not a supported\n` +
         `  MXC target. Native binaries ship for win32/linux (x64, arm64) and\n` +
-        `  macOS arm64 only (Intel macOS is not supported). The SDK will throw\n` +
-        `  when it spawns a sandbox unless you build from source or set\n` +
-        `MXC_BIN_DIR to a directory whose <arch> subdirectory holds a compatible\n` +
-        `  binary (i.e. $MXC_BIN_DIR/<x64|arm64>/${executableBinaryName(platform)}).\n`,
+        `  macOS (x64, arm64) only. The SDK will throw when it spawns a sandbox\n` +
+        `  unless you build from source or set MXC_BIN_DIR to a directory whose\n` +
+        `  <arch> subdirectory holds a compatible binary\n` +
+        `  (i.e. $MXC_BIN_DIR/<x64|arm64>/${executableBinaryName(platform)}).\n`,
     };
   }
 

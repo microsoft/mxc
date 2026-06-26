@@ -1258,8 +1258,8 @@ describe('resolveBinaryAndCommonArgs missing-binary diagnostics (#512 F7)', () =
   it('public resolveExecutableAndArgs honors executablePath on an unsupported host (#512 F5 round 2)', () => {
     // The PUBLIC one-shot path has its OWN unsupported-platform gate; an explicit
     // executablePath must bypass it too, not just the low-level resolver. Force an
-    // unsupported tuple (Intel macOS) via the host override.
-    _setHostId({ platform: 'darwin', arch: 'x64' });
+    // unsupported tuple (32-bit Windows) via the host override.
+    _setHostId({ platform: 'win32', arch: 'ia32' });
     _resetPlatformSupportCache();
     try {
       const config: ContainerConfig = {

@@ -27,17 +27,14 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of third�
 ## npm SDK packaging: meta + per-platform binary packages
 
 `@microsoft/mxc-sdk` is a **meta package that ships no native binaries**. Each
-host's executor binaries are delivered through one of five per-platform
+host's executor binaries are delivered through one of six per-platform
 packages, which the meta package lists as exact-pinned `optionalDependencies`:
 
 ```
 @microsoft/mxc-sdk-win32-x64     @microsoft/mxc-sdk-win32-arm64
 @microsoft/mxc-sdk-linux-x64     @microsoft/mxc-sdk-linux-arm64
-                                 @microsoft/mxc-sdk-darwin-arm64
+@microsoft/mxc-sdk-darwin-x64    @microsoft/mxc-sdk-darwin-arm64
 ```
-
-(Intel macOS / `darwin-x64` is intentionally not shipped — it has no build
-target and no executor has ever shipped for it.)
 
 npm's `os`/`cpu` filtering installs only the package matching the consuming
 host, so an install downloads just that host's payload.
@@ -60,10 +57,10 @@ host, so an install downloads just that host's payload.
 
 ### One-time / ops setup (manual — not automated here)
 
-- **Register the five package names** under the `@microsoft` npm org with the same
+- **Register the six package names** under the `@microsoft` npm org with the same
   access, provenance, and signing settings as `@microsoft/mxc-sdk`
-  (`@microsoft/mxc-sdk-{win32,linux,darwin}-{x64,arm64}` minus `darwin-x64`,
-  which is not shipped). The release step cannot create org-scoped names that do
+  (`@microsoft/mxc-sdk-{win32,linux,darwin}-{x64,arm64}`). The release step cannot
+  create org-scoped names that do
   not yet exist with the right permissions. **Recommended preflight:** before the
   meta publish, verify each name exists under the expected org/provenance and that
   the exact version is either being published this run or already present.
@@ -79,7 +76,7 @@ host, so an install downloads just that host's payload.
   versions are immutable (re-publishing the same version returns `403`). Recover
   by bumping the version (`src/Cargo.toml` + `sdk/package.json`, then
   `node scripts/sync-platform-package-versions.js`) and re-running the release.
-- **Offline / air-gapped mirrors** must carry all five platform packages, not just
+- **Offline / air-gapped mirrors** must carry all six platform packages, not just
   the meta package.
 - **Cross-compiled consumers** (e.g. building a Windows VS Code bundle on a Linux
   agent) get the *agent's* platform package from a plain `npm install`. Such
