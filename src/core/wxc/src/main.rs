@@ -17,7 +17,8 @@ use hyperlight_common::HyperlightScriptRunner;
 use isolation_session_common::IsolationSessionRunner;
 #[cfg(feature = "microvm")]
 use nanvix_runner::NanVixScriptRunner;
-use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
+#[cfg(target_os = "windows")]
+use windows_sandbox_lifecycle::WindowsSandboxRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
     is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
@@ -946,13 +947,56 @@ fn main() {
                 );
                 process::exit(1);
             }
-            let sandbox_config = request
-                .experimental
-                .windows_sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
-            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
+            // Transient one-shot: each invocation launches a FRESH disposable
+            // VM and guarantees its teardown. Daemon-backed warm reuse and the
+            // `windows_sandbox` config (idle timeout / pipe name) are not
+            // consulted here; the long-lived VM is the state-aware lifecycle's
+            // concern.
+            //
+            // Warn unconditionally: one-shot launches a fresh VM per call
+            // (boot tax ~12-15s vs ~ms for a reused-VM exec), so a caller
+            // relying on warm reuse pays a large wall-clock cost. The warning
+            // is not gated on the non-default `experimental.windows_sandbox`
+            // block, because a typical warm-reuse caller never set those
+            // fields. Callers who acknowledge the model can set
+            // `WXC_WSB_ACK_ONESHOT_FRESH_VM=1` to suppress.
+            if std::env::var_os("WXC_WSB_ACK_ONESHOT_FRESH_VM").is_none() {
+                eprintln!(
+                    "[wxc-exec] WARNING: one-shot `containment: \"windows_sandbox\"` now \
+                     launches a FRESH disposable VM per call (boot ~12-15s) instead of the \
+                     legacy warm-reuse daemon. If you were relying on warm reuse for \
+                     repeated calls, switch to the state-aware lifecycle (provisionSandbox / \
+                     startSandbox / execInSandbox / stopSandbox / deprovisionSandbox) -- see \
+                     docs/windows-sandbox/windows-sandbox.md and docs/state-aware-lifecycle/. \
+                     Set WXC_WSB_ACK_ONESHOT_FRESH_VM=1 to silence this warning once you \
+                     have audited your usage."
+                );
+            }
+            //
+            // If the caller supplied a non-default
+            // `experimental.windows_sandbox` block, warn separately and more
+            // specifically that those settings are ignored (each one-shot call
+            // spawns a fresh, disposable VM), which keeps a perf-regression
+            // diagnosis ("my warm reuse stopped working") from being harder
+            // than it needs to be. Default values are not
+            // warned about (a request with no explicit block deserialises
+            // to the same default, so warning would be noise).
+            if let Some(ref ws) = request.experimental.windows_sandbox {
+                let default = wxc_common::models::WindowsSandboxConfig::default();
+                if ws.idle_timeout_ms != default.idle_timeout_ms
+                    || ws.daemon_pipe_name != default.daemon_pipe_name
+                {
+                    eprintln!(
+                        "[wxc-exec] WARNING: experimental.windows_sandbox.idle_timeout_ms / \
+                         daemon_pipe_name are no longer honored by the one-shot path (each call \
+                         spawns a fresh, disposable VM). For warm reuse, switch to the \
+                         state-aware lifecycle (provisionSandbox / startSandbox / execInSandbox \
+                         / stopSandbox / deprovisionSandbox) - see \
+                         docs/windows-sandbox/windows-sandbox.md."
+                    );
+                }
+            }
+            Box::new(WindowsSandboxRunner::new())
         }
         ContainmentBackend::IsolationSession => {
             #[cfg(feature = "isolation_session")]
