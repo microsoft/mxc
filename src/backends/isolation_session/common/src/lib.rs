@@ -34,6 +34,8 @@ mod process_options;
 #[cfg(target_os = "windows")]
 mod protected_paths_filter;
 #[cfg(target_os = "windows")]
+mod regfree;
+#[cfg(target_os = "windows")]
 mod state_aware;
 
 /// Stateless marker type. Trait impls live in `one_shot` (`ScriptRunner`)

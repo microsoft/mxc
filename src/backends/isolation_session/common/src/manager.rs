@@ -58,7 +58,20 @@ fn to_iso_config_id(value: IsolationSessionConfigurationId) -> IsoSessionConfigI
 
 /// Activates the in-proc `IsoSessionOps` factory and returns the instance.
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
-    match IsoSessionOps::new() {
+    // Establish reg-free WinRT activation from MXC_ISOSESSION_RUNTIME_DIR, if
+    // set, so IsoSessionApp.dll / IsoSessionClient.dll resolve from the known
+    // relocatable location instead of System32. No-op when the var is unset.
+    super::regfree::ensure_regfree_activation();
+
+    // On machines where the inbox IsolationSession WinRT class is registered,
+    // the reg-free actctx above is shadowed by the system catalog. When a
+    // runtime dir is configured, obtain the factory directly from the coresident
+    // IsoSessionApp.dll so the side-by-side build is used; otherwise fall back to
+    // default system activation.
+    let activation = super::regfree::activate_from_runtime_dir::<IsoSessionOps>()
+        .unwrap_or_else(IsoSessionOps::new);
+
+    match activation {
         Ok(ops) => Ok(ops),
         Err(e) => {
             let code = e.code();

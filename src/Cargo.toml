@@ -54,6 +54,7 @@ license = "MIT"
 [workspace.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_System_ApplicationInstallationAndServicing",
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Console",
@@ -72,6 +73,7 @@ windows = { version = "0.62", features = [
     "Win32_Security_Isolation",
     "Win32_System_Variant",
     "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
     "Win32_UI_Shell",
     "Win32_System_Registry",
     "Win32_System_Diagnostics_Etw",

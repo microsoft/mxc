@@ -95,7 +95,8 @@ pub(super) fn build_process_options(
 pub(super) fn build_iso_process_options(
     options: &ProcessOptions,
 ) -> Result<IsoSessionProcessOptions, IsolationSessionError> {
-    let proc_options = IsoSessionProcessOptions::new()
+    let proc_options = super::regfree::activate_from_runtime_dir::<IsoSessionProcessOptions>()
+        .unwrap_or_else(IsoSessionProcessOptions::new)
         .map_err(|e| lifecycle_err(format!("IsoSessionProcessOptions::new failed: {}", e)))?;
 
     proc_options
