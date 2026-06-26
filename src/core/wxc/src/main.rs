@@ -29,7 +29,7 @@ use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+#[cfg(target_os = "windows")]
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
 use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -266,7 +266,29 @@ fn dispatch_state_aware_request(
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
+    // Mirror the one-shot dispatch's experimental-backend gating: without it,
+    // the state-aware path would dispatch to experimental backends without
+    // checking `--experimental`, so a phase-envelope request could
+    // provision/start/exec Windows Sandbox or IsolationSession without the flag
+    // the equivalent one-shot request requires.
+    if matches!(
+        backend,
+        wxc_common::models::ContainmentBackend::WindowsSandbox
+            | wxc_common::models::ContainmentBackend::IsolationSession
+    ) && !parsed.request.experimental_enabled
+    {
+        return Err(MxcError::backend_unavailable(format!(
+            "{:?} is an experimental backend; pass --experimental to enable state-aware \
+             dispatch against it",
+            backend
+        )));
+    }
     match backend {
+        #[cfg(target_os = "windows")]
+        wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let mut runner = WindowsSandboxRunner::new();
+            dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
@@ -689,6 +711,16 @@ fn main() {
                 command_override.as_deref(),
                 &mut logger,
             );
+            // Mirror what the one-shot path does at the post-dispatch stage
+            // below: copy the CLI `--experimental` flag into the parsed
+            // request so backends that gate on it (e.g. Windows Sandbox
+            // experimental features) see the same value regardless of which
+            // dispatch branch the request entered through. Without this, the
+            // state-aware path runs without the gate -- a phase-envelope request
+            // could provision/start/exec experimental backends with no
+            // `--experimental` on the CLI.
+            parsed.request.experimental_enabled = cli.experimental;
+            parsed.request.dry_run = cli.dry_run;
             run_state_aware_main(parsed, cli.dry_run, &mut logger)
         }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
