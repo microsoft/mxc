@@ -2,12 +2,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// SDK wire-types codegen gate (Phase 2C, option C): the committed
-// `sdk/src/generated/wire.ts` must be identical (modulo line endings) to the
-// output of the Rust TypeScript emitter (`mxc_schema_gen --ts`), so the SDK's
-// drift oracle can never go stale relative to the Rust wire model. Unlike
-// options A/B, this uses NO third-party generator — the emitter lives in
-// `wxc_common::ts_emit`.
+// SDK wire-types codegen gate: the committed `sdk/src/generated/wire.ts` must
+// be identical (modulo line endings) to the output of the Rust TypeScript
+// emitter (`mxc_schema_gen --ts`), so the SDK's drift oracle can never go stale
+// relative to the Rust wire model. The emitter lives in `wxc_common::ts_emit`
+// and uses no third-party generator.
 //
 // Mirrors `check-schema-codegen.js`. Run from anywhere:
 //   node scripts/versioning/check-sdk-types-codegen.js

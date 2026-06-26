@@ -118,6 +118,37 @@ schema uses (enums, closed/open objects, `$ref`, `anyOf [T, null]`, arrays,
 scalars); extending the wire model with a new construct may require teaching the
 emitter about it.
 
+### Why a hand-written emitter (alternatives considered)
+
+The generated `wire.ts` is a **drift oracle, not the public API**. The public
+SDK types (`sdk/src/types.ts`, `sdk/src/state-aware-types.ts`) stay
+hand-written, and the conformance test asserts they match the oracle. Two other
+approaches were evaluated and rejected:
+
+- **Generate the public API directly (generate-and-replace).** The public types
+  are a *curated* surface a raw generator can't reproduce: JSDoc, the branded
+  `SandboxId<C>`, the `IsolationSessionUserConfig` class (token redaction), and
+  a per-call-phase organization that deliberately does **not** map 1:1 to the
+  wire defs. Replacing them from a generator would either ship an un-ergonomic
+  API or get hand-massaged anyway, and would churn the public surface (and its
+  review diffs) on every wire tweak. The oracle gives identical, CI-enforced,
+  bidirectional drift safety without coupling the public ergonomics to generator
+  output.
+- **A third-party schema→TS generator (e.g. `json-schema-to-typescript`).** It
+  pulls ~15 transitive npm dependencies onto the public `MxcDependencies` feed,
+  where new transitive packages 401 until manually seeded — a recurring CI/
+  supply-chain cost. The in-repo emitter is a few hundred lines, has **zero
+  dependencies**, and handles exactly the constructs our schema uses, giving
+  exact control over the output so the conformance comparison stays precise.
+
+Either alternative could revisit the "devs run a script and check in" workflow,
+but that workflow already exists here (`mxc_schema_gen --ts`, enforced by the
+codegen gate) — only the *oracle* is generated, not the curated public types. A
+larger move (e.g. describing the config in a FlatBuffers IDL to emit both Rust
+and TS) would replace the JSON config contract itself and trade away
+human-authorable config files and `$schema` editor validation; out of scope
+here.
+
 ## Roadmap
 
 - The wire model generates the committed dev schema, guarded by the codegen and
