@@ -320,7 +320,7 @@ test("stamp mode creates missing pins and removes zombie pins", () => {
     {
       optionalDependencies: {
         "@microsoft/mxc-sdk-linux-arm64": "0.7.0",
-        "@microsoft/mxc-sdk-darwin-x64": "0.7.0", // zombie: no darwin-x64 dir
+        "@microsoft/mxc-sdk-freebsd-x64": "0.7.0", // zombie: no freebsd-x64 dir
       },
     },
   );
@@ -330,7 +330,7 @@ test("stamp mode creates missing pins and removes zombie pins", () => {
     const opt = readMetaOptDeps(root);
     assert.strictEqual(opt["@microsoft/mxc-sdk-win32-x64"], "0.7.0"); // created
     assert.strictEqual(opt["@microsoft/mxc-sdk-linux-arm64"], "0.7.0"); // kept
-    assert.ok(!("@microsoft/mxc-sdk-darwin-x64" in opt)); // zombie removed
+    assert.ok(!("@microsoft/mxc-sdk-freebsd-x64" in opt)); // zombie removed
   } finally {
     cleanup(root);
   }

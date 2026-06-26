@@ -20,6 +20,10 @@ parameters:
       os: linux
     - name: macos
       os: macos
+      vmImage: macOS-15-arm64
+    - name: macos_x64
+      os: macos
+      vmImage: macOS-13
 
 jobs:
 - ${{ each target in parameters.targets }}:
@@ -39,9 +43,10 @@ jobs:
         # macOS is not available on the 1ES managed pool
         # (Azure-Pipelines-1ESPT-ExDShared does not offer macOS images).
         # Use the Microsoft-hosted 'Azure Pipelines' pool instead which
-        # uses 'vmImage' (not 'image') per ADO hosted-pool schema.
+        # uses 'vmImage' (not 'image') per ADO hosted-pool schema. The image is
+        # per-target so the Intel (macOS-13) and Apple-Silicon lanes coexist.
         name: Azure Pipelines
-        vmImage: macOS-15-arm64
+        vmImage: ${{ target.vmImage }}
         os: macOS
 
     variables:
@@ -139,18 +144,18 @@ jobs:
           displayName: Restore execute permission on lxc-exec
 
         # The platform package ships the executor but NOT the dev/test-only
-        # proxies (#512). Source linux-test-proxy from the raw build artifact and
+        # proxies (#512). Source unix-test-proxy from the raw build artifact and
         # REQUIRE the proxy E2E tests to run (no silent green-skip).
         - task: DownloadPipelineArtifact@2
-          displayName: Download linux-test-proxy
+          displayName: Download unix-test-proxy
           inputs:
             artifact: lxc-binaries-x86_64-unknown-linux-gnu
             path: $(Build.SourcesDirectory)/test-proxy-bin
 
         - script: |
             set -euo pipefail
-            find "$(Build.SourcesDirectory)/test-proxy-bin" -name linux-test-proxy -exec chmod +x {} +
-          displayName: Restore execute permission on linux-test-proxy
+            find "$(Build.SourcesDirectory)/test-proxy-bin" -name unix-test-proxy -exec chmod +x {} +
+          displayName: Restore execute permission on unix-test-proxy
 
         - script: >
             sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }}

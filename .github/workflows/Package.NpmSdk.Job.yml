@@ -47,6 +47,11 @@ jobs:
         with:
           name: mxc-binaries-aarch64-apple-darwin
           path: sdk/node/platform-packages/darwin-arm64
+      - name: Download darwin-x64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: mxc-binaries-x86_64-apple-darwin
+          path: sdk/node/platform-packages/darwin-x64
 
       # Artifact downloads strip Unix execute permissions. Restore +x on the
       # Linux/macOS executors so the packed tarballs preserve them.

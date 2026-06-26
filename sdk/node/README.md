@@ -9,16 +9,16 @@ npm install @microsoft/mxc-sdk
 ```
 
 > **Native binaries are delivered per-platform.** `@microsoft/mxc-sdk` itself
-> ships no executor binaries. It declares **five** per-platform packages
-> (`@microsoft/mxc-sdk-<os>-<arch>` for `win32`/`linux` × `x64`/`arm64`, plus
-> `darwin-arm64`; Intel macOS / `darwin-x64` is not shipped) as exact-pinned
-> `optionalDependencies`; npm's `os`/`cpu` filtering downloads only the one
+> ships no executor binaries. It declares **six** per-platform packages
+> (`@microsoft/mxc-sdk-<os>-<arch>` for `win32`/`linux`/`darwin` × `x64`/`arm64`)
+> as exact-pinned `optionalDependencies`; npm's `os`/`cpu` filtering downloads
+> only the one
 > matching your host, so an install pulls just that host's payload. In an
 > installed (production) tree the SDK resolves the executor strictly from
 > `MXC_BIN_DIR` or the identity/version-validated installed platform package at
 > runtime — planted binaries in legacy `bin/<arch>` or `src/target` paths are
 > never executed. In a monorepo source checkout (dev), the resolution order is
-> `MXC_BIN_DIR` → `sdk/platform-packages/<os>-<arch>` →
+> `MXC_BIN_DIR` → `sdk/node/platform-packages/<os>-<arch>` →
 > `src/target/<triple>/{release,debug}` → the installed package, so a fresh
 > local Rust build wins over a downloaded tarball.
 >

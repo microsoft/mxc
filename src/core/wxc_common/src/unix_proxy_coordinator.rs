@@ -495,11 +495,11 @@ mod tests {
         fs::create_dir_all(&test_dir).unwrap();
         fs::create_dir_all(&exe_dir).unwrap();
         // Binary present in BOTH; the test-proxy dir must win.
-        fs::write(test_dir.join("linux-test-proxy"), b"x").unwrap();
-        fs::write(exe_dir.join("linux-test-proxy"), b"x").unwrap();
-        let got = resolve_test_proxy_path("linux-test-proxy", Some(test_dir.as_path()), &exe_dir)
-            .unwrap();
-        assert_eq!(got, test_dir.join("linux-test-proxy"));
+        fs::write(test_dir.join("unix-test-proxy"), b"x").unwrap();
+        fs::write(exe_dir.join("unix-test-proxy"), b"x").unwrap();
+        let got =
+            resolve_test_proxy_path("unix-test-proxy", Some(test_dir.as_path()), &exe_dir).unwrap();
+        assert_eq!(got, test_dir.join("unix-test-proxy"));
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -510,13 +510,13 @@ mod tests {
         let exe_dir = base.join("exe");
         fs::create_dir_all(&test_dir).unwrap();
         fs::create_dir_all(&exe_dir).unwrap();
-        fs::write(exe_dir.join("linux-test-proxy"), b"x").unwrap();
+        fs::write(exe_dir.join("unix-test-proxy"), b"x").unwrap();
         // Provided dir lacks it -> sibling; and None for the env var -> sibling.
-        let got_a = resolve_test_proxy_path("linux-test-proxy", Some(test_dir.as_path()), &exe_dir)
-            .unwrap();
-        let got_b = resolve_test_proxy_path("linux-test-proxy", None, &exe_dir).unwrap();
-        assert_eq!(got_a, exe_dir.join("linux-test-proxy"));
-        assert_eq!(got_b, exe_dir.join("linux-test-proxy"));
+        let got_a =
+            resolve_test_proxy_path("unix-test-proxy", Some(test_dir.as_path()), &exe_dir).unwrap();
+        let got_b = resolve_test_proxy_path("unix-test-proxy", None, &exe_dir).unwrap();
+        assert_eq!(got_a, exe_dir.join("unix-test-proxy"));
+        assert_eq!(got_b, exe_dir.join("unix-test-proxy"));
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -525,11 +525,11 @@ mod tests {
         let base = std::env::temp_dir().join("mxc-proxy-resolve-missing");
         let exe_dir = base.join("exe");
         fs::create_dir_all(&exe_dir).unwrap();
-        let err = resolve_test_proxy_path("linux-test-proxy", None, &exe_dir).unwrap_err();
+        let err = resolve_test_proxy_path("unix-test-proxy", None, &exe_dir).unwrap_err();
         let _ = fs::remove_dir_all(&base);
         match err {
             WxcError::NetworkProxy(m) => {
-                assert!(m.contains("linux-test-proxy"));
+                assert!(m.contains("unix-test-proxy"));
                 assert!(m.contains("MXC_TEST_PROXY_DIR"));
             }
             other => panic!("expected NetworkProxy error, got {other:?}"),

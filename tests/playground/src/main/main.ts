@@ -525,7 +525,7 @@ ipcMain.handle('run-sandbox-raw', (_event, configJson: string, debug: boolean, e
     let workingDir: string | undefined;
     if (config.containment === 'microvm') {
       const fs = require('fs');
-      // Match the SDK's binary discovery layout (sdk/src/platform.ts):
+      // Match the SDK's binary discovery layout (sdk/node/src/platform.ts):
       // per-platform package binaries live under
       // sdk/node/platform-packages/<os>-<arch>; local dev builds under
       // src/target/<triple>/{release,debug}.

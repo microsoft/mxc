@@ -25,6 +25,11 @@ jobs:
           - os_label: macos
             runner: macos-14
             platform_slug: darwin-arm64
+          - os_label: macos-x64
+            # macos-13 is the Intel (x86_64) image — exercises the darwin-x64
+            # executor slice end-to-end on real Intel hardware.
+            runner: macos-13
+            platform_slug: darwin-x64
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -126,7 +131,7 @@ jobs:
           find "$GITHUB_WORKSPACE/test-proxy-bin" -name unix-test-proxy -exec chmod +x {} +
 
       - name: Restore execute permission on mxc-exec-mac (macOS)
-        if: matrix.os_label == 'macos'
+        if: startsWith(matrix.os_label, 'macos')
         shell: bash
         run: |
           set -euo pipefail

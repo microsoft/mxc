@@ -123,9 +123,10 @@ copy_binary_for_target() {
 
     local bin_dir="$SDK_DIR/platform-packages/darwin-$sdk_arch"
 
-    # Only stage into shipped platform packages. darwin-x64 (Intel) is not a
-    # shipped package (no manifest); its binary stays in src/target for local
-    # dev resolution via the monorepo fallback.
+    # Stage into the shipped platform package. Both darwin-arm64 and darwin-x64
+    # (Intel) are shipped; the guard below tolerates a future arch whose package
+    # manifest hasn't been added yet (binary stays in src/target for local dev
+    # resolution via the monorepo fallback).
     if [ ! -f "$bin_dir/package.json" ]; then
         echo "Skipping darwin-$sdk_arch: no platform package; binary remains in src/target."
         return

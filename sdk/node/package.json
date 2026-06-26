@@ -54,7 +54,8 @@
     "@microsoft/mxc-sdk-win32-arm64": "0.7.0",
     "@microsoft/mxc-sdk-linux-x64": "0.7.0",
     "@microsoft/mxc-sdk-linux-arm64": "0.7.0",
-    "@microsoft/mxc-sdk-darwin-arm64": "0.7.0"
+    "@microsoft/mxc-sdk-darwin-arm64": "0.7.0",
+    "@microsoft/mxc-sdk-darwin-x64": "0.7.0"
   },
   "engines": {
     "node": ">=18.0.0"
