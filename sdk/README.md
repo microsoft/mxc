@@ -227,7 +227,7 @@ Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.5
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently only implemented for `isolation_session` (Windows). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session` and `windows_sandbox` (both Windows-only; both still experimental, so every call must pass `{ experimental: true }`). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
 
 ```typescript
 import {
@@ -235,15 +235,19 @@ import {
   stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
 
-const { sandboxId } = await provisionSandbox('isolation_session');
-await startSandbox(sandboxId);
+const opts = { experimental: true };
 
-const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } });
-const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } });
+const { sandboxId } = await provisionSandbox('isolation_session', undefined, opts);
+await startSandbox(sandboxId, undefined, opts);
 
-await stopSandbox(sandboxId);
-await deprovisionSandbox(sandboxId);
+const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, opts);
+const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, opts);
+
+await stopSandbox(sandboxId, undefined, opts);
+await deprovisionSandbox(sandboxId, undefined, opts);
 ```
+
+`windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
 Full design and API: [`docs/state-aware-lifecycle/`](https://github.com/microsoft/mxc/tree/main/docs/state-aware-lifecycle/).
 
@@ -353,7 +357,7 @@ spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | Chi
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
-// State-aware lifecycle (currently only `isolation_session` on Windows)
+// State-aware lifecycle (currently `isolation_session` and `windows_sandbox` — both Windows-only)
 provisionSandbox(containment, config?, options?) → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)       → IPty             // streaming
