@@ -1661,6 +1661,7 @@ dependencies = [
  "mxc_build_common",
  "roxmltree",
  "serde_json",
+ "tempfile",
  "windows 0.62.2",
 ]
 

@@ -1,7 +1,8 @@
 //! Port of `start_plm_logging.ps1`.
 //!
 //! Starts a new permissive-learning-mode trace using the
-//! `AccessFailureProfile` defined in the sibling `plm.wprp`. If a
+//! `AccessFailureProfile` defined in `profile_gen::EMBEDDED_WPRP`
+//! (materialized to disk next to `plm.exe` by `profile_gen`). If a
 //! pre-existing WPR session blocks our start, we cancel it and retry
 //! exactly once.
 
@@ -200,15 +201,16 @@ mod tests {
         assert!(s.contains("stop"), "verb must appear: {s}");
     }
 
-    /// Pin that the shipped `plm.wprp` is well-formed XML and still
-    /// declares the `AccessFailureProfile` recording referenced by
-    /// `start_plm_trace_with`. `build.rs` copies the file verbatim
-    /// with no validation, so without this test a bad edit would
-    /// only surface as an opaque `wpr -start` failure at runtime.
+    /// Pin that the embedded WPR profile (`profile_gen::EMBEDDED_WPRP`)
+    /// is well-formed XML and still declares the `AccessFailureProfile`
+    /// recording referenced by `start_plm_trace_with`. The profile is
+    /// no longer a separate file — it lives as a raw string in
+    /// `profile_gen.rs` — so this test is the only schema gate.
     #[test]
     fn plm_wprp_resource_is_well_formed_and_declares_access_failure_profile() {
-        let wprp = include_str!("plm.wprp");
-        let doc = roxmltree::Document::parse(wprp).expect("plm.wprp must parse as well-formed XML");
+        let wprp = crate::profile_gen::EMBEDDED_WPRP;
+        let doc =
+            roxmltree::Document::parse(wprp).expect("EMBEDDED_WPRP must parse as well-formed XML");
 
         // The recording name must stay `AccessFailureProfile` —
         // `start_plm_trace_with` builds `<wprp_path>!AccessFailureProfile`.

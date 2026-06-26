@@ -7,6 +7,7 @@ pub mod config;
 pub mod coordination;
 pub mod event_parser;
 pub mod extract_caps;
+pub mod profile_gen;
 pub mod ui_limits;
 
 #[cfg(target_os = "windows")]

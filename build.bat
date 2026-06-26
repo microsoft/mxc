@@ -122,10 +122,6 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\plm.exe
         )
-        if exist "!BIN_DIR!\plm.wprp" (
-            copy /Y "!BIN_DIR!\plm.wprp" "sdk\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\plm.wprp
-        )
         if "%WITH_NANVIX%"=="1" (
             for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
                 if exist "!BIN_DIR!\%%B" (

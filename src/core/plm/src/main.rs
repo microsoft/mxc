@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::Duration;
 
 use plm::coordination::{singleton_bypass_requested, wait_until_cleared, PLM_LOG_START_IN_FLIGHT};
-use plm::{extract_caps, log, start, stop};
+use plm::{extract_caps, log, profile_gen, start, stop};
 
 /// Set to `true` while a `wpr -start` has succeeded but the matching
 /// stop hasn't run yet. Read by the console-control handler so that a
@@ -245,12 +245,13 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Start { wprp } => {
             let _singleton = acquire_singleton_if_needed()?;
-            // filename must match the
-            // lowercase `plm.wprp` written by `build.rs`. Mismatched
-            // casing works on default case-insensitive NTFS but fails
-            // opaquely on per-directory case-sensitive trees (WSL-
-            // adjacent, `git core.ignorecase=false`).
-            let wprp_path = wprp.unwrap_or_else(|| exe.join("plm.wprp"));
+            // Default: materialize the embedded `plm.wprp` next to the
+            // exe if one isn't already there.
+            let wprp_path = match wprp {
+                Some(p) => p,
+                None => profile_gen::ensure_wprp_next_to_exe(&exe)
+                    .context("failed to stage plm.wprp next to plm.exe")?,
+            };
             start::start_plm_trace(&wprp_path)?;
             // `plm start` exits immediately and leaves the kernel ETW
             // session running until a later `plm stop` / `wpr -stop`.
@@ -299,9 +300,13 @@ fn main() -> Result<()> {
             verbose_logging,
         } => {
             let _singleton = acquire_singleton_if_needed()?;
-            // see `Cmd::Start` above —
-            // lowercase to match `build.rs` staging.
-            let wprp_path = wprp.unwrap_or_else(|| exe.join("plm.wprp"));
+            // see `Cmd::Start` above — stage the embedded profile if
+            // missing.
+            let wprp_path = match wprp {
+                Some(p) => p,
+                None => profile_gen::ensure_wprp_next_to_exe(&exe)
+                    .context("failed to stage plm.wprp next to plm.exe")?,
+            };
             // The interactive `log` flow is the only standalone path
             // that holds a live trace inside a single process. Mark
             // the trace active so a Ctrl+C between the start and the

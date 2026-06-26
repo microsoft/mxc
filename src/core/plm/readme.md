@@ -26,7 +26,7 @@ The schema mapping for UI relaxations is documented in [`docs/base-process-conta
 | `src/extract_caps.rs` | ACE blob walk + `DeriveCapabilitySidsFromName` capability resolution                |
 | `src/config.rs`       | JSON load/mutate/save; path & capability merge; `apply_ui_operation_flags`          |
 | `src/access_event.rs` | `LearningModeAccessEvent` plain struct                                              |
-| `src/plm.wprp`        | WPR profile staged next to `plm.exe` by `build.rs`                                  |
+| `src/profile_gen.rs`  | Inline WPR profile (`EMBEDDED_WPRP`) + run-time writer that drops `plm.wprp` next to `plm.exe` when missing |
 
 Keys in the input config are preserved in order via `serde_json`'s `preserve_order` feature; merged blocks slot in next to existing `filesystem` / `<containment>` / `ui` sections without reformatting the file.
 
@@ -42,7 +42,7 @@ plm.exe start [--wprp <path>]
 
 | Flag       | Default                | Purpose                                                       |
 |------------|------------------------|---------------------------------------------------------------|
-| `--wprp`   | `<exe dir>\plm.wprp`   | Override the WPR profile path (staged next to the exe by default). |
+| `--wprp`   | `<exe dir>\plm.wprp`   | Override the WPR profile path. By default `plm` materializes its embedded profile next to the exe on first use; an existing `plm.wprp` is never overwritten, so operator hand-edits are preserved. |
 
 ### `plm stop`
 
@@ -142,7 +142,7 @@ cargo build -p plm --target x86_64-pc-windows-msvc
 cargo build -p plm --target x86_64-pc-windows-msvc --release
 ```
 
-`build.rs` copies `src/plm.wprp` next to the resulting executable so `plm start` resolves the profile automatically. `build.bat` from the repo root builds `plm.exe` and stages it next to `wxc-exec.exe` for the `--audit` integration.
+The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`); on first use of `plm start` / `plm log`, `profile_gen::ensure_wprp_next_to_exe` writes it to disk next to the binary if no `plm.wprp` is already present. There is no separate file in the repo and nothing for `build.rs` to stage. `build.bat` from the repo root builds `plm.exe` and stages it next to `wxc-exec.exe` for the `--audit` integration.
 
 ## ETW event reference
 

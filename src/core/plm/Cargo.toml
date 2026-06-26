@@ -29,3 +29,6 @@ windows = { workspace = true, features = [
 
 [build-dependencies]
 mxc_build_common.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
