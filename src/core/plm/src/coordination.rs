@@ -31,6 +31,28 @@ use std::time::{Duration, Instant};
 /// without a callback round-trip.
 pub static PLM_LOG_START_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// Maximum time either console-control handler will wait on its
+/// in-flight flag (`AUDIT_START_IN_FLIGHT` in `wxc-exec`,
+/// `PLM_LOG_START_IN_FLIGHT` in `plm.exe`) before falling through to
+/// `wpr -cancel`. Shared between `wxc-exec`'s `dacl_ctrl_handler`
+/// (which runs TWO bounded waits back-to-back — the DACL `try_lock`
+/// drain and the `wait_until_cleared` call) and `plm.exe`'s
+/// `plm_ctrl_handler` so the two binaries cannot drift apart.
+///
+/// Round-9 testability finding #1: round-8 shrunk wxc-exec's two
+/// waits to 2s but left `plm.exe`'s identical wait at 5s, breaking
+/// the "drift between the two handlers can no longer happen"
+/// invariant the round-7 shared helper was meant to enforce. Lifting
+/// the constant here makes drift a compile-time impossibility.
+///
+/// The 2s budget is chosen so the combined budget of the wxc-exec
+/// handler (`2 * CTRL_HANDLER_DRAIN_TIMEOUT`) stays under the
+/// ~5s OS-imposed kill budget for `CTRL_CLOSE_EVENT` /
+/// `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT`, with ~500ms of
+/// slack for the actual `wpr -cancel` spawn. Pinned by
+/// `tests::ctrl_handler_drain_timeout_respects_os_budget`.
+pub const CTRL_HANDLER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Env var set by `wxc-exec --audit` before spawning `plm.exe`. When
 /// present, the spawned `plm` binary skips its own singleton mutex
 /// acquisition because the outer `wxc-exec` already holds it for the
@@ -112,6 +134,31 @@ mod tests {
         std::env::remove_var(SINGLETON_HELD_BY_PARENT_ENV);
         assert!(observed_empty, "empty string should still count as set");
         assert!(observed_zero, "\"0\" should still count as set");
+    }
+
+    // ---- ctrl-handler drain budget --------------------------------------
+
+    // Round-9 testability finding #2 / coverage #2: pin the OS-budget
+    // invariant that motivated round-8's 5s → 2s shrink. Windows
+    // imposes a hard ~5s kill timer on `CTRL_CLOSE_EVENT` /
+    // `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT` handlers. The
+    // wxc-exec handler runs two back-to-back bounded waits each
+    // capped at `CTRL_HANDLER_DRAIN_TIMEOUT`, so `2 *
+    // CTRL_HANDLER_DRAIN_TIMEOUT` must stay under that budget with
+    // some slack for the actual `wpr -cancel` spawn that follows.
+    // A future bump back to 5s reintroduces the round-7 ETW-session
+    // leak silently — this test fails the build instead.
+    #[test]
+    fn ctrl_handler_drain_timeout_respects_os_budget() {
+        let combined = CTRL_HANDLER_DRAIN_TIMEOUT
+            .checked_mul(2)
+            .expect("2 * timeout overflows");
+        assert!(
+            combined <= Duration::from_millis(4500),
+            "2 * CTRL_HANDLER_DRAIN_TIMEOUT ({combined:?}) must stay under \
+             the ~5s OS kill budget for CTRL_CLOSE/LOGOFF/SHUTDOWN, with \
+             ~500ms slack for `wpr -cancel` to spawn"
+        );
     }
 
     // ---- wait_until_cleared ---------------------------------------------

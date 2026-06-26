@@ -683,15 +683,16 @@ impl Drop for ParkedDaclGuard {
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     if let Some(slot) = DACL_CLEANUP_SLOT.get() {
         use std::time::{Duration, Instant};
-        // Round-8 reliability finding #2: shrunk from 5s to 2s. The
-        // handler now runs TWO bounded waits (this one + the
+        // Round-8 reliability finding #2 / round-9 testability #1:
+        // the handler runs TWO bounded waits (this one + the
         // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
         // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
-        // ~5s OS-imposed kill budget. Keeping each wait under half of
-        // that budget guarantees the cancel actually runs even on
-        // console close. 2s is still longer than a real-world
-        // `SetNamedSecurityInfoW` on a deep tree.
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // ~5s OS-imposed kill budget. The per-wait budget is sourced
+        // from the shared `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`
+        // so `wxc-exec` and `plm.exe`'s `plm_ctrl_handler` cannot
+        // drift apart, and the budget invariant is pinned by a unit
+        // test (`ctrl_handler_drain_timeout_respects_os_budget`).
+        let deadline = Instant::now() + plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
         loop {
             if let Ok(mut guard) = slot.try_lock() {
                 // Either main already took the manager (guard is None)
@@ -715,26 +716,24 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     // flight when Ctrl+C arrives, wait briefly for it to complete
     // before deciding whether to issue `wpr -cancel`. Without this
     // wait, a cancel that races a not-yet-engaged session is a no-op
-    // and the session leaks past wxc-exec exit. Bounded at 5 s to
-    // match the DACL handler budget; on timeout we proceed anyway —
-    // the next-startup `recover_orphaned_state` scan plus a manual
-    // `wpr -cancel` would catch any residue.
+    // and the session leaks past wxc-exec exit. On timeout we proceed
+    // anyway — the next-startup `recover_orphaned_state` scan plus a
+    // manual `wpr -cancel` would catch any residue.
     //
     // Round-7 testability finding #3 / coverage #1: the wait loop is
     // implemented by `plm::coordination::wait_until_cleared`, the
     // same tested helper `plm.exe`'s console-control handler uses.
-    // Drift between the two handlers can no longer happen.
     //
-    // Round-8 reliability finding #2: bounded at 2s (was 5s) so the
-    // combined budget of this wait + the DACL wait above stays under
-    // the ~5s OS-imposed kill budget for CTRL_CLOSE / LOGOFF /
-    // SHUTDOWN. `wpr -start` round-trips are typically sub-second; on
-    // timeout we proceed to cancel anyway — even racing a not-yet-
-    // engaged session is strictly better than being force-killed
-    // before cancel runs.
+    // Round-8 reliability #2 / round-9 testability #1: the per-wait
+    // timeout is sourced from the shared
+    // `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` const so the
+    // wxc-exec and plm.exe handlers cannot drift apart. The const's
+    // docs (and the
+    // `ctrl_handler_drain_timeout_respects_os_budget` unit test)
+    // pin the ~5s OS kill-budget invariant.
     let _ = plm::coordination::wait_until_cleared(
         &AUDIT_START_IN_FLIGHT,
-        std::time::Duration::from_secs(2),
+        plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT,
         std::time::Duration::from_millis(50),
     );
     cancel_active_audit_trace();

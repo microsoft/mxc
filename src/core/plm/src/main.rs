@@ -134,14 +134,17 @@ unsafe extern "system" fn plm_ctrl_handler(_ctrl_type: u32) -> windows::core::BO
     // still in flight when Ctrl+C arrives, briefly wait for it to
     // settle before deciding whether to issue `wpr -cancel`. Without
     // this wait, a cancel that races a not-yet-engaged session is a
-    // no-op and the kernel session leaks past `plm.exe` exit. Bounded
-    // at 5 s to match the wxc-exec `dacl_ctrl_handler` budget (the
-    // Windows default shutdown-handler budget is 10 s). Polls via
-    // the shared `wait_until_cleared` helper so the same loop is
-    // tested in one place — see `plm::coordination::tests`.
+    // no-op and the kernel session leaks past `plm.exe` exit.
+    //
+    // Round-9 testability finding #1: timeout sourced from the
+    // shared `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` so
+    // `plm.exe` and `wxc-exec`'s `dacl_ctrl_handler` cannot drift
+    // apart. The const docs explain the ~5s OS kill budget rationale.
+    // Polls via the shared `wait_until_cleared` helper so the same
+    // loop is tested in one place — see `plm::coordination::tests`.
     let _ = wait_until_cleared(
         &PLM_LOG_START_IN_FLIGHT,
-        Duration::from_secs(5),
+        plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT,
         Duration::from_millis(50),
     );
     cancel_active_plm_trace();
