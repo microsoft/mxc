@@ -856,4 +856,79 @@ mod tests {
         let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
         assert!(caps.contains("internetClient"));
     }
+
+    // ---- public entry points: extract_caps* ------------------------------
+    //
+    // Round-6 coverage finding #5: the public surface (`extract_caps`,
+    // `extract_caps_with_index`, `extract_caps_with_index_into`) had
+    // no direct tests. Pin the hex-decode → ACE walk → resolve glue
+    // here so a regression in any of those layers fails fast rather
+    // than surfacing only via the WPR-driven integration harness.
+
+    fn hex_for_bytes(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            let _ = write!(s, "{:02X}", b);
+        }
+        s
+    }
+
+    #[test]
+    fn extract_caps_with_index_decodes_hex_and_matches_capability() {
+        let sid = well_world_sid();
+        let table = vec![CapabilityEntry {
+            name: "documentsLibrary".into(),
+            app_package_sid: Some(sid.clone()),
+            group_sid: None,
+        }];
+        let idx = CapabilityIndex::from_table(&table);
+        let hex = hex_for_bytes(&build_ace(0, &sid));
+
+        let caps = extract_caps_with_index(&hex, &idx, false).unwrap();
+        assert!(caps.contains("documentsLibrary"));
+        assert_eq!(caps.len(), 1);
+    }
+
+    #[test]
+    fn extract_caps_with_index_into_writes_into_caller_set() {
+        let sid = well_world_sid();
+        let table = vec![CapabilityEntry {
+            name: "internetClient".into(),
+            app_package_sid: Some(sid.clone()),
+            group_sid: None,
+        }];
+        let idx = CapabilityIndex::from_table(&table);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&build_ace(0, &sid));
+        buf.extend_from_slice(&build_ace(0, &sid));
+        let hex = hex_for_bytes(&buf);
+
+        // Pre-seed with an unrelated entry — extract_caps must
+        // PRESERVE existing members, not overwrite them.
+        let mut found: HashSet<String> = HashSet::new();
+        found.insert("preexisting".into());
+        extract_caps_with_index_into(&hex, &idx, false, &mut found).unwrap();
+        assert!(found.contains("preexisting"));
+        assert!(found.contains("internetClient"));
+    }
+
+    #[test]
+    fn extract_caps_with_index_rejects_malformed_hex() {
+        let table: Vec<CapabilityEntry> = Vec::new();
+        let idx = CapabilityIndex::from_table(&table);
+        assert!(extract_caps_with_index("not-hex", &idx, false).is_err());
+        assert!(extract_caps_with_index("ABC", &idx, false).is_err());
+    }
+
+    #[test]
+    fn extract_caps_with_index_returns_empty_for_no_match() {
+        // SID doesn't match any capability entry in the table.
+        let sid = well_world_sid();
+        let table: Vec<CapabilityEntry> = Vec::new();
+        let idx = CapabilityIndex::from_table(&table);
+        let hex = hex_for_bytes(&build_ace(0, &sid));
+        let caps = extract_caps_with_index(&hex, &idx, false).unwrap();
+        assert!(caps.is_empty());
+    }
 }

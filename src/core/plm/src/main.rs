@@ -17,8 +17,137 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use plm::{extract_caps, log, start, stop};
+
+/// Set to `true` while a `wpr -start` has succeeded but the matching
+/// stop hasn't run yet. Read by the console-control handler so that a
+/// Ctrl+C / Ctrl+Break that arrives during `plm log` (or between
+/// `plm start` and the operator's matching `plm stop`) still tears
+/// down the kernel ETW session instead of leaking it.
+///
+/// Round-6 reliability finding #1: the `wxc-exec --audit` path has its
+/// own AUDIT_ACTIVE flag + SetConsoleCtrlHandler; the standalone
+/// `plm log` interactive flow had neither, so Ctrl+C left the NT
+/// Kernel Logger session live until reboot or manual `wpr -cancel`.
+static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Raw `HANDLE` value of the named-mutex singleton acquired by
+/// `acquire_singleton_if_needed` (zero when unheld). Stashed in a
+/// static so the console-control handler can release the host-wide
+/// guard before `ExitProcess` runs and skips Rust destructors.
+///
+/// Round-6 reliability finding #2: `plm log` / direct `plm start` /
+/// direct `plm stop` previously bypassed the `Global\Mxc_Plm_Audit`
+/// singleton entirely, so the retry-on-conflict path in
+/// `start_plm_trace` could silently `wpr -cancel` a peer PLM trace.
+static PLM_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
+
+/// Env var set by `wxc-exec --audit` before spawning `plm.exe`. When
+/// present, the spawned `plm` binary skips its own singleton mutex
+/// acquisition because the outer `wxc-exec` already holds it for the
+/// whole audit window. Avoids a deadlock between parent and child on
+/// the same `Global\Mxc_Plm_Audit` name.
+const SINGLETON_HELD_BY_PARENT_ENV: &str = "MXC_PLM_AUDIT_SINGLETON_HELD";
+
+/// Mark the kernel ETW session as live; called immediately after
+/// `start::start_plm_trace` succeeds.
+fn mark_plm_trace_active() {
+    PLM_TRACE_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+fn clear_plm_trace_active() {
+    PLM_TRACE_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// Issue `wpr -cancel` iff a trace was marked active by this process.
+/// Idempotent and safe to call from the console-control handler.
+fn cancel_active_plm_trace() {
+    if PLM_TRACE_ACTIVE.swap(false, Ordering::SeqCst) {
+        // Use the kernel-published System32 path (round-4/5 security
+        // hardening — see wpr_path.rs).
+        let _ = plm::wpr_path::wpr_command()
+            .arg("-cancel")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// Release the named-mutex singleton if held. Idempotent.
+fn release_plm_singleton() {
+    let raw = PLM_SINGLETON_HANDLE.swap(0, Ordering::SeqCst);
+    if raw != 0 {
+        let handle = windows::Win32::Foundation::HANDLE(raw as *mut _);
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(handle);
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+        }
+    }
+}
+
+/// Acquire the host-wide PLM audit mutex unless our parent process
+/// (typically `wxc-exec --audit`) already holds it. Returns an
+/// `AcquiredSingleton` whose `Drop` releases the mutex on the normal
+/// path; the static handle is also drained by the console-control
+/// handler so Ctrl+C cleanup tears it down.
+struct AcquiredSingleton;
+
+impl Drop for AcquiredSingleton {
+    fn drop(&mut self) {
+        release_plm_singleton();
+    }
+}
+
+fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
+    if std::env::var_os(SINGLETON_HELD_BY_PARENT_ENV).is_some() {
+        // Outer process holds the mutex for the whole audit window;
+        // re-acquiring here would deadlock.
+        return Ok(None);
+    }
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "Global\\Mxc_Plm_Audit"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }
+        .context("CreateMutexW failed for Global\\Mxc_Plm_Audit")?;
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+        }
+        anyhow::bail!(
+            "another PLM trace is already in progress (Global\\Mxc_Plm_Audit held); \
+             refusing to start a second concurrent trace — only one NT Kernel Logger \
+             session can exist per host"
+        );
+    }
+    PLM_SINGLETON_HANDLE.store(handle.0 as isize, Ordering::SeqCst);
+    Ok(Some(AcquiredSingleton))
+}
+
+/// Windows console-control handler. Fires on Ctrl+C, Ctrl+Break,
+/// console close, logoff, and shutdown. Tears down any in-flight WPR
+/// session and releases the singleton mutex before the default handler
+/// calls `ExitProcess` (which skips Rust destructors).
+unsafe extern "system" fn plm_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
+    cancel_active_plm_trace();
+    release_plm_singleton();
+    // Return FALSE so the default handler still runs and terminates
+    // the process. Matches `wxc-exec`'s dacl_ctrl_handler pattern.
+    windows::core::BOOL(0)
+}
+
+fn install_ctrl_handler() {
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    // SAFETY: handler has the correct ABI; Add=TRUE merely appends to
+    // the OS handler chain.
+    let _ = unsafe { SetConsoleCtrlHandler(Some(plm_ctrl_handler), true) };
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -97,10 +226,24 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let exe = exe_dir()?;
 
+    // Install the Ctrl+C handler unconditionally so signals during any
+    // subcommand (in particular interactive `log`) tear down the WPR
+    // session and release the singleton before ExitProcess fires.
+    install_ctrl_handler();
+
     match cli.cmd {
         Cmd::Start { wprp } => {
+            let _singleton = acquire_singleton_if_needed()?;
             let wprp_path = wprp.unwrap_or_else(|| exe.join("PLM.wprp"));
-            start::start_plm_trace(&wprp_path)
+            start::start_plm_trace(&wprp_path)?;
+            // `plm start` exits immediately and leaves the kernel ETW
+            // session running until a later `plm stop` / `wpr -stop`.
+            // We deliberately do NOT mark PLM_TRACE_ACTIVE here: this
+            // process is about to exit and can't be the one to cancel
+            // the session it just kicked off. The matching `plm stop`
+            // (or wxc-exec's `cancel_active_audit_trace` cleanup path
+            // on Ctrl+C) is what owns teardown.
+            Ok(())
         }
         Cmd::Stop {
             log_dir,
@@ -109,17 +252,20 @@ fn main() -> Result<()> {
             adjusted_config_path,
             trace_file,
             verbose_logging,
-        } => stop::run(
-            stop::StopOptions {
-                log_dir,
-                bin_path,
-                config_path,
-                adjusted_config_path,
-                trace_file,
-                verbose: verbose_logging,
-            },
-            &exe,
-        ),
+        } => {
+            let _singleton = acquire_singleton_if_needed()?;
+            stop::run(
+                stop::StopOptions {
+                    log_dir,
+                    bin_path,
+                    config_path,
+                    adjusted_config_path,
+                    trace_file,
+                    verbose: verbose_logging,
+                },
+                &exe,
+            )
+        }
         Cmd::ExtractCaps {
             hex_bytes,
             verbose_logging,
@@ -136,8 +282,19 @@ fn main() -> Result<()> {
             wprp,
             verbose_logging,
         } => {
+            let _singleton = acquire_singleton_if_needed()?;
             let wprp_path = wprp.unwrap_or_else(|| exe.join("PLM.wprp"));
-            log::run(&wprp_path, verbose_logging)
+            // The interactive `log` flow is the only standalone path
+            // that holds a live trace inside a single process. Mark
+            // the trace active so a Ctrl+C between the start and the
+            // operator's matching stdin-Enter tears the session down.
+            mark_plm_trace_active();
+            let result = log::run(&wprp_path, verbose_logging);
+            // On the normal path `log::run` performs its own
+            // `wpr -stop` and the trace is no longer live; clear the
+            // flag so the Ctrl+C handler doesn't issue a stale cancel.
+            clear_plm_trace_active();
+            result
         }
     }
 }

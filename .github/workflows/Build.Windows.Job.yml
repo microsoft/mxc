@@ -78,6 +78,24 @@ jobs:
       - name: Test plm
         run: cargo test --locked --release --target ${{ matrix.target }} -p plm
 
+      # Round-6 coverage finding #1: run the PLM integration harness
+      # under the actually-built `wxc-exec.exe` + `plm.exe`. Without
+      # this, the 10 JSON fixtures under `tests/configs/plm_configs/`
+      # and the entire `wpr → ETL → event-parse → config-merge`
+      # pipeline are only exercised when a human runs the script.
+      # x64-only: arm64 GitHub-hosted runners don't ship the same
+      # `wpr.exe` recording capability — gate strictly on x86_64.
+      # GitHub-hosted Windows runners run as a local administrator
+      # (`runneradmin`), which `run_plm_test.ps1` requires for WPR.
+      - name: PLM integration tests
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          ./tests/scripts/run_plm_test.ps1 `
+            -Release `
+            -BinDir "${{ github.workspace }}/src/target/${{ matrix.target }}/release" `
+            -ConfigDir "${{ github.workspace }}/tests/configs/plm_configs"
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:

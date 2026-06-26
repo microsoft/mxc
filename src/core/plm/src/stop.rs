@@ -50,6 +50,43 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve `--bin-path` (or the calling exe directory as a fallback)
+/// to its canonical form so the self-access filter in
+/// `config::update_from_access_events` can compare it against the
+/// verbatim-prefixed paths ETW emits.
+///
+/// Returns the resolved path plus an optional warning string when the
+/// canonicalize step diverged from the operator's intent. Extracted
+/// from `run()` (round-6 coverage finding #3) so the fallback chain
+/// is unit-testable without spawning wpr or building a real ETL.
+///
+/// Fallback chain (in order):
+///   1. `canonicalize(opt.bin_path)` if `Some`
+///   2. raw `opt.bin_path` if `Some` (with a warning)
+///   3. `exe_dir` (no warning — no operator intent to diverge from)
+pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<String>) {
+    let Some(raw) = opt else {
+        return (exe_dir.to_path_buf(), None);
+    };
+    match raw.canonicalize() {
+        Ok(p) => (p, None),
+        Err(e) => {
+            let warning = format!(
+                "could not canonicalize --bin-path {} ({}); self-access filter \
+                 will use the raw path. Events referencing the binary via a \
+                 different spelling (e.g. verbatim \\\\?\\) may leak into the \
+                 adjusted config.",
+                raw.display(),
+                e
+            );
+            // Prefer the raw operator-supplied path over silently
+            // substituting exe_dir; the previous behavior swallowed
+            // operator intent entirely.
+            (raw.to_path_buf(), Some(warning))
+        }
+    }
+}
+
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>". Including
     // the PID + sub-second component prevents collisions when multiple
@@ -68,38 +105,13 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 
     // Resolve bin_path to its canonical form so the self-access filter
     // in `config::update_from_access_events` can compare it against the
-    // verbatim-prefixed paths ETW emits. Round-3 review flagged the
-    // previous silent `unwrap_or_else(|_| exe_dir.to_path_buf())` —
-    // when an operator-supplied --bin-path failed to canonicalize the
-    // PLM exe's own directory got substituted, breaking self-filter
-    // and leaking the binary into the adjusted config with no warning.
-    //
-    // The fallback chain now (in order): canonical(--bin-path) →
-    // raw --bin-path → canonical(exe_dir) → exe_dir. Each step emits
-    // a stderr warning when it diverges from the operator's intent.
-    let bin_path_raw = opts
-        .bin_path
-        .clone()
-        .unwrap_or_else(|| exe_dir.to_path_buf());
-    let bin_path: PathBuf = match bin_path_raw.canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "[plm] warning: could not canonicalize --bin-path {} ({}); \
-                 self-access filter will use the raw path. Events referencing \
-                 the binary via a different spelling (e.g. verbatim \\\\?\\) \
-                 may leak into the adjusted config.",
-                bin_path_raw.display(),
-                e
-            );
-            // Prefer the raw operator-supplied path over silently
-            // substituting exe_dir; only fall back to exe_dir when the
-            // operator gave us no bin_path at all.
-            opts.bin_path
-                .clone()
-                .unwrap_or_else(|| exe_dir.to_path_buf())
-        }
-    };
+    // verbatim-prefixed paths ETW emits. The fallback chain is in
+    // `resolve_bin_path` (round-6 coverage finding #3: extracted so the
+    // chain — and its stderr warning — is unit-testable).
+    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
+    if let Some(w) = warning {
+        eprintln!("[plm] warning: {w}");
+    }
 
     let trace_file = if let Some(p) = opts.trace_file.as_ref() {
         // Operator supplied a pre-captured .etl -- don't try to stop a
@@ -252,5 +264,50 @@ mod tests {
         let mut p = empty_parse();
         p.ui_operation_flags = 0x004; // JOB_OBJECT_UILIMIT_WRITECLIPBOARD
         assert!(!should_skip_adjusted(&p));
+    }
+
+    // ---- resolve_bin_path -----------------------------------------------
+    //
+    // Round-6 coverage finding #3: the bin-path canonicalization
+    // fallback chain affects the self-event filter (and therefore
+    // whether plm.exe leaks into Adjusted_*.json), but was previously
+    // inline in `run()` and untestable without spawning wpr.
+
+    #[test]
+    fn resolve_bin_path_falls_back_to_exe_dir_when_no_override() {
+        let exe = std::env::temp_dir();
+        let (p, warn) = resolve_bin_path(None, &exe);
+        assert_eq!(p, exe);
+        assert!(warn.is_none(), "no operator intent means no warning");
+    }
+
+    #[test]
+    fn resolve_bin_path_canonicalizes_existing_override() {
+        // Use the temp dir as a path we know exists and is
+        // canonicalizable. The canonical form may add a `\\?\` prefix
+        // on Windows; assert it ends with the same directory name.
+        let exe = std::env::temp_dir();
+        let override_path = std::env::temp_dir();
+        let (p, warn) = resolve_bin_path(Some(&override_path), &exe);
+        assert!(p.exists(), "canonicalized path should still exist");
+        assert!(warn.is_none(), "successful canonicalize must not warn");
+    }
+
+    #[test]
+    fn resolve_bin_path_warns_and_returns_raw_when_canonicalize_fails() {
+        let exe = std::env::temp_dir();
+        // A nonexistent path canonicalize() will refuse to resolve.
+        let bogus = std::path::PathBuf::from("Z:\\definitely-does-not-exist-plm-test");
+        let (p, warn) = resolve_bin_path(Some(&bogus), &exe);
+        assert_eq!(
+            p, bogus,
+            "must return the raw operator path rather than silently \
+             substituting exe_dir (previous behavior dropped operator intent)"
+        );
+        let w = warn.expect("canonicalize failure must surface a warning");
+        assert!(
+            w.contains("Z:\\definitely-does-not-exist-plm-test"),
+            "warning must reference the failing path: {w}",
+        );
     }
 }

@@ -369,7 +369,19 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
     let _ = writeln!(logger, "{summary}");
     eprintln!("{summary}");
 
-    match std::process::Command::new(&plm).args(args).status() {
+    match std::process::Command::new(&plm)
+        .args(args)
+        // Round-6 reliability finding #2: plm.exe itself now acquires
+        // the `Global\Mxc_Plm_Audit` named-mutex singleton on direct
+        // operator invocations (`plm log` / `plm start` / `plm stop`)
+        // so its retry-on-conflict path can't silently `wpr -cancel`
+        // a peer trace. When wxc-exec spawns plm.exe we already hold
+        // that mutex for the whole audit window — tell the child to
+        // skip its own acquisition so we don't deadlock on the same
+        // global name.
+        .env("MXC_PLM_AUDIT_SINGLETON_HELD", "1")
+        .status()
+    {
         Ok(s) if s.success() => true,
         Ok(s) => {
             let _ = writeln!(logger, "[audit] plm exited with status {s}");
@@ -411,6 +423,20 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
 
 #[cfg(target_os = "windows")]
 static AUDIT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set to `true` while `plm start` is being spawned and has not yet
+/// returned. Round-6 reliability finding #4: `AUDIT_ACTIVE` is flipped
+/// to `true` BEFORE `plm.exe` is spawned (because `mark_audit_active()`
+/// has to run early to cover a Ctrl+C arriving mid-spawn), but the
+/// kernel ETW session is not actually engaged until `plm.exe`'s child
+/// `wpr -start` returns. A Ctrl+C in that gap would fire
+/// `wpr -cancel` against a not-yet-existing session, then `wpr -start`
+/// would silently succeed AFTER the cancel — leaking the session past
+/// `wxc-exec`'s own cleanup. We close the race by making the Ctrl+C
+/// handler wait (bounded) until `plm start` has finished its spawn
+/// round-trip before deciding whether to issue the cancel.
+#[cfg(target_os = "windows")]
+static AUDIT_START_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Mark that the wxc-exec process owns a live PLM audit trace. Called
 /// just before `plm start` is spawned so a Ctrl-C arriving mid-spawn
@@ -675,6 +701,23 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     }
     // FALSE = "I did not fully handle this; run the next handler in the
     // chain (i.e. the default handler that calls ExitProcess)".
+    //
+    // Round-6 reliability finding #4: if `plm start` is still in
+    // flight when Ctrl+C arrives, wait briefly for it to complete
+    // before deciding whether to issue `wpr -cancel`. Without this
+    // wait, a cancel that races a not-yet-engaged session is a no-op
+    // and the session leaks past wxc-exec exit. Bounded at 5 s to
+    // match the DACL handler budget; on timeout we proceed anyway —
+    // the next-startup `recover_orphaned_state` scan plus a manual
+    // `wpr -cancel` would catch any residue.
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+    let cancel_deadline = StdInstant::now() + StdDuration::from_secs(5);
+    while AUDIT_START_IN_FLIGHT.load(Ordering::SeqCst) {
+        if StdInstant::now() >= cancel_deadline {
+            break;
+        }
+        std::thread::sleep(StdDuration::from_millis(50));
+    }
     cancel_active_audit_trace();
     windows::core::BOOL(0)
 }
@@ -1293,7 +1336,16 @@ fn main() {
         // looked like "no denials." Bail explicitly on start failure
         // so the operator sees the error and the policy isn't
         // silently relaxed.
+        //
+        // Round-6 reliability finding #4: bracket the spawn with
+        // AUDIT_START_IN_FLIGHT so the console-control handler waits
+        // for it to drain before deciding whether to issue `wpr
+        // -cancel` (closes the Ctrl+C race where cancel arrives
+        // before `plm.exe`'s child `wpr -start` has engaged the
+        // kernel session).
+        AUDIT_START_IN_FLIGHT.store(true, Ordering::SeqCst);
         let start_ok = run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
+        AUDIT_START_IN_FLIGHT.store(false, Ordering::SeqCst);
         if !start_ok {
             let _ = writeln!(
                 logger,

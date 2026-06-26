@@ -5,7 +5,7 @@
 //! pre-existing WPR session blocks our start, we cancel it and retry
 //! exactly once.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 
@@ -24,13 +24,38 @@ pub struct WprExe;
 
 impl WprLauncher for WprExe {
     fn start(&mut self, profile_arg: &str) -> Result<ExitStatus> {
+        // Round-6 coverage finding #7: surface the resolved wpr.exe
+        // path in the spawn-failure context so operators on hosts
+        // without the Windows Performance Toolkit installed (Server
+        // SKUs stripped of WPT, etc.) get an actionable hint instead
+        // of a bare `os error 2`. The path itself is kernel-published
+        // (round-5 security hardening) and is safe to surface.
+        let cmd = wpr_command();
+        let resolved = cmd.get_program().to_string_lossy().into_owned();
         wpr_command()
             .args(["-start", profile_arg, "-filemode"])
             .status()
-            .context("failed to spawn wpr -start")
+            .map_err(|e| describe_wpr_spawn_error("start", &resolved, e))
     }
     fn cancel(&mut self) {
         cancel_existing_wpr_trace();
+    }
+}
+
+/// Wrap a `wpr.exe` spawn `io::Error` in an `anyhow::Error` carrying
+/// the resolved absolute path so the failure message is actionable
+/// (e.g. `wpr.exe not present at <path> — install the Windows
+/// Performance Toolkit`). Round-6 coverage finding #7.
+fn describe_wpr_spawn_error(verb: &str, resolved: &str, e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!(
+            "failed to spawn wpr -{verb}: {e} (resolved path: {resolved}). \
+             The Windows Performance Recorder (wpr.exe) is required for PLM \
+             tracing; install the Windows Performance Toolkit (part of the \
+             Windows ADK) and ensure {resolved} is present.",
+        )
+    } else {
+        anyhow::anyhow!("failed to spawn wpr -{verb} ({resolved}): {e}",)
     }
 }
 
@@ -146,5 +171,41 @@ mod tests {
         assert!(format!("{err}").contains("failed after retry"));
         assert_eq!(f.idx, 2);
         assert_eq!(f.cancels, 1);
+    }
+
+    /// Round-6 coverage finding #7: when wpr.exe isn't on the system
+    /// (e.g. Server SKU without WPT), the spawn-failure context must
+    /// surface the resolved path AND nudge the operator toward
+    /// installing the Windows Performance Toolkit. Asserting against
+    /// a real spawn isn't deterministic on CI, so drive the formatter
+    /// directly with a synthesized NotFound `io::Error`.
+    #[test]
+    fn wpr_spawn_not_found_error_is_actionable() {
+        let err = describe_wpr_spawn_error(
+            "start",
+            "C:\\Windows\\System32\\wpr.exe",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "the system cannot find"),
+        );
+        let s = format!("{err}");
+        assert!(
+            s.contains("C:\\Windows\\System32\\wpr.exe"),
+            "error must surface resolved wpr path: {s}",
+        );
+        assert!(
+            s.contains("Windows Performance Toolkit") || s.contains("Windows ADK"),
+            "error must hint at WPT install: {s}",
+        );
+    }
+
+    #[test]
+    fn wpr_spawn_other_error_keeps_path_in_context() {
+        let err = describe_wpr_spawn_error(
+            "stop",
+            "C:\\Windows\\System32\\wpr.exe",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied"),
+        );
+        let s = format!("{err}");
+        assert!(s.contains("C:\\Windows\\System32\\wpr.exe"), "got: {s}");
+        assert!(s.contains("stop"), "verb must appear: {s}");
     }
 }

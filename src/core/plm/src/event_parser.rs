@@ -343,13 +343,19 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
     if buf.capacity() < INITIAL_GUESS_BYTES {
         buf.reserve(INITIAL_GUESS_BYTES - buf.capacity());
     }
-    let cap = buf.capacity();
-    // SAFETY: the buffer's length is set to its full capacity here so
-    // EvtRender can write into it. We never read uninitialised bytes
-    // past `needed`; the UTF-16 slice below is bounded by `needed`.
+    // Round-6 reliability finding #3: keep `buf` at `len == 0` while we
+    // call `EvtRender`. The Win32 API writes through the raw pointer
+    // using the explicit size argument and does not care about Rust's
+    // `Vec::len`, so we don't need to extend it up-front. Only extend
+    // `len` to `needed` on the SUCCESS path; on every error path leave
+    // the Vec empty so callers reusing `render_buf` across events
+    // never observe uninitialized bytes (previously `set_len(cap)`
+    // before the fallible call left the Vec exposing uninit memory
+    // when EvtRender failed).
     unsafe {
-        buf.set_len(cap);
+        buf.set_len(0);
     }
+    let cap = buf.capacity();
 
     let mut needed: u32 = 0;
     let mut count: u32 = 0;
@@ -382,8 +388,7 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
             buf.reserve(needed as usize - buf.capacity());
         }
         let new_cap = buf.capacity();
-        unsafe {
-            buf.set_len(new_cap);
+        let second = unsafe {
             EvtRender(
                 None,
                 event,
@@ -392,12 +397,24 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
                 Some(buf.as_mut_ptr() as *mut _),
                 &mut needed as *mut _,
                 &mut count as *mut _,
-            )?;
-        }
+            )
+        };
+        // Propagate any error AFTER ensuring `buf` is still at len=0
+        // (no uninit bytes exposed to the reused-buffer caller path).
+        second?;
     }
 
+    // Both EvtRender calls succeeded: `needed` is the byte count
+    // written into the buffer. Extend `len` so the slice below sees
+    // initialized memory only (`needed` capped at capacity defensively
+    // in case the kernel returned a value larger than the buffer it
+    // wrote into — impossible in practice but cheap to guard).
+    let init_bytes = (needed as usize).min(buf.capacity());
+    unsafe {
+        buf.set_len(init_bytes);
+    }
     // Buffer is UTF-16; trim trailing NUL.
-    let u16_count = (needed as usize) / 2;
+    let u16_count = init_bytes / 2;
     let u16_slice: &[u16] =
         unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, u16_count) };
     let trimmed = match u16_slice.iter().position(|&c| c == 0) {
@@ -417,13 +434,16 @@ struct ParsedEvent {
     /// For Data nodes this is the inner text; for ComplexData this is
     /// also the inner text (concatenated hex-encoded blob).
     event_data: Vec<String>,
+    /// Index into `event_data` of the 5th `<ComplexData>` sibling (the
+    /// DACL ACE blob on EventID=14 access events). `None` if fewer than
+    /// five ComplexData children were seen. Borrowed directly rather
+    /// than cloned to avoid a second `String` allocation of the largest
+    /// per-event field (round-6 perf finding #1).
+    complex_data_4_idx: Option<usize>,
     /// EventData/Data entries paired with their `Name` attribute (when set),
     /// in document order. Used for events whose schema is resolved at render
     /// time (e.g. UI injection event_id=27 with provider manifest available).
     event_data_named: Vec<(String, String)>,
-    /// Inner text of the 5th EventData child (index 4) which carries the
-    /// DACL ACE hex blob, when present.
-    complex_data_4: Option<String>,
     /// Hex-encoded `<ProcessingErrorData><EventPayload>` body for events
     /// whose manifest schema can't be resolved at render time. UI
     /// injection events (id 27) are commonly delivered this way.
@@ -469,7 +489,14 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
     // 100k events.
     let need_named = event_id == 27;
     let mut event_data_named: Vec<(String, String)> = Vec::new();
-    let mut complex_data_4: Option<String> = None;
+    // Round-6 perf finding #1: track the position of the 5th
+    // `<ComplexData>` sibling (the DACL ACE blob) inside `event_data`
+    // rather than allocating a second `String` copy of its inner text.
+    // The blob is the largest single field on an EventID=14 access
+    // event (multi-KB of hex), and previously we paid an unconditional
+    // duplicate `to_string()` plus the wasted push into `event_data`
+    // for it. The consumer at the call site borrows the slot directly.
+    let mut complex_data_4_idx: Option<usize> = None;
     if let Some(ed) = root.children().find(|n| n.has_tag_name("EventData")) {
         let mut complex_index = 0usize;
         for child in ed.children().filter(|n| n.is_element()) {
@@ -484,16 +511,14 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
                         event_data_named.push((name.to_string(), text.clone()));
                     }
                 }
+                let pushed_idx = event_data.len();
                 event_data.push(text);
-            }
-            if tag == "ComplexData" {
-                if complex_index == 4 {
-                    let txt = child.text().unwrap_or("").to_string();
-                    if !txt.trim().is_empty() {
-                        complex_data_4 = Some(txt);
+                if tag == "ComplexData" {
+                    if complex_index == 4 {
+                        complex_data_4_idx = Some(pushed_idx);
                     }
+                    complex_index += 1;
                 }
-                complex_index += 1;
             }
         }
     }
@@ -515,18 +540,38 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
         thread_id,
         event_data,
         event_data_named,
-        complex_data_4,
+        complex_data_4_idx,
         processing_error_payload,
     })
 }
 
+/// Strip Windows path-namespace prefixes so downstream filters that
+/// expect a DOS form (`C:\...`) see one.
+///
+/// Round-6 correctness finding #2: previously this function only
+/// handled `\??\` (the NT-object prefix). Paths emitted with the
+/// verbatim (`\\?\C:\...`) or DOS-device (`\\.\C:\...`) prefixes
+/// reached `is_skippable` which then rejected them on the "second
+/// char is not `:`" gate, silently dropping the access event before
+/// `config::normalize_path` ever got a chance to canonicalize it.
+///
+/// `\??\` and `\\?\` both unwrap to the same DOS-ish form by stripping
+/// the 4-byte prefix. The same is true of `\\.\` for drive-letter
+/// devices (`\\.\C:` -> `C:`); device names that aren't drive letters
+/// (e.g. `\\.\PhysicalDrive0`) are still rejected downstream by the
+/// `path[1] == ':'` gate which is the desired behavior.
 fn normalize_file_path(p: &str) -> String {
     let trimmed = p.trim();
-    if trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("\\??\\") {
-        trimmed[4..].to_string()
-    } else {
-        trimmed.to_string()
+    if trimmed.len() >= 4 {
+        let head = &trimmed[..4];
+        if head.eq_ignore_ascii_case("\\??\\")
+            || head.eq_ignore_ascii_case("\\\\?\\")
+            || head.eq_ignore_ascii_case("\\\\.\\")
+        {
+            return trimmed[4..].to_string();
+        }
     }
+    trimmed.to_string()
 }
 
 // Kept for unit tests / external callers; the hot path uses
@@ -780,14 +825,23 @@ impl<'a> ParseAccumulator<'a> {
             return;
         }
 
-        if let Some(blob) = &ev.complex_data_4 {
-            // R5-17: write directly into the accumulator's HashSet.
-            let _ = extract_caps::extract_caps_with_index_into(
-                blob,
-                &self.capability_index,
-                self.verbose,
-                &mut self.requested_capabilities,
-            );
+        if let Some(idx) = ev.complex_data_4_idx {
+            // Borrow rather than clone — `event_data[idx]` holds the
+            // ACE hex blob already pushed in `parse_event_xml`; we
+            // consume it in place. The other event_data slots taken
+            // below (0/1/3) live at different indices.
+            if let Some(blob) = ev.event_data.get(idx) {
+                let blob_str = blob.as_str();
+                if !blob_str.trim().is_empty() {
+                    // R5-17: write directly into the accumulator's HashSet.
+                    let _ = extract_caps::extract_caps_with_index_into(
+                        blob_str,
+                        &self.capability_index,
+                        self.verbose,
+                        &mut self.requested_capabilities,
+                    );
+                }
+            }
         }
 
         // EventID=14 file-access event. Pull the file path; absent paths
@@ -979,6 +1033,30 @@ mod tests {
         assert_eq!(normalize_file_path("C:\\foo"), "C:\\foo");
     }
 
+    /// Round-6 correctness finding #2: verbatim (`\\?\C:\...`) and
+    /// DOS-device (`\\.\C:\...`) prefixes must be stripped before
+    /// `is_skippable`'s drive-letter gate; otherwise the kernel
+    /// provider's natural rendering of those forms drops every event.
+    #[test]
+    fn normalize_file_path_strips_verbatim_and_dos_device_prefixes() {
+        // Verbatim "\\?\C:\..." form. Note: each `\` doubles in a
+        // Rust string literal; the on-disk path is `\\?\C:\foo`.
+        assert_eq!(normalize_file_path("\\\\?\\C:\\foo"), "C:\\foo");
+        // DOS-device prefix for drive-letter access.
+        assert_eq!(normalize_file_path("\\\\.\\C:\\foo"), "C:\\foo");
+        // Case-insensitive guard against accidental tightening.
+        assert_eq!(normalize_file_path("\\\\?\\c:\\foo"), "c:\\foo");
+    }
+
+    /// After the prefix strip, a normalized path with a drive letter
+    /// must SURVIVE `is_skippable`. Catches the integration between
+    /// normalize_file_path and the drive-letter gate.
+    #[test]
+    fn verbatim_prefix_path_survives_is_skippable() {
+        let normalized = normalize_file_path("\\\\?\\C:\\Users\\test\\foo.txt");
+        assert!(!is_skippable(&normalized, None, false));
+    }
+
     #[test]
     fn is_skippable_rejects_short_and_non_drive_letter() {
         assert!(is_skippable("abc", None, false));
@@ -1152,6 +1230,146 @@ mod tests {
         assert_eq!(
             result.valid_access_events[1].file_path,
             "C:\\Users\\test\\b.txt"
+        );
+    }
+
+    // ---- UI EventID=27 -> apply_ui_flags end-to-end ----------------------
+
+    /// Build a UI-injection `<Event EventID="27">` whose payload is
+    /// emitted as a `<ProcessingErrorData><EventPayload>` hex blob
+    /// (the rendering used when the consumer doesn't have the provider
+    /// manifest — the common case for PLM consumers).
+    fn make_ui_event_xml(category: u32, detail: u32) -> String {
+        // Layout: process_name\0 | pid u64 | seq u64 | category u32 | detail u32 | denied u8
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"App");
+        bytes.push(0);
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&2u64.to_le_bytes());
+        bytes.extend_from_slice(&category.to_le_bytes());
+        bytes.extend_from_slice(&detail.to_le_bytes());
+        bytes.push(1);
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(hex, "{:02X}", b);
+        }
+        format!(
+            r#"<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+              <System>
+                <EventID>27</EventID>
+                <TimeCreated SystemTime="2024-01-02T03:04:05.000Z"/>
+                <Execution ProcessID="1" ThreadID="2"/>
+              </System>
+              <ProcessingErrorData>
+                <EventPayload>{hex}</EventPayload>
+              </ProcessingErrorData>
+            </Event>"#
+        )
+    }
+
+    /// Round-6 coverage finding #8: the parser produces a
+    /// `ui_operation_flags` bitmap; `apply_ui_operation_flags` then
+    /// rewrites the config's `ui.*` fields. The two halves are tested
+    /// individually but their contract (bit values must match) is
+    /// untested — this integration test pins it. A drift between
+    /// `JOB_OBJECT_UILIMIT_*` here and in `config.rs` will fail this
+    /// test even though both halves' unit tests still pass.
+    #[test]
+    fn ui_event_xml_drives_config_relaxation_through_apply_ui_flags() {
+        // HANDLES violation: the default `ui.isolation = "handles"`
+        // should widen to `"desktop"` (handles allowed, atoms still
+        // restricted).
+        let xmls = [make_ui_event_xml(UI_OPERATION, JOB_OBJECT_UILIMIT_HANDLES)];
+        let parse = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+
+        assert_eq!(
+            parse.ui_event_count, 1,
+            "EventID=27 should be counted as a UI event"
+        );
+        assert_eq!(
+            parse.ui_operation_flags, JOB_OBJECT_UILIMIT_HANDLES,
+            "UI_OPERATION detail must OR into ui_operation_flags",
+        );
+        assert!(
+            !parse.need_ui,
+            "UI_OPERATION (not CONVERT_TO_GUI) must not set need_ui",
+        );
+
+        // Drive the config through apply_ui_operation_flags. Starting
+        // from the default `ui.isolation = "handles"` (the OS default),
+        // a HANDLES relaxation should widen to "desktop".
+        let mut config = serde_json::json!({ "ui": { "isolation": "handles" } });
+        crate::config::apply_ui_operation_flags(&mut config, parse.ui_operation_flags)
+            .expect("apply_ui_operation_flags");
+        assert_eq!(
+            config["ui"]["isolation"], "desktop",
+            "HANDLES relaxation should widen ui.isolation handles -> desktop"
+        );
+    }
+
+    /// CONVERT_TO_GUI violations flow through `set_ui_subsystem_enabled`
+    /// rather than `apply_ui_operation_flags`. Pin that integration too.
+    #[test]
+    fn ui_convert_to_gui_event_sets_need_ui() {
+        let xmls = [make_ui_event_xml(CONVERT_TO_GUI, 0)];
+        let parse = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+
+        assert_eq!(parse.ui_event_count, 1);
+        assert!(parse.need_ui, "CONVERT_TO_GUI must set need_ui");
+        assert_eq!(
+            parse.ui_operation_flags, 0,
+            "CONVERT_TO_GUI must NOT contribute to ui_operation_flags",
+        );
+
+        let mut config = serde_json::json!({});
+        crate::config::set_ui_subsystem_enabled(&mut config).expect("set_ui_subsystem_enabled");
+        assert_eq!(config["ui"]["disable"], false);
+    }
+
+    /// Round-6 coverage finding #4: `parse_events` (the live entry
+    /// point that drives EvtQuery against a real .etl) can't run from
+    /// unit tests, but the per-event accumulator it feeds is shared
+    /// with `parse_events_from_xml`. Cover a heterogeneous mixed
+    /// stream — multiple access events, a UI event, a malformed
+    /// record in the middle, and a CWD-filtered noise event — so any
+    /// regression in the mixed-stream dispatch (event-id routing,
+    /// continue-on-malformed, CWD filter) surfaces from `cargo test`.
+    #[test]
+    fn parse_events_from_xml_mixed_stream_integration() {
+        let xmls: Vec<String> = vec![
+            // EventID=14 valid access event.
+            make_event_xml("C:\\Workdir\\real_target.txt", "0x1"),
+            // Malformed in the middle — must not abort the stream.
+            "<not-an-event/>".to_string(),
+            // CWD-filtered noise: under the supplied cwd, must be skipped.
+            make_event_xml("C:\\Repo\\src\\test_scaffold.rs", "0x1"),
+            // Another valid access event.
+            make_event_xml("C:\\Workdir\\other.txt", "0x2"),
+            // UI EventID=27 violation.
+            make_ui_event_xml(UI_OPERATION, JOB_OBJECT_UILIMIT_WRITECLIPBOARD),
+        ];
+        let result = parse_events_from_xml(xmls.iter(), Some("C:\\Repo"), false, Vec::new());
+
+        assert_eq!(
+            result.valid_access_events.len(),
+            2,
+            "expected exactly two valid access events (the other two were \
+             malformed and cwd-filtered respectively)",
+        );
+        assert_eq!(result.ui_event_count, 1);
+        assert_eq!(result.ui_operation_flags, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,);
+        assert!(!result.need_ui);
+
+        // Pin the order so a regression in event-stream interleaving
+        // (e.g. dropping the post-malformed events) fails loudly.
+        assert_eq!(
+            result.valid_access_events[0].file_path,
+            "C:\\Workdir\\real_target.txt"
+        );
+        assert_eq!(
+            result.valid_access_events[1].file_path,
+            "C:\\Workdir\\other.txt"
         );
     }
 }

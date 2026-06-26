@@ -386,7 +386,17 @@ foreach ($cfg in $configFiles) {
             # under the wxc-exec job object. cancel_active_audit_trace
             # in wxc-exec normally handles this on Ctrl-C; cover the
             # taskkill path explicitly here.
-            & wpr.exe -cancel 2>$null | Out-Null
+            #
+            # Round-6 testability finding #1: invoke wpr.exe via its
+            # absolute System32 path. The unqualified `wpr.exe` form
+            # resolved via $env:PATH (which on Windows starts with the
+            # current directory for child-process search), reintroducing
+            # the exact CWD-plant elevation vulnerability that
+            # `src/core/plm/src/wpr_path.rs` was built to prevent.
+            # This script enforces Administrator above; a planted
+            # `wpr.exe` next to a launcher cwd would run as admin.
+            $wprExe = Join-Path ([Environment]::GetFolderPath('System')) 'wpr.exe'
+            & $wprExe -cancel 2>$null | Out-Null
         }
 
         $stdoutText = if (Test-Path $stdoutFile) { Get-Content $stdoutFile -Raw } else { '' }
