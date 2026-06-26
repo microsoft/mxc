@@ -1467,7 +1467,8 @@ fn derive_sid_string_from_name(name: &str) -> String {
 
     match unsafe { DeriveAppContainerSidFromAppContainerName(pcwstr_name) } {
         Ok(sid) => {
-            let s = unsafe { string_util::sid_to_string(sid.0, "unknown-sid") };
+            let s = unsafe { string_util::sid_to_string(sid.0) }
+                .unwrap_or_else(|| "unknown-sid".to_string());
             // SAFETY: SID returned by DeriveAppContainerSidFromAppContainerName
             // must be freed with FreeSid.
             unsafe {

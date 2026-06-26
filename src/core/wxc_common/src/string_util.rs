@@ -19,24 +19,21 @@ pub fn from_wide(wide: &[u16]) -> String {
 }
 
 /// Convert a SID pointer to its string representation (e.g. "S-1-5-...").
-/// Returns `default_value` on failure.
+/// Returns `None` if the pointer is null or the conversion fails.
 ///
 /// # Safety
-/// The caller must ensure `sid` points to a valid SID structure.
-pub unsafe fn sid_to_string(sid: *mut std::ffi::c_void, default_value: &str) -> String {
+/// The caller must ensure `sid` points to a valid SID structure (or is null).
+pub unsafe fn sid_to_string(sid: *mut std::ffi::c_void) -> Option<String> {
     if sid.is_null() {
-        return default_value.to_string();
+        return None;
     }
 
     let mut string_sid = windows_core::PWSTR::null();
     let psid = PSID(sid);
 
-    let ok = unsafe { ConvertSidToStringSidW(psid, &mut string_sid) };
-    if ok.is_err() {
-        return default_value.to_string();
-    }
+    unsafe { ConvertSidToStringSidW(psid, &mut string_sid) }.ok()?;
 
-    let result = unsafe { string_sid.to_string() }.unwrap_or_else(|_| default_value.to_string());
+    let result = unsafe { string_sid.to_string() }.ok();
 
     unsafe {
         let _ = LocalFree(Some(HLOCAL(string_sid.0 as *mut std::ffi::c_void)));
@@ -379,14 +376,8 @@ mod tests {
     // ========== sid_to_string ==========
 
     #[test]
-    fn sid_to_string_null_returns_default() {
-        let result = unsafe { sid_to_string(std::ptr::null_mut(), "DEFAULT") };
-        assert_eq!(result, "DEFAULT");
-    }
-
-    #[test]
-    fn sid_to_string_null_returns_empty_default() {
-        let result = unsafe { sid_to_string(std::ptr::null_mut(), "") };
-        assert_eq!(result, "");
+    fn sid_to_string_null_returns_none() {
+        let result = unsafe { sid_to_string(std::ptr::null_mut()) };
+        assert_eq!(result, None);
     }
 }
