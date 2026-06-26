@@ -339,11 +339,10 @@ fn plm_exe_path() -> Option<std::path::PathBuf> {
 /// logged but never abort the wxc-exec flow.
 ///
 /// Returns `true` iff the spawn succeeded **and** plm.exe exited with
-/// a zero status. Round-4 reliability fix: the caller needs this
-/// signal to decide whether to clear `AUDIT_ACTIVE` (only after a
-/// successful `plm stop`); previously the result was discarded and
-/// `AUDIT_ACTIVE.store(false)` ran unconditionally, silently leaking
-/// the kernel ETW session on every failure path.
+/// a zero status. The caller needs this signal to decide whether to
+/// clear `AUDIT_ACTIVE` (only after a successful `plm stop`); without
+/// it, `AUDIT_ACTIVE.store(false)` would run unconditionally and
+/// silently leak the kernel ETW session on every failure path.
 #[cfg(target_os = "windows")]
 fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
     use std::fmt::Write as _;
@@ -371,7 +370,7 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
 
     match std::process::Command::new(&plm)
         .args(args)
-        // Round-6 reliability finding #2: plm.exe itself now acquires
+        // plm.exe itself now acquires
         // the `Global\Mxc_Plm_Audit` named-mutex singleton on direct
         // operator invocations (`plm log` / `plm start` / `plm stop`)
         // so its retry-on-conflict path can't silently `wpr -cancel`
@@ -380,7 +379,7 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
         // skip its own acquisition so we don't deadlock on the same
         // global name.
         //
-        // Round-7 coverage finding #1: the env-var name comes from
+        // the env-var name comes from
         // `plm::coordination::SINGLETON_HELD_BY_PARENT_ENV` rather
         // than a duplicated string literal, so the plm and wxc
         // crates can't drift out of sync without a compile error.
@@ -430,8 +429,8 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
 static AUDIT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Set to `true` while `plm start` is being spawned and has not yet
-/// returned. Round-6 reliability finding #4: `AUDIT_ACTIVE` is flipped
-/// to `true` BEFORE `plm.exe` is spawned (because `mark_audit_active()`
+/// returned. `AUDIT_ACTIVE` is flipped to `true` BEFORE `plm.exe` is
+/// spawned (because `mark_audit_active()`
 /// has to run early to cover a Ctrl+C arriving mid-spawn), but the
 /// kernel ETW session is not actually engaged until `plm.exe`'s child
 /// `wpr -start` returns. A Ctrl+C in that gap would fire
@@ -457,7 +456,7 @@ fn mark_audit_active() {
 /// stack guard's Drop. Failures (no active session, missing wpr.exe)
 /// are silenced because the call is best-effort cleanup.
 ///
-/// Round-4 security fix: invoke `wpr.exe` by absolute path
+/// invoke `wpr.exe` by absolute path
 /// (`%SystemRoot%\System32\wpr.exe`) rather than as a bare name so
 /// `CreateProcessW`'s implicit CWD-first search order can't be abused
 /// to substitute a planted binary. PLM runs as administrator, so a
@@ -474,12 +473,12 @@ fn cancel_active_audit_trace() {
     }
 }
 
-/// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. Round-5
-/// security finding #1: the round-4 fix read `%SystemRoot%` from the
-/// process env, but UAC inherits env from the unelevated parent — a
-/// standard user could `setx SystemRoot=C:\\Users\\Public\\evil` and
-/// plant `wpr.exe` for a later admin run. `GetSystemDirectoryW` is
-/// kernel-published and not env-spoofable.
+/// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. Reading
+/// `%SystemRoot%` from the process env is unsafe because UAC inherits
+/// env from the unelevated parent — a standard user could `setx
+/// SystemRoot=C:\\Users\\Public\\evil` and plant `wpr.exe` for a later
+/// admin run. `GetSystemDirectoryW` is kernel-published and not
+/// env-spoofable.
 #[cfg(target_os = "windows")]
 fn resolve_system32_wpr() -> std::path::PathBuf {
     use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
@@ -508,7 +507,7 @@ impl Drop for AuditTraceGuard {
     }
 }
 
-/// Round-4 finding I: host-wide single-instance guard for PLM audit
+/// host-wide single-instance guard for PLM audit
 /// mode. Two concurrent `wxc-exec --audit` runs share a single NT
 /// Kernel Logger session, so the second one's `wpr -start` would
 /// either steal the first's session or fail and silently corrupt the
@@ -516,7 +515,7 @@ impl Drop for AuditTraceGuard {
 /// machine-wide; admins have SeCreateGlobalPrivilege so this works)
 /// and refuse to start if another wxc-exec audit is already running.
 ///
-/// Round-5 correctness finding #1: the handle is stashed in a static
+/// the handle is stashed in a static
 /// atomic (not just the stack guard) so the explicit cleanup before
 /// `process::exit` — which skips destructors — can release it too.
 /// `AuditSingletonGuard::drop` is now just a thin shim over
@@ -671,20 +670,20 @@ impl Drop for ParkedDaclGuard {
 /// Returns `FALSE` so the default handler still runs (which terminates
 /// the process).
 ///
-/// Acquires the slot with a bounded wait (≤5s), not `try_lock`. If the
-/// main thread is mid-`Drop` on the same manager — which can be doing a
-/// `SetNamedSecurityInfoW` — returning FALSE immediately lets the
-/// default handler call `ExitProcess`, terminating that drop mid-Win32
-/// and leaving the host DACL in an inconsistent state. The bounded
-/// wait blocks the default handler until either main finishes (lock
-/// released) or 5s elapses — whichever comes first. On timeout we
-/// proceed anyway; the recovery scan on the next `wxc-exec` startup
-/// reaps anything left behind.
+/// Acquires the slot with a bounded wait
+/// (`plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`), not `try_lock`.
+/// If the main thread is mid-`Drop` on the same manager — which can be
+/// doing a `SetNamedSecurityInfoW` — returning FALSE immediately lets
+/// the default handler call `ExitProcess`, terminating that drop mid-
+/// Win32 and leaving the host DACL in an inconsistent state. The
+/// bounded wait blocks the default handler until either main finishes
+/// (lock released) or the shared timeout elapses — whichever comes
+/// first. On timeout we proceed anyway; the recovery scan on the next
+/// `wxc-exec` startup reaps anything left behind.
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     if let Some(slot) = DACL_CLEANUP_SLOT.get() {
         use std::time::{Duration, Instant};
-        // Round-8 reliability finding #2 / round-9 testability #1:
-        // the handler runs TWO bounded waits (this one + the
+        // // the handler runs TWO bounded waits (this one + the
         // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
         // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
         // ~5s OS-imposed kill budget. The per-wait budget is sourced
@@ -712,7 +711,7 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     // FALSE = "I did not fully handle this; run the next handler in the
     // chain (i.e. the default handler that calls ExitProcess)".
     //
-    // Round-6 reliability finding #4: if `plm start` is still in
+    // if `plm start` is still in
     // flight when Ctrl+C arrives, wait briefly for it to complete
     // before deciding whether to issue `wpr -cancel`. Without this
     // wait, a cancel that races a not-yet-engaged session is a no-op
@@ -720,11 +719,11 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     // anyway — the next-startup `recover_orphaned_state` scan plus a
     // manual `wpr -cancel` would catch any residue.
     //
-    // Round-7 testability finding #3 / coverage #1: the wait loop is
+    // the wait loop is
     // implemented by `plm::coordination::wait_until_cleared`, the
     // same tested helper `plm.exe`'s console-control handler uses.
     //
-    // Round-8 reliability #2 / round-9 testability #1: the per-wait
+    // the per-wait
     // timeout is sourced from the shared
     // `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` const so the
     // wxc-exec and plm.exe handlers cannot drift apart. The const's
@@ -1316,7 +1315,7 @@ fn main() {
     // so Ctrl-C / panic / process::exit between start and stop don't
     // leak the kernel ETW session.
     //
-    // Round-5 reliability finding #1: declaration order matters. Rust
+    // declaration order matters. Rust
     // drops locals in REVERSE declaration order, and on the cleanup
     // path we want the trace guard (`AuditTraceGuard`, which calls
     // `wpr -cancel`) to run BEFORE the singleton handle is released —
@@ -1329,7 +1328,7 @@ fn main() {
     let _audit_guard: Option<AuditTraceGuard>;
     #[cfg(target_os = "windows")]
     let audit_config_file = if cli.audit {
-        // Round-4 finding I: refuse to start a second concurrent
+        // refuse to start a second concurrent
         // audit. We acquire the host-wide named mutex BEFORE marking
         // AUDIT_ACTIVE so a failure here doesn't engage the cleanup
         // path that would cancel someone else's running trace.
@@ -1345,7 +1344,7 @@ fn main() {
         }
         mark_audit_active();
         _audit_guard = Some(AuditTraceGuard);
-        // Round-5 reliability finding #2: previously this was
+        // previously this was
         // `let _ = run_plm_command(...)`, which discarded the failure
         // status. If plm start failed (missing plm.exe, wpr session
         // conflict not resolved, etc.), the workload ran with
@@ -1355,7 +1354,7 @@ fn main() {
         // so the operator sees the error and the policy isn't
         // silently relaxed.
         //
-        // Round-6 reliability finding #4: bracket the spawn with
+        // bracket the spawn with
         // AUDIT_START_IN_FLIGHT so the console-control handler waits
         // for it to drain before deciding whether to issue `wpr
         // -cancel` (closes the Ctrl+C race where cancel arrives
@@ -1396,7 +1395,7 @@ fn main() {
     // its exit code. Done before the runner is dropped so the trace
     // tooling sees a fully-quiesced workload.
     //
-    // Round-4 fix: only clear `AUDIT_ACTIVE` when `plm stop` actually
+    // only clear `AUDIT_ACTIVE` when `plm stop` actually
     // succeeded. Previously the flag was cleared unconditionally,
     // which silently leaked the kernel ETW session whenever stop
     // failed (missing plm.exe, spawn fail, wpr -stop non-zero) and
@@ -1436,15 +1435,14 @@ fn main() {
     drop(runner);
     drop(take_parked_dacl());
 
-    // Round-5 correctness finding #1: the `process::exit` below skips
-    // destructors, so `AuditTraceGuard::drop` (which calls
-    // `cancel_active_audit_trace`) and `AuditSingletonGuard::drop`
-    // (which releases the host-wide named mutex) never run on the
-    // normal path. The round-4-B comment promised "leave AUDIT_ACTIVE
-    // set so cleanup guards run wpr -cancel on stop failure" — but
-    // that's only true on the panic-unwind / Ctrl-C path, not here.
-    // Manually invoke the cleanups so a stop-failure path actually
-    // tears the kernel ETW session down and frees the singleton.
+    // the `process::exit` below skips destructors, so
+    // `AuditTraceGuard::drop` (which calls `cancel_active_audit_trace`)
+    // and `AuditSingletonGuard::drop` (which releases the host-wide
+    // named mutex) never run on the normal path. Leaving `AUDIT_ACTIVE`
+    // set so cleanup guards run `wpr -cancel` on stop failure is only
+    // true on the panic-unwind / Ctrl-C path, not here. Manually
+    // invoke the cleanups so a stop-failure path actually tears the
+    // kernel ETW session down and frees the singleton.
     #[cfg(target_os = "windows")]
     {
         cancel_active_audit_trace();

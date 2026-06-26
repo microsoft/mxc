@@ -4,7 +4,7 @@
 //! each module are gated with `#[cfg(target_os = "windows")]`, while
 //! pure-data parsers (XML, hex, ACE bytes, normalization,
 //! `CapabilityIndex`, `ParseAccumulator`) compile on every target so
-//! their unit tests run in Linux/macOS CI. Round-3 testability fix.
+//! their unit tests run in Linux/macOS CI.
 //!
 //! The thin `plm` binary lives in `main.rs` and is itself Windows-only.
 

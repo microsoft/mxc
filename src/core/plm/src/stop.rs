@@ -18,7 +18,7 @@ use crate::config::{
 use crate::event_parser::{parse_events, ParseResult};
 use crate::wpr_path::wpr_command;
 
-/// Round-4 finding V: the "skip adjusted config" predicate extracted
+/// the "skip adjusted config" predicate extracted
 /// from the inline check in `run`. A trace that produced no access
 /// events, no capability requests, no `CONVERT_TO_GUI` hint, and no
 /// `UI_OPERATION` flags has nothing to merge — emitting an
@@ -43,8 +43,7 @@ pub struct StopOptions {
 /// Abstraction over `wpr -stop` invocations so the failure-mapping
 /// state machine in `stop_plm_trace_with` is testable without
 /// actually spawning processes. Mirrors `start::WprLauncher`
-/// (round-7 testability finding #2 — the start-side seam existed
-/// since round 5/6 but the stop side was hard-coded).
+///.
 pub trait WprStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus>;
 }
@@ -84,7 +83,7 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
 ///
 /// Returns the resolved path plus an optional warning string when the
 /// canonicalize step diverged from the operator's intent. Extracted
-/// from `run()` (round-6 coverage finding #3) so the fallback chain
+/// from `run()` so the fallback chain
 /// is unit-testable without spawning wpr or building a real ETL.
 ///
 /// Fallback chain (in order):
@@ -133,8 +132,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     // Resolve bin_path to its canonical form so the self-access filter
     // in `config::update_from_access_events` can compare it against the
     // verbatim-prefixed paths ETW emits. The fallback chain is in
-    // `resolve_bin_path` (round-6 coverage finding #3: extracted so the
-    // chain — and its stderr warning — is unit-testable).
+    // `resolve_bin_path`.
     let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
     if let Some(w) = warning {
         eprintln!("[plm] warning: {w}");
@@ -257,7 +255,7 @@ mod tests {
         }
     }
 
-    // Round-4 finding V: pin the "skip adjusted config" predicate
+    // pin the "skip adjusted config" predicate
     // against each single-signal ParseResult plus the all-empty case.
 
     #[test]
@@ -295,7 +293,7 @@ mod tests {
 
     // ---- resolve_bin_path -----------------------------------------------
     //
-    // Round-6 coverage finding #3: the bin-path canonicalization
+    // the bin-path canonicalization
     // fallback chain affects the self-event filter (and therefore
     // whether plm.exe leaks into Adjusted_*.json), but was previously
     // inline in `run()` and untestable without spawning wpr.
@@ -340,11 +338,11 @@ mod tests {
 
     // ---- WprStopper / stop_plm_trace_with -------------------------------
     //
-    // Round-7 testability finding #2: the start-side `WprLauncher`
-    // seam existed since round 5/6 but `stop_plm_trace` hard-coded
-    // `wpr_command()`. The non-zero-exit and spawn-error branches
-    // (the ones production actually hits when WPR or the .etl file
-    // are unhealthy) had zero test coverage. Mirror the start side.
+    // The start side already has a `WprLauncher` seam, but
+    // `stop_plm_trace` historically hard-coded `wpr_command()`. The
+    // non-zero-exit and spawn-error branches (the ones production
+    // actually hits when WPR or the .etl file are unhealthy) had
+    // zero test coverage. Mirror the start side.
 
     use std::os::windows::process::ExitStatusExt;
 

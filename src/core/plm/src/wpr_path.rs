@@ -1,16 +1,15 @@
 //! Locate `wpr.exe` by absolute path.
 //!
-//! Round-4 security finding #1: every PLM caller of `wpr` previously
-//! used `Command::new("wpr")`, which on Windows resolves via
+//! `Command::new("wpr")` is unsafe: on Windows it resolves via
 //! `CreateProcessW`'s implicit DLL/EXE search order — and that order
 //! starts with the **current working directory**. Because PLM runs as
 //! administrator (required to start the NT Kernel Logger), an
 //! unprivileged user who can drop a `wpr.exe` into a directory an
 //! admin later runs PLM from would gain code execution as that admin.
 //!
-//! Round-5 security finding #1: the round-4 fix read `%SystemRoot%`
-//! from the process environment block, but UAC inherits the
-//! unelevated parent's env verbatim. A standard user can `setx
+//! Reading `%SystemRoot%` from the process environment block is also
+//! unsafe: UAC inherits the unelevated parent's env verbatim. A
+//! standard user can `setx
 //! SystemRoot=C:\\Users\\Public\\evil`, plant
 //! `evil\\System32\\wpr.exe`, and the next admin-elevated
 //! `wxc-exec --audit` (or any cleanup-path `wpr -cancel`) launches the
@@ -88,7 +87,7 @@ mod tests {
         );
     }
 
-    /// Round-5 security regression guard: setting `SystemRoot` in the
+    /// setting `SystemRoot` in the
     /// process env MUST NOT change which `wpr.exe` we resolve, because
     /// the kernel-published system directory is the source of truth.
     #[test]

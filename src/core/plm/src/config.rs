@@ -123,7 +123,7 @@ fn strip_verbatim_or_device_prefix(s: &str) -> Option<&str> {
         if head == "\\\\?\\" || head == "\\\\.\\" {
             return Some(&s[4..]);
         }
-        // Round-5 finding #8: `\??\` is the NT-object-manager
+        // `\??\` is the NT-object-manager
         // equivalent of `\\?\`. ETW kernel events sometimes surface
         // paths in this form (NtCreateFile resolves both). The
         // event_parser layer strips it via `normalize_file_path`, but
@@ -158,9 +158,9 @@ fn strip_verbatim_or_device_prefix(s: &str) -> Option<&str> {
 fn normalize_path(p: &str) -> Option<String> {
     // 1. Strip verbatim / device prefix (`\\?\`, `\\.\`, and the
     //    NT-object `\??\` prefix). UNC verbatim is rejected because
-    //    we don't grant policy to network shares. Round-5 finding #8:
-    //    `\??\` was previously stripped only by `event_parser`, so
-    //    events that bypassed that layer leaked the literal prefix
+    //    we don't grant policy to network shares. The `\??\` prefix
+    //    must be stripped here too (not only in `event_parser`), so
+    //    events that bypass that layer don't leak the literal prefix
     //    into config storage.
     let stripped = strip_verbatim_or_device_prefix(p)?;
 
@@ -185,7 +185,7 @@ fn normalize_path(p: &str) -> Option<String> {
     //    strip trailing dots and spaces. Leave the drive-letter component
     //    ("c:") untouched.
     //
-    //    Round-5 correctness finding #2: `..` and `.` segments break
+    //    `..` and `.` segments break
     //    the deny-prefix invariant — `C:\Windows\.\System32\evil` and
     //    `C:\dir\..\Secrets\token.dat` would normalize to forms that
     //    miss a deny entry on the canonical parent. Rather than
@@ -376,9 +376,9 @@ pub fn update_from_access_events(
 
     // Pre-normalize every comparison input exactly once (here, outside the
     // per-event loop). The hot path then does pure byte-slice compares
-    // with no allocation. Round-1 already moved the JSON array clone out
-    // of the loop; this pass also removes the `to_ascii_lowercase()` that
-    // was still running per call. For exact-match idempotence (the common
+    // with no allocation. The JSON array clone is hoisted out of the
+    // loop and the per-call `to_ascii_lowercase()` is eliminated. For
+    // exact-match idempotence (the common
     // case after a few hundred events) we also maintain a `HashSet` of
     // already-covered normalized forms for O(1) short-circuit.
     let bin_path_norm = normalize_path(bin_path);
@@ -421,7 +421,7 @@ pub fn update_from_access_events(
         // because `stop.rs` canonicalises bin_path via `canonicalize()`,
         // which on Windows returns the `\\?\C:\…` form while ETW
         // reports the plain `C:\…` form; comparing only the raw strings
-        // (round-2 behaviour) let the binary path leak into the output
+        // let the binary path leak into the output
         // config as a readonly entry.
         let is_self_event = ev.file_path.eq_ignore_ascii_case(bin_path)
             || bin_path_norm
@@ -540,10 +540,10 @@ pub fn update_from_access_events(
 /// Returns `Some(key)` for backends that support capability merge,
 /// `None` for backends that don't — callers must skip the merge with
 /// a diagnostic rather than misfiling capabilities into a section the
-/// runner will ignore. Round-3 fix (containment_subobject_key)
-/// previously fell through to `processContainer` for any unknown
-/// value, which silently produced a malformed config for
-/// `seatbelt`/`lxc`/`wslc`/`windows_sandbox`/`isolation_session` etc.
+/// runner will ignore. A naive fallthrough to `processContainer` for
+/// any unknown value silently produces a malformed config for
+/// `seatbelt`/`lxc`/`wslc`/`windows_sandbox`/`isolation_session` etc.,
+/// so unknown values return `None` instead.
 fn capability_subobject_key(enum_value: &str) -> Option<&'static str> {
     match enum_value.to_ascii_lowercase().as_str() {
         "processcontainer" | "appcontainer" => Some("processContainer"),
@@ -1161,7 +1161,7 @@ mod tests {
 
     // ---- parent_for_write -------------------------------------------------
     //
-    // Round-7 correctness #2: gated to Windows because the impl uses
+    // gated to Windows because the impl uses
     // `std::path::Path` which only recognises `\` as a separator on
     // Windows. On Linux `Path::new("C:\\a\\b\\c.txt")` is a single
     // component and `parent()` returns `Some("")`, which would make
@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn is_drive_root_handles_verbatim_and_device_prefix() {
-        // Round-2 regression: ETW emits these forms when a process opens
+        // ETW emits these forms when a process opens
         // \??\C:\... directly; the drive-root guard must catch them.
         assert!(is_drive_root("\\\\?\\C:\\"));
         assert!(is_drive_root("\\\\?\\C:"));
@@ -1278,7 +1278,7 @@ mod tests {
 
     #[test]
     fn normalize_path_strips_trailing_dot_per_component() {
-        // Round-2 security finding: trailing dots map to the same NTFS
+        // trailing dots map to the same NTFS
         // object as the base name, so deny matching must canonicalize.
         assert_eq!(
             normalize_path("C:\\Secrets.").as_deref(),
@@ -1307,7 +1307,7 @@ mod tests {
         assert!(normalize_path("\\\\?\\UNC\\server\\share\\x").is_none());
     }
 
-    // Round-4 finding T: lock current behavior on path-normalization
+    // lock current behavior on path-normalization
     // corners that prior rounds did not cover. These are NOT
     // necessarily the *correct* answers in every case (see comments)
     // — they encode what `normalize_path` actually does today so a
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[test]
     fn normalize_path_strips_nt_object_prefix() {
-        // Round-5 finding #8 fix: `\??\C:\foo` is the NT-object form
+        // `\??\C:\foo` is the NT-object form
         // ETW occasionally emits. `config::normalize_path` now
         // explicitly strips the `\??\` prefix (mirroring `\\?\` /
         // `\\.\` handling) so call sites that bypass
@@ -1404,9 +1404,9 @@ mod tests {
             .is_empty());
     }
 
-    // ---- Round-4 finding G: bin_path self-event filter -------------------
+    // ---- bin_path self-event filter -------------------
     //
-    // The round-3 fix normalizes `bin_path` and compares both the raw
+    // The self-filter normalizes `bin_path` and compares both the raw
     // (verbatim or plain) form via `eq_ignore_ascii_case` AND the
     // normalized form against the event path. Every other test in this
     // module passes `"__never_matches__"` as bin_path; these four lock
@@ -1429,7 +1429,7 @@ mod tests {
 
     #[test]
     fn self_event_filter_skips_verbatim_bin_path_against_plain_event() {
-        // Round-3 regression scenario: canonicalize() may return the
+        // canonicalize() may return the
         // verbatim form \\?\C:\..., while ETW emits the plain form.
         // Both must self-filter.
         let mut cfg = json!({});
@@ -1497,7 +1497,7 @@ mod tests {
         );
     }
 
-    // Round-8 correctness finding #1: these tests indirectly call
+    // these tests indirectly call
     // `parent_for_write`, which uses `Path::new(...).parent()`. On non-Windows
     // hosts `\` is not a path separator, so `Path::new("C:\\hiberfil.sys").parent()`
     // returns `Some("")` instead of `Some("C:\\")`, producing spurious failures
@@ -1534,12 +1534,12 @@ mod tests {
         assert!(added.readwrite.is_empty());
     }
 
-    // ---- round-2 security regressions ------------------------------------
+    // ---- ------------------------------------
 
     #[cfg(target_os = "windows")]
     #[test]
     fn write_via_verbatim_drive_root_does_not_grant_volume() {
-        // Round-2 finding #1: \\?\C:\hiberfil.sys must trigger the
+        // \\?\C:\hiberfil.sys must trigger the
         // drive-root guard (parent_for_write -> "\\?\C:\" which previously
         // bypassed is_drive_root and granted the whole volume).
         let mut cfg = json!({});
@@ -1554,7 +1554,7 @@ mod tests {
 
     #[test]
     fn write_to_trailing_dot_variant_of_denied_dir_is_blocked() {
-        // Round-2 finding #12: "C:\Secrets." resolves to the same NTFS
+        // "C:\Secrets." resolves to the same NTFS
         // object as "C:\Secrets" but previously bypassed deny matching.
         let mut cfg = json!({
             "filesystem": { "deniedPaths": ["C:\\Secrets"] }
@@ -1573,7 +1573,7 @@ mod tests {
 
     #[test]
     fn write_to_ads_on_denied_dir_is_rejected() {
-        // Round-2 finding #13: ADS syntax on a directory resolves to the
+        // ADS syntax on a directory resolves to the
         // directory and must not bypass deny matching. `normalize_path`
         // rejects the path entirely.
         let mut cfg = json!({
@@ -1593,7 +1593,7 @@ mod tests {
 
     #[test]
     fn mixed_separators_do_not_cause_duplicates() {
-        // Round-2 finding #14: `C:/foo` vs `C:\foo` previously broke dedup.
+        // `C:/foo` vs `C:\foo` previously broke dedup.
         let mut cfg = json!({
             "filesystem": { "readonlyPaths": ["C:\\src"] }
         });
@@ -1653,7 +1653,7 @@ mod tests {
         assert_eq!(cfg["ui"]["clipboard"], json!("all"));
     }
 
-    // Round-4 finding S: asymmetric / widening clipboard branches.
+    // asymmetric / widening clipboard branches.
 
     #[test]
     fn apply_ui_flags_read_clipboard_only_sets_read() {
@@ -1733,7 +1733,7 @@ mod tests {
 
     #[test]
     fn apply_ui_flags_always_sets_disable_false_when_any_flag_applied() {
-        // Round-2 finding #15: schema default for `ui.disable` is `true`,
+        // schema default for `ui.disable` is `true`,
         // in which case the runner ignores all other ui.* fields. We must
         // unconditionally clear it whenever ANY relaxation is applied so
         // a UI_OPERATION-only trace (e.g. GLOBALATOMS) actually converges.
@@ -1752,7 +1752,7 @@ mod tests {
         assert!(cfg3.get("ui").is_none());
     }
 
-    // Round-3 finding M: explicit coverage for the systemSettings and
+    // explicit coverage for the systemSettings and
     // isolation branches that were previously only exercised indirectly.
 
     #[test]
@@ -1835,7 +1835,7 @@ mod tests {
 
     #[test]
     fn merge_capabilities_creates_camel_case_subobject() {
-        // Regression for round-3 finding A: PLM previously used the
+        // PLM previously used the
         // `containment` enum value (lowercase `processcontainer`) as
         // the sub-object key. The schema requires camelCase
         // `processContainer`; the lowercase form failed validation
@@ -1874,7 +1874,7 @@ mod tests {
         );
     }
 
-    // Round-4 finding R: merge_capabilities must silently no-op (no
+    // merge_capabilities must silently no-op (no
     // panic, no error) when the config has no `containment` set.
     #[test]
     fn merge_capabilities_silently_skips_when_containment_missing() {
@@ -1892,7 +1892,7 @@ mod tests {
         assert!(cfg.get("processContainer").is_none());
     }
 
-    // Round-4 finding E: non-PC backends must NOT have capabilities
+    // non-PC backends must NOT have capabilities
     // misfiled into a `processContainer` sub-object. They have no
     // `capabilities` array in their schema; the merge is a no-op.
     #[test]
@@ -1923,7 +1923,7 @@ mod tests {
         }
     }
 
-    // Round-4 finding U: merge is additive-only. Even when the
+    // merge is additive-only. Even when the
     // requested set is disjoint from existing capabilities, every
     // pre-existing capability must survive the merge.
     #[test]

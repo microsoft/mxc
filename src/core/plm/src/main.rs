@@ -29,7 +29,7 @@ use plm::{extract_caps, log, start, stop};
 /// `plm start` and the operator's matching `plm stop`) still tears
 /// down the kernel ETW session instead of leaking it.
 ///
-/// Round-6 reliability finding #1: the `wxc-exec --audit` path has its
+/// the `wxc-exec --audit` path has its
 /// own AUDIT_ACTIVE flag + SetConsoleCtrlHandler; the standalone
 /// `plm log` interactive flow had neither, so Ctrl+C left the NT
 /// Kernel Logger session live until reboot or manual `wpr -cancel`.
@@ -40,7 +40,7 @@ static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// static so the console-control handler can release the host-wide
 /// guard before `ExitProcess` runs and skips Rust destructors.
 ///
-/// Round-6 reliability finding #2: `plm log` / direct `plm start` /
+/// `plm log` / direct `plm start` /
 /// direct `plm stop` previously bypassed the `Global\Mxc_Plm_Audit`
 /// singleton entirely, so the retry-on-conflict path in
 /// `start_plm_trace` could silently `wpr -cancel` a peer PLM trace.
@@ -60,8 +60,7 @@ fn clear_plm_trace_active() {
 /// Idempotent and safe to call from the console-control handler.
 fn cancel_active_plm_trace() {
     if PLM_TRACE_ACTIVE.swap(false, Ordering::SeqCst) {
-        // Use the kernel-published System32 path (round-4/5 security
-        // hardening — see wpr_path.rs).
+        // Use the kernel-published System32 path.
         let _ = plm::wpr_path::wpr_command()
             .arg("-cancel")
             .stdout(std::process::Stdio::null())
@@ -130,13 +129,13 @@ fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
 /// session and releases the singleton mutex before the default handler
 /// calls `ExitProcess` (which skips Rust destructors).
 unsafe extern "system" fn plm_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
-    // Round-7 reliability finding #1: if `plm log`'s `wpr -start` is
+    // if `plm log`'s `wpr -start` is
     // still in flight when Ctrl+C arrives, briefly wait for it to
     // settle before deciding whether to issue `wpr -cancel`. Without
     // this wait, a cancel that races a not-yet-engaged session is a
     // no-op and the kernel session leaks past `plm.exe` exit.
     //
-    // Round-9 testability finding #1: timeout sourced from the
+    // timeout sourced from the
     // shared `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` so
     // `plm.exe` and `wxc-exec`'s `dacl_ctrl_handler` cannot drift
     // apart. The const docs explain the ~5s OS kill budget rationale.
@@ -246,7 +245,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Start { wprp } => {
             let _singleton = acquire_singleton_if_needed()?;
-            // Round-8 coverage finding #4: filename must match the
+            // filename must match the
             // lowercase `plm.wprp` written by `build.rs`. Mismatched
             // casing works on default case-insensitive NTFS but fails
             // opaquely on per-directory case-sensitive trees (WSL-
@@ -300,7 +299,7 @@ fn main() -> Result<()> {
             verbose_logging,
         } => {
             let _singleton = acquire_singleton_if_needed()?;
-            // Round-8 coverage finding #4: see `Cmd::Start` above —
+            // see `Cmd::Start` above —
             // lowercase to match `build.rs` staging.
             let wprp_path = wprp.unwrap_or_else(|| exe.join("plm.wprp"));
             // The interactive `log` flow is the only standalone path

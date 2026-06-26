@@ -332,7 +332,7 @@ where
 fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
     use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
 
-    // Round-6 reliability finding #3 / round-7 perf #3: keep `buf` at
+    // keep `buf` at
     // `len == 0` while we call `EvtRender`. The Win32 API writes
     // through the raw pointer using the explicit size argument and
     // does not care about Rust's `Vec::len`, so we don't need to
@@ -346,11 +346,9 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
     // `capacity ≥ len + additional`, not `capacity ≥ additional` —
     // actually reaches the INITIAL_GUESS_BYTES target on the first
     // call where `len` had been left non-zero by the previous event.
-    // (Round-7 perf #3: the old order computed
-    // `reserve(INITIAL_GUESS_BYTES - capacity)` past a non-zero `len`,
-    // which silently no-op'd when capacity was already > len so the
-    // 8 KiB target was never reached on a buffer freshly resized to
-    // a small event.)
+    // (Reserving past a non-zero `len` silently no-ops when capacity
+    // is already > len, so the 8 KiB target would never be reached
+    // on a buffer freshly resized to a small event.)
     const INITIAL_GUESS_BYTES: usize = 8 * 1024;
     unsafe {
         buf.set_len(0);
@@ -441,7 +439,7 @@ struct ParsedEvent {
     /// DACL ACE blob on EventID=14 access events). `None` if fewer than
     /// five ComplexData children were seen. Borrowed directly rather
     /// than cloned to avoid a second `String` allocation of the largest
-    /// per-event field (round-6 perf finding #1).
+    /// per-event field.
     complex_data_4_idx: Option<usize>,
     /// EventData/Data entries paired with their `Name` attribute (when set),
     /// in document order. Used for events whose schema is resolved at render
@@ -492,7 +490,7 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
     // 100k events.
     let need_named = event_id == 27;
     let mut event_data_named: Vec<(String, String)> = Vec::new();
-    // Round-6 perf finding #1: track the position of the 5th
+    // track the position of the 5th
     // `<ComplexData>` sibling (the DACL ACE blob) inside `event_data`
     // rather than allocating a second `String` copy of its inner text.
     // The blob is the largest single field on an EventID=14 access
@@ -551,7 +549,7 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 /// Strip Windows path-namespace prefixes so downstream filters that
 /// expect a DOS form (`C:\...`) see one.
 ///
-/// Round-6 correctness finding #2: previously this function only
+/// previously this function only
 /// handled `\??\` (the NT-object prefix). Paths emitted with the
 /// verbatim (`\\?\C:\...`) or DOS-device (`\\.\C:\...`) prefixes
 /// reached `is_skippable` which then rejected them on the "second
@@ -567,7 +565,7 @@ fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 /// Kept (in addition to `normalize_file_path_in_place`) so unit
 /// tests can exercise the prefix-strip on a `&str` input. The hot
 /// path in `ParseAccumulator::consume` uses the in-place variant
-/// to avoid an allocation per accepted event (round-7 perf #1).
+/// to avoid an allocation per accepted event.
 #[cfg(test)]
 fn normalize_file_path(p: &str) -> String {
     let mut s = p.to_string();
@@ -575,13 +573,12 @@ fn normalize_file_path(p: &str) -> String {
     s
 }
 
-/// In-place sibling of `normalize_file_path`. Round-7 perf #1: the
-/// hot loop in `ParseAccumulator::consume` takes ownership of the
-/// raw path via `mem::take` and reuses the buffer through this
-/// in-place normaliser plus a trailing-`\\` truncate to eliminate
-/// the double allocation the previous code performed
-/// (`normalize_file_path` → `String`, then `.trim_matches('\\').to_string()`
-/// → second `String`).
+/// In-place sibling of `normalize_file_path`. The hot loop in
+/// `ParseAccumulator::consume` takes ownership of the raw path via
+/// `mem::take` and reuses the buffer through this in-place
+/// normaliser plus a trailing-`\\` truncate, eliminating a double
+/// allocation (`normalize_file_path` → `String`, then
+/// `.trim_matches('\\').to_string()` → second `String`).
 fn normalize_file_path_in_place(s: &mut String) {
     // Trim leading + trailing ASCII whitespace in place.
     let lead = s.len() - s.trim_start().len();
@@ -612,7 +609,7 @@ fn normalize_file_path_in_place(s: &mut String) {
 /// Strip leading + trailing `\\` from a `String` in place. Mirrors
 /// `str::trim_matches('\\')` semantics but avoids the trailing
 /// `.to_string()` round-trip the consume hot path used to do
-/// (round-7 perf #1).
+///.
 fn trim_backslashes_in_place(s: &mut String) {
     let lead = s.len() - s.trim_start_matches('\\').len();
     if lead > 0 {
@@ -687,7 +684,7 @@ struct ParseAccumulator<'a> {
     /// Cached lowercase form of `current_directory` with trailing `\` trimmed,
     /// plus that string with one trailing `\` appended. Computed once at
     /// construction so the hot `is_skippable` path doesn't allocate two
-    /// `String`s per event on a 100k-event trace (round-4 finding K).
+    /// `String`s per event on a 100k-event trace.
     /// `None` if `current_directory` is `None` or is a bare drive root.
     cwd_lc_trimmed: Option<String>,
     cwd_lc_prefix: Option<String>,
@@ -753,7 +750,7 @@ impl<'a> ParseAccumulator<'a> {
 
     /// Hot-path CWD/path filter. Uses precomputed lowercase forms of
     /// `current_directory` to avoid two `String` allocs per event
-    /// (round-4 finding K). R5-12: byte-wise ASCII comparison
+    ///. R5-12: byte-wise ASCII comparison
     /// against the cached lowercase forms — `to_ascii_lowercase` on
     /// every event allocated ~12 MB / 100k events for nothing.
     /// Logic must stay in sync with the free `is_skippable` function
@@ -896,7 +893,7 @@ impl<'a> ParseAccumulator<'a> {
         // typically indicate capability-resource access events whose
         // capabilities have already been collected from the DACL above.
         //
-        // Round-7 perf #1: take the path out of `ev.event_data` so we
+        // take the path out of `ev.event_data` so we
         // can normalise + trim in place. The previous code allocated
         // twice — once in `normalize_file_path` and once in
         // `.trim_matches('\\').to_string()` at push time — for every
@@ -965,7 +962,7 @@ impl<'a> ParseAccumulator<'a> {
             println!("{file_path}");
         }
 
-        // Round-7 perf #1: trim the leading/trailing `\\` in place
+        // trim the leading/trailing `\\` in place
         // (matches the semantics of the previous `.trim_matches('\\')`)
         // so the push doesn't need a fresh allocation.
         trim_backslashes_in_place(&mut file_path);
@@ -1093,7 +1090,7 @@ mod tests {
         assert_eq!(normalize_file_path("C:\\foo"), "C:\\foo");
     }
 
-    /// Round-6 correctness finding #2: verbatim (`\\?\C:\...`) and
+    /// verbatim (`\\?\C:\...`) and
     /// DOS-device (`\\.\C:\...`) prefixes must be stripped before
     /// `is_skippable`'s drive-letter gate; otherwise the kernel
     /// provider's natural rendering of those forms drops every event.
@@ -1138,7 +1135,7 @@ mod tests {
         ));
     }
 
-    // Regression for round-4 finding M: a CWD of bare `C:\` (drive root)
+    // a CWD of bare `C:\` (drive root)
     // must NOT swallow every event on that drive. Only an explicit
     // equality match against the drive root is honored.
     #[test]
@@ -1262,7 +1259,7 @@ mod tests {
         assert_eq!(result.valid_access_events[1].access_mask, 0x2);
     }
 
-    /// Round-3 finding L: when a single rendered event is malformed we
+    /// when a single rendered event is malformed we
     /// must not abort the whole trace — every subsequent valid event
     /// would silently disappear, leaving PLM under-granting on the next
     /// adjust pass. The accumulator's `consume` swallows parse failures
@@ -1328,7 +1325,7 @@ mod tests {
         )
     }
 
-    /// Round-6 coverage finding #8: the parser produces a
+    /// the parser produces a
     /// `ui_operation_flags` bitmap; `apply_ui_operation_flags` then
     /// rewrites the config's `ui.*` fields. The two halves are tested
     /// individually but their contract (bit values must match) is
@@ -1387,7 +1384,7 @@ mod tests {
         assert_eq!(config["ui"]["disable"], false);
     }
 
-    /// Round-6 coverage finding #4: `parse_events` (the live entry
+    /// `parse_events` (the live entry
     /// point that drives EvtQuery against a real .etl) can't run from
     /// unit tests, but the per-event accumulator it feeds is shared
     /// with `parse_events_from_xml`. Cover a heterogeneous mixed

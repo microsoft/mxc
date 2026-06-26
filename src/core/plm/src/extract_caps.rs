@@ -394,9 +394,9 @@ pub enum SidResolution<'a> {
     Unknown,
 }
 
-/// Indexed view of a capability table for O(1) SID lookup. Round-1 left
-/// `resolve_sid` doing a linear scan over ~150 entries per ACE, which
-/// dominated CPU time on traces with thousands of ACEs.
+/// Indexed view of a capability table for O(1) SID lookup. A naive
+/// `resolve_sid` doing a linear scan over ~150 entries per ACE
+/// dominates CPU time on traces with thousands of ACEs.
 ///
 /// The map keys are SID byte sequences; the value pairs the matched
 /// capability name with a flag distinguishing the package-SID variant
@@ -434,7 +434,7 @@ impl CapabilityIndex {
                 SidResolution::Capability(name.as_str())
             };
         }
-        // Round-4 perf fix: defer the LSASS-RPC LookupAccountSidW call
+        // defer the LSASS-RPC LookupAccountSidW call
         // to the caller's `verbose` branch. `lookup_nt_account` is a
         // 2-syscall round-trip per unknown SID; on a 100k-event trace
         // with ~4 ACEs each and ~50% unknown SIDs, calling it from
@@ -492,7 +492,7 @@ pub(crate) fn parse_hex_string(hex_input: &str) -> Result<Vec<u8>> {
     // allocated an intermediate `String` per call; with thousands of
     // ACE blobs per trace that added up.
     //
-    // Round-7 perf #2: iterate `as_bytes()` rather than `chars()`. The
+    // iterate `as_bytes()` rather than `chars()`. The
     // input is always ASCII hex emitted by the Windows event renderer
     // (`<ComplexData>` text nodes from EvtRender), so per-codepoint
     // UTF-8 decoding is pure overhead. Non-hex / non-whitespace bytes
@@ -866,7 +866,7 @@ mod tests {
 
     // ---- public entry points: extract_caps* ------------------------------
     //
-    // Round-6 coverage finding #5: the public surface (`extract_caps`,
+    // the public surface (`extract_caps`,
     // `extract_caps_with_index`, `extract_caps_with_index_into`) had
     // no direct tests. Pin the hex-decode → ACE walk → resolve glue
     // here so a regression in any of those layers fails fast rather

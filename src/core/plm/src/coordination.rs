@@ -1,7 +1,7 @@
 //! Cross-process coordination primitives shared by `plm.exe` and the
 //! `wxc-exec --audit` driver in the `wxc` crate.
 //!
-//! Round-7 coverage finding #1: the env-var name and the bypass check
+//! the env-var name and the bypass check
 //! used to be a string literal in `plm/src/main.rs` and a separate
 //! `Command::env("MXC_PLM_AUDIT_SINGLETON_HELD", "1")` literal in
 //! `wxc/src/main.rs`. If either drifted from the other, the child
@@ -11,7 +11,7 @@
 //! check; the `wxc` crate now depends on `plm` (lib) so they both
 //! import the same constant.
 //!
-//! Round-7 testability finding #3: the bounded "wait for an
+//! the bounded "wait for an
 //! `AtomicBool` to clear" loop used by both console-control handlers
 //! (`dacl_ctrl_handler` in wxc-exec and `plm_ctrl_handler` in
 //! plm.exe) used to be inlined inside `unsafe extern "system"`
@@ -38,12 +38,7 @@ pub static PLM_LOG_START_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// (which runs TWO bounded waits back-to-back — the DACL `try_lock`
 /// drain and the `wait_until_cleared` call) and `plm.exe`'s
 /// `plm_ctrl_handler` so the two binaries cannot drift apart.
-///
-/// Round-9 testability finding #1: round-8 shrunk wxc-exec's two
-/// waits to 2s but left `plm.exe`'s identical wait at 5s, breaking
-/// the "drift between the two handlers can no longer happen"
-/// invariant the round-7 shared helper was meant to enforce. Lifting
-/// the constant here makes drift a compile-time impossibility.
+/// Lifting the constant here makes drift a compile-time impossibility.
 ///
 /// The 2s budget is chosen so the combined budget of the wxc-exec
 /// handler (`2 * CTRL_HANDLER_DRAIN_TIMEOUT`) stays under the
@@ -62,7 +57,7 @@ pub const SINGLETON_HELD_BY_PARENT_ENV: &str = "MXC_PLM_AUDIT_SINGLETON_HELD";
 
 /// True when the env-var set by the audit-driving parent process is
 /// present. Extracted from `acquire_singleton_if_needed` so the
-/// bypass branch is reachable from unit tests (round-7 coverage #2).
+/// bypass branch is reachable from unit tests.
 pub fn singleton_bypass_requested() -> bool {
     std::env::var_os(SINGLETON_HELD_BY_PARENT_ENV).is_some()
 }
@@ -73,8 +68,7 @@ pub fn singleton_bypass_requested() -> bool {
 ///
 /// Used by both `wxc-exec`'s `dacl_ctrl_handler` (waiting for `plm
 /// start` to drain before issuing `wpr -cancel`) and `plm.exe`'s
-/// `plm_ctrl_handler` (round-7 reliability #1 — same race in the
-/// standalone `plm log` flow).
+/// `plm_ctrl_handler`.
 pub fn wait_until_cleared(flag: &AtomicBool, timeout: Duration, poll_interval: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while flag.load(Ordering::SeqCst) {
@@ -120,7 +114,7 @@ mod tests {
         assert!(observed);
     }
 
-    // Round-7 coverage #1: the bypass also fires for any non-empty
+    // the bypass also fires for any non-empty
     // value (Windows env "0" is still set), so the parent only needs
     // the env var to be present, not equal to "1". Pin that contract
     // so a future refactor doesn't tighten the check.
@@ -138,16 +132,15 @@ mod tests {
 
     // ---- ctrl-handler drain budget --------------------------------------
 
-    // Round-9 testability finding #2 / coverage #2: pin the OS-budget
-    // invariant that motivated round-8's 5s → 2s shrink. Windows
-    // imposes a hard ~5s kill timer on `CTRL_CLOSE_EVENT` /
-    // `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT` handlers. The
-    // wxc-exec handler runs two back-to-back bounded waits each
-    // capped at `CTRL_HANDLER_DRAIN_TIMEOUT`, so `2 *
-    // CTRL_HANDLER_DRAIN_TIMEOUT` must stay under that budget with
-    // some slack for the actual `wpr -cancel` spawn that follows.
-    // A future bump back to 5s reintroduces the round-7 ETW-session
-    // leak silently — this test fails the build instead.
+    // Pin the OS-budget invariant. Windows imposes a hard ~5s kill
+    // timer on `CTRL_CLOSE_EVENT` / `CTRL_LOGOFF_EVENT` /
+    // `CTRL_SHUTDOWN_EVENT` handlers. The wxc-exec handler runs two
+    // back-to-back bounded waits each capped at
+    // `CTRL_HANDLER_DRAIN_TIMEOUT`, so `2 * CTRL_HANDLER_DRAIN_TIMEOUT`
+    // must stay under that budget with some slack for the actual
+    // `wpr -cancel` spawn that follows. A future bump to >2s
+    // reintroduces the ETW-session leak silently — this test fails
+    // the build instead.
     #[test]
     fn ctrl_handler_drain_timeout_respects_os_budget() {
         let combined = CTRL_HANDLER_DRAIN_TIMEOUT

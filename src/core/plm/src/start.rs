@@ -24,12 +24,12 @@ pub struct WprExe;
 
 impl WprLauncher for WprExe {
     fn start(&mut self, profile_arg: &str) -> Result<ExitStatus> {
-        // Round-6 coverage finding #7: surface the resolved wpr.exe
+        // surface the resolved wpr.exe
         // path in the spawn-failure context so operators on hosts
         // without the Windows Performance Toolkit installed (Server
         // SKUs stripped of WPT, etc.) get an actionable hint instead
         // of a bare `os error 2`. The path itself is kernel-published
-        // (round-5 security hardening) and is safe to surface.
+        // and is safe to surface.
         let cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
         wpr_command()
@@ -45,7 +45,7 @@ impl WprLauncher for WprExe {
 /// Wrap a `wpr.exe` spawn `io::Error` in an `anyhow::Error` carrying
 /// the resolved absolute path so the failure message is actionable
 /// (e.g. `wpr.exe not present at <path> — install the Windows
-/// Performance Toolkit`). Round-6 coverage finding #7.
+/// Performance Toolkit`).
 fn describe_wpr_spawn_error(verb: &str, resolved: &str, e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound {
         anyhow::anyhow!(
@@ -67,12 +67,13 @@ fn describe_wpr_spawn_error(verb: &str, resolved: &str, e: std::io::Error) -> an
 /// Only one NT Kernel Logger session can exist host-wide, so when this
 /// runs we are necessarily terminating an existing recording (PLM's
 /// previous run or an unrelated tool). We emit a warning to stderr so
-/// an operator running a parallel recording sees what happened. Round-3
-/// added a `wpr -status` probe gating this call; round-4 removed it
-/// because the English-only stdout match defeated the scope narrowing
-/// on every localized Windows install. We now invoke cancel only on
-/// the retry path after `wpr -start` itself reports a conflict, which
-/// is locale-invariant by construction.
+/// an operator running a parallel recording sees what happened.
+///
+/// A `wpr -status` probe is deliberately NOT used to gate this call:
+/// its English-only stdout match defeats the scope narrowing on every
+/// localized Windows install. Cancel is invoked only on the retry path
+/// after `wpr -start` itself reports a conflict, which is
+/// locale-invariant by construction.
 pub fn cancel_existing_wpr_trace() {
     eprintln!(
         "[plm] cancelling pre-existing WPR session via `wpr -cancel`; \
@@ -173,7 +174,7 @@ mod tests {
         assert_eq!(f.cancels, 1);
     }
 
-    /// Round-6 coverage finding #7: when wpr.exe isn't on the system
+    /// when wpr.exe isn't on the system
     /// (e.g. Server SKU without WPT), the spawn-failure context must
     /// surface the resolved path AND nudge the operator toward
     /// installing the Windows Performance Toolkit. Asserting against
@@ -209,7 +210,7 @@ mod tests {
         assert!(s.contains("stop"), "verb must appear: {s}");
     }
 
-    /// Round-7 coverage finding #3: the shipped `plm.wprp` is copied
+    /// the shipped `plm.wprp` is copied
     /// verbatim by `build.rs` with no validation. If a future edit
     /// produces malformed XML, removes the `AccessFailureProfile`
     /// recording, or drops a referenced provider GUID, the build
