@@ -9,6 +9,7 @@ members = [
     "core/mxc_build_common",
     "core/generated/base_container_specification",
     "backends/appcontainer/common",
+    "backends/windows_sandbox/daemon",
     "backends/windows_sandbox/guest",
     "backends/windows_sandbox/common",
     "backends/windows_sandbox/lifecycle",

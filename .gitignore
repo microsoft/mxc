@@ -46,3 +46,7 @@ pathrel_test.exe
 
 # Claude
 .claude/
+review_windows_sandbox_*.md
+
+# iterative-review working artifacts
+.review/
