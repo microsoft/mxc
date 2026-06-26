@@ -240,7 +240,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 8 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC/Bwrap — shared most-restrictive-wins normalization in `wxc_common`. | S |
 | 9 | **Paths must exist at policy-load time** | 🟡 Actionable | Same as LXC/Bwrap — shared `path_exists()` in `wxc_common`. | S |
 | 10 | **Explicit `{ windowsPath, containerPath }` mount control** | 🟡 Actionable | Host paths always mounted at `/mnt/<drive>/`; let users specify the in-container mount point. `policy_mapping.rs:23-60`. | M |
-| 11 | **Handle UNC / non-drive paths** | 🟡 Actionable | UNC paths (`\\server\share`) silently dropped with a warning; plan is to hard-error. Branch `user/sodas/wslc-reject-unc-paths`. | S |
+| 11 | **Handle UNC / non-drive paths** | ✅ Addressed | UNC paths (`\\server\share`) now hard-error at parse time as of [PR #537](https://github.com/microsoft/mxc/pull/537) (merged 2026-06-18), instead of being silently dropped with a warning. | — |
 | 12 | **(D5) Deny = ACCESS_DENIED, not hidden** | ⛔ Non-actionable | Same Linux mount-namespace limitation as LXC/Bwrap — overlaying a path hides it entirely. WSLC runs on the same Linux kernel; a deny-mount API from the SDK would still produce hidden (not ACCESS_DENIED) semantics. | — |
 | 13 | **(D6) Object-based — enforcement** | ⛔ Non-actionable | WSLC SDK is path-based. Same limitation as Linux backends. | — |
 | 14 | **Rename across regions** | ⛔ Non-actionable | WSL uses Linux VFS — returns EXDEV, not ACCESS_DENIED. Same as LXC/Bwrap. | — |
@@ -277,7 +277,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 28 | **Finish & merge port-mapping support** | 🟡 In progress | Branch `user/sodas/wslc-port-mapping`. | M |
+| 28 | **Port-mapping support** | ✅ Addressed | TCP host→container port forwarding shipped in [PR #530](https://github.com/microsoft/mxc/pull/530) (merged 2026-06-23). Provides explicit per-port inbound exposure (the `hostLoopback: "allow"` primitive for mapped ports); policy-driven `ingress.hostLoopback` default posture still needs the VM-level API (see Network #16 / SDK dep #1). | — |
 | 29 | **State-aware lifecycle** | 🟡 Actionable | Implement `StatefulSandboxBackend`. WSLC bears the largest startup cost — session reuse is the highest-value win. | L |
 | 30 | **Structured denied-resource diagnostics** | 🟡 Actionable | Parity with Process Container's structured denial reporting. | M |
 | 31 | **Un-gate WSLC tests in CI** | ⛔ Blocked | Needs `wslcsdk.dll` public NuGet (see SDK dep #2 above). | M |
