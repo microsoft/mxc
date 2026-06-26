@@ -612,43 +612,6 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
     Ok(())
 }
 
-/// Returns a platform-specific identity for the filesystem object a path points to.
-/// On Unix this is `(device, inode)`; on Windows it is `(volume serial, file index)`
-/// obtained via `GetFileInformationByHandle`. Two paths returning the same identity
-/// (hardlinks, junctions, case-only differences, drive aliases) name the same object.
-/// Returns `None` if the path does not exist or its identity cannot be read.
-#[cfg(unix)]
-fn file_identity(path: &str) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
-}
-
-#[cfg(windows)]
-fn file_identity(path: &str) -> Option<(u64, u64)> {
-    use std::os::windows::io::AsRawHandle;
-
-    let file = fs::File::open(path).ok()?;
-    let mut info: windows::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
-        unsafe { std::mem::zeroed() };
-    let handle = windows::Win32::Foundation::HANDLE(file.as_raw_handle());
-    let ok = unsafe {
-        windows::Win32::Storage::FileSystem::GetFileInformationByHandle(handle, &mut info)
-    };
-    if ok.is_ok() {
-        let file_index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
-        Some((info.dwVolumeSerialNumber as u64, file_index))
-    } else {
-        None
-    }
-}
-
-/// Numeric precedence for filesystem intents; higher is more restrictive.
-/// Used to apply "most-restrictive-wins" when a path (or filesystem object)
-/// is referenced by more than one policy list.
-const INTENT_READWRITE: u8 = 1;
-const INTENT_READONLY: u8 = 2;
-const INTENT_DENIED: u8 = 3;
-
 /// Normalizes cross-list filesystem path constraints by applying
 /// **most-restrictive-wins** precedence (`deny` > `readonly` > `readwrite`):
 ///
@@ -657,10 +620,6 @@ const INTENT_DENIED: u8 = 3;
 ///    `deniedPaths` is normalized to denied).
 /// 2. Paths should exist: logs a warning for paths that don't exist on the host
 ///    (advisory — some backends create mount targets dynamically).
-/// 3. Object-based conflict: if two different paths resolve to the same filesystem
-///    object (via hardlinks, junctions, symlinks, or aliases) with different
-///    intents, the more restrictive intent wins and the less-restrictive path
-///    entry is dropped.
 ///
 /// This never rejects the config — conflicting intents are resolved deterministically
 /// rather than erroring, matching the roadmap's most-restrictive-wins decision.
@@ -726,59 +685,6 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             }
         }
     }
-
-    // 3. Object-based conflict: most-restrictive-wins across path aliases that
-    //    resolve to the same filesystem object.
-    normalize_object_aliases(policy, logger);
-}
-
-/// Resolves object-based intent conflicts (different path strings naming the same
-/// filesystem object) using most-restrictive-wins. Drops the less-restrictive path
-/// entry when a more restrictive entry references the same object.
-fn normalize_object_aliases(policy: &mut ContainerPolicy, logger: &mut Logger) {
-    // Compute the most restrictive intent rank observed for each object identity.
-    let mut max_rank: HashMap<(u64, u64), u8> = HashMap::new();
-    for (paths, rank) in [
-        (&policy.readwrite_paths, INTENT_READWRITE),
-        (&policy.readonly_paths, INTENT_READONLY),
-        (&policy.denied_paths, INTENT_DENIED),
-    ] {
-        for path in paths {
-            if let Some(id) = file_identity(path) {
-                let entry = max_rank.entry(id).or_insert(0);
-                if rank > *entry {
-                    *entry = rank;
-                }
-            }
-        }
-    }
-
-    policy.readwrite_paths.retain(|path| {
-        if let Some(id) = file_identity(path) {
-            if max_rank.get(&id).copied().unwrap_or(INTENT_READWRITE) > INTENT_READWRITE {
-                logger.log_line(&format!(
-                    "Filesystem path '{}' (readwritePaths) resolves to the same object as a \
-                     more restrictive entry; applying most-restrictive intent",
-                    path
-                ));
-                return false;
-            }
-        }
-        true
-    });
-    policy.readonly_paths.retain(|path| {
-        if let Some(id) = file_identity(path) {
-            if max_rank.get(&id).copied().unwrap_or(INTENT_READONLY) > INTENT_READONLY {
-                logger.log_line(&format!(
-                    "Filesystem path '{}' (readonlyPaths) resolves to the same object as a \
-                     deniedPaths entry; applying most-restrictive intent (denied)",
-                    path
-                ));
-                return false;
-            }
-        }
-        true
-    });
 }
 
 // ---------- Conversion from raw JSON to domain model ----------
@@ -4150,67 +4056,5 @@ mod tests {
         let mut logger = test_logger();
 
         load_request(&encoded, &mut logger, true).unwrap();
-    }
-
-    #[test]
-    fn object_based_conflict_via_hardlink_resolves_to_denied() {
-        // Create a temp file and a hardlink to it — same inode, two paths.
-        let dir = std::env::temp_dir().join("mxc_test_object_conflict");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let original = dir.join("original.txt");
-        let link = dir.join("link.txt");
-        fs::write(&original, "test").unwrap();
-        fs::hard_link(&original, &link).unwrap();
-
-        let original_str = original.to_str().unwrap().replace('\\', "\\\\");
-        let link_str = link.to_str().unwrap().replace('\\', "\\\\");
-
-        // original = readwrite, link = denied → same object, denied wins.
-        let json = format!(
-            r#"{{"process": {{"commandLine": "echo hi"}}, "containment": "process", "filesystem": {{"readwritePaths": ["{}"], "deniedPaths": ["{}"]}}}}"#,
-            original_str, link_str
-        );
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy.readwrite_paths.is_empty(),
-            "readwrite alias should be dropped (denied wins)"
-        );
-        assert_eq!(req.policy.denied_paths.len(), 1);
-
-        // Cleanup
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn object_based_same_intent_via_hardlink_preserved() {
-        // Same inode, same intent (both readwritePaths) → both preserved.
-        let dir = std::env::temp_dir().join("mxc_test_object_same_intent");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let original = dir.join("original.txt");
-        let link = dir.join("link.txt");
-        fs::write(&original, "test").unwrap();
-        fs::hard_link(&original, &link).unwrap();
-
-        let original_str = original.to_str().unwrap().replace('\\', "\\\\");
-        let link_str = link.to_str().unwrap().replace('\\', "\\\\");
-
-        let json = format!(
-            r#"{{"process": {{"commandLine": "echo hi"}}, "containment": "process", "filesystem": {{"readwritePaths": ["{}", "{}"]}}}}"#,
-            original_str, link_str
-        );
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        // Same intent → both retained.
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.readwrite_paths.len(), 2);
-
-        // Cleanup
-        let _ = fs::remove_dir_all(&dir);
     }
 }
