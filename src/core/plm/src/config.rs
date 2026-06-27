@@ -268,6 +268,26 @@ fn trim_trailing_separators(s: &str) -> &str {
     s.trim_end_matches(['\\', '/'])
 }
 
+/// Case-insensitive ASCII compare without allocation. Used by
+/// `merge_capabilities` so the sort step doesn't allocate two lowercased
+/// `String`s per comparison. Non-ASCII bytes are compared verbatim.
+fn cmp_ci_ascii(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.bytes();
+    let mut bi = b.bytes();
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, _) => return Ordering::Less,
+            (_, None) => return Ordering::Greater,
+            (Some(x), Some(y)) => match x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase()) {
+                Ordering::Equal => continue,
+                ord => return ord,
+            },
+        }
+    }
+}
+
 /// True iff `path` denotes a drive root like `C:\` (or `C:` / `C:/` or
 /// the verbatim/device variants `\\?\C:\` / `\\.\C:\`).
 ///
@@ -651,16 +671,166 @@ pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose
     }
 }
 
-/// Merge discovered AppContainer capability names into the config's
-/// containment-backend block. Implementation arrives in the
-/// capability-extraction PR; this stub is a no-op for an empty input
-/// (PR2's parser never produces a non-empty set) and bails otherwise so
-/// a stray future caller can't silently drop findings.
-pub fn merge_capabilities(_config: &mut Value, requested: &HashSet<String>) -> Result<()> {
-    if !requested.is_empty() {
-        anyhow::bail!(
-            "merge_capabilities body not yet wired (capability extraction lands in a later PR)"
+/// Map a `containment` enum value (lowercase, matching the schema's
+/// `containment` enum) to the JSON sub-object key that holds its
+/// `capabilities` array, if any. Today only the ProcessContainer
+/// backend has a `capabilities` array in its schema (see
+/// `wxc_common::models::ContainmentBackend::section_path`); every
+/// other backend either does not exist on Windows or does not accept
+/// AppContainer-style capability SIDs at all.
+///
+/// Returns `Some(key)` for backends that support capability merge,
+/// `None` for backends that don't — callers must skip the merge with
+/// a diagnostic rather than misfiling capabilities into a section the
+/// runner will ignore. A naive fallthrough to `processContainer` for
+/// any unknown value silently produces a malformed config for
+/// `seatbelt`/`lxc`/`wslc`/`windows_sandbox`/`isolation_session` etc.,
+/// so unknown values return `None` instead.
+fn capability_subobject_key(enum_value: &str) -> Option<&'static str> {
+    match enum_value.to_ascii_lowercase().as_str() {
+        "processcontainer" | "appcontainer" => Some("processContainer"),
+        // Known backends without a `capabilities` array — merge is a
+        // no-op for these (caller emits a warning).
+        "lxc" | "wslc" | "windows_sandbox" | "seatbelt" | "isolation_session" | "bubblewrap"
+        | "hyperlight" | "microvm" | "vm" => None,
+        // Genuinely unknown value (e.g. a typo or a future backend
+        // not yet wired into PLM): return None so we don't silently
+        // pollute the config.
+        _ => None,
+    }
+}
+
+/// Locate (case-insensitively) or create the containment sub-object on
+/// `config` and ensure its `capabilities` array exists. Returns the key
+/// the caller should use to subsequently reach the object, or `None`
+/// when the containment backend has no `capabilities` array at all.
+fn resolve_containment_key(config: &mut Value, containment_name: &str) -> Result<Option<String>> {
+    let canonical = match capability_subobject_key(containment_name) {
+        Some(k) => k,
+        None => return Ok(None),
+    };
+    let obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
+    let existing_key = obj
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(canonical))
+        .cloned();
+    let key = match existing_key {
+        Some(k) => k,
+        None => {
+            obj.insert(canonical.to_string(), json!({}));
+            canonical.to_string()
+        }
+    };
+    if !obj[&key].is_object() {
+        obj[&key] = json!({});
+    }
+    let inner = obj
+        .get_mut(&key)
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("`{key}` must be a JSON object"))?;
+    if !inner.contains_key("capabilities") {
+        inner.insert("capabilities".into(), json!([]));
+    } else if !inner["capabilities"].is_array() {
+        anyhow::bail!("`{key}.capabilities` must be a JSON array");
+    }
+    Ok(Some(key))
+}
+
+pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Result<()> {
+    let containment_name = match config.get("containment").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => return Ok(()),
+    };
+
+    let key = match resolve_containment_key(config, &containment_name)? {
+        Some(k) => k,
+        None => {
+            // Backend has no `capabilities` array in its schema (or is
+            // unknown to PLM). Emit a stderr warning so the operator
+            // knows the discovered capabilities are being dropped on
+            // the floor, rather than silently writing a section the
+            // runner will reject.
+            if !requested.is_empty() {
+                eprintln!(
+                    "[plm] warning: containment '{containment_name}' has no `capabilities` \
+                     array in its schema; dropping {} discovered capabilit{}: {}",
+                    requested.len(),
+                    if requested.len() == 1 { "y" } else { "ies" },
+                    {
+                        let mut sorted: Vec<&String> = requested.iter().collect();
+                        sorted.sort();
+                        sorted
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                );
+            }
+            return Ok(());
+        }
+    };
+    let caps_arr = config[&key]["capabilities"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let mut existing: HashSet<String> = HashSet::new();
+    for v in &caps_arr {
+        if let Some(s) = v.as_str() {
+            if !s.trim().is_empty() {
+                existing.insert(s.to_ascii_lowercase());
+            }
+        }
+    }
+
+    let mut included: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for cap in requested {
+        if existing.insert(cap.to_ascii_lowercase()) {
+            included.push(cap.clone());
+        } else {
+            skipped.push(cap.clone());
+        }
+    }
+
+    // Emit a sorted, case-insensitively-deduped capabilities array.
+    let mut all_caps: Vec<String> = caps_arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .chain(included.iter().cloned())
+        .collect();
+    let mut seen_lower: HashSet<String> = HashSet::new();
+    all_caps.retain(|c| seen_lower.insert(c.to_ascii_lowercase()));
+    // Custom case-insensitive ASCII compare so the per-element cost is
+    // a byte-by-byte walk instead of two `to_ascii_lowercase()` clones
+    // per comparison.
+    all_caps.sort_unstable_by(|a, b| cmp_ci_ascii(a, b));
+
+    config[&key]["capabilities"] = Value::Array(all_caps.into_iter().map(Value::String).collect());
+
+    if !included.is_empty() {
+        included.sort();
+        println!(
+            "Capabilities included into '{containment_name}.capabilities' ({}):",
+            included.len()
         );
+        for c in &included {
+            println!("  + {c}");
+        }
+    }
+
+    if !skipped.is_empty() {
+        skipped.sort();
+        println!(
+            "Capabilities skipped (already present) ({}):",
+            skipped.len()
+        );
+        for c in &skipped {
+            println!("  = {c}");
+        }
     }
     Ok(())
 }
