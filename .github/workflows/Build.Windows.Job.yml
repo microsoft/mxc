@@ -82,7 +82,7 @@ jobs:
         run: cargo test --locked --release --target ${{ matrix.target }} -p plm
 
       # Run the PLM integration harness under the actually-built
-      # `wxc-exec.exe` + `plm.exe`. Without this, the 10 JSON fixtures
+      # `wxc-exec.exe` + `plm.exe`. Without this, the JSON fixtures
       # under `tests/configs/plm_configs/` and the entire
       # `wpr → ETL → event-parse → config-merge` pipeline are only
       # exercised when a human runs the script. x64-only: arm64
@@ -90,21 +90,27 @@ jobs:
       # capability — gate strictly on x86_64. GitHub-hosted Windows
       # runners run as a local administrator (`runneradmin`), which
       # `run_plm_test.ps1` requires for WPR.
-      - name: PLM integration tests
+      #
+      # `-Fs` restricts the run to filesystem fixtures only. UI and
+      # capability fixtures require an interactive desktop session
+      # (clipboard, window manager, screen capture, WinRT pickers)
+      # and have no useful behavior on headless GitHub runners.
+      #
+      # This step runs with `defaults.run.working-directory: src`, so
+      # a relative `./tests/scripts/...` invocation would resolve to
+      # `src/tests/scripts/...` and fail-fast — use the absolute
+      # workspace path to match -BinDir/-ConfigDir below. `-KeepLogs`
+      # preserves each failed fixture's trace.etl + Adjusted_*.json +
+      # harness stdout/stderr for the failure-only upload-artifact
+      # step that follows; without it, the only CI signal is scraped
+      # console text.
+      - name: PLM integration tests (filesystem only)
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
-          # This job runs every step with
-          # `defaults.run.working-directory: src`, so a relative
-          # `./tests/scripts/...` invocation here would resolve to
-          # `src/tests/scripts/...` and fail-fast. Use the absolute
-          # workspace path to match -BinDir/-ConfigDir below.
-          # Pass -KeepLogs so failed fixtures' trace.etl +
-          # Adjusted_*.json + harness stdout/stderr survive for the
-          # failure-only upload-artifact step that follows; without
-          # it, the only CI signal is scraped console text.
           & "${{ github.workspace }}/tests/scripts/run_plm_test.ps1" `
             -Release `
+            -Fs `
             -BinDir "${{ github.workspace }}/src/target/${{ matrix.target }}/release" `
             -ConfigDir "${{ github.workspace }}/tests/configs/plm_configs" `
             -KeepLogs
