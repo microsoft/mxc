@@ -79,10 +79,11 @@ jobs:
       # cross-platform modules (config, event_parser parse helpers,
       # extract_caps pure helpers, ui_limits, access_event) compile on
       # every target and their unit tests run on every target. This
-      # gate makes the round-3 cfg-split a CI-enforced contract — if
-      # someone adds a `use windows::…` without a `#[cfg]` gate the
-      # Linux build fails fast rather than rotting silently. We build
-      # only the lib because main.rs is `#![cfg(target_os = "windows")]`.
+      # gate makes the cross-platform/Windows-only split a CI-enforced
+      # contract — if someone adds a `use windows::…` without a
+      # `#[cfg]` gate the Linux build fails fast rather than rotting
+      # silently. We build only the lib because main.rs is
+      # `#![cfg(target_os = "windows")]`.
       - name: Build plm lib (cross-platform modules)
         working-directory: src
         run: cargo build --locked --release --target ${{ matrix.target }} -p plm --lib
