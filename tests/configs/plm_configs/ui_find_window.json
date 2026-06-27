@@ -1,0 +1,17 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "PLM-FindWindow-Basic",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "plmtester.exe ui-isolation find-window",
+    "timeout": 30000
+  },
+  "ui": {
+    "disable": false
+  },
+  "processContainer": {
+    "ui": {
+      "isolation": "handles"
+    }
+  }
+}
