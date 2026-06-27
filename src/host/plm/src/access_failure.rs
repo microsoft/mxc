@@ -8,11 +8,8 @@
 //!     prefixes -> DOS form),
 //!   * the post-XPath filters (current-directory, drive-letter,
 //!     self-access, invalid filename chars),
-//!   * the per-event accumulator helper that pushes the resulting
-//!     access event into `ParseAccumulator`.
-//!
-//! ACE-blob → capability-name extraction lands in a later PR; this PR
-//! only collects file paths and access masks.
+//!   * the per-event accumulator helper that feeds the DACL ACE blob
+//!     through `extract_caps` and pushes the resulting access event.
 //!
 //! `ParseAccumulator` (in `event_parser`) owns the mutable state;
 //! `consume_access_failure` is the only public entry point.
@@ -30,13 +27,31 @@ pub(crate) const FILE_PATH_INDEX: usize = 2;
 const APP_PATH_INDEX: usize = 3;
 const ACCESS_MASK_INDEX: usize = 5;
 
-/// Per-event consume helper for `EventID=14`. Applies the post-XPath
-/// filters and pushes a `LearningModeAccessEvent` into
-/// `acc.valid_access_events` on success.
+/// Per-event consume helper for `EventID=14`. Walks the DACL ACE blob
+/// through `extract_caps`, applies the post-XPath filters, and pushes a
+/// `LearningModeAccessEvent` into `acc.valid_access_events` on success.
 pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedEvent) {
+    if let Some(idx) = ev.complex_data_4_idx {
+        // Borrow rather than clone — the ACE hex blob was already pushed
+        // by `parse_event_xml`; the other EventData slots taken below
+        // (0/1/3) live at different indices so this is safe.
+        if let Some(blob) = ev.event_data.get(idx) {
+            let blob_str = blob.as_str();
+            if !blob_str.trim().is_empty() {
+                let _ = crate::extract_caps::extract_caps_with_index_into(
+                    blob_str,
+                    &acc.capability_index,
+                    acc.verbose,
+                    &mut acc.requested_capabilities,
+                );
+            }
+        }
+    }
+
     // Pull the file path. Absent paths typically mean capability-only
-    // resource accesses; the capability-extraction PR will use the
-    // DACL ACE blob for those, but this PR drops them.
+    // resource accesses whose capability has already been collected
+    // from the DACL above. Take the slot out via `mem::take` so we can
+    // normalise + trim in place without a second `String` allocation.
     let mut file_path = match ev.event_data.get_mut(FILE_PATH_INDEX) {
         Some(s) if !s.is_empty() => std::mem::take(s),
         _ => return,
@@ -389,7 +404,7 @@ mod tests {
             make_event_xml("C:\\Users\\test\\foo.txt", "0x1"),
             make_event_xml("C:\\Users\\test\\bar.txt", "0x2"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert_eq!(result.valid_access_events.len(), 2);
         assert_eq!(
             result.valid_access_events[0].file_path,
@@ -414,7 +429,7 @@ mod tests {
             "<not-an-event/>".to_string(),
             valid_b,
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert_eq!(
             result.valid_access_events.len(),
             2,
@@ -458,7 +473,7 @@ mod tests {
     #[test]
     fn consume_drops_mount_point_manager() {
         let xmls = [make_event_xml("\\Device\\MountPointManager", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -470,7 +485,7 @@ mod tests {
             make_event_xml("C:\\repo\\src\\main.rs", "0x1"),
             make_event_xml("C:\\other\\x.txt", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), Some("C:\\repo"), false);
+        let result = parse_events_from_xml(xmls.iter(), Some("C:\\repo"), false, Vec::new());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\other\\x.txt");
     }
@@ -483,7 +498,7 @@ mod tests {
             make_event_xml("abc", "0x1"),
             make_event_xml("\\\\server\\share\\x", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -492,7 +507,7 @@ mod tests {
     #[test]
     fn consume_drops_invalid_filename_chars() {
         let xmls = [make_event_xml("C:\\foo*bar.txt", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -506,16 +521,18 @@ mod tests {
             "\\Device\\HarddiskVolume3\\Tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(device.iter(), None, false)
-            .valid_access_events
-            .is_empty());
+        assert!(
+            parse_events_from_xml(device.iter(), None, false, Vec::new())
+                .valid_access_events
+                .is_empty()
+        );
 
         let dos = [make_event_xml_with_app(
             "C:\\Tools\\app.exe",
             "C:\\Tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(dos.iter(), None, false)
+        assert!(parse_events_from_xml(dos.iter(), None, false, Vec::new())
             .valid_access_events
             .is_empty());
 
@@ -525,7 +542,7 @@ mod tests {
             "\\Device\\HarddiskVolume3\\tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(cased.iter(), None, false)
+        assert!(parse_events_from_xml(cased.iter(), None, false, Vec::new())
             .valid_access_events
             .is_empty());
     }
@@ -541,7 +558,7 @@ mod tests {
             "\\Device\\HarddiskVolume3\\Tools\\app.exe",
             "0x1",
         )];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\app.exe");
     }
@@ -551,7 +568,7 @@ mod tests {
     #[test]
     fn consume_keeps_normal_valid_event() {
         let xmls = [make_event_xml("C:\\Users\\test\\doc.txt", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(
             result.valid_access_events[0].file_path,
@@ -570,7 +587,7 @@ mod tests {
             make_event_xml("C:\\USERS\\TEST\\DUP.TXT", "0x2"),
             make_event_xml("C:\\Users\\test\\dup.txt", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
         assert_eq!(
             result.valid_access_events.len(),
             1,

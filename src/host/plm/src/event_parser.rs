@@ -27,6 +27,7 @@ use windows::Win32::System::EventLog::{
 };
 
 use crate::access_event::LearningModeAccessEvent;
+use crate::extract_caps;
 
 /// EventID the PLM provider emits for a file/capability access that
 /// *would* have been denied. Decoded by `crate::access_failure`.
@@ -434,8 +435,14 @@ pub(crate) struct ParsedEvent {
     pub(crate) time_created: DateTime<Utc>,
     pub(crate) process_id: u32,
     pub(crate) thread_id: u32,
-    /// EventData/Data values in document order.
+    /// EventData/Data values in document order. May be Data or ComplexData.
     pub(crate) event_data: Vec<String>,
+    /// Index into `event_data` of the 5th `<ComplexData>` sibling (the
+    /// DACL ACE blob on `EventID=14` access events). `None` if fewer
+    /// than five `ComplexData` children were seen. Borrowed directly
+    /// rather than cloned to avoid a second `String` allocation of the
+    /// largest per-event field.
+    pub(crate) complex_data_4_idx: Option<usize>,
 }
 
 pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
@@ -484,6 +491,7 @@ pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
         process_id: acc.process_id,
         thread_id: acc.thread_id,
         event_data: acc.event_data,
+        complex_data_4_idx: acc.complex_data_4_idx,
     })
 }
 
@@ -492,7 +500,7 @@ pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 /// never captured here.
 enum Capture {
     EventId,
-    Data,
+    Data { is_complex: bool },
 }
 
 /// Streaming replacement for the former per-event roxmltree DOM. Walks
@@ -518,6 +526,10 @@ struct StreamAcc {
     process_id: u32,
     thread_id: u32,
     event_data: Vec<String>,
+    // Position of the 5th `<ComplexData>` sibling (the DACL ACE blob),
+    // tracked instead of cloning that multi-KB text a second time.
+    complex_data_4_idx: Option<usize>,
+    complex_index: usize,
     capture: Option<(Capture, String)>,
 }
 
@@ -563,10 +575,11 @@ impl StreamAcc {
                 }
             }
             b"Data" | b"ComplexData" if self.in_event_data => {
+                let is_complex = name.local_name().as_ref() == b"ComplexData";
                 if is_empty {
-                    self.event_data.push(String::new());
+                    self.finish_data(is_complex, String::new());
                 } else {
-                    self.capture = Some((Capture::Data, String::new()));
+                    self.capture = Some((Capture::Data { is_complex }, String::new()));
                 }
             }
             _ => {}
@@ -588,7 +601,7 @@ impl StreamAcc {
         let matches = matches!(
             (&self.capture, local),
             (Some((Capture::EventId, _)), b"EventID")
-                | (Some((Capture::Data, _)), b"Data" | b"ComplexData")
+                | (Some((Capture::Data { .. }, _)), b"Data" | b"ComplexData")
         );
         if !matches {
             return;
@@ -596,7 +609,18 @@ impl StreamAcc {
         let (kind, text) = self.capture.take().unwrap();
         match kind {
             Capture::EventId => self.event_id = text.parse::<u32>().unwrap_or(0),
-            Capture::Data => self.event_data.push(text),
+            Capture::Data { is_complex } => self.finish_data(is_complex, text),
+        }
+    }
+
+    fn finish_data(&mut self, is_complex: bool, text: String) {
+        let pushed_idx = self.event_data.len();
+        self.event_data.push(text);
+        if is_complex {
+            if self.complex_index == 4 {
+                self.complex_data_4_idx = Some(pushed_idx);
+            }
+            self.complex_index += 1;
         }
     }
 }
@@ -617,7 +641,7 @@ pub(crate) struct ParseAccumulator {
     /// Cached lowercase form of the trace's current directory with
     /// trailing `\\` trimmed (computed once at construction so the hot
     /// `is_skippable` path doesn't allocate two `String`s per event).
-    /// `None` when `current_directory` is `None` or is a bare drive
+    /// `None` when the current directory is `None` or is a bare drive
     /// root.
     pub(crate) cwd_lc_trimmed: Option<String>,
     pub(crate) cwd_lc_prefix: Option<String>,
@@ -639,10 +663,23 @@ pub(crate) struct ParseAccumulator {
     /// rather than aborting the trace, but the running total is surfaced
     /// at the end of a parse so silent data loss is observable.
     pub(crate) parse_failures: usize,
+    // Capability table is retained for tests/diagnostics that want to
+    // inspect the source; per-event resolution always goes through
+    // `capability_index` to avoid the O(table_size) HashMap rebuild
+    // that resolving from the raw `Vec<CapabilityEntry>` would pay per
+    // ACE blob.
+    #[allow(dead_code)]
+    pub(crate) capability_table: Vec<extract_caps::CapabilityEntry>,
+    pub(crate) capability_index: extract_caps::CapabilityIndex,
 }
 
 impl ParseAccumulator {
-    fn new(current_directory: Option<&str>, verbose: bool) -> Self {
+    fn new(
+        current_directory: Option<&str>,
+        verbose: bool,
+        capability_table: Vec<extract_caps::CapabilityEntry>,
+    ) -> Self {
+        let capability_index = extract_caps::CapabilityIndex::from_table(&capability_table);
         let (cwd_lc_trimmed, cwd_lc_prefix) = match current_directory {
             Some(cwd) => {
                 let trimmed = cwd.trim_end_matches('\\');
@@ -671,6 +708,8 @@ impl ParseAccumulator {
             access_event_index: HashMap::new(),
             requested_capabilities: HashSet::new(),
             parse_failures: 0,
+            capability_table,
+            capability_index,
         }
     }
 
@@ -763,7 +802,12 @@ pub fn parse_events(
     current_directory: Option<&str>,
     verbose: bool,
 ) -> Result<ParseResult> {
-    let mut acc = ParseAccumulator::new(current_directory, verbose);
+    // Build the capability table once. Each entry requires a
+    // `DeriveCapabilitySidsFromName` syscall + LocalAlloc/LocalFree
+    // pair; the table is process-static so doing this per-event would
+    // dominate wall-time on large traces.
+    let capability_table = extract_caps::build_capability_table();
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_table);
     for_each_event_xml(trace_file, verbose, |xml| {
         acc.consume(xml);
         Ok(())
@@ -773,17 +817,19 @@ pub fn parse_events(
 
 /// Fixture-test seam: drive the same per-event accumulator
 /// `parse_events` uses, but pull XML strings from an iterator rather
-/// than a live ETW session.
+/// than a live ETW session. Pass an empty `capability_table` when ACE
+/// matching isn't under test.
 pub fn parse_events_from_xml<I, S>(
     xmls: I,
     current_directory: Option<&str>,
     verbose: bool,
+    capability_table: Vec<extract_caps::CapabilityEntry>,
 ) -> ParseResult
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut acc = ParseAccumulator::new(current_directory, verbose);
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_table);
     for xml in xmls {
         acc.consume(xml.as_ref());
     }
@@ -834,7 +880,7 @@ mod tests {
         // Single fs-only event; ensure the dispatcher runs and the
         // event is collected.
         let xml = make_event_xml("C:\\app\\foo.txt", "0x1");
-        let result = parse_events_from_xml(vec![xml], None, false);
+        let result = parse_events_from_xml(vec![xml], None, false, Vec::new());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\app\\foo.txt");
     }
