@@ -709,6 +709,9 @@ fn convert_wire_config(
                     .capabilities
                     .push("permissiveLearningMode".to_string());
                 logger.log("WARNING: 'learningMode' enabled - AppContainer restrictions will NOT be enforced (DEBUG BUILD ONLY)\n");
+                eprintln!(
+                    "[mxc] permissiveLearningMode injected via 'learningMode: true' - AppContainer restrictions are NOT enforced"
+                );
             }
             #[cfg(not(debug_assertions))]
             {
@@ -717,6 +720,12 @@ fn convert_wire_config(
         }
 
         if let Some(caps) = ac.capabilities {
+            #[cfg(debug_assertions)]
+            if caps.iter().any(|c| c == "permissiveLearningMode") {
+                eprintln!(
+                    "[mxc] permissiveLearningMode present in policy capabilities - AppContainer restrictions are NOT enforced"
+                );
+            }
             policy.capabilities.extend(caps);
         }
 
@@ -1013,6 +1022,7 @@ fn convert_wire_config(
         testing_features_enabled: false,
         experimental,
         dry_run: false,
+        audit: false,
     })
 }
 

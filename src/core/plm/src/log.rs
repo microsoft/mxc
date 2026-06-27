@@ -1,0 +1,76 @@
+//! Interactive "logging" mode — trace-lifecycle skeleton only.
+//!
+//! 1. Prompts the user to press Enter to start logging.
+//! 2. Starts a WPR trace (same `AccessFailureProfile` used by `start`).
+//! 3. Prompts the user to press Enter to stop logging.
+//! 4. Stops the trace into a temp .etl and reports where it landed.
+//!
+//! In-memory parsing and the "changes a blank config would receive"
+//! preview arrive in later PRs.
+
+use anyhow::{Context, Result};
+use chrono::Local;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+
+use crate::coordination::PLM_LOG_START_IN_FLIGHT;
+use crate::start;
+use crate::wpr_path::wpr_command;
+use std::sync::atomic::Ordering;
+
+fn prompt_enter(message: &str) -> Result<()> {
+    print!("{message}");
+    io::stdout().flush().ok();
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .context("failed to read from stdin")?;
+    Ok(())
+}
+
+fn stop_wpr_trace(trace_file: &Path) -> Result<()> {
+    let status = wpr_command()
+        .args(["-stop", &trace_file.to_string_lossy()])
+        .status()
+        .context("failed to spawn wpr -stop")?;
+    if !status.success() {
+        anyhow::bail!("wpr -stop exited with {status}");
+    }
+    Ok(())
+}
+
+pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
+    prompt_enter("Press Enter to start logging...")?;
+    // Bracket the `wpr -start` spawn so the console-control handler
+    // in `plm/src/main.rs` waits for it to drain before deciding
+    // whether to issue `wpr -cancel`. Closes the same race the
+    // wxc-exec side closes with `AUDIT_START_IN_FLIGHT`.
+    PLM_LOG_START_IN_FLIGHT.store(true, Ordering::SeqCst);
+    let start_result = start::start_plm_trace(wprp_path);
+    PLM_LOG_START_IN_FLIGHT.store(false, Ordering::SeqCst);
+    start_result?;
+    println!("Logging started.");
+
+    prompt_enter("Press Enter to stop logging...")?;
+
+    // Per-run trace file in temp; PID + sub-second component prevents
+    // parallel `plm log` invocations from colliding on the same .etl.
+    let stamp = format!(
+        "{}_pid{}",
+        Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
+        std::process::id()
+    );
+    let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
+    stop_wpr_trace(&trace_file)?;
+
+    println!(
+        "Trace captured at {} (parse-and-preview arrives in a later PR).",
+        trace_file.display()
+    );
+    if verbose {
+        println!("verbose logging requested; no events parsed in this PR.");
+    }
+    Ok(())
+}
