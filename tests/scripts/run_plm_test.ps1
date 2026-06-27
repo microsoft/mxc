@@ -149,12 +149,12 @@ $AutomaticTests = @(
         )
     },
     @{
-        # Round-4 finding W: regression for the deny-list filter. The
-        # config pre-declares C:\Tessera\plm_fs_test\denied in
-        # deniedPaths; the workload tries to read a file there (which
-        # the container blocks). PLM MUST NOT promote the denied path
-        # into readonlyPaths/readwritePaths — Forbid asserts the
-        # absence of any "denied" substring in the field-level diff.
+        # Regression for the deny-list filter. The config pre-declares
+        # C:\Tessera\plm_fs_test\denied in deniedPaths; the workload
+        # tries to read a file there (which the container blocks). PLM
+        # MUST NOT promote the denied path into
+        # readonlyPaths/readwritePaths — Forbid asserts the absence of
+        # any "denied" substring in the field-level diff.
         Name   = 'fs_denied_not_promoted'
         Setup  = {
             New-Item -ItemType Directory -Path 'C:\Tessera\plm_fs_test\denied' -Force | Out-Null
@@ -176,10 +176,10 @@ $ManualTests = @(
     @{ Name = 'cap_screenshot'; Expect = @('processcontainer = {"capabilities":["graphicsCapture"]}') }
 )
 
-# Round-4 finding Q: guard against orphan configs. Every JSON under
-# plm_configs/ MUST be referenced by either $AutomaticTests or
-# $ManualTests so it's exercised in CI. New fixtures that someone drops
-# in but forgets to register fail fast here.
+# Guard against orphan configs. Every JSON under plm_configs/ MUST be
+# referenced by either $AutomaticTests or $ManualTests so it's
+# exercised in CI. New fixtures that someone drops in but forgets to
+# register fail fast here.
 $registeredNames = @($AutomaticTests + $ManualTests | ForEach-Object { $_.Name })
 $onDiskNames = $configFiles | ForEach-Object {
     [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
@@ -363,7 +363,7 @@ foreach ($cfg in $configFiles) {
     # a timeout kills the entire descendant tree (wxc-exec → plm.exe →
     # workload). The previous Start-Job approach only signalled the
     # job's PowerShell host; spawned native descendants survived and
-    # raced the next test iteration. (Round-3 reliability finding G.)
+    # raced the next test iteration.
     $stdoutFile = [IO.Path]::GetTempFileName()
     $stderrFile = [IO.Path]::GetTempFileName()
     try {
@@ -387,11 +387,11 @@ foreach ($cfg in $configFiles) {
             # in wxc-exec normally handles this on Ctrl-C; cover the
             # taskkill path explicitly here.
             #
-            # Round-6 testability finding #1: invoke wpr.exe via its
-            # absolute System32 path. The unqualified `wpr.exe` form
-            # resolved via $env:PATH (which on Windows starts with the
-            # current directory for child-process search), reintroducing
-            # the exact CWD-plant elevation vulnerability that
+            # Invoke wpr.exe via its absolute System32 path. The
+            # unqualified `wpr.exe` form would resolve via $env:PATH
+            # (which on Windows starts with the current directory for
+            # child-process search), reintroducing the exact CWD-plant
+            # elevation vulnerability that
             # `src/core/plm/src/wpr_path.rs` was built to prevent.
             # This script enforces Administrator above; a planted
             # `wpr.exe` next to a launcher cwd would run as admin.
@@ -434,11 +434,11 @@ foreach ($cfg in $configFiles) {
     } elseif (-not $adjustedPath) {
         Write-Host "  log dir: $logDir" -ForegroundColor DarkGray
         Write-Host "  (no Adjusted_*.json — trace had no mergeable findings)" -ForegroundColor Yellow
-        # Round-4 finding W: a "no-adjusted" outcome IS a pass for
-        # entries that declare no positive expectations (Expect=@()) —
-        # e.g. deny-list fixtures asserting nothing got promoted. We
-        # only flag it as a failure when the entry expected at least
-        # one observable change.
+        # A "no-adjusted" outcome IS a pass for entries that declare
+        # no positive expectations (Expect=@()) — e.g. deny-list
+        # fixtures asserting nothing got promoted. We only flag it as
+        # a failure when the entry expected at least one observable
+        # change.
         if ($expectEntry -and (-not $expectEntry.Expect -or $expectEntry.Expect.Count -eq 0)) {
             $status = 'pass'
             Write-Host "  (Expect=@(); no-adjusted satisfies the negative expectation)" -ForegroundColor Green
@@ -466,10 +466,10 @@ foreach ($cfg in $configFiles) {
                     $missingExpect += $needle
                 }
             }
-            # Round-4 finding W: negative expectations — assertions that
-            # particular substrings MUST NOT appear in the diff (e.g.,
-            # confirming a deniedPaths entry is not promoted to
-            # readwritePaths). $entry.Forbid is an optional string list.
+            # Negative expectations — assertions that particular
+            # substrings MUST NOT appear in the diff (e.g., confirming
+            # a deniedPaths entry is not promoted to readwritePaths).
+            # $entry.Forbid is an optional string list.
             $forbiddenSeen = @()
             if ($expectEntry.PSObject.Properties.Name -contains 'Forbid' -and $expectEntry.Forbid) {
                 foreach ($forbidden in $expectEntry.Forbid) {
