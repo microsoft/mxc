@@ -9,15 +9,23 @@ use chrono::Local;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
+use crate::config::{
+    deny_file_set, initialize_filesystem, load_config, update_from_access_events,
+    write_added_paths_summary,
+};
+use crate::event_parser::parse_events;
 use crate::wpr_path::wpr_command;
 
 pub struct StopOptions {
     pub log_dir: Option<PathBuf>,
+    pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
+    pub adjusted_config_path: Option<PathBuf>,
     /// When set, skip `wpr -stop` and treat the supplied .etl as the
     /// captured trace. Useful for re-processing a previously captured
     /// trace without an active WPR session.
     pub trace_file: Option<PathBuf>,
+    pub verbose: bool,
 }
 
 /// Abstraction over `wpr -stop` invocations so the failure-mapping
@@ -31,20 +39,11 @@ pub struct WprExeStopper;
 
 impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
-        // Capture stdio rather than inheriting so a successful `wpr
-        // -stop` doesn't leak wpr chatter into any wrapping tool (e.g.
-        // `wxc-exec --audit`). On non-zero exit we replay the captured
-        // streams so operators can still see wpr's own diagnostic.
         let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        let output = cmd
-            .args(["-stop", &trace_file.to_string_lossy()])
-            .output()
-            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))?;
-        if !output.status.success() {
-            crate::start::replay_wpr_output("stop", &output);
-        }
-        Ok(output.status)
+        cmd.args(["-stop", &trace_file.to_string_lossy()])
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
     }
 }
 
@@ -61,16 +60,60 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
     stop_plm_trace_with(&mut WprExeStopper, trace_file)
 }
 
+/// Resolve `--bin-path` (or fall back to the calling exe directory)
+/// to its canonical form. Later PRs feed this into the self-access
+/// filter; this PR exposes it so the canonicalize fallback chain is
+/// pinned by tests from day one.
+///
+/// Fallback chain:
+///   1. `canonicalize(opt.bin_path)` if `Some`
+///   2. raw `opt.bin_path` if `Some` (with a warning)
+///   3. `exe_dir` (no warning)
+pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<String>) {
+    let Some(raw) = opt else {
+        return (exe_dir.to_path_buf(), None);
+    };
+    match raw.canonicalize() {
+        Ok(p) => (p, None),
+        Err(e) => {
+            let warning = format!(
+                "could not canonicalize --bin-path {} ({}); self-access filter \
+                 will use the raw path. Events referencing the binary via a \
+                 different spelling (e.g. verbatim \\\\?\\) may leak into the \
+                 adjusted config.",
+                raw.display(),
+                e
+            );
+            // Prefer the raw operator-supplied path over silently
+            // substituting exe_dir; that would drop operator intent.
+            (raw.to_path_buf(), Some(warning))
+        }
+    }
+}
+
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>". The sub-second
-    // component makes parallel PLM runs finishing in the same second
-    // land in distinct directories.
+    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
+    // Including PID + sub-second component avoids collisions when
+    // parallel PLM tasks finish in the same second.
     let log_dir = opts.log_dir.unwrap_or_else(|| {
-        let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
+        let stamp = format!(
+            "{}_pid{}",
+            Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
+            std::process::id()
+        );
         exe_dir.join("logs").join(stamp)
     });
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
+
+    // Resolve bin_path to its canonical form so the self-access filter
+    // in `config::update_from_access_events` can compare it against the
+    // verbatim-prefixed paths ETW emits. The fallback chain is in
+    // `resolve_bin_path`.
+    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
+    if let Some(w) = warning {
+        eprintln!("[plm] warning: {w}");
+    }
 
     let trace_file = if let Some(p) = opts.trace_file.as_ref() {
         // Operator supplied a pre-captured .etl -- don't try to stop a
@@ -85,12 +128,58 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         p
     };
 
-    println!("Trace captured at {}.", trace_file.display());
+    if opts.verbose {
+        println!("Beginning event parsing, this may take several minutes");
+    }
 
-    // `config_path` is accepted today so the wxc-exec --audit harness
-    // can pass it through; the merge that consumes it arrives in the
-    // filesystem-extraction PR.
-    if let Some(p) = opts.config_path.as_ref() {
+    // Current directory at parse time -- events under this path are
+    // treated as test scaffolding noise and skipped.
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
+
+    let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
+
+    let config_path = match opts.config_path.as_ref() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if parse.is_empty() {
+        // Nothing mergeable -- skip producing an Adjusted_*.json (which
+        // would be byte-identical to the input and confuse the harness's
+        // diff-based pass/fail signal).
+        return Ok(());
+    }
+
+    // Copy original config alongside the trace so we have a snapshot of
+    // the exact input that produced this run's output.
+    let leaf = config_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".into());
+    let dest_config = log_dir.join(&leaf);
+    std::fs::copy(config_path, &dest_config)
+        .with_context(|| format!("failed to copy {}", config_path.display()))?;
+
+    let mut config = load_config(&dest_config)?;
+    initialize_filesystem(&mut config)?;
+    let deny = deny_file_set(&config);
+
+    let bin_path_s = bin_path.to_string_lossy().into_owned();
+    let added = update_from_access_events(
+        &mut config,
+        &bin_path_s,
+        &parse.valid_access_events,
+        &deny,
+        opts.verbose,
+    )?;
+
+    write_added_paths_summary(&added);
+
+    // `adjusted_config_path` is accepted today so the wxc-exec --audit
+    // harness can pass it through; the Adjusted_*.json writer arrives
+    // in the next PR (config-generation).
+    if let Some(p) = opts.adjusted_config_path.as_ref() {
         let _ = p;
     }
 
@@ -100,6 +189,42 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- resolve_bin_path -----------------------------------------------
+
+    #[test]
+    fn resolve_bin_path_falls_back_to_exe_dir_when_no_override() {
+        let exe = std::env::temp_dir();
+        let (p, warn) = resolve_bin_path(None, &exe);
+        assert_eq!(p, exe);
+        assert!(warn.is_none(), "no operator intent means no warning");
+    }
+
+    #[test]
+    fn resolve_bin_path_canonicalizes_existing_override() {
+        let exe = std::env::temp_dir();
+        let override_path = std::env::temp_dir();
+        let (p, warn) = resolve_bin_path(Some(&override_path), &exe);
+        assert!(p.exists(), "canonicalized path should still exist");
+        assert!(warn.is_none(), "successful canonicalize must not warn");
+    }
+
+    #[test]
+    fn resolve_bin_path_warns_and_returns_raw_when_canonicalize_fails() {
+        let exe = std::env::temp_dir();
+        let bogus = std::path::PathBuf::from("Z:\\definitely-does-not-exist-plm-test");
+        let (p, warn) = resolve_bin_path(Some(&bogus), &exe);
+        assert_eq!(
+            p, bogus,
+            "must return the raw operator path rather than silently \
+             substituting exe_dir (would drop operator intent)"
+        );
+        let w = warn.expect("canonicalize failure must surface a warning");
+        assert!(
+            w.contains("Z:\\definitely-does-not-exist-plm-test"),
+            "warning must reference the failing path: {w}",
+        );
+    }
 
     // ---- WprStopper / stop_plm_trace_with -------------------------------
 
