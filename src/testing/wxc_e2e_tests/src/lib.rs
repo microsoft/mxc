@@ -234,7 +234,7 @@ pub fn run_lxc_config(config_file: &str, extra_args: &[&str]) -> CommandResult {
 }
 
 /// Return whether the Hyperlight snapshot is installed at the default
-/// location (`%LOCALAPPDATA%\pyhl\snapshot.hls`).
+/// location (`%LOCALAPPDATA%\pyhl\snapshot\index.json`).
 pub fn has_hyperlight_snapshot() -> bool {
     let home = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -243,7 +243,7 @@ pub fn has_hyperlight_snapshot() -> bool {
                 .map(|v| PathBuf::from(v).join("AppData").join("Local"))
                 .unwrap_or_default()
         });
-    let snapshot = home.join("pyhl").join("snapshot.hls");
+    let snapshot = home.join("pyhl").join("snapshot").join("index.json");
     if snapshot.is_file() {
         println!("Using Hyperlight snapshot at {}", snapshot.display());
         true
