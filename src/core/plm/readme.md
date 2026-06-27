@@ -73,7 +73,7 @@ The merge pipeline:
 1. **File paths** — every `EventID=14` whose path passes the validity filters is added to `filesystem.readwritePaths` or `filesystem.readonlyPaths` based on the OR-ed access mask, excluding anything already in `filesystem.deniedPaths`.
 2. **Capabilities** — every resolved capability name not already present is appended to the containment block's `capabilities` array.
 3. **UI subsystem** — any `CONVERT_TO_GUI` violation flips `ui.disable` to `false` so Win32k syscalls succeed.
-4. **UI operations** — every `UI_OPERATION` violation contributes its `JOB_OBJECT_UILIMIT_*` bit to a mask which is then mapped per the [UI policy schema](../../../docs/base-process-container/UIPolicy_Schema.md) — e.g. `WRITECLIPBOARD` widens `ui.clipboard`, `HANDLES` relaxes `ui.isolation`, `INJECTION` sets `ui.injection = true`.
+4. **UI operations** — every `UI_OPERATION` violation contributes its `JOB_OBJECT_UILIMIT_*` bit to a mask which is then mapped per the [UI policy schema](../../../docs/base-process-container/UIPolicy_Schema.md) — e.g. `WRITECLIPBOARD` widens `ui.clipboard`, `HANDLES` relaxes `processContainer.ui.isolation`, `INJECTION` sets `ui.injection = true`.
 
 An `Adjusted_*.json` is written whenever the trace yielded *any* mergeable finding — file path, capability, `CONVERT_TO_GUI`, or `UI_OPERATION`.
 

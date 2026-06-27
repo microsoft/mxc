@@ -575,24 +575,11 @@ fn read_ace_at_offset(buf: &[u8], cursor: usize) -> Result<AceSlice<'_>> {
 /// of capability names matched along the way. When `verbose` is true, a
 /// per-ACE diagnostic line is emitted to stdout.
 ///
-/// The capability table is taken by reference so callers (e.g. the
-/// per-event loop in `event_parser`) can build it once and reuse it
-/// across many invocations -- building it is ~150 syscalls + heap
-/// alloc/free pairs and was previously dominating PLM's parse time on
-/// large traces.
-pub fn invoke_ace_walk_with_table(
-    buf: &[u8],
-    table: &[CapabilityEntry],
-    verbose: bool,
-) -> Result<HashSet<String>> {
-    let index = CapabilityIndex::from_table(table);
-    invoke_ace_walk_with_index(buf, &index, verbose)
-}
-
-/// Same as `invoke_ace_walk_with_table` but accepts a pre-built
-/// `CapabilityIndex`. Use this in any hot loop that walks many ACE
-/// buffers in a row — building the index is O(table_size) and you only
-/// want to do it once.
+/// Accepts a pre-built `CapabilityIndex`. Use this in any hot loop that
+/// walks many ACE buffers in a row — building the index is
+/// O(table_size) and you only want to do it once. Hot-loop callers
+/// should prefer `invoke_ace_walk_with_index_into` to avoid the
+/// throwaway `HashSet` allocation per blob.
 pub fn invoke_ace_walk_with_index(
     buf: &[u8],
     index: &CapabilityIndex,
@@ -666,10 +653,11 @@ pub fn invoke_ace_walk_with_index_into(
 }
 
 /// Convenience wrapper that builds a fresh capability table per call.
-/// Prefer `invoke_ace_walk_with_table` in any loop.
+/// Prefer `invoke_ace_walk_with_index` (with a reused index) in any loop.
 pub fn invoke_ace_walk(buf: &[u8], verbose: bool) -> Result<HashSet<String>> {
     let table = build_capability_table();
-    invoke_ace_walk_with_table(buf, &table, verbose)
+    let index = CapabilityIndex::from_table(&table);
+    invoke_ace_walk_with_index(buf, &index, verbose)
 }
 
 /// Top-level entry point matching the script's `-HexBytes` invocation.
@@ -678,23 +666,11 @@ pub fn extract_caps(hex_bytes: &str, verbose: bool) -> Result<HashSet<String>> {
     invoke_ace_walk(&bytes, verbose)
 }
 
-/// Per-event variant of `extract_caps` that reuses a caller-owned
-/// capability table to avoid the ~150-syscall rebuild cost per event.
-/// Note: this still rebuilds a `CapabilityIndex` per call — prefer
-/// `extract_caps_with_index` in any hot loop.
-pub fn extract_caps_with_table(
-    hex_bytes: &str,
-    table: &[CapabilityEntry],
-    verbose: bool,
-) -> Result<HashSet<String>> {
-    let bytes = parse_hex_string(hex_bytes)?;
-    invoke_ace_walk_with_table(&bytes, table, verbose)
-}
-
 /// Per-event variant that takes a pre-built `CapabilityIndex` so the
 /// O(table_size) build cost is paid once per parse, not per ACE blob.
-/// This is the entry point used by the production hot loop in
-/// `event_parser::ParseAccumulator`.
+/// Prefer `extract_caps_with_index_into` (which writes into a
+/// caller-owned set) for the production hot loop; this variant is kept
+/// for tests and callers that want a fresh `HashSet` per blob.
 pub fn extract_caps_with_index(
     hex_bytes: &str,
     index: &CapabilityIndex,

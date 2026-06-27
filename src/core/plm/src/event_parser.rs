@@ -55,7 +55,7 @@ pub struct ParseResult {
     pub valid_access_events: Vec<LearningModeAccessEvent>,
     pub requested_capabilities: HashSet<String>,
     /// True when at least one `CONVERT_TO_GUI` violation was observed.
-    /// Drives the legacy behavior of flipping `ui.disable` to `false`.
+    /// Drives `set_ui_subsystem_enabled` (flips `ui.disable` to `false`).
     pub need_ui: bool,
     /// Total number of EventID=27 records observed, regardless of category.
     pub ui_event_count: u32,
@@ -386,7 +386,8 @@ pub(crate) struct ParseAccumulator<'a> {
     // Capability table is retained for tests/diagnostics that want to
     // inspect the source; per-event resolution always goes through
     // `capability_index` to avoid the O(table_size) HashMap rebuild
-    // that `extract_caps_with_table` would otherwise pay per ACE blob.
+    // that resolving from the raw `Vec<CapabilityEntry>` would pay per
+    // ACE blob.
     #[allow(dead_code)]
     pub(crate) capability_table: Vec<extract_caps::CapabilityEntry>,
     pub(crate) capability_index: extract_caps::CapabilityIndex,

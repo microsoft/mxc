@@ -742,8 +742,13 @@ pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) -> Result<()> {
         return Ok(());
     }
 
-    // Pre-compute which sub-trees we'll need so we can validate JSON
-    // shape up-front (one error per malformed branch) before mutating.
+    // Pre-compute which sub-trees we need to touch so each block can
+    // bail out early when its bits aren't set. Shape validation still
+    // happens inside each block, not up-front — callers that pass a
+    // malformed `processContainer` may see top-level `ui` already
+    // mutated when the inner branch errors out. Both callers
+    // (`log::run`, `stop::run`) propagate with `?` and discard the
+    // half-mutated value, so this is safe in practice.
     let need_top_ui = flags
         & (JOB_OBJECT_UILIMIT_READCLIPBOARD
             | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
@@ -1773,6 +1778,30 @@ mod tests {
         let mut cfg = json!({ "ui": null });
         use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
         assert!(apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).is_err());
+    }
+
+    #[test]
+    fn apply_ui_flags_rejects_non_object_process_container() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
+        let mut cfg = json!({ "processContainer": "not-an-object" });
+        let err = apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME)
+            .expect_err("non-object processContainer must error");
+        assert!(
+            err.to_string().contains("processContainer"),
+            "error must identify the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_ui_flags_rejects_non_object_process_container_ui() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_GLOBALATOMS;
+        let mut cfg = json!({ "processContainer": { "ui": null } });
+        let err = apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_GLOBALATOMS)
+            .expect_err("non-object processContainer.ui must error");
+        assert!(
+            err.to_string().contains("processContainer.ui"),
+            "error must identify the offending key, got: {err}"
+        );
     }
 
     #[test]

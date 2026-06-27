@@ -104,10 +104,6 @@ pub fn start_plm_trace(wprp_path: &Path) -> Result<()> {
     start_plm_trace_with(&mut WprExe, wprp_path)
 }
 
-/// Back-compat alias for the legacy `stop_existing_wpr_trace` name
-/// still used by cleanup handlers (Ctrl-C, panic guard).
-pub use cancel_existing_wpr_trace as stop_existing_wpr_trace;
-
 #[cfg(test)]
 mod tests {
     use super::*;

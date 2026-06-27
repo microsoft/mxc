@@ -21,6 +21,7 @@ time the config is run.
 | `fs_promoted.json`             | `cmd.exe` writes a file into `C:\Tessera\plm_fs_test\readonly\` (pre-created by `run_plm_test.ps1`). The config pre-seeds that directory in `readonlyPaths`; PLM should observe the write and add the parent to `readwritePaths`, widening the policy from read-only to read+write. |
 | `fs_add_readonly.json`         | `cmd.exe` reads `C:\Tessera\plm_fs_test\src\input.txt` (pre-created). Config has no `filesystem` section; PLM should add the file path to `readonlyPaths`. |
 | `fs_add_readwrite.json`        | `cmd.exe` writes `C:\Tessera\plm_fs_test\dst\out.txt` (dir pre-created). Config has no `filesystem` section; PLM should add the parent dir to `readwritePaths`. |
+| `fs_denied_not_promoted.json`  | `cmd.exe` reads `C:\Tessera\plm_fs_test\denied\secret.txt` while the parent dir is listed in `deniedPaths`. The read fails inside the sandbox; PLM should observe the access but must NOT promote a denied path into `readonlyPaths` / `readwritePaths`. Asserts the deny-list overrides learning. |
 
 All configs use:
 
