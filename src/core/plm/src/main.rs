@@ -183,7 +183,7 @@ enum Cmd {
         #[arg(long)]
         wprp: Option<PathBuf>,
     },
-    /// Stop the trace. Event parsing / config merging arrives in later PRs.
+    /// Stop the trace and (optionally) merge findings into a config.
     Stop {
         /// Directory for trace.etl, copied input config, and Adjusted_*.json.
         #[arg(long)]
@@ -217,7 +217,8 @@ enum Cmd {
         #[arg(long)]
         verbose_logging: bool,
     },
-    /// Interactive: press Enter to start logging, press Enter again to stop.
+    /// Interactive: press Enter to start logging, press Enter again to
+    /// stop, then print the changes a blank config would receive.
     Log {
         /// Override path to plm.wprp. Defaults to <exe dir>\plm.wprp.
         #[arg(long)]
