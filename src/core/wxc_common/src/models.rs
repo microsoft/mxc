@@ -691,6 +691,9 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
+    /// Audit mode: when true, `permissiveLearningMode` is permitted even in
+    /// release builds (with a security warning). Set by the `--audit` CLI flag.
+    pub audit: bool,
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)

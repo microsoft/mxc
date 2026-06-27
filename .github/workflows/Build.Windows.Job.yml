@@ -63,10 +63,62 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      # `plm` is excluded from the workspace's default-members (it pulls
+      # in `windows` crates that aren't needed for the standard build),
+      # so opt it in explicitly here to keep PR #552's audit pipeline
+      # building + tested in CI.
+      - name: Build plm
+        run: cargo build --locked --release --target ${{ matrix.target }} -p plm
+
       - name: Test
         run: cargo test --locked --release --target ${{ matrix.target }}
              --no-default-features
              --features "${{ matrix.features }}"
+
+      - name: Test plm
+        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
+
+      # Round-6 coverage finding #1: run the PLM integration harness
+      # under the actually-built `wxc-exec.exe` + `plm.exe`. Without
+      # this, the 10 JSON fixtures under `tests/configs/plm_configs/`
+      # and the entire `wpr → ETL → event-parse → config-merge`
+      # pipeline are only exercised when a human runs the script.
+      # x64-only: arm64 GitHub-hosted runners don't ship the same
+      # `wpr.exe` recording capability — gate strictly on x86_64.
+      # GitHub-hosted Windows runners run as a local administrator
+      # (`runneradmin`), which `run_plm_test.ps1` requires for WPR.
+      - name: PLM integration tests
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          # Round-7 correctness #1: this job runs every step with
+          # `defaults.run.working-directory: src`, so a relative
+          # `./tests/scripts/...` invocation here resolves to
+          # `src/tests/scripts/...` and fail-fasts. Use the absolute
+          # workspace path to match -BinDir/-ConfigDir below.
+          # Round-7 testability #1: pass -KeepLogs so failed fixtures'
+          # trace.etl + Adjusted_*.json + harness stdout/stderr survive
+          # for the failure-only upload-artifact step that follows;
+          # without it, the only CI signal is scraped console text.
+          & "${{ github.workspace }}/tests/scripts/run_plm_test.ps1" `
+            -Release `
+            -BinDir "${{ github.workspace }}/src/target/${{ matrix.target }}/release" `
+            -ConfigDir "${{ github.workspace }}/tests/configs/plm_configs" `
+            -KeepLogs
+
+      # Round-7 testability #1: surface PLM trace evidence to triagers
+      # when the integration job goes red. The script's per-fixture
+      # logs/ dirs are nested under each plm_configs/<config>/ entry.
+      - name: Upload PLM logs on failure
+        if: failure() && matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plm-failure-logs-${{ matrix.target }}
+          path: |
+            ${{ github.workspace }}/src/target/${{ matrix.target }}/release/logs/**
+            ${{ github.workspace }}/tests/configs/plm_configs/**/logs/**
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4

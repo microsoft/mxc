@@ -4,6 +4,7 @@
 use std::fmt::Write;
 use std::fs;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -115,6 +116,18 @@ struct Cli {
     /// Run the fallback detector and emit JSON, without spawning a sandbox.
     #[arg(long)]
     probe: bool,
+
+    /// Audit mode: inject the `permissiveLearningMode` capability into the
+    /// AppContainer policy so denied operations are logged but allowed.
+    /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
+    /// `request.audit` consumer (AppContainer) have no cross-platform
+    /// counterpart, so accepting the flag elsewhere would print a misleading
+    /// "restrictions will NOT be enforced" warning while the bubblewrap/
+    /// seatbelt backends silently ignore both the flag and the injected
+    /// capability.
+    #[cfg(target_os = "windows")]
+    #[arg(long)]
+    audit: bool,
 
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
@@ -300,6 +313,276 @@ fn config_input(cli: &Cli) -> Option<(String, bool)> {
     }
 }
 
+/// Resolve the on-disk config path passed to `wxc-exec`, if any. Returns
+/// `None` when the config was supplied as `--config-base64` (no file path)
+/// or not at all. Used by `--audit` to thread `plm stop --config-path` so
+/// findings can be merged back into the source policy.
+#[cfg(target_os = "windows")]
+fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
+    if cli.config_base64.is_some() {
+        return None;
+    }
+    cli.config
+        .as_ref()
+        .or(cli.config_path.as_ref())
+        .map(std::path::PathBuf::from)
+}
+
+/// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
+/// same install directory. Returns `None` when the current exe path
+/// can't be resolved.
+#[cfg(target_os = "windows")]
+fn plm_exe_path() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("plm.exe")))
+}
+
+/// Run `plm.exe <subcommand> <args...>` synchronously and route stdio
+/// through to wxc-exec's console. Audit tracing is a best-effort
+/// diagnostic; missing-binary / spawn / non-zero-exit conditions are
+/// logged but never abort the wxc-exec flow.
+///
+/// Returns `true` iff the spawn succeeded **and** plm.exe exited with
+/// a zero status. The caller needs this signal to decide whether to
+/// clear `AUDIT_ACTIVE` (only after a successful `plm stop`); without
+/// it, `AUDIT_ACTIVE.store(false)` would run unconditionally and
+/// silently leak the kernel ETW session on every failure path.
+#[cfg(target_os = "windows")]
+fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
+    use std::fmt::Write as _;
+
+    let Some(plm) = plm_exe_path() else {
+        let _ = writeln!(logger, "[audit] could not resolve plm.exe path");
+        return false;
+    };
+    if !plm.exists() {
+        let _ = writeln!(
+            logger,
+            "[audit] plm.exe not found at {} - skipping",
+            plm.display()
+        );
+        return false;
+    }
+
+    let mut summary = String::new();
+    let _ = write!(summary, "[audit] running {}", plm.display());
+    for a in args {
+        let _ = write!(summary, " {}", a.to_string_lossy());
+    }
+    let _ = writeln!(logger, "{summary}");
+    eprintln!("{summary}");
+
+    match std::process::Command::new(&plm)
+        .args(args)
+        // plm.exe itself now acquires
+        // the `Global\Mxc_Plm_Audit` named-mutex singleton on direct
+        // operator invocations (`plm log` / `plm start` / `plm stop`)
+        // so its retry-on-conflict path can't silently `wpr -cancel`
+        // a peer trace. When wxc-exec spawns plm.exe we already hold
+        // that mutex for the whole audit window — tell the child to
+        // skip its own acquisition so we don't deadlock on the same
+        // global name.
+        //
+        // the env-var name comes from
+        // `plm::coordination::SINGLETON_HELD_BY_PARENT_ENV` rather
+        // than a duplicated string literal, so the plm and wxc
+        // crates can't drift out of sync without a compile error.
+        .env(plm::coordination::SINGLETON_HELD_BY_PARENT_ENV, "1")
+        .status()
+    {
+        Ok(s) if s.success() => true,
+        Ok(s) => {
+            let _ = writeln!(logger, "[audit] plm exited with status {s}");
+            eprintln!("[audit] plm exited with status {s}");
+            false
+        }
+        Err(e) => {
+            let _ = writeln!(logger, "[audit] failed to spawn plm: {e}");
+            eprintln!("[audit] failed to spawn plm: {e}");
+            false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Graceful-exit PLM audit-trace cleanup
+// ---------------------------------------------------------------------------
+//
+// `--audit` runs `plm.exe start`, which leaves a live WPR ETW session
+// in the kernel for the duration of the workload. The matching
+// `plm.exe stop` below tears it down. If anything between those two
+// calls aborts wxc-exec — Ctrl-C, panic, `process::exit`,
+// container-runner kill — the kernel session stays allocated until
+// reboot or manual `wpr -cancel`, blocking all other WPR consumers
+// on the host (only one NT Kernel Logger session can exist at a time).
+//
+// We bracket the live-trace window with `AUDIT_ACTIVE` plus a stack-
+// owned `AuditTraceGuard`. Cleanup paths:
+//  * Normal exit and panic unwind — `AuditTraceGuard::drop` invokes
+//    `cancel_active_audit_trace()`.
+//  * Ctrl-C / Ctrl-Break / console close — the `dacl_ctrl_handler`
+//    also calls `cancel_active_audit_trace()` after handling DACLs.
+// `cancel_active_audit_trace()` is idempotent via the AtomicBool, so
+// it is safe for both paths to call it.
+//
+// Cancel uses `wpr -cancel`. Today PLM uses the global default
+// instance so this matches; if PLM gains an `-instancename` argument
+// later, plumb it through here too.
+
+#[cfg(target_os = "windows")]
+static AUDIT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set to `true` while `plm start` is being spawned and has not yet
+/// returned. `AUDIT_ACTIVE` is flipped to `true` BEFORE `plm.exe` is
+/// spawned (because `mark_audit_active()`
+/// has to run early to cover a Ctrl+C arriving mid-spawn), but the
+/// kernel ETW session is not actually engaged until `plm.exe`'s child
+/// `wpr -start` returns. A Ctrl+C in that gap would fire
+/// `wpr -cancel` against a not-yet-existing session, then `wpr -start`
+/// would silently succeed AFTER the cancel — leaking the session past
+/// `wxc-exec`'s own cleanup. We close the race by making the Ctrl+C
+/// handler wait (bounded) until `plm start` has finished its spawn
+/// round-trip before deciding whether to issue the cancel.
+#[cfg(target_os = "windows")]
+static AUDIT_START_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Mark that the wxc-exec process owns a live PLM audit trace. Called
+/// just before `plm start` is spawned so a Ctrl-C arriving mid-spawn
+/// still triggers cleanup (over-cancelling a not-yet-started session
+/// is harmless — `wpr -cancel` returns non-zero and we discard).
+#[cfg(target_os = "windows")]
+fn mark_audit_active() {
+    AUDIT_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// Cancel an in-flight PLM audit trace iff one is active, then clear
+/// the flag. Idempotent; safe to call from the Ctrl-C handler and the
+/// stack guard's Drop. Failures (no active session, missing wpr.exe)
+/// are silenced because the call is best-effort cleanup.
+///
+/// invoke `wpr.exe` by absolute path
+/// (`%SystemRoot%\System32\wpr.exe`) rather than as a bare name so
+/// `CreateProcessW`'s implicit CWD-first search order can't be abused
+/// to substitute a planted binary. PLM runs as administrator, so a
+/// CWD-search hit gives an attacker SYSTEM-equivalent code execution.
+#[cfg(target_os = "windows")]
+fn cancel_active_audit_trace() {
+    if AUDIT_ACTIVE.swap(false, Ordering::SeqCst) {
+        let wpr = resolve_system32_wpr();
+        let _ = std::process::Command::new(&wpr)
+            .arg("-cancel")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. Reading
+/// `%SystemRoot%` from the process env is unsafe because UAC inherits
+/// env from the unelevated parent — a standard user could `setx
+/// SystemRoot=C:\\Users\\Public\\evil` and plant `wpr.exe` for a later
+/// admin run. `GetSystemDirectoryW` is kernel-published and not
+/// env-spoofable.
+#[cfg(target_os = "windows")]
+fn resolve_system32_wpr() -> std::path::PathBuf {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = vec![0u16; 260];
+    // SAFETY: buf is initialized; we pass valid length and own the
+    // memory for the duration of the call.
+    let n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
+    if n == 0 || (n as usize) > buf.len() {
+        return std::path::PathBuf::from("C:\\Windows\\System32\\wpr.exe");
+    }
+    let dir = String::from_utf16_lossy(&buf[..n as usize]);
+    let mut p = std::path::PathBuf::from(dir);
+    p.push("wpr.exe");
+    p
+}
+
+/// Stack-owned guard that mirrors `ParkedDaclGuard`: ensures the audit
+/// trace is cancelled on panic unwind and on normal function return.
+#[cfg(target_os = "windows")]
+struct AuditTraceGuard;
+
+#[cfg(target_os = "windows")]
+impl Drop for AuditTraceGuard {
+    fn drop(&mut self) {
+        cancel_active_audit_trace();
+    }
+}
+
+/// host-wide single-instance guard for PLM audit
+/// mode. Two concurrent `wxc-exec --audit` runs share a single NT
+/// Kernel Logger session, so the second one's `wpr -start` would
+/// either steal the first's session or fail and silently corrupt the
+/// first run's findings. We acquire a named mutex (`Global\\` so it's
+/// machine-wide; admins have SeCreateGlobalPrivilege so this works)
+/// and refuse to start if another wxc-exec audit is already running.
+///
+/// the handle is stashed in a static
+/// atomic (not just the stack guard) so the explicit cleanup before
+/// `process::exit` — which skips destructors — can release it too.
+/// `AuditSingletonGuard::drop` is now just a thin shim over
+/// `release_audit_singleton`; both paths are idempotent.
+#[cfg(target_os = "windows")]
+static AUDIT_SINGLETON_HANDLE: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+struct AuditSingletonGuard;
+
+#[cfg(target_os = "windows")]
+impl Drop for AuditSingletonGuard {
+    fn drop(&mut self) {
+        release_audit_singleton();
+    }
+}
+
+/// Release the host-wide audit singleton if held. Idempotent: safe to
+/// call from `Drop`, from the explicit pre-`process::exit` cleanup,
+/// and from error paths.
+#[cfg(target_os = "windows")]
+fn release_audit_singleton() {
+    let raw = AUDIT_SINGLETON_HANDLE.swap(0, Ordering::SeqCst);
+    if raw != 0 {
+        let handle = windows::Win32::Foundation::HANDLE(raw as *mut _);
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(handle);
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn try_acquire_audit_singleton() -> Result<AuditSingletonGuard, String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "Global\\Mxc_Plm_Audit"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) };
+    let handle = match handle {
+        Ok(h) => h,
+        Err(e) => return Err(format!("CreateMutexW failed: {e}")),
+    };
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+        }
+        return Err(String::from(
+            "another wxc-exec --audit run holds the Global\\Mxc_Plm_Audit mutex; \
+             refusing to start a second concurrent PLM trace (only one NT Kernel \
+             Logger session can exist per host)",
+        ));
+    }
+    AUDIT_SINGLETON_HANDLE.store(handle.0 as isize, Ordering::SeqCst);
+    Ok(AuditSingletonGuard)
+}
+
 // ---------------------------------------------------------------------------
 // Graceful-exit DACL cleanup
 // ---------------------------------------------------------------------------
@@ -392,23 +675,28 @@ impl Drop for ParkedDaclGuard {
 /// Returns `FALSE` so the default handler still runs (which terminates
 /// the process).
 ///
-/// Acquires the slot with a bounded wait (≤5s), not `try_lock`. If the
-/// main thread is mid-`Drop` on the same manager — which can be doing a
-/// `SetNamedSecurityInfoW` — returning FALSE immediately lets the
-/// default handler call `ExitProcess`, terminating that drop mid-Win32
-/// and leaving the host DACL in an inconsistent state. The bounded
-/// wait blocks the default handler until either main finishes (lock
-/// released) or 5s elapses — whichever comes first. On timeout we
-/// proceed anyway; the recovery scan on the next `wxc-exec` startup
-/// reaps anything left behind.
+/// Acquires the slot with a bounded wait
+/// (`plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`), not `try_lock`.
+/// If the main thread is mid-`Drop` on the same manager — which can be
+/// doing a `SetNamedSecurityInfoW` — returning FALSE immediately lets
+/// the default handler call `ExitProcess`, terminating that drop mid-
+/// Win32 and leaving the host DACL in an inconsistent state. The
+/// bounded wait blocks the default handler until either main finishes
+/// (lock released) or the shared timeout elapses — whichever comes
+/// first. On timeout we proceed anyway; the recovery scan on the next
+/// `wxc-exec` startup reaps anything left behind.
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     if let Some(slot) = DACL_CLEANUP_SLOT.get() {
         use std::time::{Duration, Instant};
-        // 5s mirrors the WaitForSingleObject pattern recommended for
-        // graceful-shutdown handlers; tuned to be longer than a worst-
-        // case `SetNamedSecurityInfoW` on a deep tree but well under
-        // the Windows default 10s shutdown-handler budget.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // // the handler runs TWO bounded waits (this one + the
+        // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
+        // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
+        // ~5s OS-imposed kill budget. The per-wait budget is sourced
+        // from the shared `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`
+        // so `wxc-exec` and `plm.exe`'s `plm_ctrl_handler` cannot
+        // drift apart, and the budget invariant is pinned by a unit
+        // test (`ctrl_handler_drain_timeout_respects_os_budget`).
+        let deadline = Instant::now() + plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
         loop {
             if let Ok(mut guard) = slot.try_lock() {
                 // Either main already took the manager (guard is None)
@@ -427,6 +715,32 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     }
     // FALSE = "I did not fully handle this; run the next handler in the
     // chain (i.e. the default handler that calls ExitProcess)".
+    //
+    // if `plm start` is still in
+    // flight when Ctrl+C arrives, wait briefly for it to complete
+    // before deciding whether to issue `wpr -cancel`. Without this
+    // wait, a cancel that races a not-yet-engaged session is a no-op
+    // and the session leaks past wxc-exec exit. On timeout we proceed
+    // anyway — the next-startup `recover_orphaned_state` scan plus a
+    // manual `wpr -cancel` would catch any residue.
+    //
+    // the wait loop is
+    // implemented by `plm::coordination::wait_until_cleared`, the
+    // same tested helper `plm.exe`'s console-control handler uses.
+    //
+    // the per-wait
+    // timeout is sourced from the shared
+    // `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` const so the
+    // wxc-exec and plm.exe handlers cannot drift apart. The const's
+    // docs (and the
+    // `ctrl_handler_drain_timeout_respects_os_budget` unit test)
+    // pin the ~5s OS kill-budget invariant.
+    let _ = plm::coordination::wait_until_cleared(
+        &AUDIT_START_IN_FLIGHT,
+        plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT,
+        std::time::Duration::from_millis(50),
+    );
+    cancel_active_audit_trace();
     windows::core::BOOL(0)
 }
 
@@ -705,6 +1019,10 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
+    #[cfg(target_os = "windows")]
+    {
+        request.audit = cli.audit;
+    }
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
@@ -720,6 +1038,28 @@ fn main() {
         }
     };
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
+
+    // --audit injects permissiveLearningMode so denied operations are logged
+    // but allowed. Works in both debug and release builds; in release the
+    // runner-side rejection is relaxed because request.audit is set.
+    // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
+    #[cfg(target_os = "windows")]
+    if cli.audit
+        && !request
+            .policy
+            .capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case("permissiveLearningMode"))
+    {
+        request
+            .policy
+            .capabilities
+            .push("permissiveLearningMode".to_string());
+        logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
+        eprintln!(
+            "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
+        );
+    }
 
     // Final validation: a command line must come from somewhere. If neither
     // the policy nor the CLI supplied one we cannot proceed.
@@ -975,10 +1315,125 @@ fn main() {
         }
     };
 
+    // --audit: start the PLM (permissive learning mode) WPR trace before
+    // the runner spawns the container so we capture access-denied events
+    // for the lifetime of the workload. The matching `plm stop` below
+    // tears the trace down and (when the policy came from a file)
+    // merges findings back into it. Both calls are best-effort.
+    //
+    // Bracket the live-trace window with `AUDIT_ACTIVE` + a stack guard
+    // so Ctrl-C / panic / process::exit between start and stop don't
+    // leak the kernel ETW session.
+    //
+    // declaration order matters. Rust
+    // drops locals in REVERSE declaration order, and on the cleanup
+    // path we want the trace guard (`AuditTraceGuard`, which calls
+    // `wpr -cancel`) to run BEFORE the singleton handle is released —
+    // otherwise a concurrent wxc-exec could acquire the freed mutex
+    // and start its own trace, only to have our stale `wpr -cancel`
+    // tear it down. Declare the singleton first so it drops last.
+    #[cfg(target_os = "windows")]
+    let _audit_singleton: Option<AuditSingletonGuard>;
+    #[cfg(target_os = "windows")]
+    let _audit_guard: Option<AuditTraceGuard>;
+    #[cfg(target_os = "windows")]
+    let audit_config_file = if cli.audit {
+        // refuse to start a second concurrent
+        // audit. We acquire the host-wide named mutex BEFORE marking
+        // AUDIT_ACTIVE so a failure here doesn't engage the cleanup
+        // path that would cancel someone else's running trace.
+        match try_acquire_audit_singleton() {
+            Ok(g) => _audit_singleton = Some(g),
+            Err(msg) => {
+                let _ = writeln!(logger, "[audit] {msg}");
+                eprintln!("error: {msg}");
+                _audit_singleton = None;
+                _audit_guard = None;
+                std::process::exit(1);
+            }
+        }
+        mark_audit_active();
+        _audit_guard = Some(AuditTraceGuard);
+        // previously this was
+        // `let _ = run_plm_command(...)`, which discarded the failure
+        // status. If plm start failed (missing plm.exe, wpr session
+        // conflict not resolved, etc.), the workload ran with
+        // `permissiveLearningMode` injected into the sandbox policy
+        // but with zero WPR recording — an empty Adjusted_*.json
+        // looked like "no denials." Bail explicitly on start failure
+        // so the operator sees the error and the policy isn't
+        // silently relaxed.
+        //
+        // bracket the spawn with
+        // AUDIT_START_IN_FLIGHT so the console-control handler waits
+        // for it to drain before deciding whether to issue `wpr
+        // -cancel` (closes the Ctrl+C race where cancel arrives
+        // before `plm.exe`'s child `wpr -start` has engaged the
+        // kernel session).
+        AUDIT_START_IN_FLIGHT.store(true, Ordering::SeqCst);
+        let start_ok = run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
+        AUDIT_START_IN_FLIGHT.store(false, Ordering::SeqCst);
+        if !start_ok {
+            let _ = writeln!(
+                logger,
+                "[audit] plm start failed; refusing to run the workload with \
+                 permissiveLearningMode but no WPR recording"
+            );
+            eprintln!(
+                "error: plm start failed; refusing to run --audit without an \
+                 active trace. See logs for details."
+            );
+            // cancel_active_audit_trace is idempotent and safe to call
+            // even if start never began a session — it inspects the
+            // AUDIT_ACTIVE flag and only invokes wpr -cancel if set.
+            cancel_active_audit_trace();
+            std::process::exit(1);
+        }
+        config_file_path(&cli)
+    } else {
+        _audit_guard = None;
+        _audit_singleton = None;
+        None
+    };
+
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    // Tear down the PLM trace after the container exits, regardless of
+    // its exit code. Done before the runner is dropped so the trace
+    // tooling sees a fully-quiesced workload.
+    //
+    // only clear `AUDIT_ACTIVE` when `plm stop` actually
+    // succeeded. Previously the flag was cleared unconditionally,
+    // which silently leaked the kernel ETW session whenever stop
+    // failed (missing plm.exe, spawn fail, wpr -stop non-zero) and
+    // simultaneously turned `AuditTraceGuard::drop` and the Ctrl-C
+    // handler into no-ops. On failure we now leave the flag set so
+    // the stack guard's `Drop` runs `wpr -cancel` for us.
+    #[cfg(target_os = "windows")]
+    if cli.audit {
+        let mut stop_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from("stop")];
+        if let Some(cfg) = audit_config_file.as_ref() {
+            stop_args.push(std::ffi::OsString::from("--config-path"));
+            stop_args.push(cfg.clone().into_os_string());
+        }
+        let borrowed: Vec<&std::ffi::OsStr> = stop_args
+            .iter()
+            .map(std::ffi::OsString::as_os_str)
+            .collect();
+        let stop_ok = run_plm_command(&borrowed, &mut logger);
+        if stop_ok {
+            AUDIT_ACTIVE.store(false, Ordering::SeqCst);
+        } else {
+            let _ = writeln!(
+                logger,
+                "[audit] plm stop failed; leaving AUDIT_ACTIVE set so cleanup guards \
+                 will run wpr -cancel on exit"
+            );
+        }
+    }
 
     // Explicitly drop the runner before retrieving the parked DACL
     // manager so any runner-internal resources holding child handles
@@ -989,6 +1444,20 @@ fn main() {
     // next startup covers everything else.)
     drop(runner);
     drop(take_parked_dacl());
+
+    // the `process::exit` below skips destructors, so
+    // `AuditTraceGuard::drop` (which calls `cancel_active_audit_trace`)
+    // and `AuditSingletonGuard::drop` (which releases the host-wide
+    // named mutex) never run on the normal path. Leaving `AUDIT_ACTIVE`
+    // set so cleanup guards run `wpr -cancel` on stop failure is only
+    // true on the panic-unwind / Ctrl-C path, not here. Manually
+    // invoke the cleanups so a stop-failure path actually tears the
+    // kernel ETW session down and frees the singleton.
+    #[cfg(target_os = "windows")]
+    {
+        cancel_active_audit_trace();
+        release_audit_singleton();
+    }
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
