@@ -2,15 +2,14 @@
 // Licensed under the MIT License.
 
 //! `ScriptRunner` impl for `IsolationSessionRunner`. Runs the full
-//! register → provision → share → start → exec → stop → deprovision
-//! lifecycle in a single process.
+//! provision → start → exec → stop → deprovision lifecycle in a single
+//! process.
 
 use std::fmt::Write;
 use std::io::IsTerminal;
 
-use wxc_common::id::mint_random_token;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, IsolationSessionConfigurationId, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
 use super::manager::IsolationSessionManager;
@@ -53,55 +52,27 @@ impl ScriptRunner for IsolationSessionRunner {
         let _ = writeln!(logger, "Isolation Session: arguments={}", options.arguments);
         let _ = writeln!(logger, "Isolation Session: interactive={}", interactive);
 
-        let session_cfg = request.experimental.isolation_session.as_ref();
-        let config_id: IsolationSessionConfigurationId = session_cfg
-            .map(|cfg| cfg.configuration_id)
-            .unwrap_or_default();
+        // One-shot runs are local agent users only (state-aware handles
+        // Entra). Provision returns the OS-assigned account name; the
+        // manager is then pegged to it for the rest of the lifecycle.
+        let agent_user_name = match IsolationSessionManager::add_user("", "") {
+            Ok(name) => {
+                let _ = writeln!(logger, "Isolation Session: agent user = {}", name);
+                name
+            }
+            Err(e) => return e.into(),
+        };
 
-        // Mint a per-invocation provisionId so concurrent MXC
-        // isolation-session processes do not collide on agent identity.
-        let provision_id = format!("wxc-{}", mint_random_token());
-        let manager = match IsolationSessionManager::new(&provision_id) {
+        let manager = match IsolationSessionManager::new(&agent_user_name) {
             Ok(m) => m,
             Err(e) => return e.into(),
         };
 
-        if let Err(e) = manager.register_client() {
-            return e.into();
-        }
-
-        match manager.provision_agent_user() {
-            Ok(agent_name) => {
-                let _ = writeln!(logger, "Isolation Session: agent user = {}", agent_name);
-            }
-            Err(e) => {
-                // provision_agent_user may return Err *after* a successful
-                // OS-side provision (e.g., the AgentUserName fetch fails on
-                // a non-error result). Defensively deprovision so an
-                // Indefinite-lifetime agent user does not leak.
-                // No-ops on absent state.
-                let _ = manager.deprovision_agent_user();
-                let _ = manager.unregister_client();
-                return e.into();
-            }
-        }
-
-        if let Err(e) = manager.share_folders(
-            &request.policy.readwrite_paths,
-            &request.policy.readonly_paths,
-            Some(logger),
-        ) {
-            let _ = manager.deprovision_agent_user();
-            let _ = manager.unregister_client();
-            return e.into();
-        }
-
-        if let Err(e) = manager.start_session(config_id) {
+        if let Err(e) = manager.start_session("") {
             // Provision succeeded; start did not. Clean up. stop_session
             // is a no-op on an unstarted session.
             let _ = manager.stop_session();
             let _ = manager.deprovision_agent_user();
-            let _ = manager.unregister_client();
             return e.into();
         }
 
@@ -110,7 +81,6 @@ impl ScriptRunner for IsolationSessionRunner {
             Err(e) => {
                 let _ = manager.stop_session();
                 let _ = manager.deprovision_agent_user();
-                let _ = manager.unregister_client();
                 return e.into();
             }
         };
@@ -120,9 +90,6 @@ impl ScriptRunner for IsolationSessionRunner {
         }
         if let Err(e) = manager.deprovision_agent_user() {
             let _ = writeln!(logger, "Warning: deprovision_agent_user failed: {}", e);
-        }
-        if let Err(e) = manager.unregister_client() {
-            let _ = writeln!(logger, "Warning: unregister_client failed: {}", e);
         }
 
         // Output already streamed live to wxc-exec's stdio via relay
@@ -157,7 +124,6 @@ mod tests {
             experimental: ExperimentalConfig {
                 isolation_session: Some(IsolationSessionConfig {
                     user: Some(well_formed_user()),
-                    ..Default::default()
                 }),
                 ..Default::default()
             },

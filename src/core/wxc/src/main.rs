@@ -492,6 +492,17 @@ fn main() {
             wxc_common::models::ContainerPolicy::default()
         };
         let output = appcontainer_common::probe::run_probe(&policy);
+        // appcontainer_common has no dependency on the isolation-session
+        // backend, so it reports `isolationSessionAvailable` as `false`. When
+        // the backend is compiled in, override it with a read-only activation
+        // probe of the in-proc service.
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        let output = {
+            let mut output = output;
+            output.probes.isolation_session_available =
+                isolation_session_common::is_service_available();
+            output
+        };
         match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
