@@ -30,7 +30,7 @@ pub enum ContainmentBackend {
     Hyperlight,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
-    /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
+    /// Isolation Session — process isolation via the IsolationSession API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
     /// macOS Seatbelt sandbox backend.

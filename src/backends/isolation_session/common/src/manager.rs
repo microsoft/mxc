@@ -34,9 +34,9 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
             let code = e.code();
             if code == CLASS_E_CLASSNOTAVAILABLE || code == REGDB_E_CLASSNOTREG {
                 Err(IsolationSessionError::ServiceUnavailable(format!(
-                    "in-proc Windows.AI.IsolationSession IsoSessionOps API is not available \
-                     on this OS build (HRESULT: {:#010x}). Ensure IsoSessionApp.dll is \
-                     registered and the OS feature gate is enabled.",
+                    "in-proc Windows.AI.IsolationSession.Preview IsoSessionOps API is not \
+                     available on this OS build (HRESULT: {:#010x}). Ensure the OS feature \
+                     gate is enabled and the platform supports isolation sessions.",
                     code.0 as u32
                 )))
             } else {

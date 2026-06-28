@@ -794,8 +794,8 @@ try {
             Assert-True (-not $out.Contains("marker_B.txt")) "C does not see marker_B.txt"
         } | Out-Null
 
-        # E5: Stop + deprovision B. The registration leak means the registration
-        # survives B's deprovision and A / C remain functional.
+        # E5: Stop + deprovision B. Each sandbox is a distinct OS agent user,
+        # so deprovisioning B removes only B's user; A / C remain functional.
         Run-StateAwareTest "Lifecycle E: stop B" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxB -Experimental
             Assert-True ($r.ExitCode -eq 0) "stop B exit 0"
@@ -807,17 +807,17 @@ try {
         if ($bDeprovPassed) { $saBDeprov = $true }
 
         # E6: Regression check -- A and C remain functional after B
-        # deprovisioned. Would fail without the registration leak.
+        # deprovisioned. Per-user isolation means B's teardown cannot affect them.
         Run-StateAwareTest "Lifecycle E: A still functional after B deprov" {
             $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxA
             $out = [string]$r.Stdout
-            Assert-True ($r.ExitCode -eq 0) "list exit 0 (registration not torn down by B's deprovision)"
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (A's agent user not torn down by B's deprovision)"
             Assert-True ($out.Contains("marker_A.txt")) "A still sees marker_A.txt"
         } | Out-Null
         Run-StateAwareTest "Lifecycle E: C still functional after B deprov" {
             $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxC
             $out = [string]$r.Stdout
-            Assert-True ($r.ExitCode -eq 0) "list exit 0 (registration not torn down by B's deprovision)"
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (C's agent user not torn down by B's deprovision)"
             Assert-True ($out.Contains("marker_C.txt")) "C still sees marker_C.txt"
         } | Out-Null
 
@@ -852,8 +852,8 @@ try {
         if ($cDeprovPassed) { $saCDeprov = $true }
     }
 
-    # E10: Fresh provision D after all three torn down -- the leaked registration
-    # must not poison new sandboxes either.
+    # E10: Fresh provision D after all three torn down -- per-user isolation
+    # means new sandboxes are unaffected by the earlier teardowns.
     Run-StateAwareTest "Lifecycle E: provision D after all torn down" {
         $script:saSandboxD = Provision-LifecycleESandbox -Label "D"
         Assert-True ($null -ne $script:saSandboxD) "saSandboxD is non-null"

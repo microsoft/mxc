@@ -271,9 +271,9 @@ mod tests {
         );
     }
 
-    // `ID_PREFIX` is the `<prefix>:<provisionId>` tag the dispatcher
+    // `ID_PREFIX` is the `<prefix>:<agentUserName>` tag the dispatcher
     // matches against in `backend_from_prefix`. Indirectly covered by
-    // every `extract_provision_id_*` test that uses an `"iso:..."`
+    // every `extract_agent_user_name_*` test that uses an `"iso:..."`
     // literal; pinned explicitly here so the dependence is visible.
     #[test]
     fn id_prefix_matches_wire_format() {

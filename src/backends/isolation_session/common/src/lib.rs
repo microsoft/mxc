@@ -2,14 +2,14 @@
 // Licensed under the MIT License.
 
 //! IsolationSession backend — executes scripts in an isolated Windows
-//! session via the in-proc `Windows.AI.IsolationSession` `IsoSessionOps`
+//! session via the in-proc `Windows.AI.IsolationSession.Preview` `IsoSessionOps`
 //! API. `IsolationSessionRunner` is the only externally-reachable type;
 //! the granular lifecycle wrapper (`IsolationSessionManager`) and helpers
 //! are module-private.
 //!
 //! Trait impls split by lifecycle shape:
-//! - `one_shot`: `ScriptRunner` — register → provision → start → exec →
-//!   stop → deprovision in a single process.
+//! - `one_shot`: `ScriptRunner` — provision → start → exec → stop →
+//!   deprovision in a single process.
 //! - `state_aware`: `StatefulSandboxBackend` — per-phase methods called
 //!   across multiple `wxc-exec` invocations by an external orchestrator.
 

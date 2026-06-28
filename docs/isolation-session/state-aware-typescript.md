@@ -1,8 +1,8 @@
-# MXC IsolationSession Backend — State-Aware TypeScript Initial Plan
+# MXC IsolationSession Backend — State-Aware (TypeScript)
 
 This document describes the IsolationSession backend's TypeScript SDK surface under
 the state-aware lifecycle API ([design](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)).
-It is the SDK companion to the [Rust initial plan](state-aware-rust-initial-plan.md).
+It is the SDK companion to the [Rust spec](state-aware-rust.md).
 The Rust doc covers runtime semantics (validation, error mapping, idempotence,
 concurrency); this doc covers SDK API surface, types, and consumer usage patterns.
 
@@ -18,8 +18,8 @@ concurrency); this doc covers SDK API surface, types, and consumer usage pattern
 
 ### Out of scope
 
-- Runtime validation rules — see the [Rust plan](state-aware-rust-initial-plan.md)
-  for the Entra `user` validation matrix, policy honor matrix, idempotence,
+- Runtime validation rules — see the [Rust spec](state-aware-rust.md)
+  for the Entra `user` validation, policy matrix, idempotence,
   concurrency, and error mapping.
 - The wire-format envelope — see the
   [main design doc](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) §7.
@@ -29,7 +29,7 @@ concurrency); this doc covers SDK API surface, types, and consumer usage pattern
 ## Per-phase Configs and Metadata
 
 The SDK exposes only the fields the IsolationSession runtime currently honors at each
-phase. See the [Rust plan](state-aware-rust-initial-plan.md) for the full Rust-side
+phase. See the [Rust spec](state-aware-rust.md) for the full Rust-side
 contract (including fields not yet exposed via the SDK).
 
 | Phase | Config | Metadata |
@@ -47,7 +47,6 @@ contract (including fields not yet exposed via the SDK).
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
-| `filesystem` | `FilesystemConfig` | absent | `readwritePaths` and `readonlyPaths` honored at provision; `deniedPaths` rejected. |
 | `user` | `IsolationSessionUserConfig` | absent | Optional Entra credentials (see below). |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
@@ -63,8 +62,7 @@ contract (including fields not yet exposed via the SDK).
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
-| `configurationId` | `'small' \| 'medium' \| 'large' \| 'composable'` | runtime default `'composable'` | Session size profile. |
-| `user` | `IsolationSessionUserConfig` | absent | Required when the sandbox was provisioned with a `user` bundle; rejected otherwise. When required, `upn` must match the UPN supplied at provision (case-insensitive). |
+| `user` | `IsolationSessionUserConfig` | absent | Optional. For an Entra sandbox, re-supply the `user` (same UPN, current WAM token) so the OS can validate the token against the agent user assigned at provision. Omit for a local sandbox. Shape-validated only — MXC does not match the UPN against the sandbox id. |
 
 **Metadata:** none.
 
@@ -120,11 +118,11 @@ const opts: SandboxSpawnOptions = { experimental: true };
 
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
-  { filesystem: { readwritePaths: ['C:\\workspace'] } },
+  {},
   opts,
 );
 
-await startSandbox(sandboxId, { configurationId: 'composable' }, opts);
+await startSandbox(sandboxId, {}, opts);
 const r = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hi' } }, opts);
 console.log(r.stdout); // "hi"
 
@@ -134,8 +132,9 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 
 ### Entra
 
-Provisioning with a `user` bundle selects the Entra path; the returned id encodes
-the UPN, and every subsequent start on that sandbox must carry a matching `user`:
+Provisioning with a `user` bundle selects the Entra path. The returned id is an
+opaque OS-assigned handle (it does not encode the UPN); re-supply the `user` at
+start so the OS can validate the current WAM token:
 
 ```typescript
 import { IsolationSessionUserConfig } from '@microsoft/mxc-sdk';
@@ -144,16 +143,16 @@ const user = new IsolationSessionUserConfig('alice@contoso.com', wamToken);
 
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
-  { filesystem: { readwritePaths: ['C:\\workspace'] }, user },
+  { user },
   opts,
 );
 
-await startSandbox(sandboxId, { configurationId: 'composable', user }, opts);
+await startSandbox(sandboxId, { user }, opts);
 // exec / stop / deprovision unchanged from the local example above.
 ```
 
-Validation rules for the Entra path (UPN matching, malformed-bundle handling, error
-codes) live in the [Rust plan](state-aware-rust-initial-plan.md).
+Validation rules for the Entra path (bundle shape-validation, error
+codes) live in the [Rust spec](state-aware-rust.md).
 
 ## Test helpers
 
@@ -189,5 +188,5 @@ covers the validation rejections.
 
 - [State-aware design (main)](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
 - [State-aware design (overview)](../state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md)
-- [Rust initial plan](state-aware-rust-initial-plan.md) — runtime semantics
-- [Initial bringup plan (one-shot)](initial-bringup-plan.md)
+- [Rust spec](state-aware-rust.md) — runtime semantics
+- [One-shot bringup](oneshot.md)
