@@ -1249,7 +1249,7 @@ mod tests {
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {
-                "isolation_session": {"start": {"configurationId": "small"}}
+                "isolation_session": {"start": {"user": {"upn": "alice@contoso.com"}}}
             }
         }"#;
         match load_mxc(json).unwrap() {
@@ -1263,7 +1263,7 @@ mod tests {
                 assert_eq!(
                     exp,
                     serde_json::json!({
-                        "isolation_session": {"start": {"configurationId": "small"}}
+                        "isolation_session": {"start": {"user": {"upn": "alice@contoso.com"}}}
                     })
                 );
             }
