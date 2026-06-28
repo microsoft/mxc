@@ -459,15 +459,13 @@ pub enum TransportProtocol {
     Tcp,
 }
 
-/// IsolationSession backend config. Carries both the one-shot fields
-/// (`configurationId`, `user`) and the per-phase state-aware nesting
-/// (`provision` / `start` / `stop` / `deprovision`).
+/// IsolationSession backend config. Carries the one-shot `user` field and
+/// the per-phase state-aware nesting (`provision` / `start` / `stop` /
+/// `deprovision`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
-    /// Sizing profile (one-shot).
-    pub configuration_id: Option<IsolationConfigurationId>,
     /// Optional Entra cloud-agent user bundle (one-shot).
     pub user: Option<IsolationUser>,
     /// State-aware provision-phase configuration.
@@ -485,21 +483,8 @@ pub struct IsolationSession {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSessionPhase {
-    /// Sizing profile for this phase.
-    pub configuration_id: Option<IsolationConfigurationId>,
     /// Entra cloud-agent user bundle for this phase.
     pub user: Option<IsolationUser>,
-}
-
-/// IsolationSession sizing profile.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum IsolationConfigurationId {
-    Small,
-    Medium,
-    Large,
-    Composable,
 }
 
 /// Entra cloud-agent user bundle. Reachable only under the permissive

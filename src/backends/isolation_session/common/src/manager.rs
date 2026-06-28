@@ -2,59 +2,29 @@
 // Licensed under the MIT License.
 
 //! `IsolationSessionManager` — granular wrapper over the in-proc
-//! `IsoSessionOps` lifecycle. Each method maps 1:1 to a single WinRT op,
-//! plus the `share_folders` non-lifecycle op. `create_process` also drives
-//! the ConPTY relay setup + shutdown ladder against the local console.
+//! isolation session lifecycle. Each method maps 1:1 to a single WinRT op.
+//! `create_process` also drives the ConPTY relay setup + shutdown ladder
+//! against the local console.
 
-use wxc_common::models::IsolationSessionConfigurationId;
 use wxc_common::process_util::OwnedHandle;
 
 use isolation_session_bindings::bindings::{
-    IsoSessionConfigId, IsoSessionFolderSharingRequest, IsoSessionFolderSharingResult,
     IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult, IsoSessionUserResult,
 };
-use windows::Win32::Foundation::{
-    CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, HANDLE, REGDB_E_CLASSNOTREG,
-};
+use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
-use windows_collections::IVectorView;
 use windows_core::{HSTRING, PCWSTR};
 
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
 use super::error::{check_result, format_iso_error, lifecycle_err, IsolationSessionError};
-use super::folder_sharing::{
-    aggregate_share_folder_outcomes, build_share_folder_requests, extract_share_folder_outcomes,
-};
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, PipeRelayParams, PipeRelayWithStopParams,
 };
 use super::process_options::{build_iso_process_options, ProcessOptions};
-use super::protected_paths_filter::filter_protected_paths;
-
-/// Registration ID used with the in-proc `IsoSessionOps` API. Must be the
-/// literal string `"regid"`: the in-proc API uses the same string
-/// internally for every agent-name-keyed op, so registering under any
-/// other value causes subsequent calls to miss the registration. Do not
-/// parameterise.
-///
-/// The id is effectively shared across all concurrent MXC isolation-session
-/// sandboxes for the calling user; see `IsolationSessionManager::register_client`
-/// (idempotent) and `unregister_client` (intentional no-op) for the
-/// lifecycle implications.
-const REGISTRATION_ID: &str = "regid";
-
-fn to_iso_config_id(value: IsolationSessionConfigurationId) -> IsoSessionConfigId {
-    match value {
-        IsolationSessionConfigurationId::Small => IsoSessionConfigId::Small,
-        IsolationSessionConfigurationId::Medium => IsoSessionConfigId::Medium,
-        IsolationSessionConfigurationId::Large => IsoSessionConfigId::Large,
-        IsolationSessionConfigurationId::Composable => IsoSessionConfigId::Composable,
-    }
-}
 
 /// Activates the in-proc `IsoSessionOps` factory and returns the instance.
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
@@ -79,56 +49,57 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
     }
 }
 
-/// Manages the `IsoSessionOps` lifecycle. Methods map 1:1 to the granular
+/// Returns `true` when the in-proc isolation session service can be
+/// activated on this host. Used by the probe to advertise backend
+/// availability without provisioning anything.
+pub fn is_service_available() -> bool {
+    check_service_available_and_activate().is_ok()
+}
+
+/// Manages the isolation session lifecycle. Methods map 1:1 to the granular
 /// API steps.
 pub struct IsolationSessionManager {
-    /// Registration identifier used in `RegisterApp` / `AddUserAsync` /
-    /// `UnregisterAppAsync`. Pegged to the literal `"regid"` — required
-    /// by the OS API.
-    registration_id: HSTRING,
-    /// Provision identifier. Used as `provisionId` to `AddUserAsync` and
-    /// as the `agentName` argument to every subsequent op (the OS API
-    /// aliases them at the COM layer).
-    provision_id: HSTRING,
-    /// The activated `IsoSessionOps` instance. Held for the manager's
-    /// lifetime so the WinRT factory is reused across calls.
+    /// The OS-assigned agent user name returned by `add_user`. Used as the
+    /// `agentUserName` argument to every subsequent lifecycle op.
+    agent_user_name: HSTRING,
+    /// The activated service instance. Held for the manager's lifetime so
+    /// the WinRT factory is reused across calls.
     ops: IsoSessionOps,
 }
 
 impl IsolationSessionManager {
-    /// Activates the `IsoSessionOps` factory, verifies the service is
-    /// available, and pegs the manager to the supplied `provisionId`.
-    /// Both one-shot and state-aware callers mint a dynamic id per
-    /// invocation (e.g. `wxc-<8-hex>`).
-    pub(super) fn new(provision_id: &str) -> Result<Self, IsolationSessionError> {
+    /// Pegs a manager to an existing OS-assigned agent user name (the value
+    /// returned by `add_user`). Activates the service factory once and
+    /// reuses it for the manager's lifetime.
+    pub(super) fn new(agent_user_name: &str) -> Result<Self, IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
         Ok(Self {
-            registration_id: HSTRING::from(REGISTRATION_ID),
-            provision_id: HSTRING::from(provision_id),
+            agent_user_name: HSTRING::from(agent_user_name),
             ops,
         })
     }
 
-    /// Registers the app with the OS API. Safe to call repeatedly with
-    /// the same regid — the OS API treats duplicates as success.
-    pub(super) fn register_client(&self) -> Result<(), IsolationSessionError> {
-        let result = self
-            .ops
-            .RegisterApp(&self.registration_id)
-            .map_err(|e| lifecycle_err(format!("RegisterApp call failed: {}", e)))?;
-        check_result(&result, "RegisterApp")
-    }
-
-    /// Step 1: Provision an agent user. Returns the OS-assigned agent
-    /// account name for logging only — addressing for subsequent ops
-    /// continues to use the configured `provision_id`.
+    /// Provisions an agent user and returns the OS-assigned account name,
+    /// which addresses every subsequent lifecycle op.
+    ///
+    /// Pass empty strings for a local agent user, or the Entra account name
+    /// and its WAM token for an Entra-backed agent; the OS validates
+    /// token/identity consistency. Because the account name is not known
+    /// until this returns, the caller constructs the manager via `new`
+    /// afterward — hence an associated function rather than a method.
     ///
     /// Note: `lifecycle.destroyOnExit` is silently ignored on this backend.
-    /// The in-proc API hardcodes `Indefinite` lifetime in `AddUserAsync`.
-    pub(super) fn provision_agent_user(&self) -> Result<String, IsolationSessionError> {
-        let async_op = self
-            .ops
-            .AddUserAsync(&self.registration_id, &self.provision_id)
+    /// The in-proc API hardcodes `Indefinite` lifetime.
+    pub(super) fn add_user(
+        opt_entra_account_name: &str,
+        opt_wam_token: &str,
+    ) -> Result<String, IsolationSessionError> {
+        let ops = check_service_available_and_activate()?;
+        let async_op = ops
+            .AddUserAsync(
+                &HSTRING::from(opt_entra_account_name),
+                &HSTRING::from(opt_wam_token),
+            )
             .map_err(|e| lifecycle_err(format!("AddUserAsync call failed: {}", e)))?;
         let user_result: IsoSessionUserResult = async_op
             .join()
@@ -150,133 +121,19 @@ impl IsolationSessionManager {
         Ok(name.to_string())
     }
 
-    /// Step 1 (Entra): Provision an agent user backed by Entra cloud
-    /// credentials. Calls `IIsoSessionOps2::AddUserAsync2` with the
-    /// caller-supplied `wam_token`. Returns `ServiceUnavailable` when the
-    /// host OS lacks the v2 interface; the caller does not fall back to v1.
-    pub(super) fn provision_agent_user_v2(
-        &self,
-        wam_token: &str,
-    ) -> Result<String, IsolationSessionError> {
-        let async_op = match self.ops.AddUserAsync2(
-            &self.registration_id,
-            &self.provision_id,
-            &HSTRING::from(wam_token),
-        ) {
-            Ok(op) => op,
-            Err(e) if e.code() == E_NOINTERFACE => {
-                return Err(IsolationSessionError::ServiceUnavailable(
-                    "IsoSessionOps2 (Entra agent support) is not available on this OS build"
-                        .to_string(),
-                ));
-            }
-            Err(e) => return Err(lifecycle_err(format!("AddUserAsync2 call failed: {}", e))),
-        };
-        let user_result: IsoSessionUserResult = async_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync2 wait failed: {}", e)))?;
-
-        let err = user_result
-            .Error()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get Error failed: {}", e)))?;
-        let is_error = err
-            .IsError()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get IsError failed: {}", e)))?;
-        if is_error {
-            return Err(format_iso_error("AddUserAsync2", &err));
-        }
-
-        let name = user_result.AgentUserName().map_err(|e| {
-            lifecycle_err(format!("AddUserAsync2: get AgentUserName failed: {}", e))
-        })?;
-        Ok(name.to_string())
-    }
-
-    /// Grants the agent user access to host folders. `readwrite_paths` get
-    /// read+write access, `readonly_paths` get read-only. Both apply
-    /// recursively to each subtree.
+    /// Step 2: Start the isolation session for the pegged agent user.
     ///
-    /// Independent of session start: requires only that the agent user
-    /// exists (call after `provision_agent_user`, before
-    /// `deprovision_agent_user`).
-    ///
-    /// The MXC process needs `WRITE_DAC` on each target folder. Returns
-    /// `Ok` on all-success; on any per-path failure returns a `Lifecycle`
-    /// error listing every failed path. Empty input on both slices is a
-    /// no-op.
-    pub(super) fn share_folders(
-        &self,
-        readwrite_paths: &[String],
-        readonly_paths: &[String],
-        logger: Option<&mut wxc_common::logger::Logger>,
-    ) -> Result<(), IsolationSessionError> {
-        // Emergency mitigation (MXC issue #330): drop protected paths
-        // before forwarding. See `protected_paths_filter.rs`.
-        let (rw_kept, ro_kept) = filter_protected_paths(readwrite_paths, readonly_paths, logger);
-        let requests = build_share_folder_requests(&rw_kept, &ro_kept);
-        if requests.is_empty() {
-            return Ok(());
-        }
-        let view: IVectorView<IsoSessionFolderSharingRequest> = requests.into();
+    /// `opt_wam_token` is empty for a local agent or the Entra WAM token for
+    /// an Entra-backed agent.
+    pub(super) fn start_session(&self, opt_wam_token: &str) -> Result<(), IsolationSessionError> {
         let async_op = self
             .ops
-            .ShareFolderBatchAsync(&self.provision_id, &view)
-            .map_err(|e| lifecycle_err(format!("ShareFolderBatchAsync call failed: {}", e)))?;
-        let results: IVectorView<IsoSessionFolderSharingResult> = async_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("ShareFolderBatchAsync wait failed: {}", e)))?;
-        let outcomes = extract_share_folder_outcomes(&results)?;
-        aggregate_share_folder_outcomes(&outcomes)
-    }
-
-    /// Step 2: Start the isolation session.
-    pub(super) fn start_session(
-        &self,
-        config_id: IsolationSessionConfigurationId,
-    ) -> Result<(), IsolationSessionError> {
-        let cfg: IsoSessionConfigId = to_iso_config_id(config_id);
-        let async_op = self
-            .ops
-            .StartSessionAsync(&self.provision_id, cfg)
+            .StartSessionAsync(&self.agent_user_name, &HSTRING::from(opt_wam_token))
             .map_err(|e| lifecycle_err(format!("StartSessionAsync call failed: {}", e)))?;
         let result = async_op
             .join()
             .map_err(|e| lifecycle_err(format!("StartSessionAsync wait failed: {}", e)))?;
         check_result(&result, "StartSessionAsync")
-    }
-
-    /// Step 2 (Entra): Start an Entra-backed isolation session via
-    /// `IIsoSessionOps2::StartSessionAsync2`. Returns `ServiceUnavailable`
-    /// when the host OS lacks the v2 interface.
-    pub(super) fn start_session_v2(
-        &self,
-        config_id: IsolationSessionConfigurationId,
-        wam_token: &str,
-    ) -> Result<(), IsolationSessionError> {
-        let cfg: IsoSessionConfigId = to_iso_config_id(config_id);
-        let async_op =
-            match self
-                .ops
-                .StartSessionAsync2(&self.provision_id, cfg, &HSTRING::from(wam_token))
-            {
-                Ok(op) => op,
-                Err(e) if e.code() == E_NOINTERFACE => {
-                    return Err(IsolationSessionError::ServiceUnavailable(
-                        "IsoSessionOps2 (Entra agent support) is not available on this OS build"
-                            .to_string(),
-                    ));
-                }
-                Err(e) => {
-                    return Err(lifecycle_err(format!(
-                        "StartSessionAsync2 call failed: {}",
-                        e
-                    )));
-                }
-            };
-        let result = async_op
-            .join()
-            .map_err(|e| lifecycle_err(format!("StartSessionAsync2 wait failed: {}", e)))?;
-        check_result(&result, "StartSessionAsync2")
     }
 
     /// Step 3: Create a process inside the started isolation session.
@@ -291,7 +148,7 @@ impl IsolationSessionManager {
         let async_op = self
             .ops
             .RunProcessWithOptionsAsync(
-                &self.provision_id,
+                &self.agent_user_name,
                 &HSTRING::from(&options.process_path),
                 &HSTRING::from(&options.arguments),
                 &proc_options,
@@ -543,7 +400,7 @@ impl IsolationSessionManager {
     pub(super) fn stop_session(&self) -> Result<(), IsolationSessionError> {
         let async_op = self
             .ops
-            .StopSessionAsync(&self.provision_id)
+            .StopSessionAsync(&self.agent_user_name)
             .map_err(|e| lifecycle_err(format!("StopSessionAsync call failed: {}", e)))?;
         let result = async_op
             .join()
@@ -555,33 +412,12 @@ impl IsolationSessionManager {
     pub(super) fn deprovision_agent_user(&self) -> Result<(), IsolationSessionError> {
         let async_op = self
             .ops
-            .RemoveUserAsync(&self.provision_id)
+            .RemoveUserAsync(&self.agent_user_name)
             .map_err(|e| lifecycle_err(format!("RemoveUserAsync call failed: {}", e)))?;
         let result = async_op
             .join()
             .map_err(|e| lifecycle_err(format!("RemoveUserAsync wait failed: {}", e)))?;
         check_result(&result, "RemoveUserAsync")
-    }
-
-    /// Tears down the client registration set up by `register_client` —
-    /// currently a no-op.
-    pub(super) fn unregister_client(&self) -> Result<(), IsolationSessionError> {
-        // Intentional no-op. The `"regid"` literal is shared across all
-        // concurrent MXC isolation-session sandboxes for the calling user;
-        // calling `UnregisterAppAsync` would tear down the registration for
-        // every other still-running one. Reversible when the OS API
-        // eliminates registration IDs entirely; do not uncomment without
-        // verifying OS API behavior has changed.
-        //
-        // let async_op = self
-        //     .ops
-        //     .UnregisterAppAsync(&self.registration_id)
-        //     .map_err(|e| lifecycle_err(format!("UnregisterAppAsync call failed: {}", e)))?;
-        // let result = async_op
-        //     .join()
-        //     .map_err(|e| lifecycle_err(format!("UnregisterAppAsync wait failed: {}", e)))?;
-        // check_result(&result, "UnregisterAppAsync")
-        Ok(())
     }
 }
 
@@ -661,35 +497,5 @@ mod tests {
                 panic!("expected ServiceUnavailable variant, got: {:?}", other);
             }
         }
-    }
-
-    // The `to_iso_config_id` free function is the sole bridge between
-    // MXC's internal enum and the WinRT enum. If a new variant is added
-    // to either side without updating the function, these tests catch
-    // the drift.
-
-    #[test]
-    fn config_id_conversion_small() {
-        let iso_id: IsoSessionConfigId = to_iso_config_id(IsolationSessionConfigurationId::Small);
-        assert_eq!(iso_id, IsoSessionConfigId::Small);
-    }
-
-    #[test]
-    fn config_id_conversion_medium() {
-        let iso_id: IsoSessionConfigId = to_iso_config_id(IsolationSessionConfigurationId::Medium);
-        assert_eq!(iso_id, IsoSessionConfigId::Medium);
-    }
-
-    #[test]
-    fn config_id_conversion_large() {
-        let iso_id: IsoSessionConfigId = to_iso_config_id(IsolationSessionConfigurationId::Large);
-        assert_eq!(iso_id, IsoSessionConfigId::Large);
-    }
-
-    #[test]
-    fn config_id_conversion_composable() {
-        let iso_id: IsoSessionConfigId =
-            to_iso_config_id(IsolationSessionConfigurationId::Composable);
-        assert_eq!(iso_id, IsoSessionConfigId::Composable);
     }
 }

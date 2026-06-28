@@ -20,8 +20,6 @@ mod console_relay;
 #[cfg(target_os = "windows")]
 mod error;
 #[cfg(target_os = "windows")]
-mod folder_sharing;
-#[cfg(target_os = "windows")]
 mod manager;
 #[cfg(target_os = "windows")]
 mod one_shot;
@@ -32,9 +30,10 @@ mod policy;
 #[cfg(target_os = "windows")]
 mod process_options;
 #[cfg(target_os = "windows")]
-mod protected_paths_filter;
-#[cfg(target_os = "windows")]
 mod state_aware;
+
+#[cfg(target_os = "windows")]
+pub use manager::is_service_available;
 
 /// Stateless marker type. Trait impls live in `one_shot` (`ScriptRunner`)
 /// and `state_aware` (`StatefulSandboxBackend`).
