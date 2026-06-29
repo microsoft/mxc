@@ -474,10 +474,12 @@ in-repo mechanisms (all implemented):
    is `block`, `ui.disable` is `true`, clipboard/injection off, etc. (see
    [The three version axes](#the-three-version-axes) and the schema). A minimal
    config is a tight sandbox.
-2. **Explicit + loud relaxation.** Any field that opens a boundary beyond its
-   secure default is logged at parse time as `SECURITY: boundary relaxed: …`, so
-   a relaxation is never silent — it is auditable in the diagnostic log. (Phase
-   4b.)
+2. **Explicit + loud relaxation.** Fields that open a network, UI, capability,
+   or Seatbelt boundary beyond their secure default are logged at parse time as
+   `SECURITY: boundary relaxed: …`, so those relaxations are never silent — they
+   are auditable in the diagnostic log. (Phase 4b. Filesystem path grants and the
+   Seatbelt pty baseline are deliberately out of this audit's scope, being the
+   request's primary purpose rather than a relaxation.)
 3. **Catastrophic capabilities are compile-time-removed.** A capability that
    would defeat the sandbox wholesale rather than merely widen it — currently
    `seatbelt.profileOverride`, which replaces the entire generated deny-default
@@ -495,7 +497,8 @@ exceed it. Whether such a clamp can be made truly unbypassable is
 
 | Platform | Clamp mechanism | Unbypassable? | Status |
 |---|---|---|---|
-| Windows (ProcessContainer / BaseContainer) | OS sandbox broker enforces the policy inside `CreateProcessInSandbox` | Yes — the broker is the kernel-side authority | OS-infra (outside this repo) |
+| Windows — BaseContainer tier | OS sandbox broker enforces the policy inside `Experimental_CreateProcessInSandbox` | Yes — the broker is the kernel-side authority | OS-infra (outside this repo) |
+| Windows — AppContainer fallback tiers (BFS / DACL) | AppContainer + `bfscfg.exe` BFS or host-side DACL ACEs; used when the BaseContainer API is absent | Partial — enforcement is partly host-side, not a single kernel broker | Existing backend behavior |
 | Linux (LXC) | Host LSM (AppArmor / SELinux) profile + root-owned policy file | Yes, with a host LSM; otherwise advisory | OS-infra / host config |
 | Linux (Bubblewrap) | LSM, or compile-time capability removal | Partial — bwrap is unprivileged by design | OS-infra / build |
 | macOS (Seatbelt) | Root-owned policy file + codesign / SIP | Yes, with SIP + signed binary; otherwise advisory | OS-infra (outside this repo) |
