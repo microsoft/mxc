@@ -457,6 +457,59 @@ The MXC ↔ OS contract therefore reports: which feature failed, whether it was 
 version mismatch or a runtime/capability unavailability (e.g. Hyper-V off), and
 what the user should do (upgrade OS, enable feature, change the config).
 
+## Trust model and the outer clamp
+
+MXC's authorization model and the (optional) unbypassable upper bound on what a
+config can relax.
+
+### Authorization model: one principal, secure-and-loud defaults
+
+For the agent/SDK consumers MXC is built for, the same principal authors **both**
+the config JSON and the command line. There is no second, more-privileged channel
+to grant capabilities from, so MXC does **not** require a mandatory second-channel
+authorization for boundary-relaxing fields. Instead, safety rests on three
+in-repo mechanisms (all implemented):
+
+1. **Secure defaults.** Every boundary defaults closed: `network.defaultPolicy`
+   is `block`, `ui.disable` is `true`, clipboard/injection off, etc. (see
+   [The three version axes](#the-three-version-axes) and the schema). A minimal
+   config is a tight sandbox.
+2. **Explicit + loud relaxation.** Any field that opens a boundary beyond its
+   secure default is logged at parse time as `SECURITY: boundary relaxed: …`, so
+   a relaxation is never silent — it is auditable in the diagnostic log. (Phase
+   4b.)
+3. **Catastrophic capabilities are compile-time-removed.** A capability that
+   would defeat the sandbox wholesale rather than merely widen it — currently
+   `seatbelt.profileOverride`, which replaces the entire generated deny-default
+   profile — is **stripped from release/shipped binaries** (parser strip + the
+   builder branch compiled out), so it cannot be honored in production at all.
+   (Phase 4c.)
+
+### The outer clamp (optional, platform-asymmetric)
+
+The mechanisms above bound what the *config* requests. An **outer clamp** is a
+separate, optional upper bound enforced *below* the config — an unbypassable
+ceiling a host operator can impose so that even a fully-relaxed config cannot
+exceed it. Whether such a clamp can be made truly unbypassable is
+**platform-asymmetric**, because it depends on an OS primitive MXC does not own:
+
+| Platform | Clamp mechanism | Unbypassable? | Status |
+|---|---|---|---|
+| Windows (ProcessContainer / BaseContainer) | OS sandbox broker enforces the policy inside `CreateProcessInSandbox` | Yes — the broker is the kernel-side authority | OS-infra (outside this repo) |
+| Linux (LXC) | Host LSM (AppArmor / SELinux) profile + root-owned policy file | Yes, with a host LSM; otherwise advisory | OS-infra / host config |
+| Linux (Bubblewrap) | LSM, or compile-time capability removal | Partial — bwrap is unprivileged by design | OS-infra / build |
+| macOS (Seatbelt) | Root-owned policy file + codesign / SIP | Yes, with SIP + signed binary; otherwise advisory | OS-infra (outside this repo) |
+| All platforms | Root/admin-owned **clamp-policy file** read at the trust boundary, capping the boundary relaxations that Phase 4b logs | No — a trust-boundary gate, bypassable by a local admin, not a kernel guarantee | Deferred (in-repo candidate) |
+
+The truly unbypassable rows (broker, LSM, SIP) live in OS infrastructure outside
+this repository and are intentionally **out of scope here**. The one piece that
+*could* live in-repo — a root-owned clamp-policy file the parser enforces as a
+ceiling on relaxations — is a meaningful additional gate but is **not a kernel
+guarantee** (a local admin can edit the file), so it is tracked as a follow-up
+rather than shipped as if it were unbypassable. Catastrophic, un-clampable
+capabilities are handled instead by compile-time removal (above), which needs no
+OS primitive.
+
 ## Experimental Features — Clarifications
 
 **Shipping model:** The shipped schema contains **only** non-experimental 
