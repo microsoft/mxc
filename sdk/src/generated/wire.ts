@@ -10,7 +10,7 @@
  * (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
  * exported from the SDK. The conformance test asserts the hand-written public
  * types in `../types.ts` still match these. CI gate:
- * `scripts/versioning/check-sdk-types-codegen.js`.
+ * `scripts/versioning/check-codegen.js`.
  *
  * Regenerate with:
  *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/src/generated/wire.ts

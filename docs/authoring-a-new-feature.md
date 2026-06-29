@@ -156,7 +156,7 @@ attributes become constraints. Then regenerate the committed schema:
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json
 ```
 
-The `check-schema-codegen.js` CI gate fails if the committed schema drifts from
+The `check-codegen.js` CI gate fails if the committed schema drifts from
 the wire model, so the regenerate step is mandatory.
 
 ## Step 2: Add the model struct

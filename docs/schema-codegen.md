@@ -33,10 +33,11 @@ standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
 
 ## CI gates (`Versioning Checks` job)
 
-- **`check-schema-codegen.js`** — regenerates the schema and fails if the
-  committed `schemas/dev/...json` differs (the schema can never go stale).
-- **`validate-configs.js`** — validates the `tests/examples` + `tests/configs`
-  corpus against the committed schema.
+- **`check-codegen.js`** — regenerates the dev schema **and** the SDK wire types
+  and fails if either committed copy differs (neither can go stale).
+- **`check-schema-conformance.js`** — validates the `tests/examples` +
+  `tests/configs` corpus (and, per Phase 4b-emit, SDK-emitted configs)
+  against the committed schema.
 - **`check-schema-versions.js`** / **`check-version-sync.js`** — version-constant
   and product-version sync.
 
@@ -59,7 +60,7 @@ indirection and wraps optionals as `anyOf: [{ $ref }, { "type": "null" }]`, so
 the file roughly doubled in size with no change in meaning). Three lenses:
 
 1. **Accept side** — every config in the `tests/examples` + `tests/configs`
-   corpus must still validate. The `validate-configs.js` gate enforces this.
+   corpus must still validate. The `check-schema-conformance.js` gate enforces this.
 2. **Reject side** — the *effective* per-property constraints (allowed keys,
    enum value sets, `additionalProperties` open/closed, `required`) after
    resolving `$ref`s.
@@ -110,7 +111,7 @@ value and `wxc_common::ts_emit` emits `sdk/src/generated/wire.ts`. That file is
 **not public API** — it is a drift oracle. The unit test
 `sdk/tests/unit/wire-conformance.test.ts` asserts (at `tsc` time) that the
 hand-written public types in `sdk/src/types.ts` still conform to it, and
-`check-sdk-types-codegen.js` is a CI gate (running the emitter and diffing the
+`check-codegen.js` is a CI gate (running the emitter and diffing the
 committed file) that fails on drift. So a wire-model change ripples to all three
 surfaces — Rust ⇄ schema ⇄ TS — and a forgotten SDK update fails CI instead of
 drifting silently. The emitter handles only the JSON Schema constructs the MXC
@@ -168,5 +169,5 @@ here.
   the wire shape and cannot drift.
 - The SDK TypeScript wire types are generated from the same wire model
   (`sdk/src/generated/wire.ts`, via the `wxc_common::ts_emit` Rust emitter),
-  guarded by a conformance test plus the `check-sdk-types-codegen.js` gate, and
+  guarded by a conformance test plus the `check-codegen.js` gate, and
   the hand-maintained `*-strict.json` stable view has been retired.
