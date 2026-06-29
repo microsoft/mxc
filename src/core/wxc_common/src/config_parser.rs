@@ -8,7 +8,7 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
+    ClipboardPolicy, ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
     IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
     PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TestFeatureConfig, UiPolicy,
     WindowsSandboxConfig, WslcConfig,
@@ -498,6 +498,105 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
     }
 }
 
+/// Emit a standardized, deterministic warning for each setting that opens a
+/// security boundary beyond the secure default, so relaxations are loud and
+/// auditable in the diagnostic log rather than silently honored. Logging only —
+/// never changes behavior. Filesystem grants and the seatbelt pty baseline are
+/// out of scope (they are the request's primary purpose, not a relaxation).
+fn log_boundary_relaxations(
+    policy: &ContainerPolicy,
+    seatbelt: Option<&SeatbeltConfig>,
+    logger: &mut Logger,
+) {
+    const P: &str = "SECURITY: boundary relaxed:";
+
+    // Network
+    if policy.default_network_policy == NetworkPolicy::Allow {
+        logger.log_line(&format!(
+            "{P} network.defaultPolicy=allow (network open by default)"
+        ));
+    }
+    if policy.allow_local_network {
+        logger.log_line(&format!("{P} network.allowLocalNetwork=true"));
+    }
+    if !policy.allowed_hosts.is_empty() {
+        logger.log_line(&format!(
+            "{P} network.allowedHosts ({} host(s))",
+            policy.allowed_hosts.len()
+        ));
+    }
+    if !policy.blocked_hosts.is_empty() {
+        logger.log_line(&format!(
+            "{P} network.blockedHosts ({} host(s))",
+            policy.blocked_hosts.len()
+        ));
+    }
+    if policy.network_proxy.is_enabled() {
+        logger.log_line(&format!("{P} network.proxy enabled"));
+    }
+
+    // UI
+    if !policy.ui.disable {
+        logger.log_line(&format!("{P} ui.disable=false (windows allowed)"));
+    }
+    if policy.ui.clipboard != ClipboardPolicy::None {
+        logger.log_line(&format!("{P} ui.clipboard={:?}", policy.ui.clipboard));
+    }
+    if policy.ui.injection {
+        logger.log_line(&format!("{P} ui.injection=true"));
+    }
+
+    // ProcessContainer
+    if !policy.capabilities.is_empty() {
+        logger.log_line(&format!(
+            "{P} processContainer.capabilities ({} cap(s))",
+            policy.capabilities.len()
+        ));
+    }
+    let ui = &policy.base_process_ui;
+    if ui.isolation != "container" {
+        logger.log_line(&format!(
+            "{P} processContainer.ui.isolation={}",
+            ui.isolation
+        ));
+    }
+    if ui.desktop_system_control {
+        logger.log_line(&format!(
+            "{P} processContainer.ui.desktopSystemControl=true"
+        ));
+    }
+    if ui.system_settings != "none" {
+        logger.log_line(&format!(
+            "{P} processContainer.ui.systemSettings={}",
+            ui.system_settings
+        ));
+    }
+    if ui.ime {
+        logger.log_line(&format!("{P} processContainer.ui.ime=true"));
+    }
+
+    // Seatbelt (macOS)
+    if let Some(sb) = seatbelt {
+        if sb.profile_override.is_some() {
+            logger.log_line(&format!(
+                "{P} seatbelt.profileOverride (generated profile bypassed)"
+            ));
+        }
+        if sb.gui_access {
+            logger.log_line(&format!("{P} seatbelt.guiAccess=true"));
+        }
+        if sb.keychain_access {
+            logger.log_line(&format!("{P} seatbelt.keychainAccess=true"));
+        }
+        if !sb.extra_mach_lookups.is_empty() {
+            logger.log_line(&format!(
+                "{P} seatbelt.extraMachLookups ({} service(s))",
+                sb.extra_mach_lookups.len()
+            ));
+        }
+    }
+}
+
 // `allow_missing_command` relaxes the `require_process == true` arms so that a
 // CLI command-line override (provided by the driver after parsing) can stand in
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
@@ -900,6 +999,8 @@ fn convert_wire_config(
         };
     }
 
+    log_boundary_relaxations(&policy, seatbelt.as_ref(), logger);
+
     Ok(ExecutionRequest {
         schema_version,
         container_id,
@@ -1030,7 +1131,6 @@ mod tests {
     use super::*;
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
-    use crate::models::ClipboardPolicy;
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
@@ -1175,6 +1275,30 @@ mod tests {
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
+    }
+
+    #[test]
+    fn boundary_relaxation_logged_for_network_and_ui() {
+        // A config that opens network + UI boundaries logs loud SECURITY lines;
+        // a secure-default config must not.
+        let relaxed = r#"{"process": {"commandLine": "echo hi"}, "network": {"defaultPolicy": "allow"}, "ui": {"disable": false, "injection": true}}"#;
+        let mut logger = test_logger();
+        load_request(&base64_encode(relaxed.as_bytes()), &mut logger, true).unwrap();
+        let out = logger.get_buffer();
+        assert!(
+            out.contains("SECURITY: boundary relaxed: network.defaultPolicy=allow"),
+            "got: {out}"
+        );
+        assert!(out.contains("ui.disable=false"));
+        assert!(out.contains("ui.injection=true"));
+
+        let secure = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let mut logger2 = test_logger();
+        load_request(&base64_encode(secure.as_bytes()), &mut logger2, true).unwrap();
+        assert!(
+            !logger2.get_buffer().contains("boundary relaxed"),
+            "secure defaults should not warn"
+        );
     }
 
     #[test]
