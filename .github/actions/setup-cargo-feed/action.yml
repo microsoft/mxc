@@ -1,0 +1,10 @@
+name: Setup cargo MxcDependencies feed
+description: >-
+  Append the public MxcDependencies feed config to the repo-root cargo config so
+  cargo resolves through the feed (mirrors the ADO Cargo.Setup.Public step).
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ github.workspace }}
+      run: cat .azure-pipelines/.cargo/config.public.toml >> .cargo/config.toml

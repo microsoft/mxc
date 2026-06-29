@@ -6,6 +6,9 @@
 # doesn't extend the critical path.
 
 parameters:
+- name: isOfficialBuild
+  type: boolean
+  default: false
 - name: matrix
   type: object
   default:
@@ -68,9 +71,13 @@ jobs:
         parameters:
           targetTriple: $(targetTriple)
 
-      # Redirect crates.io to the public MxcDependencies feed (1ES network
-      # isolation blocks crates.io).
-      - template: Cargo.Setup.Public.yml@self
+      # Official builds resolve crates through the internal Mxc-Azure-Feed; fork/unofficial
+      # builds use the public MxcDependencies mirror. 1ES network isolation blocks crates.io
+      # either way.
+      - ${{ if eq(parameters.isOfficialBuild, true) }}:
+        - template: Cargo.Setup.Private.yml@self
+      - ${{ else }}:
+        - template: Cargo.Setup.Public.yml@self
 
       - script: cargo fmt --all -- --check
         displayName: cargo fmt --check

@@ -1,0 +1,37 @@
+# Seeds the public shine-oss MxcDependencies feed with every crates.io crate in
+# src/Cargo.lock.
+#
+# This pipeline cannot be run with `/azp run`; run it manually from shine-oss
+# (Run pipeline at https://dev.azure.com/shine-oss/mxc/_build?definitionId=33).
+
+parameters:
+  - name: prNumber
+    displayName: GitHub PR number to seed from
+    type: string
+
+trigger: none
+pr: none
+
+jobs:
+  - job: fetch_dependencies
+    displayName: Fetch and cache dependencies
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      # Overlay only the lockfile from the PR head onto the trusted checkout. cargo is never
+      # run and only Cargo.lock (data) is read, so no PR code executes. Review the PR's
+      # Cargo.lock first.
+      - script: |
+          set -euo pipefail
+          git fetch origin "pull/${{ parameters.prNumber }}/head"
+          git checkout FETCH_HEAD -- src/Cargo.lock
+          echo "Overlaid Cargo.lock from PR #${{ parameters.prNumber }}"
+        displayName: Overlay Cargo.lock from PR
+
+      - script: python3 .azure-pipelines/scripts/seed_feed.py
+        displayName: Seed the MxcDependencies feed from Cargo.lock
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)

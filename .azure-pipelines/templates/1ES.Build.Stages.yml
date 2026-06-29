@@ -87,6 +87,8 @@ stages:
   dependsOn: []
   jobs:
   - template: Lint.Job.yml
+    parameters:
+      isOfficialBuild: ${{ parameters.isOfficialBuild }}
 
 - stage: SDK_Unit_Tests
   displayName: 'SDK Unit Tests'
