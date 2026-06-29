@@ -53,6 +53,14 @@ const EXPERIMENTAL_KEY_TO_CONTAINMENT = {
   isolation_session: "isolation_session",
 };
 
+// Propertyless containments that are irreducibly stable (the abstract default
+// intent the runtime always resolves). These have no config block to cross-check
+// against, so they are pinned here. Other propertyless stable values (e.g.
+// `bubblewrap`) are pure allowlist declarations whose accidental removal is a
+// schema breaking change caught by the Phase 5b breaking-change guard, not an
+// internal inconsistency the freeze generator can detect structurally.
+const REQUIRED_STABLE_CONTAINMENT = ["process"];
+
 function fail(msg) {
   console.error("Freeze stable schema FAILED:");
   console.error("  - " + msg);
@@ -206,6 +214,12 @@ function validateStable({ out, defsKey, version }) {
       errors.push(
         `"${value}" is in stableContainment but "${key}" is still active experimental; promote it (and bump) first.`
       );
+    }
+  }
+  // ...and the irreducibly-stable default intent(s) must always be present.
+  for (const value of REQUIRED_STABLE_CONTAINMENT) {
+    if (!stableContainment.has(value)) {
+      errors.push(`stableContainment must always include "${value}" (the default intent).`);
     }
   }
 
