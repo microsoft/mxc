@@ -337,7 +337,14 @@ When your experimental feature is ready to ship:
    `experimental`: `"gpuIsolation has moved to the stable section"`.
    This error should persist for at least one release cycle so users have
    time to migrate, then it can be relaxed to the standard "unknown field"
-   behavior.
+   behavior. Keep the old field in the wire `Experimental` struct (as a
+   tombstone) so the parser can detect and reject it.
+7. Update the promotion guard manifest `schemas/config-stability.json` in the
+   **same commit**: move the key from `experimental` to `movedToStable` (with
+   the minor it shipped in), and bump `schemaMinor` to match the new
+   `maxSupported` minor. `scripts/versioning/check-config-stability.js` fails CI
+   if a feature leaves `experimental` without becoming a tombstone, or is
+   promoted without the minor bump — so promotion is never silent.
 
 ## Checklist
 
@@ -349,3 +356,4 @@ When your experimental feature is ready to ship:
 - [ ] Test config created and verified with and without `--experimental`
 - [ ] Stable code path is unaffected (all existing tests pass)
 - [ ] SDK updated if feature is SDK-accessible
+- [ ] New experimental key registered in `schemas/config-stability.json` `experimental` list (verified by `check-config-stability.js`)
