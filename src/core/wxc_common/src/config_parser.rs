@@ -626,7 +626,16 @@ fn validate_experimental_backend_keys(
 }
 
 /// Convert a typed `wire::Seatbelt` block into the validated domain struct.
-fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
+///
+/// `profileOverride` replaces the entire generated deny-default profile, so it
+/// is a catastrophic escape hatch: release builds **reject** a config that sets
+/// it, so a shipped binary can never run under a caller-supplied profile and
+/// never silently substitutes a different one. It is honored only in dev/debug
+/// builds for advanced testing.
+fn make_seatbelt_config(
+    sb: wire::Seatbelt,
+    logger: &mut Logger,
+) -> Result<SeatbeltConfig, WxcError> {
     // Destructure (no `..`) so adding a wire field without mapping it is a
     // compile error rather than a silent runtime drop.
     let wire::Seatbelt {
@@ -637,14 +646,35 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         keychain_access,
         extra_mach_lookups,
     } = sb;
-    SeatbeltConfig {
+
+    // SECURITY: reject the whole-profile override in release builds rather than
+    // dropping it. Silently substituting the generated profile would run the
+    // caller under a policy they did not ask for -- which can be *more*
+    // permissive than the custom profile they supplied. Failing closed matches
+    // how the reserved learning-mode capabilities are handled.
+    #[cfg(not(debug_assertions))]
+    let profile_override: Option<String> = {
+        if profile_override.is_some() {
+            let msg = "seatbelt.profileOverride is a dev-only capability and is \
+                       not accepted by release builds; remove it from the config"
+                .to_string();
+            logger.log_line(&format!("SECURITY: {msg}"));
+            return Err(WxcError::ConfigParse(msg));
+        }
+        None
+    };
+    // Touch `logger` in debug so the signature is consistent across profiles.
+    #[cfg(debug_assertions)]
+    let _ = &logger;
+
+    Ok(SeatbeltConfig {
         profile_override,
         gui_access: gui_access.unwrap_or(false),
         launch_method: launch_method.map(Into::into).unwrap_or_default(),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
-    }
+    })
 }
 
 /// Resolve the optional `containment` wire enum to a concrete domain backend.
@@ -1386,7 +1416,10 @@ fn convert_wire_config(
 
     // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
     // rejected above.
-    let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
+    let seatbelt = cfg
+        .seatbelt
+        .map(|sb| make_seatbelt_config(sb, logger))
+        .transpose()?;
 
     // UI section
     if let Some(raw_ui) = cfg.ui {
@@ -5195,7 +5228,8 @@ mod tests {
     }
 
     #[test]
-    fn seatbelt_profile_override_passed_through() {
+    #[cfg(debug_assertions)]
+    fn seatbelt_profile_override_passed_through_in_debug() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(deny default)"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -5205,6 +5239,31 @@ mod tests {
         assert_eq!(
             cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn seatbelt_profile_override_rejected_in_release() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(allow default)"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("release builds must reject profileOverride, not silently drop it");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("seatbelt.profileOverride"),
+            "error must name the offending field, got: {msg}"
+        );
+        assert!(
+            msg.contains("dev-only") && msg.contains("not accepted"),
+            "error must state the dev-only rejection, got: {msg}"
+        );
+        let out = logger.get_buffer();
+        assert!(
+            out.contains("SECURITY: seatbelt.profileOverride"),
+            "a SECURITY line must name the field, got: {out}"
         );
     }
 
