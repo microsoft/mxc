@@ -155,13 +155,11 @@ extends:
             # Authenticode-sign the staged PowerShell scripts so Code Sign
             # Validation (CSV) passes and the vpack ships signed scripts. The
             # downloaded wxc binaries arrive pre-signed from MXC-Official-Build;
-            # only these source-staged .ps1 scripts need signing here. The
-            # 'external_distribution' profile maps to CP-230012 (Microsoft
-            # Authenticode) — the same cert used to sign the binaries.
+            # only these source-staged .ps1 scripts need signing here.
             - task: onebranch.pipeline.signing@1
               displayName: Sign isolation_session scripts
               inputs:
                 command: sign
                 signing_profile: external_distribution
                 files_to_sign: '**/*.ps1'
-                search_root: $(ob_outputDirectory)
+                search_root: $(ob_outputDirectory)\isolation_session\main\scripts
