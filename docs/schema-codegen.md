@@ -36,8 +36,9 @@ standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
 - **`check-codegen.js`** — regenerates the dev schema **and** the SDK wire types
   and fails if either committed copy differs (neither can go stale).
 - **`check-schema-conformance.js`** — validates the `tests/examples` +
-  `tests/configs` corpus (and, per Phase 4b-emit, SDK-emitted configs)
-  against the committed schema.
+  `tests/configs` corpus against the committed schema, and (with
+  `--sdk-emission=required`, from the SDK Unit job) the configs the SDK emits
+  per `(platform, containment)`.
 - **`check-schema-versions.js`** / **`check-version-sync.js`** — version-constant
   and product-version sync.
 
