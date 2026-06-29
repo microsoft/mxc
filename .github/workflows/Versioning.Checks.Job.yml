@@ -30,14 +30,11 @@ jobs:
       - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
         run: node scripts/versioning/check-rust-toolchain-sync.js
 
-      - name: Check schema is in sync with the Rust wire model (codegen)
-        run: node scripts/versioning/check-schema-codegen.js
+      - name: Check codegen (dev schema + SDK wire types in sync with the Rust wire model)
+        run: node scripts/versioning/check-codegen.js
 
-      - name: Check SDK wire types are in sync with the Rust wire model (codegen)
-        run: node scripts/versioning/check-sdk-types-codegen.js
-
-      - name: Validate config corpus against dev schema
-        run: node scripts/versioning/validate-configs.js
+      - name: Check schema conformance (corpus + SDK emission)
+        run: node scripts/versioning/check-schema-conformance.js
 
       - name: Check config stability surface (promotion guard)
         run: node scripts/versioning/check-config-stability.js

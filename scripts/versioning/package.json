@@ -5,7 +5,9 @@
   "description": "Repository tooling: version-sync and config schema validation gates. Not published.",
   "scripts": {
     "check-schema-versions": "node check-schema-versions.js",
-    "validate-configs": "node validate-configs.js"
+    "check-codegen": "node check-codegen.js",
+    "check-schema-conformance": "node check-schema-conformance.js",
+    "check-config-stability": "node check-config-stability.js"
   },
   "dependencies": {
     "ajv": "^8.17.1"
