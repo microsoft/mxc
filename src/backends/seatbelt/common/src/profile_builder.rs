@@ -32,6 +32,12 @@ use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy, Proxy
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
 /// reachability to the resolved address supplied by the runner.
 ///
+/// If `request.seatbelt.profile_override` is set, that string is returned
+/// verbatim and policy fields are ignored. This whole-profile escape hatch is
+/// **dev-only**: the branch is compiled out of release builds (and the config
+/// parser strips `profileOverride` in release anyway), so a shipped binary
+/// always builds the generated deny-default profile.
+///
 /// `pub` (not `pub(crate)`) so it stays a reachable API root: `profile_builder`
 /// is compiled and unit-tested on every host, but its only in-crate caller
 /// (`seatbelt_runner`) is `cfg(target_os = "macos")`, so on other targets a
@@ -40,6 +46,7 @@ pub fn build_profile_with_proxy(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
 ) -> Result<String, String> {
+    #[cfg(debug_assertions)]
     if let Some(override_profile) = request
         .seatbelt
         .as_ref()
@@ -776,6 +783,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn profile_override_takes_precedence() {
         let mut r = req();
         r.policy.readonly_paths = vec!["/should/be/ignored".into()];

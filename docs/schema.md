@@ -80,7 +80,7 @@ production configs and the dev schema when working on experimental features:
             ]
         },
         "seatbelt": {                 // macOS sandbox settings (macOS only)
-            "profileOverride": null,       // Optional raw TinyScheme profile (escape hatch)
+            "profileOverride": null,       // Dev-only escape hatch (stripped in release builds)
             "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps
             "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
             "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)

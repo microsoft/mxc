@@ -352,7 +352,7 @@ pub enum ClipboardPolicy {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Seatbelt {
-    /// Replace the generated profile entirely (advanced/testing escape hatch).
+    /// Replace the generated profile entirely (dev-only escape hatch; stripped in release builds).
     pub profile_override: Option<String>,
     /// Allow GUI (WindowServer) access.
     pub gui_access: Option<bool>,
