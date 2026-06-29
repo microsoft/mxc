@@ -525,65 +525,63 @@ fn log_boundary_relaxations(
             policy.allowed_hosts.len()
         ));
     }
-    if !policy.blocked_hosts.is_empty() {
-        logger.log_line(&format!(
-            "{P} network.blockedHosts ({} host(s))",
-            policy.blocked_hosts.len()
-        ));
-    }
+    // blockedHosts is intentionally not reported: it only subtracts
+    // connectivity, so it never relaxes the boundary.
     if policy.network_proxy.is_enabled() {
         logger.log_line(&format!("{P} network.proxy enabled"));
     }
 
-    // UI
+    // UI. Clipboard, injection, windows, and the BaseProcess desktop knobs are
+    // inert while UI is disabled; only warn when ui.disable=false opens them.
+    // `ime` and capabilities stay effective regardless and are reported below.
+    let ui = &policy.base_process_ui;
     if !policy.ui.disable {
         logger.log_line(&format!("{P} ui.disable=false (windows allowed)"));
+        if policy.ui.clipboard != ClipboardPolicy::None {
+            logger.log_line(&format!("{P} ui.clipboard={:?}", policy.ui.clipboard));
+        }
+        if policy.ui.injection {
+            logger.log_line(&format!("{P} ui.injection=true"));
+        }
+        if ui.isolation != "container" {
+            logger.log_line(&format!(
+                "{P} processContainer.ui.isolation={}",
+                ui.isolation
+            ));
+        }
+        if ui.desktop_system_control {
+            logger.log_line(&format!(
+                "{P} processContainer.ui.desktopSystemControl=true"
+            ));
+        }
+        if ui.system_settings != "none" {
+            logger.log_line(&format!(
+                "{P} processContainer.ui.systemSettings={}",
+                ui.system_settings
+            ));
+        }
+        if seatbelt.is_some_and(|sb| sb.gui_access) {
+            logger.log_line(&format!("{P} seatbelt.guiAccess=true"));
+        }
     }
-    if policy.ui.clipboard != ClipboardPolicy::None {
-        logger.log_line(&format!("{P} ui.clipboard={:?}", policy.ui.clipboard));
-    }
-    if policy.ui.injection {
-        logger.log_line(&format!("{P} ui.injection=true"));
+    if ui.ime {
+        logger.log_line(&format!("{P} processContainer.ui.ime=true"));
     }
 
-    // ProcessContainer
+    // ProcessContainer capabilities (effective regardless of ui.disable).
     if !policy.capabilities.is_empty() {
         logger.log_line(&format!(
             "{P} processContainer.capabilities ({} cap(s))",
             policy.capabilities.len()
         ));
     }
-    let ui = &policy.base_process_ui;
-    if ui.isolation != "container" {
-        logger.log_line(&format!(
-            "{P} processContainer.ui.isolation={}",
-            ui.isolation
-        ));
-    }
-    if ui.desktop_system_control {
-        logger.log_line(&format!(
-            "{P} processContainer.ui.desktopSystemControl=true"
-        ));
-    }
-    if ui.system_settings != "none" {
-        logger.log_line(&format!(
-            "{P} processContainer.ui.systemSettings={}",
-            ui.system_settings
-        ));
-    }
-    if ui.ime {
-        logger.log_line(&format!("{P} processContainer.ui.ime=true"));
-    }
 
-    // Seatbelt (macOS)
+    // Seatbelt non-UI relaxations (independent of ui.disable).
     if let Some(sb) = seatbelt {
         if sb.profile_override.is_some() {
             logger.log_line(&format!(
                 "{P} seatbelt.profileOverride (generated profile bypassed)"
             ));
-        }
-        if sb.gui_access {
-            logger.log_line(&format!("{P} seatbelt.guiAccess=true"));
         }
         if sb.keychain_access {
             logger.log_line(&format!("{P} seatbelt.keychainAccess=true"));
@@ -1298,6 +1296,17 @@ mod tests {
         assert!(
             !logger2.get_buffer().contains("boundary relaxed"),
             "secure defaults should not warn"
+        );
+
+        // blockedHosts under deny-by-default and clipboard under ui.disable are
+        // inert and must NOT warn.
+        let inert = r#"{"process": {"commandLine": "echo hi"}, "network": {"blockedHosts": ["evil.test"]}, "ui": {"clipboard": "all", "injection": true}}"#;
+        let mut logger3 = test_logger();
+        load_request(&base64_encode(inert.as_bytes()), &mut logger3, true).unwrap();
+        assert!(
+            !logger3.get_buffer().contains("boundary relaxed"),
+            "inert blockedHosts + UI-disabled clipboard should not warn, got: {}",
+            logger3.get_buffer()
         );
     }
 
