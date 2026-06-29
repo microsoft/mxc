@@ -38,3 +38,6 @@ jobs:
 
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js
+
+      - name: Check config stability surface (promotion guard)
+        run: node scripts/versioning/check-config-stability.js
