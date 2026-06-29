@@ -4,7 +4,7 @@
 //! Dedicated, well-typed wire model — the single source of truth for the MXC
 //! config shape. The JSON Schema (`schemas/dev/mxc-config.schema.<dev>.json`) is
 //! **generated** from these types via `mxc_schema_gen`; CI fails if the
-//! committed schema drifts (see `scripts/versioning/check-schema-codegen.js`).
+//! committed schema drifts (see `scripts/versioning/check-codegen.js`).
 //!
 //! These types describe the config *contract* precisely:
 //!
