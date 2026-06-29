@@ -1092,6 +1092,7 @@ dependencies = [
  "windows-collections",
  "windows-core",
  "windows-future",
+ "zip",
 ]
 
 [[package]]
