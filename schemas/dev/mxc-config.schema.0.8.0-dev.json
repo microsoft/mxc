@@ -740,7 +740,7 @@
           ]
         },
         "profileOverride": {
-          "description": "Replace the generated profile entirely (advanced/testing escape hatch).",
+          "description": "Replace the generated profile entirely (dev-only escape hatch; stripped in release builds).",
           "type": [
             "string",
             "null"

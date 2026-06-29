@@ -465,7 +465,12 @@ fn validate_experimental_backend_keys(
 }
 
 /// Convert a typed `wire::Seatbelt` block into the validated domain struct.
-fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
+///
+/// `profileOverride` replaces the entire generated deny-default profile, so it
+/// is a catastrophic escape hatch: it is **stripped in release builds** (and a
+/// SECURITY line logged) so shipped binaries cannot honor a caller-supplied
+/// profile. It is retained only in dev/debug builds for advanced testing.
+fn make_seatbelt_config(sb: wire::Seatbelt, logger: &mut Logger) -> SeatbeltConfig {
     // Destructure (no `..`) so adding a wire field without mapping it is a
     // compile error rather than a silent runtime drop.
     let wire::Seatbelt {
@@ -476,6 +481,19 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         keychain_access,
         extra_mach_lookups,
     } = sb;
+
+    // SECURITY: strip the whole-profile override in release builds.
+    #[cfg(not(debug_assertions))]
+    let profile_override = {
+        if profile_override.is_some() {
+            logger.log("SECURITY: 'seatbelt.profileOverride' is a dev-only capability and has been ignored (not allowed in release builds)\n");
+        }
+        None
+    };
+    // Touch `logger` in debug so the signature is consistent across profiles.
+    #[cfg(debug_assertions)]
+    let _ = &logger;
+
     SeatbeltConfig {
         profile_override,
         gui_access: gui_access.unwrap_or(false),
@@ -985,7 +1003,7 @@ fn convert_wire_config(
 
     // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
     // rejected above.
-    let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
+    let seatbelt = cfg.seatbelt.map(|sb| make_seatbelt_config(sb, logger));
 
     // UI section
     if let Some(raw_ui) = cfg.ui {
@@ -3475,7 +3493,8 @@ mod tests {
     }
 
     #[test]
-    fn seatbelt_profile_override_passed_through() {
+    #[cfg(debug_assertions)]
+    fn seatbelt_profile_override_passed_through_in_debug() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(deny default)"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -3486,6 +3505,22 @@ mod tests {
             cfg.profile_override.as_deref(),
             Some("(version 1)(deny default)")
         );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn seatbelt_profile_override_stripped_in_release() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(allow default)"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.seatbelt.expect("seatbelt should be populated");
+        assert!(
+            cfg.profile_override.is_none(),
+            "profileOverride must be stripped in release builds"
+        );
+        assert!(logger.get_buffer().contains("SECURITY"));
     }
 
     #[test]
