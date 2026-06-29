@@ -41,6 +41,15 @@ standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
   per `(platform, containment)`.
 - **`check-schema-versions.js`** / **`check-version-sync.js`** — version-constant
   and product-version sync.
+- **`check-config-stability.js`** — promotion guard (experimental surface +
+  tombstones + minor-bump-on-promotion).
+- **`freeze-stable-schema.js --check`** — proves the dev schema can be frozen to
+  a valid stable schema; `--write <ver>` generates the stable release file.
+- **`check-breaking-change.js`** — when `stableLatest` changes, fails if a
+  breaking schema change ships without an adequate version bump (pre-1.0:
+  breaking needs ≥ minor; ≥1.0: needs major). Detection runs only for
+  same-major.minor transitions, so legacy↔generated shape differences (always a
+  ≥minor gap) are never diffed.
 
 ## What the generated schema does NOT contain
 
