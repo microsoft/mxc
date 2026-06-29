@@ -15,6 +15,7 @@
 //   node scripts/versioning/check-config-stability.js
 
 const { readFileSync } = require("fs");
+const { execFileSync } = require("child_process");
 const { join } = require("path");
 
 const repoRoot = join(__dirname, "..", "..");
@@ -27,6 +28,35 @@ function read(...parts) {
 function majorMinor(v) {
   const m = /^(\d+)\.(\d+)\./.exec(v);
   return m ? `${m[1]}.${m[2]}` : null;
+}
+
+// minorRank("0.8") -> 8 within major 0; used to require monotonic bumps.
+function minorParts(mm) {
+  const m = /^(\d+)\.(\d+)$/.exec(mm || "");
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+function minorGreater(a, b) {
+  const pa = minorParts(a), pb = minorParts(b);
+  if (!pa || !pb) return false;
+  return pa[0] > pb[0] || (pa[0] === pb[0] && pa[1] > pb[1]);
+}
+
+// Read the manifest as it stood at a base ref (the promotion-history baseline).
+// Falls back gracefully when there is no committed predecessor (first add).
+function baseManifest() {
+  for (const ref of ["origin/main", "HEAD~1"]) {
+    try {
+      const txt = execFileSync(
+        "git",
+        ["show", `${ref}:schemas/config-stability.json`],
+        { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+      );
+      return JSON.parse(txt);
+    } catch {
+      /* ref or file absent; try next */
+    }
+  }
+  return null;
 }
 
 const manifest = JSON.parse(read("schemas", "config-stability.json"));
@@ -89,6 +119,37 @@ for (const [k, atMinor] of Object.entries(manifest.movedToStable || {})) {
   }
   if (!/^\d+\.\d+$/.test(atMinor)) {
     errors.push(`movedToStable["${k}"] = "${atMinor}" must be a major.minor string.`);
+  }
+}
+
+// 6. History-aware promotion guard (catches lockstep promotions a snapshot
+//    check misses). Compare against the manifest at the base ref: any key that
+//    was active experimental and is no longer active MUST now be a tombstone,
+//    AND the schema minor MUST have advanced. A key that simply vanished (delete
+//    + promote) is therefore caught even though nothing top-level references its
+//    experimental past.
+const base = baseManifest();
+if (base) {
+  const baseActive = new Set(base.experimental || []);
+  const baseTombstones = new Set(Object.keys(base.movedToStable || {}));
+  for (const k of baseActive) {
+    if (active.has(k)) continue; // still experimental — fine
+    if (!tombstones.has(k)) {
+      errors.push(
+        `"${k}" left "experimental" but is not in "movedToStable". A feature can only ` +
+          `leave experimental by becoming a tombstone (promotion); deleting it is a silent break.`
+      );
+    } else if (!minorGreater(manifest.schemaMinor, base.schemaMinor)) {
+      errors.push(
+        `"${k}" was promoted to stable but schemaMinor did not advance ` +
+          `(base ${base.schemaMinor} -> now ${manifest.schemaMinor}). Promotion requires a minor bump.`
+      );
+    }
+  }
+  for (const k of baseTombstones) {
+    if (!tombstones.has(k)) {
+      errors.push(`"${k}" was a tombstone at base but is gone now; tombstones are permanent.`);
+    }
   }
 }
 
