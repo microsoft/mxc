@@ -8,10 +8,10 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    CaptureDenialsConfig, CaptureDenialsMode, ClipboardPolicy, ContainerPolicy, ContainmentBackend,
+    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LaunchMethod, LifecycleConfig,
+    LxcConfig, NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig,
+    SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -713,6 +713,143 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
     }
 }
 
+/// Render a caller-supplied string safely for a single diagnostic line.
+///
+/// Free-form config values reach the security log verbatim, so an embedded
+/// newline would let a caller forge additional `SECURITY: boundary relaxed:`
+/// entries and poison the audit stream. Control characters are escaped and the
+/// value is truncated so one field cannot dominate the log.
+fn sanitize_log_value(value: &str) -> String {
+    const MAX: usize = 128;
+    let mut out = String::with_capacity(value.len().min(MAX) + 2);
+    out.push('"');
+    for ch in value.chars().take(MAX) {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    if value.chars().count() > MAX {
+        out.push_str("...");
+    }
+    out.push('"');
+    out
+}
+
+/// Emit a standardized, deterministic warning for each setting that opens a
+/// security boundary beyond the secure default, so relaxations are loud and
+/// auditable in the diagnostic log rather than silently honored. Logging only —
+/// never changes behavior. Filesystem grants and the seatbelt pty baseline are
+/// out of scope (they are the request's primary purpose, not a relaxation).
+fn log_boundary_relaxations(
+    policy: &ContainerPolicy,
+    seatbelt: Option<&SeatbeltConfig>,
+    logger: &mut Logger,
+) {
+    const P: &str = "SECURITY: boundary relaxed:";
+
+    // Network
+    if policy.default_network_policy == NetworkPolicy::Allow {
+        logger.log_line(&format!(
+            "{P} network.defaultPolicy=allow (network open by default)"
+        ));
+    }
+    if policy.allow_local_network {
+        logger.log_line(&format!("{P} network.allowLocalNetwork=true"));
+    }
+    if !policy.allowed_hosts.is_empty() {
+        logger.log_line(&format!(
+            "{P} network.allowedHosts ({} host(s))",
+            policy.allowed_hosts.len()
+        ));
+    }
+    // blockedHosts is intentionally not reported: it only subtracts
+    // connectivity, so it never relaxes the boundary.
+    if policy.network_proxy.is_enabled() {
+        logger.log_line(&format!("{P} network.proxy enabled"));
+    }
+
+    // UI. Clipboard, injection, windows, and the BaseProcess desktop knobs are
+    // inert while UI is disabled; only warn when ui.disable=false opens them.
+    // `ime` and capabilities stay effective regardless and are reported below.
+    let ui = &policy.base_process_ui;
+    // Clipboard is NOT gated on ui.disable: the Seatbelt profile builder emits
+    // the pasteboard mach-lookup grant purely from ui.clipboard, outside its
+    // ui.disable branch, so a UI-disabled macOS sandbox with clipboard enabled
+    // still has a live pasteboard channel. Reporting it unconditionally is
+    // redundant on Windows (where UI-disabled forces clipboard blocks) but never
+    // misses a real relaxation.
+    if policy.ui.clipboard != ClipboardPolicy::None {
+        logger.log_line(&format!("{P} ui.clipboard={:?}", policy.ui.clipboard));
+    }
+    if !policy.ui.disable {
+        logger.log_line(&format!("{P} ui.disable=false (windows allowed)"));
+        if policy.ui.injection {
+            logger.log_line(&format!("{P} ui.injection=true"));
+        }
+        if ui.isolation != "container" {
+            logger.log_line(&format!(
+                "{P} processContainer.ui.isolation={}",
+                ui.isolation
+            ));
+        }
+        if ui.desktop_system_control {
+            logger.log_line(&format!(
+                "{P} processContainer.ui.desktopSystemControl=true"
+            ));
+        }
+        if ui.system_settings != "none" {
+            logger.log_line(&format!(
+                "{P} processContainer.ui.systemSettings={}",
+                sanitize_log_value(&ui.system_settings)
+            ));
+        }
+        if seatbelt.is_some_and(|sb| sb.gui_access) {
+            logger.log_line(&format!("{P} seatbelt.guiAccess=true"));
+        }
+    }
+    if ui.ime {
+        logger.log_line(&format!("{P} processContainer.ui.ime=true"));
+    }
+
+    // ProcessContainer capabilities (effective regardless of ui.disable).
+    if !policy.capabilities.is_empty() {
+        logger.log_line(&format!(
+            "{P} processContainer.capabilities ({} cap(s))",
+            policy.capabilities.len()
+        ));
+    }
+
+    // Seatbelt non-UI relaxations (independent of ui.disable).
+    if let Some(sb) = seatbelt {
+        if matches!(sb.launch_method, LaunchMethod::Open) {
+            logger.log_line(&format!(
+                "{P} seatbelt.launchMethod=open (sandbox applies to the inner \
+                 command, not the launched app)"
+            ));
+        }
+        if sb.profile_override.is_some() {
+            logger.log_line(&format!(
+                "{P} seatbelt.profileOverride (generated profile bypassed)"
+            ));
+        }
+        if sb.keychain_access {
+            logger.log_line(&format!("{P} seatbelt.keychainAccess=true"));
+        }
+        if !sb.extra_mach_lookups.is_empty() {
+            logger.log_line(&format!(
+                "{P} seatbelt.extraMachLookups ({} service(s))",
+                sb.extra_mach_lookups.len()
+            ));
+        }
+    }
+}
+
 // `allow_missing_command` relaxes the `require_process == true` arms so that a
 // CLI command-line override (provided by the driver after parsing) can stand in
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
@@ -1261,6 +1398,8 @@ fn convert_wire_config(
         };
     }
 
+    log_boundary_relaxations(&policy, seatbelt.as_ref(), logger);
+
     Ok(ExecutionRequest {
         schema_version,
         container_id,
@@ -1502,7 +1641,6 @@ mod tests {
     use super::*;
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
-    use crate::models::ClipboardPolicy;
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
@@ -1768,6 +1906,111 @@ mod tests {
             MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
+    }
+
+    #[test]
+    fn boundary_relaxation_logged_for_network_and_ui() {
+        // A config that opens network + UI boundaries logs loud SECURITY lines;
+        // a secure-default config must not.
+        let relaxed = r#"{"process": {"commandLine": "echo hi"}, "network": {"defaultPolicy": "allow"}, "ui": {"disable": false, "injection": true}}"#;
+        let mut logger = test_logger();
+        load_request(&base64_encode(relaxed.as_bytes()), &mut logger, true).unwrap();
+        let out = logger.get_buffer();
+        assert!(
+            out.contains("SECURITY: boundary relaxed: network.defaultPolicy=allow"),
+            "got: {out}"
+        );
+        assert!(out.contains("ui.disable=false"));
+        assert!(out.contains("ui.injection=true"));
+
+        let secure = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let mut logger2 = test_logger();
+        load_request(&base64_encode(secure.as_bytes()), &mut logger2, true).unwrap();
+        assert!(
+            !logger2.get_buffer().contains("boundary relaxed"),
+            "secure defaults should not warn"
+        );
+
+        // blockedHosts under deny-by-default is inert and must NOT warn.
+        // Injection is inert while ui.disable=true (Seatbelt only omits an
+        // explicit HID deny, which deny-default already covers), so it is
+        // suppressed too.
+        let inert = r#"{"process": {"commandLine": "echo hi"}, "network": {"blockedHosts": ["evil.test"]}, "ui": {"injection": true}}"#;
+        let mut logger3 = test_logger();
+        load_request(&base64_encode(inert.as_bytes()), &mut logger3, true).unwrap();
+        assert!(
+            !logger3.get_buffer().contains("boundary relaxed"),
+            "inert blockedHosts + UI-disabled injection should not warn, got: {}",
+            logger3.get_buffer()
+        );
+    }
+
+    #[test]
+    fn clipboard_warns_even_when_ui_is_disabled() {
+        // The Seatbelt profile builder emits the pasteboard mach-lookup grant
+        // from ui.clipboard alone, outside its ui.disable branch, so clipboard
+        // is a live channel on macOS even with UI disabled. The warning must not
+        // be suppressed by ui.disable.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "all"}}"#;
+        let mut logger = test_logger();
+        let req = load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
+        assert!(req.policy.ui.disable, "ui.disable defaults to true");
+        let out = logger.get_buffer();
+        assert!(
+            out.contains("SECURITY: boundary relaxed: ui.clipboard=All"),
+            "clipboard must warn while ui.disable=true, got: {out}"
+        );
+    }
+
+    #[test]
+    fn seatbelt_launch_method_open_warns() {
+        // launchMethod=open sandboxes the inner command rather than the launched
+        // app, which moves the trust boundary and must be reported.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"launchMethod": "open"}}"#;
+        let mut logger = test_logger();
+        load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
+        let out = logger.get_buffer();
+        assert!(
+            out.contains("SECURITY: boundary relaxed: seatbelt.launchMethod=open"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn mixed_policy_suppresses_only_the_inert_field() {
+        // Suppression must be field-specific: an inert setting stays silent while
+        // an effective relaxation in the same config still warns.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "network": {"blockedHosts": ["evil.test"], "allowLocalNetwork": true}}"#;
+        let mut logger = test_logger();
+        load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
+        let out = logger.get_buffer();
+        assert!(
+            out.contains("SECURITY: boundary relaxed: network.allowLocalNetwork=true"),
+            "effective relaxation must still warn, got: {out}"
+        );
+        assert!(
+            !out.contains("blockedHosts"),
+            "blockedHosts must stay silent, got: {out}"
+        );
+    }
+
+    #[test]
+    fn free_form_log_values_cannot_forge_audit_lines() {
+        // A newline in a free-form value must not be able to synthesize an extra
+        // `SECURITY: boundary relaxed:` line in the audit stream.
+        let forged = sanitize_log_value("custom\nSECURITY: boundary relaxed: forged=true");
+        assert!(
+            !forged.contains('\n'),
+            "newline must be escaped, got: {forged}"
+        );
+        assert!(forged.contains("\\n"), "got: {forged}");
+        // Long values are truncated so one field cannot dominate the log.
+        let long = sanitize_log_value(&"a".repeat(500));
+        assert!(
+            long.len() < 200,
+            "value should be truncated, len={}",
+            long.len()
+        );
     }
 
     #[test]
