@@ -38,3 +38,6 @@ jobs:
 
       - name: Check config stability surface (promotion guard)
         run: node scripts/versioning/check-config-stability.js
+
+      - name: Check the dev schema can be frozen to a valid stable schema
+        run: node scripts/versioning/freeze-stable-schema.js --check

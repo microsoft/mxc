@@ -342,9 +342,29 @@ When your experimental feature is ready to ship:
 7. Update the promotion guard manifest `schemas/config-stability.json` in the
    **same commit**: move the key from `experimental` to `movedToStable` (with
    the minor it shipped in), and bump `schemaMinor` to match the new
-   `maxSupported` minor. `scripts/versioning/check-config-stability.js` fails CI
-   if a feature leaves `experimental` without becoming a tombstone, or is
-   promoted without the minor bump — so promotion is never silent.
+   `maxSupported` minor. If the promoted backend has its own `containment` wire
+   value, add that exact value to `stableContainment` so the freeze generator
+   includes it in stable schemas. `scripts/versioning/check-config-stability.js`
+   fails CI if a feature leaves `experimental` without becoming a tombstone, or
+   is promoted without the minor bump — so promotion is never silent.
+
+### Cutting a stable release
+
+Stable schemas are **generated**, not hand-authored. To freeze the current dev
+surface as a stable release schema:
+
+```
+node scripts/versioning/freeze-stable-schema.js --write <version>   # e.g. 0.8.0-alpha
+```
+
+This derives `schemas/stable/mxc-config.schema.<version>.json` from the generated
+dev schema, stripping the experimental + state-aware surface and the experimental
+`containment` values (everything outside `stableContainment`). Then update
+`schemas/schema-version.json` (`stableLatest`) and the docs/compatibility tables.
+`freeze-stable-schema.js --check` runs in CI every PR to prove the current dev
+schema can still be frozen cleanly (valid, no dangling `$ref`s, experimental
+surface fully removed). The legacy hand-authored stables (0.4–0.7) stay frozen as
+historical artifacts and are never regenerated.
 
 ## Checklist
 

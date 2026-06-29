@@ -1,5 +1,5 @@
 {
-  "$comment": "Promotion guard manifest for the MXC config surface (Phase 4a). Declares the dev schema minor, the ACTIVE experimental sub-keys under the top-level 'experimental' object, and tombstones for keys that have been promoted to stable (kept in the wire 'Experimental' struct only so the parser can reject the old experimental spelling with a 'moved to stable' error). check-config-stability.js diffs this against the generated dev schema: a key promoted out of 'experimental' (or removed) without a matching tombstone + minor bump fails CI. Active experimental keys must NOT be top-level; tombstones MUST be top-level. Bump schemaMinor (and devSchemaFile/maxSupported in schema-version.json) in the same commit that promotes a feature.",
+  "$comment": "Promotion guard manifest for the MXC config surface (Phase 4a). Declares the dev schema minor, the ACTIVE experimental sub-keys under the top-level 'experimental' object, tombstones for keys that have been promoted to stable (kept in the wire 'Experimental' struct only so the parser can reject the old experimental spelling with a 'moved to stable' error), and the stable 'containment' enum allowlist used by the freeze generator (Phase 5a). check-config-stability.js diffs this against the generated dev schema: a key promoted out of 'experimental' (or removed) without a matching tombstone + minor bump fails CI. Active experimental keys must NOT be top-level; tombstones MUST be top-level. Bump schemaMinor (and devSchemaFile/maxSupported in schema-version.json) in the same commit that promotes a feature. When promoting a backend that has its own 'containment' value, also add that exact wire value to stableContainment.",
   "schemaMinor": "0.8",
   "experimental": [
     "isolation_session",
@@ -10,5 +10,13 @@
   ],
   "movedToStable": {
     "seatbelt": "0.7"
-  }
+  },
+  "stableContainment": [
+    "process",
+    "processcontainer",
+    "lxc",
+    "bubblewrap",
+    "seatbelt"
+  ]
 }
+
