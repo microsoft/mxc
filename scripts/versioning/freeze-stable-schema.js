@@ -33,6 +33,26 @@ const readJson = (...p) => JSON.parse(readFileSync(join(repoRoot, ...p), "utf8")
 // Top-level properties that are not part of the stable surface.
 const STRIP_PROPS = ["experimental", "phase", "sandboxId"];
 
+// Structural cross-check for the stableContainment allowlist (breaks the
+// circularity of validating the generated enum against the same manifest it was
+// built from). Maps a stable top-level backend *config property* to the exact
+// `containment` wire value it pairs with: if the property survives into the
+// stable schema, its containment value MUST be in stableContainment. (Abstract /
+// property-less containments like `process` and `bubblewrap` are not listed.)
+const PROPERTY_TO_CONTAINMENT = {
+  processContainer: "processcontainer",
+  lxc: "lxc",
+  seatbelt: "seatbelt",
+};
+
+// Experimental sub-keys that are also `containment` wire values: an ACTIVE
+// experimental backend must NOT appear in stableContainment.
+const EXPERIMENTAL_KEY_TO_CONTAINMENT = {
+  windows_sandbox: "windows_sandbox",
+  wslc: "wslc",
+  isolation_session: "isolation_session",
+};
+
 function fail(msg) {
   console.error("Freeze stable schema FAILED:");
   console.error("  - " + msg);
@@ -160,11 +180,33 @@ function validateStable({ out, defsKey, version }) {
 
   // Containment exactly equals the stable allowlist.
   const manifest = readJson("schemas", "config-stability.json");
+  const stableContainment = new Set(manifest.stableContainment || []);
   const cont = out[defsKey] && out[defsKey].Containment;
   const got = (cont && cont.oneOf ? cont.oneOf : []).map((b) => (Array.isArray(b.enum) ? b.enum[0] : b.const)).sort();
-  const want = [...manifest.stableContainment].sort();
+  const want = [...stableContainment].sort();
   if (JSON.stringify(got) !== JSON.stringify(want)) {
     errors.push(`stable containment ${JSON.stringify(got)} != allowlist ${JSON.stringify(want)}`);
+  }
+
+  // stableContainment COMPLETENESS (structural, not circular): every stable
+  // backend config property that survives stripping must have its containment
+  // value declared, or the stable schema would expose the block but reject its
+  // own containment value.
+  for (const [prop, value] of Object.entries(PROPERTY_TO_CONTAINMENT)) {
+    if (out.properties && out.properties[prop] && !stableContainment.has(value)) {
+      errors.push(
+        `stable schema exposes the "${prop}" backend block but stableContainment is missing its "${value}" value.`
+      );
+    }
+  }
+  // ...and an active-experimental backend must NOT be in stableContainment.
+  for (const key of manifest.experimental || []) {
+    const value = EXPERIMENTAL_KEY_TO_CONTAINMENT[key];
+    if (value && stableContainment.has(value)) {
+      errors.push(
+        `"${value}" is in stableContainment but "${key}" is still active experimental; promote it (and bump) first.`
+      );
+    }
   }
 
   // Compiles as a schema, and accepts a minimal stable config while rejecting
