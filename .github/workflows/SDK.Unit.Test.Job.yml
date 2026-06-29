@@ -30,3 +30,15 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+
+      # Phase 4b-emit: validate the configs the SDK actually emits (per platform
+      # x containment) against the dev schema, here where sdk/dist exists. The
+      # check mocks os.platform to cover every platform in one run, so this runs
+      # regardless of which matrix OS we are on. ajv is resolved from
+      # scripts/versioning.
+      - name: Install versioning gate deps
+        working-directory: scripts/versioning
+        run: npm ci
+      - name: Check SDK config emission against dev schema
+        working-directory: ${{ github.workspace }}
+        run: node scripts/versioning/check-schema-conformance.js --sdk-emission=required
