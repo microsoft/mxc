@@ -182,6 +182,42 @@ tests; the key names and casing are to be treated as a stable contract.
   `deniedResources` from the summary after exit. This is the simpler, race-free option
   and is the basis for the approve-and-retry experience.
 
+### Final response envelope (stderr, no pipe)
+
+When **no** denial pipe is attached (`MXC_DENIALS_PIPE` unset — the default,
+wait-for-exit case), `wxc-exec` also writes a single plain-JSON envelope line to
+**stderr** after the workload exits, carrying the consolidated denial list:
+
+```jsonc
+{
+  "error": { "code": "backend_error", "message": "..." },  // present only on failure
+  "deniedResources": [ /* same deduped array as the summary's deniedResources */ ],
+  "deniedResourcesTruncated": true                          // present only when truncated
+}
+```
+
+This is a convenience for the wait-for-exit consumer: it is the same final envelope
+that already carries the `error` object on failure, now with `deniedResources` folded
+in, so an application can parse **one clean JSON line at the tail** instead of demuxing
+the `0x1E`-framed `summary` record. Key properties:
+
+- **Plain JSON, not `0x1E`-framed.** It is a normal newline-terminated line; it does
+  **not** carry the `0x1E` record-separator prefix, so a `0x1E` demux skips it and a
+  JSON consumer reads it directly.
+- **Emitted unconditionally with respect to exit code.** It appears whenever there are
+  denials, on both successful (exit 0) and failed runs — not only on failure.
+- **PTY-safe.** It is a single emission *after* the child has exited, so under a
+  pseudoconsole it cleanly appends at the tail of the transcript rather than racing
+  live output.
+- **Suppressed when a pipe is attached.** When `MXC_DENIALS_PIPE` is set, denials are
+  delivered over that dedicated channel (including the consolidated `summary` list), so
+  the stderr envelope is **not** emitted — keeping the terminal the pipe exists to
+  protect free of denial bytes.
+- **Independent of the live `0x1E` stderr stream.** In the no-pipe case the `0x1E`
+  per-denial lines and `summary` terminator are still written to stderr as before; this
+  envelope is an additional, separately-parseable artifact. Consumers should pick one:
+  either parse the `0x1E` stream, or read this final envelope.
+
 ---
 
 ## 5. Transports and PTY handling

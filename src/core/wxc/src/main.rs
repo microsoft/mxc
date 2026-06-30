@@ -1000,22 +1000,61 @@ fn main() {
         eprint!("{}", response.standard_err);
     }
 
-    // Emit a structured JSON error envelope on stderr for SDK/caller consumption
-    // when the runner produced an error message (one-shot flows only).
+    // Emit a structured JSON envelope on stderr for SDK/caller consumption
+    // (one-shot flows only). It carries, in a single post-exit emission:
+    //   * an `error` object, when the runner produced an error message; and
+    //   * the captured `deniedResources` list (+ `deniedResourcesTruncated`),
+    //     when captureDenials surfaced denials.
     // In PTY mode stderr is merged into the PTY output stream, so the envelope
-    // appears inline -- callers (e.g. copilot) can parse it from the output.
-    if response.exit_code != 0 && !response.error_message.is_empty() {
-        let mut envelope = serde_json::json!({
-            "error": {
-                "code": "backend_error",
-                "message": response.error_message,
+    // appears inline at the tail -- callers (e.g. copilot) can parse it from the
+    // output. A single emission *after* the workload has exited is PTY-safe
+    // (the terminal is idle, nothing races it); this is the "wait-for-exit"
+    // delivery path (Path 1) and lets a caller read one clean JSON envelope
+    // instead of parsing the 0x1E-framed denial summary line.
+    //
+    // The denial list is folded in only when no live denial pipe is attached.
+    // When `MXC_DENIALS_PIPE` is set the caller opted into the live stream
+    // (Path 2) and already receives the consolidated list over that dedicated
+    // channel, so repeating it on stderr would be redundant and would pollute
+    // the very terminal the pipe exists to keep clean. The env-var name mirrors
+    // `PIPE_ENV_VAR` in learning_mode_windows::denial_stream.
+    let denials_on_pipe = std::env::var("MXC_DENIALS_PIPE")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let has_error = response.exit_code != 0 && !response.error_message.is_empty();
+    let has_denials = !response.denied_resources.is_empty() && !denials_on_pipe;
+    if has_error || has_denials {
+        let mut envelope = serde_json::Map::new();
+        if has_error {
+            let mut error = serde_json::Map::new();
+            error.insert(
+                "code".to_string(),
+                serde_json::Value::String("backend_error".to_string()),
+            );
+            error.insert(
+                "message".to_string(),
+                serde_json::Value::String(response.error_message.clone()),
+            );
+            if !response.extended_error.is_empty() {
+                error.insert(
+                    "extended_error".to_string(),
+                    serde_json::Value::String(response.extended_error.clone()),
+                );
             }
-        });
-        if !response.extended_error.is_empty() {
-            envelope["error"]["extended_error"] =
-                serde_json::Value::String(response.extended_error.clone());
+            envelope.insert("error".to_string(), serde_json::Value::Object(error));
         }
-        if let Ok(json) = serde_json::to_string(&envelope) {
+        if has_denials {
+            if let Ok(resources) = serde_json::to_value(&response.denied_resources) {
+                envelope.insert("deniedResources".to_string(), resources);
+            }
+            if response.denied_resources_truncated {
+                envelope.insert(
+                    "deniedResourcesTruncated".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+        }
+        if let Ok(json) = serde_json::to_string(&serde_json::Value::Object(envelope)) {
             eprintln!("{json}");
         }
     }
