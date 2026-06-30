@@ -850,7 +850,7 @@ impl AppContainerScriptRunner {
         // (0x1E). SDK callers split stderr on 0x1E and parse each
         // segment as JSON, enabling mid-run prompts.
         let denial_sink: Option<DenialSink> = if request.capture_denials {
-            Some(DenialSink::open())
+            Some(DenialSink::open(request.denials_fd))
         } else {
             None
         };

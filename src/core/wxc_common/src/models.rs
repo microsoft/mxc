@@ -598,6 +598,19 @@ pub struct ExecutionRequest {
     /// with no learning-mode injection, no shim RPC, no ETW session, and
     /// no consumer thread. Identical baseline to today.
     pub capture_denials: bool,
+
+    /// Runtime-only transport handle for the captureDenials live stream.
+    ///
+    /// When set, it is an *inherited*, writable Windows anonymous-pipe
+    /// handle (passed by the launcher via `--denials-fd <HANDLE>`); the
+    /// runner adopts it and writes the captureDenials NDJSON stream to
+    /// that handle out-of-band, leaving stderr/the PTY clean. When unset
+    /// (the common case) the stream rides stderr.
+    ///
+    /// This is a per-invocation transport parameter, not part of the
+    /// serialized config wire format, so it is `#[serde(skip)]`.
+    #[serde(skip)]
+    pub denials_fd: Option<u64>,
 }
 
 impl Default for ExecutionRequest {
@@ -619,6 +632,7 @@ impl Default for ExecutionRequest {
             experimental: ExperimentalConfig::default(),
             dry_run: false,
             capture_denials: false,
+            denials_fd: None,
         }
     }
 }

@@ -182,11 +182,12 @@ tests; the key names and casing are to be treated as a stable contract.
   `deniedResources` from the summary after exit. This is the simpler, race-free option
   and is the basis for the approve-and-retry experience.
 
-### Final response envelope (stderr, no pipe)
+### Final response envelope (stderr, no side channel)
 
-When **no** denial pipe is attached (`MXC_DENIALS_PIPE` unset — the default,
-wait-for-exit case), `wxc-exec` also writes a single plain-JSON envelope line to
-**stderr** after the workload exits, carrying the consolidated denial list:
+When **no** denial side channel is attached (`--denials-fd` not passed — the
+default, wait-for-exit case), `wxc-exec` also writes a single plain-JSON
+envelope line to **stderr** after the workload exits, carrying the
+consolidated denial list:
 
 ```jsonc
 {
@@ -209,11 +210,12 @@ the `0x1E`-framed `summary` record. Key properties:
 - **PTY-safe.** It is a single emission *after* the child has exited, so under a
   pseudoconsole it cleanly appends at the tail of the transcript rather than racing
   live output.
-- **Suppressed when a pipe is attached.** When `MXC_DENIALS_PIPE` is set, denials are
-  delivered over that dedicated channel (including the consolidated `summary` list), so
-  the stderr envelope is **not** emitted — keeping the terminal the pipe exists to
-  protect free of denial bytes.
-- **Independent of the live `0x1E` stderr stream.** In the no-pipe case the `0x1E`
+- **Suppressed when a side channel is attached.** When `--denials-fd` is passed,
+  denials are delivered over that dedicated handle (including the consolidated
+  `summary` list), so the stderr envelope is **not** emitted — keeping the
+  terminal the side channel exists to protect free of denial bytes.
+- **Independent of the live `0x1E` stderr stream.** In the no-side-channel case the
+  `0x1E`
   per-denial lines and `summary` terminator are still written to stderr as before; this
   envelope is an additional, separately-parseable artifact. Consumers should pick one:
   either parse the `0x1E` stream, or read this final envelope.
@@ -223,38 +225,45 @@ the `0x1E`-framed `summary` record. Key properties:
 ## 5. Transports and PTY handling
 
 The denial bytes are identical across transports; only the destination differs. The
-destination is selected once per invocation by the application through an environment
-variable. MXC does not auto-detect a terminal.
+destination is selected once per invocation by the application through a command-line
+flag. MXC does not auto-detect a terminal.
 
-| Workload execution mode | Set `MXC_DENIALS_PIPE`? | Denials are delivered on |
+| Workload execution mode | Pass `--denials-fd`? | Denials are delivered on |
 |---|---|---|
 | **Piped** (application owns stdout/stderr) | No | `wxc-exec`'s **stderr**, `0x1E`-framed |
-| **Under a PTY / ConPTY** (interactive) | **Yes** (`MXC_DENIALS_PIPE=<name>`) | the named pipe `\\.\pipe\<name>` |
+| **Under a PTY / ConPTY** (interactive) | **Yes** (`--denials-fd <handle>`) | the inherited anonymous-pipe write handle |
 
 > **Important.** Under a pseudoconsole the workload owns the terminal: standard
 > output, standard error, cursor movements, and color codes are multiplexed into a
 > single byte stream. Framed JSON on that stream would corrupt the rendered terminal
 > and could not be parsed back out reliably. An application that allocates a PTY
-> **must** set `MXC_DENIALS_PIPE` to a pipe name; `wxc-exec` then writes the identical
-> `0x1E` stream out-of-band to `\\.\pipe\<name>`, leaving the terminal clean. The
-> variable must be set to the base name only (without the `\\.\pipe\` prefix, which
-> `wxc-exec` prepends). Routing is explicit: MXC will not infer the pipe from a
-> terminal check.
+> **must** create an anonymous pipe with an **inheritable write end**, spawn
+> `wxc-exec` so it inherits that handle, and pass the handle's numeric value as
+> `--denials-fd <handle>`; `wxc-exec` then writes the identical `0x1E` stream
+> out-of-band to that handle, leaving the terminal clean. Routing is explicit: MXC
+> will not infer the transport from a terminal check.
 
 Operational notes:
 
-- **Ordering.** Create the named-pipe server before spawning `wxc-exec` so that the
-  pipe exists when the child opens it.
-- **Fallback.** If `MXC_DENIALS_PIPE` is set but the pipe cannot be opened (the server
-  is not listening, the name is mistyped), `wxc-exec` logs a warning and falls back to
-  stderr rather than failing the workload. Applications must not assume that setting
-  the variable guarantees nothing will appear on stderr.
-- A minimal inbound named-pipe server reference — create, accept, read to EOF, with a
-  self-connect mechanism so the accept cannot block indefinitely — is provided by
-  `DenialPipeServer` in `src/testing/wxc_e2e_tests/src/denial_consumer.rs`. A C#
-  port of the same server, with live per-denial events and the timeout/fallback
-  handling, is in [`samples/csharp`](./samples/csharp/README.md)
-  (`DenialPipeConsumer.cs`).
+- **Inheritance.** The write handle must be marked inheritable (`bInheritHandle =
+  TRUE` / `HANDLE_FLAG_INHERIT`) and the child must be spawned with handle
+  inheritance enabled, so the same numeric value is valid inside `wxc-exec`. Keep the
+  **read** end non-inheritable so the jailed workload never receives it. The sandboxed
+  workload is additionally restricted to inheriting only stdio, so the denials handle
+  never reaches it regardless.
+- **EOF.** Close the launcher's copy of the write handle after spawning `wxc-exec` so
+  the read end observes EOF once the child exits (EOF requires *every* write handle
+  closed).
+- **Security.** Anonymous pipes have no name in the object namespace, so no other
+  process can open or squat the channel — only a process already holding the inherited
+  handle can write to it.
+- **Fallback.** If `--denials-fd` is passed but the handle is null/invalid, `wxc-exec`
+  logs a warning and falls back to stderr rather than failing the workload.
+- A minimal anonymous-pipe consumer reference — create with an inheritable write end,
+  read to EOF — is provided by `DenialAnonPipe` in
+  `src/testing/wxc_e2e_tests/src/denial_consumer.rs`. A C# port using
+  `AnonymousPipeServerStream`, with live per-denial events, is in
+  [`samples/csharp`](./samples/csharp/README.md) (`DenialPipeConsumer.cs`).
 
 ---
 
@@ -355,16 +364,16 @@ the workload exit code.
 
 The end-to-end reference — the `0x1E` NDJSON parser, the default filters, NT-prefix
 stripping, additive policy expansion with system-critical refusal, and the
-`MXC_DENIALS_PIPE` named-pipe server — is implemented in:
+`--denials-fd` anonymous-pipe consumer — is implemented in:
 
 - `src/testing/wxc_e2e_tests/src/denial_consumer.rs` — the consumer-side logic.
 - `src/testing/wxc_e2e_tests/tests/e2e_windows_capture_denials.rs` — a four-phase
   native end-to-end test that drives `wxc-exec` directly and validates default-deny
-  capture, approve and re-spawn, the `MXC_DENIALS_PIPE` side channel, and a
+  capture, approve and re-spawn, the `--denials-fd` side channel, and a
   multi-round approve-and-retry loop.
 
 A runnable C# port of the same contract — the `0x1E` NDJSON parser, the default
-filters, and the `MXC_DENIALS_PIPE` inbound named-pipe server with live per-denial
+filters, and the `--denials-fd` anonymous-pipe consumer with live per-denial
 events — is provided as a standalone sample in
 [`samples/csharp`](./samples/csharp/README.md).
 

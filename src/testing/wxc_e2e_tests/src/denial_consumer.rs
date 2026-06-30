@@ -5,11 +5,11 @@
 //!
 //! Since the SDK no longer ships a learning-mode wrapper, a captureDenials
 //! consumer drives `wxc-exec` directly and owns:
-//!   * parsing the `0x1E`-framed NDJSON denial stream (off stderr in pipe mode,
-//!     or off the `MXC_DENIALS_PIPE` named pipe in console/PTY mode),
+//!   * parsing the `0x1E`-framed NDJSON denial stream (off stderr by default,
+//!     or off the inherited `--denials-fd` anonymous pipe in console/PTY mode),
 //!   * filtering OS background noise,
 //!   * folding approved denials into an expanded filesystem policy, and
-//!   * (PTY mode) standing up the named-pipe server + pseudoconsole.
+//!   * (PTY mode) standing up the anonymous pipe + pseudoconsole.
 //!
 //! This module is a faithful Rust port of that contract, exercised by
 //! `tests/e2e_windows_capture_denials.rs`. It is intentionally test-only and
@@ -270,79 +270,92 @@ pub fn matches_subtree(candidate: &str, target_file: &str, target_dir: &str) -> 
 }
 
 // ---------------------------------------------------------------------------
-// Windows transport: named-pipe server + pseudoconsole (PTY) spawn
+// Windows transport: anonymous-pipe consumer (inherited write handle)
 // ---------------------------------------------------------------------------
 
 mod win {
-    use std::ffi::c_void;
-    use std::os::windows::ffi::OsStrExt;
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
     };
-    use windows::Win32::Storage::FileSystem::{ReadFile, PIPE_ACCESS_INBOUND};
-    use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_WAIT,
-    };
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows::Win32::Storage::FileSystem::ReadFile;
+    use windows::Win32::System::Pipes::CreatePipe;
 
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    /// A one-shot inbound named-pipe server that accepts a single client and
-    /// reads everything it writes until the client disconnects.
-    pub struct DenialPipeServer {
-        pub base_name: String,
+    /// A one-shot anonymous-pipe consumer that mirrors how a real launcher
+    /// drives the `--denials-fd` transport: it creates a pipe whose
+    /// **write** end is inheritable, hands that handle's numeric value to
+    /// `wxc-exec` via `--denials-fd`, and reads everything the child writes
+    /// until EOF.
+    ///
+    /// Anonymous pipes have no object-namespace name, so the channel can't
+    /// be opened or squatted by any process that doesn't already hold the
+    /// inherited handle. The read end is marked non-inheritable so the
+    /// jailed child never receives it.
+    pub struct DenialAnonPipe {
+        write: Option<HANDLE>,
+        write_value: u64,
         reader: Option<JoinHandle<Vec<u8>>>,
     }
 
-    impl DenialPipeServer {
-        /// Create the pipe and start accepting on a background thread. The
-        /// returned `base_name` is what `MXC_DENIALS_PIPE` should be set to
-        /// (no `\\.\pipe\` prefix — wxc-exec prepends it).
+    impl DenialAnonPipe {
+        /// Create the pipe and start draining the read end on a background
+        /// thread. The write end is inheritable so the spawned `wxc-exec`
+        /// inherits it; the read end is cleared of `HANDLE_FLAG_INHERIT`.
         pub fn start() -> std::io::Result<Self> {
-            let base_name = format!("mxc-denials-{}", uuid::Uuid::new_v4().simple());
-            let full = format!(r"\\.\pipe\{base_name}");
-            let wname = wide(&full);
-
-            // Create synchronously so the pipe exists before the child opens it.
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    PCWSTR(wname.as_ptr()),
-                    PIPE_ACCESS_INBOUND,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    1,
-                    0,
-                    64 * 1024,
-                    0,
-                    None,
-                )
+            let mut read = HANDLE::default();
+            let mut write = HANDLE::default();
+            // `bInheritHandle = TRUE` makes *both* ends inheritable; we then
+            // strip inheritance from the read end so only the write end
+            // crosses into the child.
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: std::ptr::null_mut(),
+                bInheritHandle: true.into(),
             };
-            if handle == INVALID_HANDLE_VALUE {
-                return Err(std::io::Error::last_os_error());
+            unsafe {
+                CreatePipe(&mut read, &mut write, Some(&sa), 64 * 1024)
+                    .map_err(|e| std::io::Error::other(format!("CreatePipe: {e}")))?;
+                SetHandleInformation(read, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0))
+                    .map_err(|e| std::io::Error::other(format!("SetHandleInformation: {e}")))?;
             }
 
-            let raw = handle.0 as isize;
-            let reader = std::thread::spawn(move || read_pipe_to_end(HANDLE(raw as *mut c_void)));
+            let write_value = write.0 as usize as u64;
+            // HANDLE wraps a raw pointer and isn't `Send`; move the integer
+            // value across the thread boundary and rebuild the handle inside.
+            let read_value = read.0 as usize;
+            let reader = std::thread::spawn(move || read_pipe_to_end(read_value));
 
             Ok(Self {
-                base_name,
+                write: Some(write),
+                write_value,
                 reader: Some(reader),
             })
         }
 
-        /// Wait up to `timeout` for the client to connect, write, and
-        /// disconnect, then return everything it wrote. If no client ever
-        /// connects (e.g. wxc-exec fell back to stderr), a self-connect kick
-        /// releases the pending accept so this never blocks indefinitely.
+        /// The numeric handle value to pass as `--denials-fd <value>`.
+        pub fn write_fd(&self) -> u64 {
+            self.write_value
+        }
+
+        /// Close the parent's copy of the inheritable write handle. Must be
+        /// called *after* the child is spawned (so it inherits the handle)
+        /// and before reading to EOF: the read end only sees EOF once
+        /// *every* write handle — the child's and ours — is closed.
+        pub fn close_write(&mut self) {
+            if let Some(h) = self.write.take() {
+                unsafe {
+                    let _ = CloseHandle(h);
+                }
+            }
+        }
+
+        /// Drop our write handle (safety net) then join the reader thread,
+        /// waiting up to `timeout`, and return everything the child wrote.
         pub fn join_timeout(mut self, timeout: Duration) -> Vec<u8> {
+            self.close_write();
             let Some(reader) = self.reader.take() else {
                 return Vec::new();
             };
@@ -350,29 +363,14 @@ mod win {
             while !reader.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            if !reader.is_finished() {
-                // Connect to our own pipe as a write client to release a
-                // pending ConnectNamedPipe, then immediately drop it so the
-                // reader observes EOF.
-                let full = format!(r"\\.\pipe\{}", self.base_name);
-                let _ = std::fs::OpenOptions::new().write(true).open(&full);
-            }
             reader.join().unwrap_or_default()
         }
     }
 
-    fn read_pipe_to_end(handle: HANDLE) -> Vec<u8> {
+    fn read_pipe_to_end(handle_value: usize) -> Vec<u8> {
+        let handle = HANDLE(handle_value as *mut std::ffi::c_void);
         let mut collected = Vec::new();
         unsafe {
-            // Wait for the client (wxc-exec) to connect. ERROR_PIPE_CONNECTED
-            // means it connected between Create and Connect — also success.
-            if let Err(e) = ConnectNamedPipe(handle, None) {
-                if e.code() != ERROR_PIPE_CONNECTED.to_hresult() {
-                    let _ = CloseHandle(handle);
-                    return collected;
-                }
-            }
-
             let mut buf = [0u8; 8192];
             loop {
                 let mut read = 0u32;
@@ -383,17 +381,14 @@ mod win {
                         }
                         collected.extend_from_slice(&buf[..read as usize]);
                     }
-                    Err(_) => {
-                        // Broken pipe is the normal client-closed signal.
-                        break;
-                    }
+                    // Broken pipe is the normal "all writers closed" signal.
+                    Err(_) => break,
                 }
             }
-            let _ = DisconnectNamedPipe(handle);
             let _ = CloseHandle(handle);
         }
         collected
     }
 }
 
-pub use win::DenialPipeServer;
+pub use win::DenialAnonPipe;

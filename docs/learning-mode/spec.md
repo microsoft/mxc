@@ -54,7 +54,7 @@ The captureDenials feature has three orthogonal pieces:
    (future).
 2. **Transport** — how the denial event reaches the SDK
    consumer. Cross-platform NDJSON. Two transports for GA:
-   stderr (default) and a Windows named pipe (`MXC_DENIALS_PIPE`).
+   stderr (default) and a Windows anonymous inherited handle (`--denials-fd`).
 3. **Orchestration** — the SDK-side retry loop
    (`spawnSandboxWithRetry`) that consumes the stream, calls
    `onDenied`, regenerates the policy with the user-granted paths,
@@ -121,16 +121,22 @@ in the SDK does the demux.
 
 **Side-channel path** (Windows only, GA): when the workload owns
 the PTY (interactive REPL, color-aware build tool, progress-bar
-TUI), sharing stderr would corrupt the user's terminal. The SDK
-creates a Windows named pipe via `createDenialPipeServer()` and
-sets the `MXC_DENIALS_PIPE` env var on the spawned `wxc-exec`
-process. The Rust side detects the env var and reroutes the NDJSON
-stream from stderr to the pipe; the SDK reads the pipe and parses
-the stream the same way. The workload's PTY stays clean.
+TUI), sharing stderr would corrupt the user's terminal. The launcher
+creates a Windows anonymous pipe with an inheritable write HANDLE and
+a non-inheritable read HANDLE, spawns `wxc-exec` with handle inheritance
+enabled, and passes the write HANDLE value as `--denials-fd <handle>`.
+The Rust side adopts that handle and reroutes the NDJSON stream from
+stderr to the anonymous pipe; the launcher reads the pipe and parses
+the stream the same way. After spawning, the launcher closes its own
+write-handle copy so the read end reaches EOF when `wxc-exec` exits.
+The workload's PTY stays clean, and the sandboxed workload never
+receives the denial handle because the runner restricts inherited
+handles to stdio.
 
 Use `spawnSandboxWithSideChannel(config, { usePty: true })` to
-get this flow end-to-end. The pipe name is randomly generated per
-invocation so concurrent sandboxes don't collide.
+get this flow end-to-end. The anonymous pipe has no object-namespace
+name, so no other process can open or squat the channel; only a process
+holding the inherited handle can write.
 
 ## Proposed Schema
 
@@ -450,10 +456,10 @@ correctness invariant. Putting it in the SDK lets consumers tune
 the filter list without rebuilding wxc-exec, and lets debug
 sessions see the raw stream by passing `filters: 'none'`.
 
-### D5: Stderr is the default transport; named pipe is the PTY escape hatch
+### D5: Stderr is the default transport; anonymous inherited handle is the PTY escape hatch
 
 **Decision**: Two transports for GA: stderr (cross-platform,
-default) and a Windows named pipe (`MXC_DENIALS_PIPE`,
+default) and a Windows anonymous inherited handle (`--denials-fd`,
 opt-in via `spawnSandboxWithSideChannel`).
 
 **Why**: Stderr is universal — every OS and every runner can use
@@ -461,10 +467,10 @@ it. But stderr is a shared channel with the workload, and PTY
 mode merges it with stdout. When the workload is interactive
 (needs a real TTY for color, REPL, progress bars), the consumer
 must be able to give the workload an unrestricted PTY without
-losing the denial stream. A named pipe is that out-of-band
-channel.
+losing the denial stream. An anonymous pipe write handle inherited by
+`wxc-exec` via `--denials-fd` is that out-of-band channel.
 
-**Limitation**: GA ships the pipe transport on Windows only.
+**Limitation**: GA ships the anonymous-pipe transport on Windows only.
 Linux/macOS PTY consumers will need a Unix-domain-socket
 equivalent; that's tracked as a follow-up. Today, Linux/macOS
 PTY consumers can use stderr (the workload's PTY doesn't merge
@@ -538,7 +544,7 @@ suspended workload resumes.
 | Per-PID capture | ETW `Microsoft-Windows-Kernel-Audit` + `MXC-LearningModeLogging` providers, filtered by `EVENT_FILTER_TYPE_PID` | Session created by the privileged `mxc-learning-mode-shim` service; the trace handle is `DuplicateHandle`d into `wxc-exec` and the shim disconnects. |
 | Resource types | file, registry, other | LearningModeViolation events (event 27) cover BFS file/registry denials; AccessCheckLog (event 4907) covers everything else. |
 | Per-sandbox scoping | PID + AppContainer SID; LowBoxNumber in the event payload is used to dedupe concurrent sandboxes when the kernel does not honor the PID filter | |
-| Streaming | NDJSON on stderr (default) or named pipe (`MXC_DENIALS_PIPE`, used by `spawnSandboxWithSideChannel`) | |
+| Streaming | NDJSON on stderr (default) or an anonymous inherited write handle passed via `--denials-fd` (used by `spawnSandboxWithSideChannel`) | |
 | Descendant processes | Job Object + IOCP `JOB_OBJECT_MSG_NEW_PROCESS` + `NtSuspendProcess` + shim `ExtendDenialSession` RPC. Count reported as `descendantPidsCovered` on the summary. | Closes the per-PID-filter-doesn't-follow-descendants gap on BaseContainer (the GA-preferred backend). AppContainer (T2) still falls back to the observer-only path; tracker wiring there is a follow-up. |
 | Child processes (defence in depth) | Toolhelp snapshot poll, reported as `childProcessesObserved` on the summary | Belt-and-braces signal alongside descendant tracking: if `childProcessesObserved > descendantPidsCovered`, the SDK warns the user that some children escaped the filter. |
 | ETW kernel buffer | 256 × 128 KB = ~32 MB ceiling on the shared `mxc-denials-*` session | Default Windows ETW buffer (~4 MB) was insufficient once descendant tracking ~doubled per-workload event volume. The bumped ceiling guarantees the kernel ring is not the bottleneck for typical workloads. |

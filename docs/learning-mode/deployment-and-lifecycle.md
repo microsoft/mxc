@@ -109,7 +109,7 @@ allow it?"
 > denials and the **consumer owns** parsing, consent, and the re-spawn loop.
 > The SDK keeps only the generic `createConfigFromPolicy` / `spawnSandboxFromConfig`
 > surface plus the `captureDenials` field. A reference implementation of the
-> parser, the named-pipe transport, the default filters, and policy expansion
+> parser, the anonymous-pipe `--denials-fd` transport, the default filters, and policy expansion
 > lives in the native E2E harness
 > (`src/testing/wxc_e2e_tests/src/denial_consumer.rs`); the descriptions below are
 > the contract that harness (and any consumer) implements.
@@ -137,8 +137,8 @@ application only sees actionable denials.
 
 - **Real-time, per denial** — each denial is emitted the instant it occurs as its
   own `0x1E`-framed NDJSON `denial` record. The consumer reads these live (off
-  `wxc-exec`'s **stderr** in pipe mode, or the **`MXC_DENIALS_PIPE`** named pipe in
-  PTY mode) and can prompt or log per denial mid-run.
+  `wxc-exec`'s **stderr** in pipe mode, or the anonymous pipe read end paired
+  with **`--denials-fd <handle>`** in PTY mode) and can prompt or log per denial mid-run.
 - **Consolidated, per run** — the summary terminator line carries the deduped
   `deniedResources` array, giving the consumer a race-free single read after exit.
   This is the batch that powers the approve-and-retry UX below.
@@ -184,17 +184,17 @@ re-spawn with expanded config ──► still-denied? ──► prompt again (ne
   policy-expansion must skip OS-security-critical paths (SYSTEM hives,
   `kernel32.dll`, …). The reference `expand_readonly_paths` in `denial_consumer.rs`
   does this.
-- **PTY mode uses a named-pipe transport** (`MXC_DENIALS_PIPE`) instead of stderr,
+- **PTY mode uses an anonymous inherited-handle transport** (`--denials-fd`) instead of stderr,
   because the workload owns the terminal. The `DeniedResource` shape and the
   approval logic are identical; only the transport differs.
 
 ### Complete, copy-paste samples
 
 The end-to-end reference — denial parser (0x1E NDJSON framing), default noise
-filters, the `MXC_DENIALS_PIPE` named-pipe server, and additive policy
+filters, the `--denials-fd` anonymous-pipe side channel, and additive policy
 expansion — lives in **`src/testing/wxc_e2e_tests/src/denial_consumer.rs`**, and
 `src/testing/wxc_e2e_tests/tests/e2e_windows_capture_denials.rs` exercises the full
-pipe-mode (live stderr), side-channel (named pipe), and multi-round
+pipe-mode (live stderr), side-channel (anonymous pipe), and multi-round
 approve-and-respawn flow against the native `wxc-exec` binary. Consumers
 reimplement the same contract in their own language; the TypeScript sketch below
 shows the shape for a Node consumer.
@@ -415,7 +415,7 @@ Concretely, the documented developer workflow becomes:
 2. **Develop (unprivileged):** use the SDK / `wxc-exec` normally with
    `captureDenials: true`. The SDK preflight verifies the shim is installed and,
    if not, fails fast with the remedy command.
-3. **Run:** denials stream over stderr (or the named-pipe side channel in PTY
+3. **Run:** denials stream over stderr (or the `--denials-fd` anonymous-pipe side channel in PTY
    mode); the summary reports `captureDenialsActive: true`.
 
 ---

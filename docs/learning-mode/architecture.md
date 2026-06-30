@@ -6,9 +6,10 @@ Related: [`consumer-guide.md`](./consumer-guide.md) (application integration con
 > **Update — SDK orchestration removed (native-driven model).** The SDK
 > no longer ships a learning-mode surface (`spawnSandboxWithRetry`,
 > `parseDenialStream`, `regenerateSandboxPolicy`, the denial-channel
-> pipe server). The native `wxc-exec` binary streams denials directly
-> (0x1E-framed NDJSON on stderr, or on the `MXC_DENIALS_PIPE` named pipe
-> in PTY mode) and the **consumer owns** parsing, consent, and the
+> side-channel transport). The native `wxc-exec` binary streams denials directly
+> (0x1E-framed NDJSON on stderr, or on an anonymous inherited
+> handle passed via `--denials-fd` in PTY mode) and the **consumer
+> owns** parsing, consent, and the
 > re-spawn-per-round loop. The "Box 1 / Box 2" logic below is therefore
 > a description of the *consumer-side* responsibilities, not SDK code;
 > a reference implementation lives in the native E2E test harness
@@ -52,7 +53,7 @@ slot into.
 │   │ │   - DeniedResource type + NDJSON wire format           │ │ │
 │   │ │   - NDJSON parser (consumer-owned)                    │ │ │
 │   │ │   - Transports: stderr (xplat, implicit in parser),    │ │ │
-│   │ │     named-pipe (Windows), unix-socket (planned)        │ │ │
+│   │ │     anonymous HANDLE (Windows), unix-socket (planned)   │ │ │
 │   │ └────────────────────────────────────────────────────────┘ │ │
 │   └────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
@@ -151,8 +152,8 @@ implements (the native E2E test harness
 
 | Responsibility | Box | Purpose |
 |---|---|---|
-| NDJSON denial parser | 1 | Demux the 0x1E-framed NDJSON stream (`parseDenialStream`-equivalent): materialise `DeniedResource` records, apply default noise filters, strip the `\??\` prefix, and surface the summary terminator (which carries the consolidated `deniedResources` list). Stream-agnostic — feed it `child.stderr` (pipe mode) or the side-channel socket (PTY mode). |
-| Named-pipe transport (Windows) | 1 | A Windows named-pipe server for PTY mode, where the workload owns the terminal so denials can't share stderr. The consumer sets `MXC_DENIALS_PIPE=<name>` in the `wxc-exec` env. |
+| NDJSON denial parser | 1 | Demux the 0x1E-framed NDJSON stream (`parseDenialStream`-equivalent): materialise `DeniedResource` records, apply default noise filters, strip the `\??\` prefix, and surface the summary terminator (which carries the consolidated `deniedResources` list). Stream-agnostic — feed it `child.stderr` (pipe mode) or the `--denials-fd` anonymous pipe read end (PTY mode). |
+| Anonymous-pipe transport (Windows) | 1 | An anonymous inherited-handle transport for PTY mode, where the workload owns the terminal so denials can't share stderr. The consumer creates an anonymous pipe with a non-inheritable read end and inheritable write end, spawns `wxc-exec` with handle inheritance enabled, passes the write HANDLE as `--denials-fd <handle>`, then closes its own write copy so the read end sees EOF when the child exits. |
 | Policy expansion | 2 | Given an existing `SandboxPolicy` and the denials the user approved, produce a relaxed policy (additive, refuses system-critical paths). |
 | Re-spawn loop | 2 | Drive the loop: spawn `wxc-exec` → parse stream → prompt for consent → expand policy → respawn. One run per `wxc-exec` invocation; the consumer owns the cadence. |
 
@@ -178,7 +179,7 @@ For a consumer driving `wxc-exec` directly:
 ┌──────────────────────────────────────────────────────────┐
 │ Consumer denial parser + loop (Box 1 + Box 2)           │
 │   - spawn child (wxc-exec via spawnSandboxFromConfig)    │
-│   - read child.stderr (pipe) or MXC_DENIALS_PIPE (PTY)   │
+│   - read child.stderr or --denials-fd anonymous pipe      │
 │   - parse the 0x1E NDJSON stream into DeniedResource[]   │
 │   - prompt the user per denial / on the batch summary    │
 │   - expand policy with approved paths                    │
@@ -199,7 +200,7 @@ For a consumer driving `wxc-exec` directly:
 │         3. insert descendant PID into user-mode filter   │
 │         4. NtResumeProcess(descendant)                   │
 │   - learning_mode_windows::denial_stream::*              │
-│       (NDJSON writer thread, writes stderr lines)        │
+│       (NDJSON writer thread, writes stderr or denials fd) │
 │   - learning_mode_windows::child_process_observer        │
 │       (Toolhelp poll, defence-in-depth descendant count) │
 │   - resume root workload                                 │

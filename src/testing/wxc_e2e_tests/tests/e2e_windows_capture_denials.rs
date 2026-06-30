@@ -15,10 +15,11 @@
 //!     terminator's consolidated `deniedResources` list.
 //!   * Phase 2 (approve+restart) — fold captured denials into an expanded
 //!     readonly policy and re-spawn; assert the read now succeeds.
-//!   * Phase 3 (side channel) — run with `MXC_DENIALS_PIPE` set; assert denials
-//!     arrive on the **named pipe** and stderr stays free of 0x1E sentinels.
-//!     This is the redirect a PTY consumer relies on to keep the terminal
-//!     clean (the native `open_writer` honours the pipe regardless of mode).
+//!   * Phase 3 (side channel) — run with `--denials-fd` pointing at an
+//!     inherited anonymous-pipe write handle; assert denials arrive on the
+//!     **pipe handle** and stderr stays free of 0x1E sentinels. This is the
+//!     redirect a PTY consumer relies on to keep the terminal clean (the
+//!     native `open_writer` honours the handle regardless of mode).
 //!   * Phase 4 (round loop) — drive a generic capture → approve → retry loop to
 //!     convergence, exercising the multi-round cadence a real consumer owns.
 //!
@@ -30,11 +31,11 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wxc_e2e_tests::denial_consumer::{
-    expand_readonly_paths, matches_subtree, parse_denial_stream, DenialPipeServer, DeniedResource,
+    expand_readonly_paths, matches_subtree, parse_denial_stream, DenialAnonPipe, DeniedResource,
     ParseResult,
 };
 use wxc_e2e_tests::find_binary;
@@ -233,8 +234,8 @@ fn test_capture_denials_approval_restart() {
         "phase2: unexpected parse errors"
     );
 
-    // ---- Phase 3: side-channel pipe (MXC_DENIALS_PIPE) --------------------
-    println!("--- PHASE 3: denials routed to the MXC_DENIALS_PIPE side channel ---");
+    // ---- Phase 3: side-channel pipe (--denials-fd) -----------------------
+    println!("--- PHASE 3: denials routed to the --denials-fd side channel ---");
     run_phase3_pipe_side_channel(&exe, &target);
 
     // ---- Phase 4: capture → approve → retry loop to convergence -----------
@@ -280,28 +281,40 @@ fn test_capture_denials_approval_restart() {
     println!("[functional-test] PASS");
 }
 
-/// Phase 3: run the workload with `MXC_DENIALS_PIPE` set so denials are
-/// routed to a private named pipe instead of stderr. Asserts denials land on
-/// the pipe and the workload's stderr stays free of 0x1E sentinels.
+/// Phase 3: run the workload with `--denials-fd` pointing at an inherited
+/// anonymous-pipe write handle so denials are routed to that private handle
+/// instead of stderr. Asserts denials land on the pipe and the workload's
+/// stderr stays free of 0x1E sentinels.
 ///
 /// This exercises the same native redirect path as PTY/console mode
-/// (`open_writer` honours `MXC_DENIALS_PIPE` regardless of console mode) — the
-/// pipe is the side channel a real PTY consumer uses to keep the terminal
-/// clean. Driving it with piped stdio keeps the test deterministic (no ConPTY
-/// teardown handshake) while still proving the redirect contract.
+/// (`open_writer` honours `--denials-fd` regardless of console mode) — the
+/// inherited handle is the side channel a real PTY consumer uses to keep the
+/// terminal clean. Driving it with piped stdio keeps the test deterministic
+/// (no ConPTY teardown handshake) while still proving the redirect contract.
 fn run_phase3_pipe_side_channel(exe: &Path, target: &str) {
     let config = build_config("captureDenials-e2e-p3", target, &[]);
     let config_path = write_temp_config(&config);
 
-    let server = DenialPipeServer::start().expect("start denial pipe server");
+    let mut pipe = DenialAnonPipe::start().expect("start denial anon pipe");
 
-    let output = Command::new(exe)
+    // The inheritable write handle is inherited because std spawns the child
+    // with bInheritHandles=TRUE (piped stdio) and applies no handle-list
+    // filter, so the value is valid in the child.
+    let child = Command::new(exe)
         .arg(&config_path)
-        .env("MXC_DENIALS_PIPE", &server.base_name)
-        .output()
+        .arg("--denials-fd")
+        .arg(pipe.write_fd().to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("spawn wxc-exec");
 
-    let pipe_bytes = server.join_timeout(Duration::from_secs(20));
+    // Drop our copy of the write end now that the child holds it, so the
+    // reader observes EOF once the child closes its end / exits.
+    pipe.close_write();
+
+    let output = child.wait_with_output().expect("wait wxc-exec");
+    let pipe_bytes = pipe.join_timeout(Duration::from_secs(20));
     let _ = std::fs::remove_file(&config_path);
 
     let parsed = parse_denial_stream(&pipe_bytes, true);
@@ -320,10 +333,10 @@ fn run_phase3_pipe_side_channel(exe: &Path, target: &str) {
 
     assert!(
         pipe_target > 0,
-        "phase3: expected a target-dir denial delivered on the named pipe; got none"
+        "phase3: expected a target-dir denial delivered on the anonymous pipe; got none"
     );
     // The 0x1E Record Separator must NOT have leaked onto stderr (it was
-    // redirected to the side-channel pipe).
+    // redirected to the inherited-handle side channel).
     assert!(
         !output.stderr.contains(&0x1E),
         "phase3: 0x1E denial sentinel leaked onto stderr (side channel not used)"

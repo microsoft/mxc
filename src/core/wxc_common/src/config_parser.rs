@@ -1265,6 +1265,7 @@ fn convert_raw_config_inner(
         experimental,
         dry_run: false,
         capture_denials,
+        denials_fd: None,
     })
 }
 

@@ -1112,11 +1112,11 @@ impl ScriptRunner for BaseContainerRunner {
         let descendant_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let descendant_count_for_summary = std::sync::Arc::clone(&descendant_count);
 
-        // Shared captureDenials sink (named pipe or stderr), opened
-        // once so the per-denial lines and the terminator summary line
-        // ride the same handle. `None` when capture wasn't requested.
+        // Shared captureDenials sink (inherited pipe handle or stderr),
+        // opened once so the per-denial lines and the terminator summary
+        // line ride the same handle. `None` when capture wasn't requested.
         let denial_sink: Option<DenialSink> = if request.capture_denials {
-            Some(DenialSink::open())
+            Some(DenialSink::open(request.denials_fd))
         } else {
             None
         };

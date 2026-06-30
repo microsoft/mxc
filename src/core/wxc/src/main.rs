@@ -109,6 +109,19 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
+    /// Windows-only. Inherited, writable anonymous-pipe HANDLE that the
+    /// captureDenials live stream should be written to instead of stderr.
+    ///
+    /// The launcher creates an anonymous pipe with an inheritable write
+    /// end, spawns `wxc-exec` so it inherits that handle, and passes the
+    /// handle's numeric value here. `wxc-exec` adopts the handle and
+    /// writes the `0x1E`-framed denial NDJSON to it out-of-band, keeping
+    /// stderr/the PTY clean. Only meaningful together with
+    /// `captureDenials` in the policy. When omitted the stream rides
+    /// stderr.
+    #[arg(long = "denials-fd")]
+    denials_fd: Option<u64>,
+
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
     /// CLI flags remain usable after the config path. Examples:
@@ -697,6 +710,7 @@ fn main() {
     let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
+    request.denials_fd = cli.denials_fd;
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
@@ -1012,15 +1026,13 @@ fn main() {
     // delivery path (Path 1) and lets a caller read one clean JSON envelope
     // instead of parsing the 0x1E-framed denial summary line.
     //
-    // The denial list is folded in only when no live denial pipe is attached.
-    // When `MXC_DENIALS_PIPE` is set the caller opted into the live stream
-    // (Path 2) and already receives the consolidated list over that dedicated
-    // channel, so repeating it on stderr would be redundant and would pollute
-    // the very terminal the pipe exists to keep clean. The env-var name mirrors
-    // `PIPE_ENV_VAR` in learning_mode_windows::denial_stream.
-    let denials_on_pipe = std::env::var("MXC_DENIALS_PIPE")
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
+    // The denial list is folded in only when no live denial channel is
+    // attached. When `--denials-fd` is given the caller opted into the
+    // live stream (Path 2) and already receives the consolidated list
+    // over that dedicated inherited-handle channel, so repeating it on
+    // stderr would be redundant and would pollute the very terminal the
+    // channel exists to keep clean.
+    let denials_on_pipe = request.denials_fd.is_some();
     let has_error = response.exit_code != 0 && !response.error_message.is_empty();
     let has_denials = !response.denied_resources.is_empty() && !denials_on_pipe;
     if has_error || has_denials {

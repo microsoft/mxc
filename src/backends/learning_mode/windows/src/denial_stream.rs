@@ -1,10 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Shared captureDenials stderr-streaming protocol used by both the
-//! AppContainer and BaseContainer runners.
+//! Shared captureDenials streaming protocol used by both the
+//! AppContainer and BaseContainer runners. The stream rides stderr by
+//! default, or an inherited anonymous-pipe handle when the launcher
+//! passes `--denials-fd` (see [`DenialSink`]).
 //!
-//! Wire format on stderr (one line per *unique* `(path, accessType)`):
+//! Wire format (one line per *unique* `(path, accessType)`):
 //!
 //! ```text
 //! \x1e{"type":"denial","path":"...","resourceType":"...","accessType":"...","pid":N,"filetime":N}\n
@@ -36,55 +38,17 @@ pub const DENIAL_STREAM_MARKER: u8 = 0x1E;
 /// Env var that opts into raw (pre-dedupe) event count in the summary.
 const VERBOSE_ENV_VAR: &str = "MXC_DENIAL_VERBOSE";
 
-/// Env var that redirects the captureDenials NDJSON stream from
-/// stderr to a named pipe.
-///
-/// When set, the value is the **base name** of a Windows named pipe
-/// (no `\\.\pipe\` prefix). The runner prepends the prefix and
-/// opens the pipe for writing. Both per-denial lines and the
-/// terminator summary go to the pipe instead of stderr.
-///
-/// Designed for the PTY-mode scenario: when the SDK consumer wants
-/// the workload to own a clean PTY (for color, REPL interactivity,
-/// `isatty()`-aware progress bars, etc.), the captureDenials stream
-/// can't share that PTY without corrupting the user's terminal.
-/// The SDK creates a named-pipe server and passes its name through
-/// this env var; wxc-exec writes denials to the pipe; the SDK reads
-/// from the pipe and runs `parseDenialStream` on it.
-///
-/// When unset (the common case), the runner writes to stderr as
-/// before.
-const PIPE_ENV_VAR: &str = "MXC_DENIALS_PIPE";
-
-/// Open the writer the captureDenials stream should drain into for
-/// this invocation. Returns a `Box<dyn Write>` so the call sites can
-/// share one code path between the stderr-default and the
-/// named-pipe-override transports.
-///
-/// On Windows, the named-pipe variant uses `std::fs::OpenOptions` to
-/// open `\\.\pipe\<name>` for writing -- Win32 exposes named pipes
-/// through the same NT object namespace as files, so the standard
-/// `File` works directly without any windows-rs detour.
-///
-/// If the env var is set but the pipe can't be opened (server isn't
-/// listening, name typo, etc.), we log the error and fall back to
-/// stderr. The captureDenials feature staying half-functional is
-/// strictly better than panicking the workload's runner.
 /// A shared, thread-safe handle to the captureDenials output sink
-/// (the named pipe in PTY mode, otherwise stderr).
+/// (the launcher's inherited anonymous-pipe handle when `--denials-fd`
+/// is given, otherwise stderr).
 ///
 /// The sink is opened exactly **once** per `wxc-exec` invocation and
 /// shared (cheap `Arc` clone) between the denial-writer thread and the
-/// summary-emit call. This is load-bearing for the named-pipe
-/// transport: the SDK-side pipe server (`createDenialPipeServer`)
-/// accepts exactly **one** client connection and then stops listening,
-/// so the per-denial lines and the terminator summary line *must* ride
-/// the same connection. Opening the pipe a second time for the summary
-/// would be refused (the server has already closed), the summary would
-/// silently fall back to stderr, and in PTY mode that stderr write is
-/// swallowed — so the SDK would never see the stream terminator.
-/// Sharing one handle keeps both the stderr and named-pipe transports
-/// correct.
+/// summary-emit call. This is load-bearing: the per-denial lines and
+/// the terminator summary line *must* ride the **same** handle, so the
+/// consumer reads a single uninterrupted stream terminated by exactly
+/// one summary. Sharing one handle keeps both the stderr and the
+/// inherited-handle transports correct.
 #[derive(Clone)]
 pub struct DenialSink {
     inner: std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
@@ -99,12 +63,14 @@ impl std::fmt::Debug for DenialSink {
 
 impl DenialSink {
     /// Opens the destination the captureDenials stream should drain
-    /// into for this invocation (named pipe when `MXC_DENIALS_PIPE` is
-    /// set, otherwise stderr). Call this once and clone the result to
-    /// share the same underlying handle across threads.
-    pub fn open() -> Self {
+    /// into for this invocation. When `denials_fd` carries an inherited,
+    /// writable anonymous-pipe handle (from `--denials-fd`), the stream
+    /// rides that handle out-of-band; otherwise it goes to stderr. Call
+    /// this once and clone the result to share the same underlying
+    /// handle across threads.
+    pub fn open(denials_fd: Option<u64>) -> Self {
         Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(open_writer())),
+            inner: std::sync::Arc::new(std::sync::Mutex::new(open_writer(denials_fd))),
         }
     }
 
@@ -124,32 +90,57 @@ impl DenialSink {
     }
 }
 
-fn open_writer() -> Box<dyn std::io::Write + Send> {
-    match std::env::var(PIPE_ENV_VAR) {
-        Ok(name) if !name.trim().is_empty() => {
+/// Open the writer the captureDenials stream should drain into for
+/// this invocation. Returns a `Box<dyn Write>` so the call sites can
+/// share one code path between the stderr-default and the
+/// inherited-handle transports.
+///
+/// When the launcher passes `--denials-fd <HANDLE>` (an *inherited*,
+/// writable anonymous-pipe handle), `wxc-exec` adopts that handle and
+/// writes the denial stream to it out-of-band, leaving stderr/the PTY
+/// clean. Inherited handles keep the same numeric value in the child,
+/// so the launcher and `wxc-exec` agree on the value. `std::fs::File`
+/// drives the handle through the Win32 file API (`WriteFile`), which
+/// anonymous-pipe handles support. Taking ownership of the handle
+/// means dropping the sink closes it, so the launcher's read end
+/// observes EOF.
+///
+/// Anonymous pipes have no name in the object namespace, so no other
+/// process can open or squat the channel -- only a process already
+/// holding the inherited handle can write to it. The jailed workload
+/// never receives the handle: the runner restricts the sandboxed
+/// child's inherited handles to stdio via
+/// `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, so the denials handle is
+/// excluded by construction.
+///
+/// If no fd is given (the common case) the stream goes to stderr. If a
+/// fd is given but is null/invalid (or we're not on Windows), we log
+/// and fall back to stderr -- the captureDenials feature staying
+/// half-functional is strictly better than panicking the runner.
+fn open_writer(denials_fd: Option<u64>) -> Box<dyn std::io::Write + Send> {
+    if let Some(raw) = denials_fd {
+        // 0 is never a valid handle; u64::MAX is INVALID_HANDLE_VALUE.
+        if raw != 0 && raw != u64::MAX {
             #[cfg(target_os = "windows")]
             {
-                let full = format!(r"\\.\pipe\{}", name.trim());
-                match std::fs::OpenOptions::new().write(true).open(&full) {
-                    Ok(f) => return Box::new(f),
-                    Err(e) => {
-                        eprintln!(
-                            "[learning_mode_windows] {PIPE_ENV_VAR}=\"{name}\" set but failed to \
-                             open pipe '{full}': {e}; falling back to stderr"
-                        );
-                    }
-                }
+                use std::os::windows::io::{FromRawHandle, RawHandle};
+                // Safety: the launcher passed an inherited, writable
+                // anonymous-pipe handle via `--denials-fd`. We take
+                // ownership; dropping the sink closes the handle so the
+                // launcher's read end sees EOF.
+                let handle = raw as usize as RawHandle;
+                let file = unsafe { std::fs::File::from_raw_handle(handle) };
+                return Box::new(file);
             }
             #[cfg(not(target_os = "windows"))]
             {
                 eprintln!(
-                    "[learning_mode_windows] {PIPE_ENV_VAR} is Windows-only; ignoring on this platform"
+                    "[learning_mode_windows] --denials-fd is Windows-only; ignoring on this platform"
                 );
             }
-            Box::new(std::io::stderr())
         }
-        _ => Box::new(std::io::stderr()),
     }
+    Box::new(std::io::stderr())
 }
 
 /// Drains `rx` until the channel closes, writing one
@@ -371,9 +362,9 @@ pub fn emit_denial_summary_line(
         Ok(s) => s,
         Err(_) => return,
     };
-    // The summary is the wire-format terminator for the SDK consumer,
-    // so it has to land on the same channel (and, for the named-pipe
-    // transport, the same connection) as the individual denial lines.
+    // The summary is the wire-format terminator for the consumer, so
+    // it has to land on the same channel (the same inherited handle, for
+    // the `--denials-fd` transport) as the individual denial lines.
     // `sink` is the shared handle the denial-writer thread already
     // drained into; by the time this is called that thread has been
     // joined, so this write is uncontended.
@@ -441,10 +432,10 @@ mod tests {
 
     /// Regression guard: the per-denial lines and the terminator
     /// summary line must land on the SAME `DenialSink` handle. The
-    /// named-pipe transport accepts exactly one connection, so a
-    /// summary written to a second handle would be lost. This mirrors
-    /// the runner ordering: stream on a thread, join, then emit the
-    /// summary on the shared sink.
+    /// inherited-handle transport is a single pipe handle, so a summary
+    /// written to a second handle would be lost. This mirrors the runner
+    /// ordering: stream on a thread, join, then emit the summary on the
+    /// shared sink.
     #[test]
     fn shared_sink_carries_denials_and_summary_on_one_handle() {
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
