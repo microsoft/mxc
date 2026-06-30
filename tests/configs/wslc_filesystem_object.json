@@ -1,0 +1,20 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "wslc-object-validation",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "if cat /mnt/c/objtest/data/secret.txt 2>/dev/null; then echo OBJECT_LEAK; else echo OBJECT_MASKED_OK; fi"
+  },
+  "filesystem": {
+    "readwritePaths": ["C:\\objtest\\data"],
+    "deniedPaths": ["C:\\objtest\\data_link"]
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

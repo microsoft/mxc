@@ -94,20 +94,23 @@ fn object_id(path: &str) -> Option<ObjectId> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
 
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
-    // Desired access 0: we need no data access to query identity, only a handle.
-    // FILE_FLAG_BACKUP_SEMANTICS lets the same call open directories as well as
-    // files. SAFETY: `wide` is a local NUL-terminated buffer; all other pointers
-    // are NULL.
+    // FILE_READ_ATTRIBUTES is the minimum access GetFileInformationByHandleEx
+    // (FileIdInfo) needs to read the object identity; a zero-access handle can
+    // be rejected (ERROR_ACCESS_DENIED) on some filesystems. We deliberately do
+    // NOT request data-read access. FILE_FLAG_BACKUP_SEMANTICS lets the same
+    // call open directories as well as files. SAFETY: `wide` is a local
+    // NUL-terminated buffer; all other pointers are NULL.
     let handle = unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
-            0,
+            FILE_READ_ATTRIBUTES.0,
             share,
             None,
             OPEN_EXISTING,
@@ -228,8 +231,10 @@ pub fn normalize_object_conflicts(policy: &mut ContainerPolicy, logger: &mut Log
         }
     }
 
-    // Rebuild the three lists from the resolved intents, preserving original
-    // ordering and de-duplicating within each list.
+    // Rebuild the three lists from the resolved intents. Within each list,
+    // entries keep first-seen order across the flattened rw → ro → denied
+    // sequence — so a path tightened from rw to denied lands ahead of paths
+    // originally in denied — de-duplicating within each list.
     let mut rw = Vec::new();
     let mut ro = Vec::new();
     let mut dn = Vec::new();
@@ -317,28 +322,24 @@ mod tests {
 
     #[test]
     fn same_object_same_intent_is_not_a_conflict() {
-        // Two distinct paths to the same object, both read-write — redundant but
-        // not a conflict, so nothing moves.
+        // Two distinct path strings to the same object via a hard link (works on
+        // both Unix and Windows, and exercises the platform object_id grouping),
+        // both read-write — redundant but not a conflict, so nothing moves and
+        // both paths are preserved in order.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         std::fs::write(&target, b"x").unwrap();
-        #[cfg(unix)]
-        let alias = {
-            let link = dir.path().join("alias");
-            std::os::unix::fs::symlink(&target, &link).unwrap();
-            link
-        };
-        #[cfg(not(unix))]
-        let alias = target.clone();
+        let alias = dir.path().join("alias");
+        std::fs::hard_link(&target, &alias).unwrap();
 
         let (t, a) = (target.to_str().unwrap(), alias.to_str().unwrap());
         let mut p = policy(&[t, a], &[], &[]);
         let mut logger = Logger::new(Mode::Buffer);
         normalize_object_conflicts(&mut p, &mut logger);
-        assert_eq!(p.readonly_paths.len(), 0);
-        assert_eq!(p.denied_paths.len(), 0);
-        // Both remain read-write (order preserved).
-        assert!(p.readwrite_paths.contains(&t.to_string()));
+        assert!(p.readonly_paths.is_empty());
+        assert!(p.denied_paths.is_empty());
+        // Both distinct paths remain read-write, original order preserved.
+        assert_eq!(p.readwrite_paths, vec![t.to_string(), a.to_string()]);
     }
 
     #[cfg(unix)]
