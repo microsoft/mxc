@@ -29,11 +29,15 @@ experience.
   return `NotSupported`; a configuration with `captureDenials: true` on those
   platforms will not capture denials. Applications must verify platform support
   before depending on the feature.
-- **Resource scope is filesystem and network only.** `resourceType` is one of `file`,
-  `network`, or `other`. **Registry capture is not supported in MXC at this time** and
-  applications must not depend on registry denials. The current Windows backend
-  produces `file` denials; `network` is reserved for the forthcoming WFP capture work,
-  and `other` is the catch-all classification (COM, IPC, and similar).
+- **Resource scope is filesystem only today.** `resourceType` is one of `file`,
+  `network`, `ui`, or `other`. **Registry capture is not supported in MXC at this time**
+  and applications must not depend on registry denials. The current Windows backend
+  produces `file` denials; `network` is reserved for the forthcoming WFP capture work;
+  `ui` is reserved for UI-policy denials (window station, desktop, clipboard, and similar
+  Win32k objects governed by Job Object UI limits) and is a first-class wire type ahead of
+  a confirmed UI-violation event source; and `other` is the catch-all classification (COM,
+  IPC, and similar). Parse `resourceType` leniently so an unmapped or future value never
+  breaks the consumer.
 - **Backend is `processcontainer` (AppContainer).** captureDenials is wired for the
   Windows process-container backend.
 - **One-shot invocations only.** `captureDenials` is honored on the one-shot spawn
@@ -123,7 +127,7 @@ remainder verbatim.
 {
   "type": "denial",
   "path": "C:\\Users\\me\\secret.txt",        // canonical; NT prefix already stripped
-  "resourceType": "file",                       // file | network | other
+  "resourceType": "file",                       // file | network | ui | other
   "accessType": "read",                         // read | write | execute | unknown
   "pid": 1234,                                   // sandbox PID that hit the denial
   "filetime": 132847890123456789                // Windows FILETIME (100ns since 1601 UTC)
@@ -211,7 +215,10 @@ Operational notes:
   the variable guarantees nothing will appear on stderr.
 - A minimal inbound named-pipe server reference — create, accept, read to EOF, with a
   self-connect mechanism so the accept cannot block indefinitely — is provided by
-  `DenialPipeServer` in `src/testing/wxc_e2e_tests/src/denial_consumer.rs`.
+  `DenialPipeServer` in `src/testing/wxc_e2e_tests/src/denial_consumer.rs`. A C#
+  port of the same server, with live per-denial events and the timeout/fallback
+  handling, is in [`samples/csharp`](./samples/csharp/README.md)
+  (`DenialPipeConsumer.cs`).
 
 ---
 
@@ -319,6 +326,11 @@ stripping, additive policy expansion with system-critical refusal, and the
   native end-to-end test that drives `wxc-exec` directly and validates default-deny
   capture, approve and re-spawn, the `MXC_DENIALS_PIPE` side channel, and a
   multi-round approve-and-retry loop.
+
+A runnable C# port of the same contract — the `0x1E` NDJSON parser, the default
+filters, and the `MXC_DENIALS_PIPE` inbound named-pipe server with live per-denial
+events — is provided as a standalone sample in
+[`samples/csharp`](./samples/csharp/README.md).
 
 Applications reimplement the same contract in their own language; the Rust port is the
 authoritative reference for behavior.

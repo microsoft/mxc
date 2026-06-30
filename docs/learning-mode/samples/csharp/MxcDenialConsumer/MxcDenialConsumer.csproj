@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    captureDenials C# reference consumer.
+
+    Standalone sample, intentionally not part of any Rust/Node build in this
+    repo. It depends only on the .NET base class library (System.IO.Pipes and
+    System.Text.Json), so no NuGet packages are required.
+
+    Build and run on Windows (see README.md for the full invocation).
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Microsoft.Mxc.Samples.DenialConsumer</RootNamespace>
+    <AssemblyName>MxcDenialConsumer</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

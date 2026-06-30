@@ -21,6 +21,14 @@ pub enum ResourceType {
     /// capture; not produced by the current Windows file-only
     /// backend.
     Network,
+    /// UI resource denied -- window station, desktop, clipboard, and
+    /// similar Win32k objects governed by the sandbox's UI policy (Job
+    /// Object UI limits). Reserved, first-class type: like `Network`, it
+    /// is part of the wire taxonomy but is **not produced by the current
+    /// Windows backend**, whose ETW access-check path captures only
+    /// filesystem denials. Wiring a classifier mapping awaits a confirmed
+    /// UI-violation event source.
+    Ui,
     /// Unclassified denial (COM, IPC, etc.).
     Other,
 }
@@ -119,6 +127,7 @@ mod tests {
             serde_json::to_string(&ResourceType::Network).unwrap(),
             "\"network\""
         );
+        assert_eq!(serde_json::to_string(&ResourceType::Ui).unwrap(), "\"ui\"");
         assert_eq!(
             serde_json::to_string(&ResourceType::Other).unwrap(),
             "\"other\""

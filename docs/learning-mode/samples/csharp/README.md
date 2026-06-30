@@ -1,0 +1,72 @@
+# captureDenials — C# reference consumer
+
+A standalone C# reference implementation of the `captureDenials` integration
+contract, mirroring the Rust reference in
+[`src/testing/wxc_e2e_tests/src/denial_consumer.rs`](../../../../src/testing/wxc_e2e_tests/src/denial_consumer.rs).
+It drives `wxc-exec` directly (there is **no SDK wrapper** for this flow) and
+receives the denial stream live over the `MXC_DENIALS_PIPE` named-pipe transport.
+
+Read the full contract first:
+[`../../consumer-guide.md`](../../consumer-guide.md).
+
+## What it shows
+
+- An **inbound** named-pipe server (`PipeDirection.In`) — `wxc-exec` writes, the
+  consumer reads.
+- The `0x1E`-framed NDJSON wire format: incremental framing, the `denial` and
+  `summary` records, lenient (forward-compatible) JSON parsing.
+- The consumer-side default noise filters and NT-prefix stripping.
+- **Live** per-denial delivery (react the moment a resource is blocked) plus the
+  consolidated `deniedResources` carried on the terminating `summary`.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `DenialStream.cs` | Wire types (`Denial`, `Summary`), the `0x1E` NDJSON parser, and the default filters. |
+| `DenialPipeConsumer.cs` | The reusable inbound named-pipe server with live `DenialReceived` / `SummaryReceived` events. |
+| `Program.cs` | End-to-end demo: create the pipe, spawn `wxc-exec`, consume live, finalize. |
+
+## Build and run (Windows)
+
+Requires the [.NET SDK](https://dotnet.microsoft.com/download) (8.0+). No NuGet
+packages are needed — the sample uses only `System.IO.Pipes` and
+`System.Text.Json`.
+
+```pwsh
+# 1) One-time host provisioning (elevated) — see consumer-guide.md §2
+wxc-host-prep install-learning-mode-shim
+
+# 2) Run the consumer against a config that sets "captureDenials": true
+dotnet run --project MxcDenialConsumer -- C:\path\to\wxc-exec.exe C:\path\to\config.json
+```
+
+Minimal config (`captureDenials` is a top-level, first-class field):
+
+```jsonc
+{
+  "version": "0.7.0-alpha",
+  "containerId": "demo",
+  "containment": "processcontainer",
+  "captureDenials": true,
+  "process": { "commandLine": "cmd /c type \"C:\\Users\\me\\secret.txt\"" },
+  "filesystem": { "readonlyPaths": [], "readwritePaths": [] }
+}
+```
+
+## Contract reminders
+
+- **Base name only.** Set `MXC_DENIALS_PIPE` to `DenialPipeConsumer.BaseName`
+  (no `\\.\pipe\` prefix — both .NET and `wxc-exec` prepend it).
+- **Create before spawn.** Construct the consumer before starting `wxc-exec`.
+- **Fallback to stderr.** If `wxc-exec` cannot open the pipe it logs a warning and
+  falls back to its stderr; the client may never connect. Cancel `RunAsync` once
+  the child exits (the demo does this after a short grace period) and inspect
+  `wxc-exec` stderr in that case.
+- **`captureDenialsActive`.** `totalDenials: 0` is ambiguous — always check this
+  flag to tell "clean run" from "capture never attached" (e.g. shim not installed).
+- **PTY-independent.** This channel is the same regardless of how the workload's
+  own stdio is wired; it exists precisely so a PTY/ConPTY terminal stays clean.
+
+This is a reference, not a supported product surface; the Rust port remains the
+authoritative reference for behavior.

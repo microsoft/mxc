@@ -122,7 +122,7 @@ Every denied access surfaces as a typed `DeniedResource` on the wire:
 {
   type: 'denial',
   path: string,                                   // e.g. C:\Users\me\secret.txt
-  resourceType: 'file' | 'network' | 'other',
+  resourceType: 'file' | 'network' | 'ui' | 'other',
   accessType: 'read' | 'write' | 'execute' | 'unknown',
   pid: number,
   filetime: bigint,

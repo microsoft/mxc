@@ -123,6 +123,14 @@ impl From<DenialEvent> for DeniedResource {
 /// - `"File"` -> `File`
 /// - `""` (empty) -> `Network`
 /// - anything else -> `Other`
+///
+/// TODO(ui-denials): the `ResourceType::Ui` variant exists in the wire
+/// taxonomy but is intentionally left unmapped here, mirroring `Network`.
+/// UI restrictions are enforced via Job Object UI limits
+/// (`JOB_OBJECT_UILIMIT_*`) at the Win32k layer, which do not surface
+/// through this ETW access-check path. Once a confirmed UI-violation
+/// event source is identified, add the mapping (e.g. the relevant
+/// `ObjectType` strings, or a dedicated extractor) -> `ResourceType::Ui`.
 pub fn resource_type_from_object_type(obj_type: &str) -> ResourceType {
     match obj_type {
         "File" => ResourceType::File,
