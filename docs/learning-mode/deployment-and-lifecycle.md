@@ -3,6 +3,7 @@
 Status: **Draft for review.** Owner: learning-mode capture feature.
 Reviewers: Tessera crew (`@microsoft/tessera-code-reviewers`).
 Related: [`architecture.md`](./architecture.md) (box layout + runtime data flow),
+[`consumer-guide.md`](./consumer-guide.md) (application integration contract and gotchas),
 [`../host-prep.md`](../host-prep.md) (shim install/uninstall command reference).
 
 This document exists because the captureDenials work (PR #558 and the stacked PRs
@@ -100,158 +101,150 @@ it (track-and-revoke; see Q2).
 
 Provisioning gets the *capability* onto the box; this section is what the
 *application* codes against once the shim is installed. It is OS-independent —
-the wire shape and SDK callbacks are identical on every platform the feature
-lands on — and is the answer to "how does my app learn a path was denied, and how
-do I ask the user to allow it?"
+the wire shape is identical on every platform the feature lands on — and is the
+answer to "how does my app learn a path was denied, and how do I ask the user to
+allow it?"
+
+> **The SDK no longer drives this loop.** The native `wxc-exec` binary streams
+> denials and the **consumer owns** parsing, consent, and the re-spawn loop.
+> The SDK keeps only the generic `createConfigFromPolicy` / `spawnSandboxFromConfig`
+> surface plus the `captureDenials` field. A reference implementation of the
+> parser, the named-pipe transport, the default filters, and policy expansion
+> lives in the native E2E harness
+> (`src/testing/wxc_e2e_tests/src/denial_consumer.rs`); the descriptions below are
+> the contract that harness (and any consumer) implements.
 
 ### The denial record
 
-Every denied access surfaces as a typed `DeniedResource`
-(`sdk/src/denial-channel/stream.ts`):
+Every denied access surfaces as a typed `DeniedResource` on the wire:
 
 ```ts
 {
   type: 'denial',
   path: string,                                   // e.g. C:\Users\me\secret.txt
-  resourceType: 'file' | 'registry' | 'other',
+  resourceType: 'file' | 'network' | 'other',
   accessType: 'read' | 'write' | 'execute' | 'unknown',
   pid: number,
   filetime: bigint,
 }
 ```
 
-Records are deduped by `(path, accessType)` upstream, and `defaultDenialFilters`
-strips the OS "background hum" (loader DLL probes, locale registry hits, etc.) so
-the application only sees actionable denials.
+Records are deduped by `(path, accessType)` upstream, and the consumer's default
+filters strip the OS "background hum" (loader DLL probes, etc.) so the
+application only sees actionable denials.
 
 ### Two delivery modes
 
-- **Real-time, per denial** — the low-level `parseDenialStream` fires an
-  `onDenial(resource)` callback the moment each denial streams off `wxc-exec`'s
-  stderr. Use this for live progress UI or logging:
-
-  ```ts
-  await parseDenialStream(child.stderr, {
-    onDenial: (r) => log(`denied: ${r.path} (${r.accessType})`),
-  });
-  ```
-
-- **Batched, per run** — the high-level `spawnSandboxWithRetry` collects the
-  deduped batch and hands it to the application once each attempt finishes via
-  `onDenied`. This is the mode that powers the approve-and-retry UX below. The
-  wrapper **also** accepts an optional real-time `onDenial(resource, attemptIndex)`
-  callback, so you can get live per-denial events **and** the managed retry loop
-  from the same call — no need to hand-roll the loop just to observe denials live.
+- **Real-time, per denial** — each denial is emitted the instant it occurs as its
+  own `0x1E`-framed NDJSON `denial` record. The consumer reads these live (off
+  `wxc-exec`'s **stderr** in pipe mode, or the **`MXC_DENIALS_PIPE`** named pipe in
+  PTY mode) and can prompt or log per denial mid-run.
+- **Consolidated, per run** — the summary terminator line carries the deduped
+  `deniedResources` array, giving the consumer a race-free single read after exit.
+  This is the batch that powers the approve-and-retry UX below.
 
 ### The approval hook
 
-The hook an application uses to ask the user "allow this?" is the `onDenied`
-callback of `spawnSandboxWithRetry`. The loop invokes it at the end of each
-attempt; the application drives whatever approval UX it wants (dialog, CLI
-prompt, policy file, …) and returns an `OnDeniedDecision`:
+The hook an application uses to ask the user "allow this?" is **consumer-owned** —
+it is no longer an SDK callback. The consumer collects the run's denials (live
+and/or from the summary), drives whatever approval UX it wants (dialog, CLI
+prompt, policy file, …), and decides which paths to grant.
 
-```ts
-const result = await spawnSandboxWithRetry({
-  script: 'my-build.exe',
-  policy: basePolicy,
-  onDenied: async (denials, ctx) => {
-    // ctx = { attemptIndex, summary, exitCode }
-    const approved = await askUserWhichToAllow(denials); // app-owned UX
-    return { approve: approved };   // subset the user allowed
-    // return { cancel: true };     // user declined -> stop, don't retry
-  },
-});
-```
+### What the consumer does with the decision
 
-### What the loop does with the decision
-
-1. If the user **approved** at least one denial, the SDK calls
-   `regenerateSandboxPolicy(basePolicy, approved)` to produce a new policy that
-   grants exactly those approved paths on top of the base policy.
-2. It **re-spawns the workload once** with the expanded policy.
-3. Any paths still denied (or newly hit) flow back through `onDenied` on the
-   second attempt, so the application can surface the final state.
+1. If the user **approved** at least one denial, the consumer expands its base
+   config — adding exactly those approved paths to
+   `filesystem.readonlyPaths` / `readwritePaths` — refusing OS-security-critical
+   paths even if approved.
+2. It **re-spawns the workload once** with the expanded config (enforcement is
+   non-blocking, so a grant only takes effect on the next run — it cannot
+   un-fail the already-denied operation).
+3. Any paths still denied (or newly hit) surface on the next run, so the
+   application can prompt again or surface the final state.
 
 ```
 spawn (captureDenials: true)
         │
         ▼
-denials stream ──► onDenied(denials)  ◄── app prompts user
-        │                                 returns { approve: [...] }
-        ▼
-regenerateSandboxPolicy(base, approved)
+denials stream ──► consumer collects + prompts user ◄── returns approved paths
         │
         ▼
-re-spawn once with expanded policy ──► still-denied? ──► onDenied again (final)
+consumer expands config with approved paths
+        │
+        ▼
+re-spawn with expanded config ──► still-denied? ──► prompt again (next round)
 ```
 
 ### Guardrails
 
-- **Retry is capped at one.** Prevents an "approve A but the workload then denies
-  B" loop from spinning forever; the SDK bails and returns the final state.
-- **Regen has a hard deny-list** (`forbiddenRegenPaths`): even if the user
-  approves them, OS-security-critical paths (SYSTEM hives, `kernel32.dll`, …) are
-  never granted.
-- **PTY mode** uses `spawnSandboxWithSideChannel` (named-pipe transport) instead
-  of stderr, but the `DeniedResource` shape and the `onDenied` hook are identical,
-  so the application integration code does not change.
+- **The consumer owns the cadence.** A typical loop caps at one prompt-and-retry
+  round; multi-round approval is the consumer's choice. MXC does a single run per
+  invocation and never loops on its own.
+- **Refuse system-critical paths.** Even if the user approves them, the consumer's
+  policy-expansion must skip OS-security-critical paths (SYSTEM hives,
+  `kernel32.dll`, …). The reference `expand_readonly_paths` in `denial_consumer.rs`
+  does this.
+- **PTY mode uses a named-pipe transport** (`MXC_DENIALS_PIPE`) instead of stderr,
+  because the workload owns the terminal. The `DeniedResource` shape and the
+  approval logic are identical; only the transport differs.
 
 ### Complete, copy-paste samples
 
-Prerequisites for both samples:
+The end-to-end reference — denial parser (0x1E NDJSON framing), default noise
+filters, the `MXC_DENIALS_PIPE` named-pipe server, and additive policy
+expansion — lives in **`src/testing/wxc_e2e_tests/src/denial_consumer.rs`**, and
+`src/testing/wxc_e2e_tests/tests/e2e_windows_capture_denials.rs` exercises the full
+pipe-mode (live stderr), side-channel (named pipe), and multi-round
+approve-and-respawn flow against the native `wxc-exec` binary. Consumers
+reimplement the same contract in their own language; the TypeScript sketch below
+shows the shape for a Node consumer.
+
+Prerequisites:
 
 - Node.js 18+.
 - The shim installed once on the machine (the provisioning step):
   `wxc-host-prep install-learning-mode-shim` from an elevated prompt.
-- The SDK added as a dependency:
+- The SDK added as a dependency (for the generic spawn surface only):
 
   ```bash
   npm install @microsoft/mxc-sdk
   ```
 
-  ```jsonc
-  // package.json
-  {
-    "dependencies": {
-      "@microsoft/mxc-sdk": "^0.6.1"
-    }
-  }
-  ```
-
-#### Sample A — high-level: prompt the user and retry (recommended)
-
-Drives the full "denied → ask the user → grant → retry once" loop with
-`spawnSandboxWithRetry`. This is the mode most applications want.
+The sketch below shows the consumer-owned loop: build a default-deny config with
+`captureDenials: true`, spawn `wxc-exec` via the generic SDK surface, read denials
+off stderr (pipe mode), prompt the user, expand the config with approved paths,
+and re-spawn.
 
 ```ts
-// approve-and-retry.ts
 import {
-  spawnSandboxWithRetry,
+  createConfigFromPolicy,
+  spawnSandboxFromConfig,
   getPlatformSupport,
   type SandboxPolicy,
-  type DeniedResource,
-  type OnDeniedDecision,
 } from '@microsoft/mxc-sdk';
-import * as readline from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
+// Consumer-owned helpers — you implement these (reference port in Rust:
+// src/testing/wxc_e2e_tests/src/denial_consumer.rs):
+//   parseDenialStream     — split the 0x1E-framed NDJSON, apply default filters
+//   defaultDenialFilters  — drop the OS loader / registry background hum
+//   expandPolicyFromDenials — additively grant approved paths, refuse critical ones
+import {
+  parseDenialStream,
+  defaultDenialFilters,
+  expandPolicyFromDenials,
+} from './your-denial-helpers.js';
 
-// Your approval UX. Here: a simple y/N prompt per denial. Replace with
-// a GUI dialog, a policy file, persisted approvals, etc.
-async function askUserWhichToAllow(
-  denials: readonly DeniedResource[],
-): Promise<DeniedResource[]> {
-  const rl = readline.createInterface({ input, output });
-  const approved: DeniedResource[] = [];
-  for (const d of denials) {
-    const ans = (
-      await rl.question(`Allow ${d.accessType} access to ${d.path}? [y/N] `)
-    )
-      .trim()
-      .toLowerCase();
-    if (ans === 'y' || ans === 'yes') approved.push(d);
-  }
-  rl.close();
-  return approved;
+async function runRound(policy: SandboxPolicy, script: string) {
+  const config = createConfigFromPolicy(policy, 'process');
+  config.captureDenials = true;
+  config.process!.commandLine = script;
+
+  // usePty:false keeps stdout/stderr separate so the NDJSON denial protocol
+  // (which rides stderr) can be demultiplexed from the workload's own writes.
+  const child = spawnSandboxFromConfig(config, { usePty: false });
+  return parseDenialStream(child.stderr!, {
+    filters: defaultDenialFilters,
+    onDenial: (r) => console.log(`denied: ${r.accessType} ${r.path}`),
+  });
 }
 
 async function main(): Promise<void> {
@@ -261,98 +254,28 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Default-deny base policy: nothing granted, so the workload's reads
-  // outside its grants surface as denials.
-  const policy: SandboxPolicy = {
-    version: '0.5.0-alpha',
+  let policy: SandboxPolicy = {
+    version: '0.6.0-alpha',
     filesystem: { readwritePaths: [], readonlyPaths: [] },
   };
+  const script = 'cmd /c type "C:\\Users\\Alice\\Documents\\report.txt"';
 
-  const result = await spawnSandboxWithRetry({
-    script: 'cmd /c type "C:\\Users\\Alice\\Documents\\report.txt"',
-    policy,
-    // Default is 0 (single attempt, no retry). Opt into one prompt-and-retry pass:
-    maxRetries: 1,
-    // Optional: real-time, per-denial callback (fires as each denial streams,
-    // before the batched onDenied). Great for live progress/logging.
-    onDenial: (r, attemptIndex) =>
-      console.log(`live[attempt ${attemptIndex}]: ${r.accessType} ${r.path}`),
-    onDenied: async (denials, ctx): Promise<OnDeniedDecision> => {
-      if (denials.length === 0) return { approve: [] };
-      console.log(`\nAttempt ${ctx.attemptIndex} hit ${denials.length} denial(s).`);
-      const approved = await askUserWhichToAllow(denials);
-      return { approve: approved }; // return { cancel: true } to abort instead
-    },
-  });
+  const result = await runRound(policy, script);
 
-  // The shim wasn't installed/reachable: capture never activated.
-  if (result.stopReason === 'capture-inactive') {
+  // captureDenialsActive === false ⇒ the shim wasn't installed/reachable.
+  if (result.summary?.captureDenialsActive === false) {
     console.error(
-      'Denial capture is not active on this machine.\n' +
-        'Install the shim (once, as administrator):\n' +
+      'Denial capture is not active — install the shim (as admin):\n' +
         '  wxc-host-prep install-learning-mode-shim',
     );
     process.exit(2);
   }
 
-  const last = result.attempts[result.attempts.length - 1];
-  console.log(`\nstopReason: ${result.stopReason}`);
-  console.log(`exitCode:   ${last.exitCode}`);
-  console.log(`workload output:\n${last.stdout}`);
-}
-
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
-```
-
-#### Sample B — low-level: stream denials in real time
-
-Spawns the workload directly and consumes the denial stream as it arrives via
-`onDenial`. Use this when you want live progress/logging rather than the managed
-retry loop.
-
-```ts
-// stream-denials.ts
-import {
-  createConfigFromPolicy,
-  spawnSandboxFromConfig,
-  parseDenialStream,
-  defaultDenialFilters,
-  type SandboxPolicy,
-} from '@microsoft/mxc-sdk';
-
-async function main(): Promise<void> {
-  const policy: SandboxPolicy = {
-    version: '0.5.0-alpha',
-    filesystem: { readwritePaths: [], readonlyPaths: [] },
-  };
-
-  const config = createConfigFromPolicy(policy, 'process');
-  config.captureDenials = true;
-  config.process!.commandLine =
-    'cmd /c type "C:\\Users\\Alice\\Documents\\report.txt"';
-
-  // usePty:false keeps stdout and stderr separate so the NDJSON denial
-  // protocol (which rides stderr) can be demultiplexed from the workload's
-  // own stderr writes.
-  const child = spawnSandboxFromConfig(config, { usePty: false });
-
-  const result = await parseDenialStream(child.stderr!, {
-    filters: defaultDenialFilters, // strip OS background noise
-    onDenial: (r) => console.log(`denied: ${r.accessType.padEnd(7)} ${r.path}`),
-  });
-
-  if (result.summary?.captureDenialsActive === false) {
-    console.error(
-      'Capture inactive — install the shim (as admin):\n' +
-        '  wxc-host-prep install-learning-mode-shim',
-    );
+  if (result.denials.length > 0) {
+    const approved = await askUserWhichToAllow(result.denials); // consumer UX
+    policy = expandPolicyFromDenials(policy, approved);
+    await runRound(policy, script); // re-spawn once with the expanded policy
   }
-
-  console.log(`\nUnique denials: ${result.denials.length}`);
-  console.log(`Workload exit:  ${result.summary?.exitCode}`);
 }
 
 main().catch((err) => {
@@ -360,10 +283,6 @@ main().catch((err) => {
   process.exit(1);
 });
 ```
-
-Both compile with a standard `tsc` setup (`module`/`moduleResolution` for Node,
-`target` ES2020+ so the `filetime: bigint` field is supported) and run with
-`node`/`ts-node`.
 
 ---
 
@@ -397,10 +316,14 @@ This is what exists today, verified against `docs/host-prep.md` and the
 
 ### Lifecycle commands (all elevated)
 
-- `install-learning-mode-shim [--shim-path <path>]` — register the service +
-  grant the privilege. Idempotent for the same binary path; a differing binary
-  path is an explicit conflict (uninstall first).
-- `uninstall-learning-mode-shim` — stop + `DeleteService`. Idempotent.
+- `install-learning-mode-shim [--shim-path <source>]` — **copy** the shim binary
+  into the protected install location (`%ProgramFiles%\Mxc`), register the service
+  to point there, and grant the privilege. `--shim-path` is the **source** to copy
+  from (defaults to the binary next to `wxc-host-prep`). Idempotent: re-running with
+  the same source refreshes the installed copy; registering a service already
+  pointing elsewhere is an explicit conflict (uninstall first).
+- `uninstall-learning-mode-shim` — stop + `DeleteService`, and best-effort delete
+  the copied binary + its (now empty) install directory. Idempotent.
   **Does not revoke** `SeSystemProfilePrivilege` (another tool on the box may
   rely on it; clobbering an LSA right is destructive).
 - `dump-learning-mode-shim [--json]` — report installed/state/binary path. Exit 0
@@ -680,8 +603,9 @@ documented elevated step from Q1:
 `wxc-host-prep install-learning-mode-shim --shim-path <resolved path>`.
 
 - 👍 No elevation in the install path; binaries are present and discoverable;
-  activation is explicit and auditable. The `--shim-path` flag already supports
-  pointing the service at the binary wherever the package placed it.
+  activation is explicit and auditable. The `--shim-path` flag points install at
+  the packaged shim binary as the **source** to copy into the protected install
+  location (`%ProgramFiles%\Mxc`), wherever the package placed it.
 - 👎 Consumer must run the separate step (mitigated by Q1's preflight error +
   docs, and by helper scripts below).
 

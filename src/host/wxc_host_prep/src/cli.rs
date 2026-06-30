@@ -120,8 +120,9 @@ struct DumpNullDeviceArgs {
 
 #[derive(clap::Args)]
 struct InstallLearningModeShimArgs {
-    /// Override the path to `mxc-learning-mode-shim.exe`. Defaults to the
-    /// same directory as `wxc-host-prep.exe`.
+    /// Override the *source* `mxc-learning-mode-shim.exe` to copy from.
+    /// Defaults to the same directory as `wxc-host-prep.exe`. The binary
+    /// is always installed into `%ProgramFiles%\Mxc`.
     #[arg(long = "shim-path")]
     shim_path: Option<String>,
 }

@@ -21,7 +21,7 @@ pub enum ResourceType {
     /// capture; not produced by the current Windows file-only
     /// backend.
     Network,
-    /// Unclassified denial (registry on Windows, COM, IPC, etc.).
+    /// Unclassified denial (COM, IPC, etc.).
     Other,
 }
 

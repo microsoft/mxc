@@ -284,11 +284,11 @@ export interface ContainerConfig {
 
   /**
    * When true, the native binary attaches a per-process ETW collector
-   * to capture filesystem/registry access denials and streams them
-   * back on stderr as NDJSON lines (each prefixed with ASCII Record
-   * Separator, 0x1E) so the SDK can react to denials mid-run. The
-   * final summary line is also delivered through
-   * `ScriptResponse.deniedResources`.
+   * to capture filesystem access denials and streams them back on
+   * stderr as NDJSON lines (each prefixed with ASCII Record Separator,
+   * 0x1E) so the consumer can react to denials mid-run. A final
+   * summary line (carrying the consolidated `deniedResources` list)
+   * terminates the stream.
    *
    * Windows only. Requires the `MxcLearningModeShim` service to be
    * installed and running on the host (see
@@ -298,7 +298,9 @@ export interface ContainerConfig {
    *
    * Default: false.
    *
-   * See {@link parseDenialStream} for consuming the streamed output.
+   * The consumer owns parsing the 0x1E-framed NDJSON denial stream
+   * (off stderr, or off the `MXC_DENIALS_PIPE` named pipe in PTY
+   * mode) and driving any consent / re-spawn loop.
    */
   captureDenials?: boolean;
 }
@@ -353,10 +355,10 @@ export type SandboxPolicy = {
   timeoutMs?: number;
 
   /**
-   * When true, the native binary captures filesystem/registry access
-   * denials made by the sandboxed process and surfaces them through
-   * stderr (as a streamed NDJSON protocol) and through
-   * `ScriptResponse.deniedResources`. Use this to drive
+   * When true, the native binary captures filesystem access denials
+   * made by the sandboxed process and surfaces them through stderr
+   * (as a streamed NDJSON protocol) terminated by a summary line that
+   * carries the consolidated `deniedResources` list. Use this to drive
    * "ask the user to grant access and retry" UX flows on top of
    * a default-deny policy.
    *
@@ -365,8 +367,8 @@ export type SandboxPolicy = {
    * flag is a no-op — the workload still runs, just without
    * denial capture. Default: false.
    *
-   * Note: capture is filesystem/registry only today. Network/WFP
-   * denials are intentionally out of scope for this iteration.
+   * Note: capture is filesystem only today. Network/WFP denials are
+   * intentionally out of scope for this iteration.
    */
   captureDenials?: boolean;
 }

@@ -1170,11 +1170,11 @@ describe('spawnSandboxFromConfig captureDenials + PTY guard', () => {
     );
   });
 
-  it('error message mentions the side-channel escape hatch', () => {
-    // Consumers hitting this guard need to know the way out:
-    // spawnSandboxWithSideChannel reroutes denials over a private
-    // named pipe so PTY mode becomes safe. The error must point
-    // them there or they'll resort to giving up captureDenials.
+  it('error message points to the MXC_DENIALS_PIPE escape hatch', () => {
+    // Consumers hitting this guard need to know the way out: setting
+    // MXC_DENIALS_PIPE reroutes denials over a named pipe so PTY mode
+    // becomes safe. The error must point them there or they'll resort
+    // to giving up captureDenials.
     const config: ContainerConfig = {
       version: '0.5.0-alpha',
       containment: 'processcontainer',
@@ -1183,7 +1183,7 @@ describe('spawnSandboxFromConfig captureDenials + PTY guard', () => {
     };
     assert.throws(
       () => spawnSandboxFromConfig(config, {}),
-      /spawnSandboxWithSideChannel/,
+      /MXC_DENIALS_PIPE/,
     );
   });
 });

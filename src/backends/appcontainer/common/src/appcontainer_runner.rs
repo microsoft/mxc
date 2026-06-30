@@ -1030,6 +1030,7 @@ impl AppContainerScriptRunner {
                     capture_was_active,
                     child_processes_observed,
                     descendant_pids_covered,
+                    &denied_resources,
                 );
             }
         }

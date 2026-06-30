@@ -36,7 +36,7 @@
 //! milliseconds) and is dominated by NT image-loader work
 //! (`ntdll!LdrpInitializeProcess`, DLL loads) which the workload
 //! cannot influence. Real applications do non-trivial setup
-//! before their first audited filesystem / registry access, so
+//! before their first audited filesystem access, so
 //! the window is usually empty.
 //!
 //! For workloads where this is unacceptable (e.g. a child that

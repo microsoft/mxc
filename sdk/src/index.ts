@@ -50,48 +50,9 @@ export {
   spawnSandbox,
   spawnSandboxAsync,
   spawnSandboxFromConfig,
-  spawnSandboxWithSideChannel,
-  SpawnWithSideChannelResult,
   buildSandboxPayload,
   SandboxSpawnOptions,
 } from './sandbox.js';
-
-// Export captureDenials side-channel transport
-export {
-  createDenialPipeServer,
-  DenialPipeServer,
-} from './denial-channel/transports/named-pipe.js';
-
-// Export captureDenials streaming consumer
-export {
-  DENIAL_STREAM_MARKER,
-  DenialAccessType,
-  DenialResourceType,
-  DeniedResource,
-  DenialStreamSummary,
-  DenialFilter,
-  defaultDenialFilters,
-  stripNtPrefix,
-  DenialStreamResult,
-  ParseDenialStreamOptions,
-  parseDenialStream,
-} from './denial-channel/stream.js';
-
-// Export captureDenials retry orchestration
-export {
-  regenerateSandboxPolicy,
-  isSystemCritical,
-  RegenInput,
-  RegenResult,
-} from './learning-mode/policy-regen.js';
-export {
-  spawnSandboxWithRetry,
-  OnDeniedDecision,
-  OnDeniedCallback,
-  SpawnSandboxWithRetryOptions,
-  SpawnSandboxWithRetryResult,
-  RetryAttemptResult,
-} from './learning-mode/spawn-with-retry.js';
 
 // Export policy discovery functions
 export {

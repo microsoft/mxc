@@ -9,3 +9,7 @@ description = "End-to-end integration tests for MXC"
 base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+uuid.workspace = true

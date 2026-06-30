@@ -1,7 +1,20 @@
 # Learning-mode capture: architecture
 
 Status: **MVP complete on Windows BaseContainer (Phases A–E + descendant filter fix + shim security hardening).**
-Related: `docs/contoso-integration.md` (consumer-facing wire format), `docs/host-prep.md` (shim install/uninstall).
+Related: [`consumer-guide.md`](./consumer-guide.md) (application integration contract and gotchas), `docs/contoso-integration.md` (consumer-facing wire format), `docs/host-prep.md` (shim install/uninstall).
+
+> **Update — SDK orchestration removed (native-driven model).** The SDK
+> no longer ships a learning-mode surface (`spawnSandboxWithRetry`,
+> `parseDenialStream`, `regenerateSandboxPolicy`, the denial-channel
+> pipe server). The native `wxc-exec` binary streams denials directly
+> (0x1E-framed NDJSON on stderr, or on the `MXC_DENIALS_PIPE` named pipe
+> in PTY mode) and the **consumer owns** parsing, consent, and the
+> re-spawn-per-round loop. The "Box 1 / Box 2" logic below is therefore
+> a description of the *consumer-side* responsibilities, not SDK code;
+> a reference implementation lives in the native E2E test harness
+> (`src/testing/wxc_e2e_tests/src/denial_consumer.rs`, exercised by
+> `tests/e2e_windows_capture_denials.rs`). `wxc-exec` does a single
+> run per invocation and never authors policy.
 
 This document describes how the captureDenials feature is laid out
 after the **three-boxes** rearchitecture. It complements the
@@ -16,7 +29,7 @@ slot into.
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ Box 2: Learning Mode Module (orchestration, OS-agnostic)         │
-│   - spawnSandboxWithRetry, policy-regen, retry loop, dispatch    │
+│   - re-spawn loop, policy expansion, dispatch (consumer-owned)  │
 │   - LearningModeBackend trait                                    │
 │   - SDK + Rust orchestrator pick the right OS adapter            │
 │                       │ dispatches to         ^ returns          │
@@ -37,7 +50,7 @@ slot into.
 │   │ ┌────────────────────────────────────────────────────────┐ │ │
 │   │ │ Box 1: Denial Channel (cross-platform transport)       │ │ │
 │   │ │   - DeniedResource type + NDJSON wire format           │ │ │
-│   │ │   - parseDenialStream (parser)                         │ │ │
+│   │ │   - NDJSON parser (consumer-owned)                    │ │ │
 │   │ │   - Transports: stderr (xplat, implicit in parser),    │ │ │
 │   │ │     named-pipe (Windows), unix-socket (planned)        │ │ │
 │   │ └────────────────────────────────────────────────────────┘ │ │
@@ -129,54 +142,51 @@ the same one-way edge — `backends/* → core/*`, never the reverse.
 
 ---
 
-## SDK layout
+## Consumer-side layout
 
-| File | Box | Purpose |
+The parsing / loop / policy-expand logic is **no longer in the SDK** —
+it is consumer-owned. The shapes below describe what a consumer
+implements (the native E2E test harness
+`src/testing/wxc_e2e_tests/src/denial_consumer.rs` is a reference port):
+
+| Responsibility | Box | Purpose |
 |---|---|---|
-| `sdk/src/denial-channel/stream.ts` | 1 | `parseDenialStream` (NDJSON parser), `DeniedResource` / `DenialAccessType` / `DenialResourceType` types, `defaultDenialFilters`, `stripNtPrefix`, `DENIAL_STREAM_MARKER`. The parser is stream-agnostic — pass it any `Readable`, including `child.stderr` for the implicit stderr transport. |
-| `sdk/src/denial-channel/transports/named-pipe.ts` | 1 (Windows) | Windows named-pipe server (`createDenialPipeServer`). Used when the workload owns the PTY so the denial stream can't share stderr. |
-| `sdk/src/denial-channel/index.ts` | 1 | Internal barrel; re-exports the two files above. |
-| `sdk/src/learning-mode/policy-regen.ts` | 2 | `regenerateSandboxPolicy` — given an existing `SandboxPolicy` and a list of `DeniedResource` events, produces a relaxed policy. |
-| `sdk/src/learning-mode/spawn-with-retry.ts` | 2 | `spawnSandboxWithRetry` — drives the retry loop (spawn → parse stream → call `onDenied` → regen policy → respawn). |
-| `sdk/src/learning-mode/index.ts` | 2 | Internal barrel. |
+| NDJSON denial parser | 1 | Demux the 0x1E-framed NDJSON stream (`parseDenialStream`-equivalent): materialise `DeniedResource` records, apply default noise filters, strip the `\??\` prefix, and surface the summary terminator (which carries the consolidated `deniedResources` list). Stream-agnostic — feed it `child.stderr` (pipe mode) or the side-channel socket (PTY mode). |
+| Named-pipe transport (Windows) | 1 | A Windows named-pipe server for PTY mode, where the workload owns the terminal so denials can't share stderr. The consumer sets `MXC_DENIALS_PIPE=<name>` in the `wxc-exec` env. |
+| Policy expansion | 2 | Given an existing `SandboxPolicy` and the denials the user approved, produce a relaxed policy (additive, refuses system-critical paths). |
+| Re-spawn loop | 2 | Drive the loop: spawn `wxc-exec` → parse stream → prompt for consent → expand policy → respawn. One run per `wxc-exec` invocation; the consumer owns the cadence. |
 
-External callers see no path changes: `sdk/src/index.ts` re-exports
-everything from the new locations with the same names as before, so
-`import { spawnSandboxWithRetry } from '@microsoft/mxc-sdk'`
-continues to work.
+The SDK retains only the **generic** spawn surface
+(`createConfigFromPolicy`, `spawnSandboxFromConfig`) and the
+`captureDenials` policy/config field, which maps straight through to
+the native binary. Consumers build a config, set `captureDenials`, and
+spawn `wxc-exec` directly.
 
 ---
 
 ## End-to-end call path (Windows)
 
-For an SDK consumer doing `spawnSandboxWithRetry`:
+For a consumer driving `wxc-exec` directly:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ Consumer (Node) — @microsoft/mxc-sdk                     │
-│   spawnSandboxWithRetry(policy, { onDenied: cb })        │
+│ Consumer (owns consent + the re-spawn loop)             │
+│   build config (captureDenials: true) → spawn wxc-exec  │
 └────────────────────────┬─────────────────────────────────┘
                          │
                          v
 ┌──────────────────────────────────────────────────────────┐
-│ sdk/src/learning-mode/spawn-with-retry.ts (Box 2)        │
-│   - spawn child (wxc-exec)                               │
-│   - hand child.stderr to parseDenialStream               │
-│   - accumulate each streamed denial (onDenial)           │
-│   - per attempt, call onDenied ONCE with the batch       │
-│   - on retry, regen policy via learning-mode/policy-regen│
+│ Consumer denial parser + loop (Box 1 + Box 2)           │
+│   - spawn child (wxc-exec via spawnSandboxFromConfig)    │
+│   - read child.stderr (pipe) or MXC_DENIALS_PIPE (PTY)   │
+│   - parse the 0x1E NDJSON stream into DeniedResource[]   │
+│   - prompt the user per denial / on the batch summary    │
+│   - expand policy with approved paths                    │
+│   - re-spawn wxc-exec with the expanded config           │
 └────────────────────────┬─────────────────────────────────┘
-                         │ hand stderr ->      ^ denials + summary
-                         v parseDenialStream   │ back to retry loop
+                         │ read stderr ->     ^ denials + summary
+                         v parse NDJSON       │ next round
 ┌──────────────────────────────────────────────────────────┐
-│ sdk/src/denial-channel/stream.ts (Box 1)                 │
-│   - read NDJSON from stderr                              │
-│   - dedupe, materialise DeniedResource records           │
-│   - emit summary line on terminator                      │
-└────────────────────────△─────────────────────────────────┘
-                         │ stderr (NDJSON, RS-prefixed)
-                         │
-┌────────────────────────┴─────────────────────────────────┐
 │ wxc-exec.exe — appcontainer / base_container runner      │
 │   - spawn workload CREATE_SUSPENDED                      │
 │   - attach workload to Job Object (no breakaway)         │

@@ -139,13 +139,7 @@ mod tests {
 
     #[test]
     fn access_check_key_denial_extracted_as_other() {
-        let p = parts(
-            4907,
-            &[
-                ("ObjectType", "\"Key\""),
-                ("ObjectName", "\"\\Registry\\Machine\\SOFTWARE\\Foo\""),
-            ],
-        );
+        let p = parts(4907, &[("ObjectType", "\"Key\"")]);
         let ev = build_denial_from_access_check(&p, 1, FIXED_FILETIME).expect("should extract");
         assert_eq!(ev.resource_type, ResourceType::Other);
     }

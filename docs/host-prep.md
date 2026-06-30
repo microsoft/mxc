@@ -238,11 +238,22 @@ Registers `mxc-learning-mode-shim.exe` as a Windows service named
   after a short period of inactivity; the next inbound pipe
   request restarts it.
 - **Display name**: `MXC Denial Capture Shim`.
-- **Default binary path**: same directory as `wxc-host-prep.exe`.
-  Override with `--shim-path <path>`.
+- **Install location**: the shim binary is **copied into
+  `%ProgramFiles%\Mxc\mxc-learning-mode-shim.exe`** and the service is
+  registered to run from there. `Program Files` is writable only by
+  administrators / SYSTEM / TrustedInstaller, so unprivileged
+  (Authenticated Users) callers cannot swap the registered service
+  binary. The directory is resolved via the Known Folders API
+  (`FOLDERID_ProgramFiles`), so it is correct on localized / redirected
+  installs.
+- **Source binary** (`--shim-path`): the source `mxc-learning-mode-shim.exe`
+  to copy from, defaulting to the same directory as `wxc-host-prep.exe`.
+  The install always copies that source into `%ProgramFiles%\Mxc`;
+  `--shim-path` only changes where the bits are copied *from*.
 
-Idempotent when an existing service has the same binary path.
-Differing binary paths are an explicit conflict — run
+Re-running the install with the same registration refreshes the copied
+binary (so an install after a rebuild updates the bits). A service
+registered with a *different* binary path is an explicit conflict — run
 `uninstall-learning-mode-shim` first.
 
 The shim itself loans ETW-session-creation privilege to
@@ -258,10 +269,12 @@ wxc-host-prep uninstall-learning-mode-shim
 ```
 
 Stops the `MxcLearningModeShim` service if running, then
-`DeleteService`s it. Idempotent — exits 0 with a "no change"
+`DeleteService`s it, and best-effort removes the copied
+`%ProgramFiles%\Mxc\mxc-learning-mode-shim.exe` binary (and the `Mxc`
+directory if now empty). Idempotent — exits 0 with a "no change"
 message when the service is already absent. Failures during the
-best-effort stop are non-fatal; the delete still proceeds and
-the OS reaps the service on its next service restart.
+best-effort stop or binary removal are non-fatal; the delete still
+proceeds and the OS reaps the service on its next service restart.
 
 ### `dump-learning-mode-shim`
 

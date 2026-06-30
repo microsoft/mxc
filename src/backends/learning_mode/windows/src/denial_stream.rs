@@ -9,7 +9,7 @@
 //! ```text
 //! \x1e{"type":"denial","path":"...","resourceType":"...","accessType":"...","pid":N,"filetime":N}\n
 //! ...
-//! \x1e{"type":"summary","exitCode":N,"totalDenials":N,"deniedResourcesTruncated":bool}\n
+//! \x1e{"type":"summary","exitCode":N,"totalDenials":N,"deniedResourcesTruncated":bool,"deniedResources":[...]}\n
 //! ```
 //!
 //! Each line is prefixed with ASCII Record Separator (0x1E). This
@@ -27,7 +27,7 @@
 //! raw count is misleading for end-user reporting: a "10 denials"
 //! workload typically generates several hundred kernel access-check
 //! events for a handful of unique resources (e.g. locale-aware code
-//! re-reading the same registry key on every `printf`).
+//! re-reading the same locale data file on every `printf`).
 
 /// ASCII Record Separator (0x1E). Prefixed to every captureDenials
 /// streaming line.
@@ -162,9 +162,8 @@ fn open_writer() -> Box<dyn std::io::Write + Send> {
 ///
 /// Stream-time dedupe rationale: in practice a single process run
 /// can trigger the same denial hundreds of times in a tight loop
-/// (e.g. locale-aware code re-reading
-/// `\REGISTRY\USER\.DEFAULT\Control Panel\International` on every
-/// `printf`). For the SDK's prompt-the-user UX every duplicate is
+/// (e.g. locale-aware code re-reading the same locale data file on
+/// every `printf`). For the SDK's prompt-the-user UX every duplicate is
 /// pure noise — the user has already been asked about that resource
 /// — and emitting them all balloons stderr by ~100x. The dedupe set
 /// is per-invocation (lives only as long as this writer thread).
@@ -256,6 +255,7 @@ fn build_summary_envelope(
     active: bool,
     child_processes_observed: usize,
     descendant_pids_covered: usize,
+    denied_resources: &[crate::DeniedResource],
     verbose: bool,
 ) -> serde_json::Value {
     // `captureDenialsActive` is always present in the summary so SDK
@@ -286,6 +286,7 @@ fn build_summary_envelope(
             "captureDenialsActive": active,
             "childProcessesObserved": child_processes_observed,
             "descendantPidsCovered": descendant_pids_covered,
+            "deniedResources": denied_resources,
             "rawEventCount": raw_event_count,
         })
     } else {
@@ -297,6 +298,7 @@ fn build_summary_envelope(
             "captureDenialsActive": active,
             "childProcessesObserved": child_processes_observed,
             "descendantPidsCovered": descendant_pids_covered,
+            "deniedResources": denied_resources,
         })
     }
 }
@@ -334,6 +336,14 @@ fn build_summary_envelope(
 /// IOCP listener added to the live ETW filter via `extend_via_shim`.
 /// SDK consumers should treat this as the "how many descendants
 /// contributed to the captured denial list" metric.
+///
+/// `denied_resources` is the full deduped `(path, accessType)` list
+/// (the same set the per-denial lines streamed). It is embedded in
+/// the summary so a consumer can read the consolidated list in one
+/// race-free shot after the workload exits, without having to
+/// accumulate the live `denial` records itself. The array is always
+/// present (empty when no denials), so an empty list unambiguously
+/// means "ran, nothing denied" (cross-check `captureDenialsActive`).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_denial_summary_line(
     sink: &DenialSink,
@@ -344,6 +354,7 @@ pub fn emit_denial_summary_line(
     active: bool,
     child_processes_observed: usize,
     descendant_pids_covered: usize,
+    denied_resources: &[crate::DeniedResource],
 ) {
     let envelope = build_summary_envelope(
         exit_code,
@@ -353,6 +364,7 @@ pub fn emit_denial_summary_line(
         active,
         child_processes_observed,
         descendant_pids_covered,
+        denied_resources,
         verbose_summary_enabled(),
     );
     let json = match serde_json::to_string(&envelope) {
@@ -441,9 +453,12 @@ mod tests {
         };
 
         let (tx, rx) = mpsc::channel();
-        tx.send(make_resource("\\REG\\A", AccessType::Read, 1)).unwrap();
-        tx.send(make_resource("\\REG\\A", AccessType::Read, 2)).unwrap(); // dup
-        tx.send(make_resource("\\REG\\B", AccessType::Write, 3)).unwrap();
+        tx.send(make_resource("C:\\dir\\a.txt", AccessType::Read, 1))
+            .unwrap();
+        tx.send(make_resource("C:\\dir\\a.txt", AccessType::Read, 2))
+            .unwrap(); // dup
+        tx.send(make_resource("C:\\dir\\b.txt", AccessType::Write, 3))
+            .unwrap();
         drop(tx);
 
         let sink_for_thread = sink.clone();
@@ -452,7 +467,11 @@ mod tests {
             .expect("writer thread");
         assert_eq!(unique, 2, "two unique (path, access) pairs");
 
-        emit_denial_summary_line(&sink, 0, unique, 3, false, true, 0, 0);
+        let summary_resources = vec![
+            make_resource("C:\\dir\\a.txt", AccessType::Read, 1),
+            make_resource("C:\\dir\\b.txt", AccessType::Write, 3),
+        ];
+        emit_denial_summary_line(&sink, 0, unique, 3, false, true, 0, 0, &summary_resources);
 
         let bytes = buf.lock().unwrap().clone();
         let segments = split_segments(&bytes);
@@ -463,6 +482,16 @@ mod tests {
         assert_eq!(segments[1]["type"], "denial");
         assert_eq!(segments[2]["type"], "summary");
         assert_eq!(segments[2]["totalDenials"], 2);
+        // The summary terminator carries the consolidated deduped list so
+        // a consumer can read it race-free without demuxing the stream.
+        let summary_list = segments[2]["deniedResources"]
+            .as_array()
+            .expect("summary carries deniedResources array");
+        assert_eq!(summary_list.len(), 2);
+        assert_eq!(summary_list[0]["path"], "C:\\dir\\a.txt");
+        assert_eq!(summary_list[0]["accessType"], "read");
+        assert_eq!(summary_list[1]["path"], "C:\\dir\\b.txt");
+        assert_eq!(summary_list[1]["accessType"], "write");
     }
 
     #[test]
@@ -601,7 +630,7 @@ mod tests {
 
     #[test]
     fn summary_envelope_default_mode_omits_raw_event_count() {
-        let env = build_summary_envelope(0, 8, 651, false, true, 0, 0, false);
+        let env = build_summary_envelope(0, 8, 651, false, true, 0, 0, &[], false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["type"], "summary");
         assert_eq!(obj["exitCode"], 0);
@@ -618,7 +647,7 @@ mod tests {
 
     #[test]
     fn summary_envelope_verbose_mode_includes_raw_event_count() {
-        let env = build_summary_envelope(0, 8, 651, false, true, 0, 0, true);
+        let env = build_summary_envelope(0, 8, 651, false, true, 0, 0, &[], true);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["totalDenials"], 8);
         assert_eq!(obj["rawEventCount"], 651);
@@ -627,7 +656,7 @@ mod tests {
 
     #[test]
     fn summary_envelope_propagates_non_zero_exit_and_truncation() {
-        let env = build_summary_envelope(-1, 0, 0, true, true, 0, 0, false);
+        let env = build_summary_envelope(-1, 0, 0, true, true, 0, 0, &[], false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["exitCode"], -1);
         assert_eq!(obj["deniedResourcesTruncated"], true);
@@ -642,7 +671,7 @@ mod tests {
         // feature isn't running" from "0 denials because the workload
         // is well-behaved". Otherwise both look like
         // `totalDenials: 0`.
-        let env = build_summary_envelope(0, 0, 0, false, false, 0, 0, false);
+        let env = build_summary_envelope(0, 0, 0, false, false, 0, 0, &[], false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["captureDenialsActive"], false);
         assert_eq!(obj["totalDenials"], 0);
@@ -652,7 +681,7 @@ mod tests {
     fn summary_envelope_active_field_present_in_both_modes() {
         for verbose in &[false, true] {
             for active in &[false, true] {
-                let env = build_summary_envelope(0, 0, 0, false, *active, 0, 0, *verbose);
+                let env = build_summary_envelope(0, 0, 0, false, *active, 0, 0, &[], *verbose);
                 let obj = env.as_object().unwrap();
                 assert!(
                     obj.contains_key("captureDenialsActive"),
@@ -671,7 +700,7 @@ mod tests {
         // observed 5 distinct child PIDs while it was alive. The
         // count must surface in the summary so SDK consumers can
         // warn the user that those children's denials are missing.
-        let env = build_summary_envelope(0, 2, 2, false, true, 5, 0, false);
+        let env = build_summary_envelope(0, 2, 2, false, true, 5, 0, &[], false);
         let obj = env.as_object().unwrap();
         assert_eq!(obj["childProcessesObserved"], 5);
         assert_eq!(obj["totalDenials"], 2);
@@ -686,7 +715,7 @@ mod tests {
         // know it's looking at a new-format summary.
         for verbose in &[false, true] {
             for children in &[0_usize, 1, 5, 100] {
-                let env = build_summary_envelope(0, 0, 0, false, true, *children, 0, *verbose);
+                let env = build_summary_envelope(0, 0, 0, false, true, *children, 0, &[], *verbose);
                 let obj = env.as_object().unwrap();
                 assert!(
                     obj.contains_key("childProcessesObserved"),

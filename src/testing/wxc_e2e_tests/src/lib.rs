@@ -13,6 +13,12 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 
+/// Consumer-side denial-stream parsing, named-pipe transport, ConPTY spawning,
+/// and policy expansion — the logic a captureDenials consumer owns now that the
+/// SDK ships no learning-mode wrapper. Windows-only.
+#[cfg(windows)]
+pub mod denial_consumer;
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -82,6 +88,16 @@ fn current_triple() -> &'static str {
 /// Profile preference (debug-vs-release) only resolves ties when neither
 /// candidate has been built more recently than the other.
 pub fn find_binary(name: &str) -> Option<PathBuf> {
+    // Deployed-run override: when the test binary runs somewhere without the
+    // repo layout (e.g. a bare VM), `MXC_E2E_BIN_DIR` points at a directory
+    // holding the MXC executables next to the test exe.
+    if let Ok(dir) = std::env::var("MXC_E2E_BIN_DIR") {
+        let candidate = PathBuf::from(dir).join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
     let src = src_dir();
     let (primary, fallback) = if is_release_mode() {
         ("release", "debug")

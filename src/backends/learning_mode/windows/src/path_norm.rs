@@ -13,8 +13,8 @@
 //! the mapping is stable in practice (drive-letter changes during a single
 //! workload run are vanishingly rare).
 //!
-//! Non-file paths (registry `\REGISTRY\Machine\...`, MUP / network shares,
-//! etc.) are returned unchanged.
+//! Non-file paths (MUP / network shares, named pipes, unknown
+//! devices, etc.) are returned unchanged.
 
 use std::sync::OnceLock;
 
@@ -29,7 +29,7 @@ static DRIVE_MAP: OnceLock<Vec<(String, String)>> = OnceLock::new();
 ///
 /// Returns `Some(canonical)` when the input starts with a known
 /// `\Device\HarddiskVolumeN\...` prefix. Returns `None` when the path is not
-/// a filesystem path that can be canonicalized (registry, MUP, unknown
+/// a filesystem path that can be canonicalized (MUP, named pipe, unknown
 /// device). Callers should fall back to the original input on `None`.
 pub fn to_user_visible(kernel_path: &str) -> Option<String> {
     if !kernel_path.starts_with(r"\Device\") {
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn non_device_path_returns_none() {
         assert!(to_user_visible(r"C:\already\user\form").is_none());
-        assert!(to_user_visible(r"\REGISTRY\Machine\SOFTWARE\Foo").is_none());
+        assert!(to_user_visible(r"\BaseNamedObjects\Foo").is_none());
         assert!(to_user_visible("").is_none());
     }
 

@@ -10,7 +10,6 @@ import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } f
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromCode } from './errors.js';
-import { createDenialPipeServer } from './denial-channel/transports/named-pipe.js';
 
 const SUPPORTED_VERSION = '0.7.0-alpha';
 const MIN_VERSION = '0.4.0-alpha';
@@ -626,14 +625,13 @@ export function spawnSandboxFromConfig(
   // single channel where 0x1E sentinel bytes would interleave with
   // workload output and corrupt the demuxer.
   //
-  // The escape hatch is the side channel: when the caller sets up
-  // a named-pipe transport (via spawnSandboxWithSideChannel, which
-  // injects MXC_DENIALS_PIPE into the wxc-exec env), wxc-exec
-  // routes the denial stream to the pipe instead of stderr -- PTY
-  // is then safe because stderr is no longer load-bearing for the
-  // protocol. We detect that case by looking for the env var on
-  // either the explicit `env` param or `process.env` itself, and
-  // skip the throw when present.
+  // The escape hatch is the native side channel: when the caller
+  // sets `MXC_DENIALS_PIPE` to a named-pipe name in the wxc-exec
+  // env, wxc-exec routes the denial stream to that pipe instead of
+  // stderr -- PTY is then safe because stderr is no longer
+  // load-bearing for the protocol. We detect that case by looking
+  // for the env var on either the explicit `env` param or
+  // `process.env` itself, and skip the throw when present.
   const pipeRedirected =
     (env && typeof env.MXC_DENIALS_PIPE === 'string' && env.MXC_DENIALS_PIPE.length > 0) ||
     (typeof process.env.MXC_DENIALS_PIPE === 'string' && process.env.MXC_DENIALS_PIPE.length > 0);
@@ -641,9 +639,9 @@ export function spawnSandboxFromConfig(
     throw new TypeError(
       'spawnSandboxFromConfig: captureDenials requires usePty: false. ' +
         'PTY mode merges stdout+stderr and corrupts the NDJSON denial stream. ' +
-        'Either pass `{ usePty: false }` here, use the spawnSandboxWithRetry ' +
-        'wrapper which handles this for you, or use spawnSandboxWithSideChannel ' +
-        'to route denials through a named pipe so PTY mode is safe.',
+        'Either pass `{ usePty: false }` here, or set the `MXC_DENIALS_PIPE` ' +
+        'environment variable to a named-pipe name so wxc-exec routes denials ' +
+        'through that pipe and PTY mode stays safe.',
     );
   }
 
@@ -767,129 +765,4 @@ function tryParseErrorEnvelopeFromLines(output: string): MxcError | null {
     }
   }
   return null;
-}
-
-
-// ---- captureDenials side-channel transport -------------------------------
-
-/**
- * Outcome of {@link spawnSandboxWithSideChannel}.
- *
- * process is the spawned IPty (PTY mode) or ChildProcess (non-PTY
- * mode), depending on options.usePty.
- *
- * denialStream is a Node.js Readable carrying the captureDenials
- * NDJSON bytes. Feed it to `parseDenialStream` from this same
- * SDK to consume denials with the same semantics as the stderr
- * transport. Resolves once wxc-exec connects to the side-channel
- * pipe; if wxc-exec exits before connecting (e.g. the workload
- * couldn't be spawned at all), the promise rejects with the
- * underlying error.
- *
- * close() tears down the pipe server. Always call it (or rely
- * on process exit) so the OS side reclaims the named pipe slot.
- */
-export interface SpawnWithSideChannelResult {
-  process: pty.IPty | ChildProcess;
-  denialStream: Promise<import('net').Socket>;
-  close(): void;
-}
-
-/**
- * Spawn a sandboxed workload with the captureDenials stream routed
- * through a private named-pipe side channel instead of stderr.
- *
- * Use this when the workload needs PTY mode (REPL, color, TTY
- * detection, interactive shell) AND captureDenials at the same
- * time. The default `spawnSandboxFromConfig` refuses this
- * combination because PTY mode merges stdout+stderr and would
- * corrupt the 0x1E-delimited wire format. The side channel keeps
- * the workload's PTY clean by routing denials over a separate
- * Windows named pipe that wxc-exec opens on startup.
- *
- * Requires `captureDenials: true` on the config. Windows-only.
- *
- * @example
- * `	ypescript
- * import { spawnSandboxWithSideChannel, parseDenialStream } from '@microsoft/mxc-sdk';
- *
- * const config = createConfigFromPolicy(policy, 'process');
- * config.captureDenials = true;
- * config.process!.commandLine = 'python -i'; // interactive REPL
- *
- * const { process: ptyProc, denialStream, close } =
- *   spawnSandboxWithSideChannel(config, { usePty: true });
- *
- * ptyProc.onData((d) => process.stdout.write(d));        // user sees REPL
- * const denials = await denialStream;
- * parseDenialStream(denials, {
- *   onDenial: (r) => console.error('[denied]', r.path),  // visible to dev
- * });
- *
- * ptyProc.onExit(() => close());
- * `
- */
-export function spawnSandboxWithSideChannel(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions = {},
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined },
-): SpawnWithSideChannelResult {
-  if (!config.captureDenials) {
-    throw new TypeError(
-      'spawnSandboxWithSideChannel: config.captureDenials must be true. ' +
-        'The side channel exists *for* captureDenials; without it the call has no effect.',
-    );
-  }
-
-  const pipeServer = createDenialPipeServer();
-
-  // MXC_DENIALS_PIPE is a runtime hint that wxc-exec itself reads (via
-  // std::env::var_os) to reroute its captureDenials NDJSON writers from
-  // stderr to the named pipe. It must NOT travel through the
-  // `env` parameter of `spawnSandboxFromConfig`, because that parameter
-  // gets injected into `config.process.env` -- i.e. it becomes the
-  // **workload's** environment block inside the sandbox. Pushing a
-  // single-entry env block (just MXC_DENIALS_PIPE, no PATH /
-  // SystemRoot / ComSpec / etc.) into Experimental_CreateProcessInSandbox
-  // makes the API fail with Win32 error 203 (ERROR_ENVVAR_NOT_FOUND).
-  //
-  // Instead, set the var on the SDK process's own env so the spawned
-  // wxc-exec inherits it (both pty.spawn and child_process.spawn
-  // inherit process.env when no explicit env is provided). The
-  // workload's env stays governed by `config.process.env` and any
-  // caller-provided `env` map -- both unaffected by this transport
-  // hint.
-  const savedDenialPipe = process.env.MXC_DENIALS_PIPE;
-  process.env.MXC_DENIALS_PIPE = pipeServer.pipeName;
-
-  // Forward to the regular spawner. PTY/non-PTY choice is the
-  // caller's; the side channel is orthogonal -- it works for both.
-  // (PTY mode is the primary motivating use case but the
-  // side-channel transport is just as valid in non-PTY mode if a
-  // consumer wants stderr left clean for the workload.)
-  let processHandle: pty.IPty | ChildProcess;
-  try {
-    processHandle = spawnSandboxFromConfig(config, options, workingDirectory, env);
-  } catch (err) {
-    pipeServer.close();
-    throw err;
-  } finally {
-    // Restore the parent env after spawn. The child has already
-    // inherited MXC_DENIALS_PIPE at this point, so removing it from
-    // the parent only affects subsequent spawns -- which is exactly
-    // the behaviour we want for concurrent sandboxes (each gets its
-    // own pipe name, no leakage between them).
-    if (savedDenialPipe === undefined) {
-      delete process.env.MXC_DENIALS_PIPE;
-    } else {
-      process.env.MXC_DENIALS_PIPE = savedDenialPipe;
-    }
-  }
-
-  return {
-    process: processHandle,
-    denialStream: pipeServer.denialStream,
-    close: () => pipeServer.close(),
-  };
 }
