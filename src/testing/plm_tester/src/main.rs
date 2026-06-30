@@ -1,36 +1,63 @@
 //! PLMTester — small harness for probing AppContainer / Low-IL /
 //! Permissive Learning Mode behavior against various Windows surfaces.
+//!
+//! Functionally Windows-only (the probes all wrap Win32 / WinRT APIs).
+//! On Linux/macOS we compile a no-op stub binary so the crate sits
+//! inside the workspace `default-members` list; invoking it prints a
+//! message and exits non-zero.
 
+#[cfg(not(target_os = "windows"))]
+fn main() {
+    eprintln!("PLMTester is Windows-only; this stub binary does nothing on non-Windows targets.");
+    std::process::exit(1);
+}
+
+#[cfg(target_os = "windows")]
 mod clipboard;
+#[cfg(target_os = "windows")]
 mod display_settings;
+#[cfg(target_os = "windows")]
 mod injection;
+#[cfg(target_os = "windows")]
 mod screenshot;
+#[cfg(target_os = "windows")]
 mod screenshot_simple;
+#[cfg(target_os = "windows")]
 mod system_param;
+#[cfg(target_os = "windows")]
 mod uiisolation;
 
+#[cfg(target_os = "windows")]
 use anyhow::Result;
+#[cfg(target_os = "windows")]
 use clap::{Parser, Subcommand};
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
 use clipboard::{
     clipboard_get, clipboard_get_in_scope, clipboard_set, dump_environment, resolve_hwnd,
     HwndSource,
 };
+#[cfg(target_os = "windows")]
 use display_settings::DisplaySettingsArgs;
+#[cfg(target_os = "windows")]
 use system_param::SystemParamArgs;
 
+#[cfg(target_os = "windows")]
 #[derive(Parser, Debug)]
 #[command(
     name = "PLMTester",
     version,
     about = "AppContainer / PLM behavior probes"
 )]
+#[cfg(target_os = "windows")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 }
 
+#[cfg(target_os = "windows")]
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Clipboard probes (set / get / roundtrip).
@@ -70,6 +97,7 @@ enum Cmd {
     Injection(injection::InjectionArgs),
 }
 
+#[cfg(target_os = "windows")]
 #[derive(Subcommand, Debug)]
 enum ClipboardOp {
     /// Set the clipboard to the given UTF-16 string.
@@ -106,6 +134,7 @@ enum ClipboardOp {
     },
 }
 
+#[cfg(target_os = "windows")]
 fn main() -> Result<()> {
     let cli = Cli::parse();
 

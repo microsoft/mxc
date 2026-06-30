@@ -63,20 +63,10 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
-      # `plm` is excluded from the workspace's default-members (it pulls
-      # in `windows` crates that aren't needed for the standard build),
-      # so opt it in explicitly here to keep PR #552's audit pipeline
-      # building + tested in CI.
-      - name: Build plm
-        run: cargo build --locked --release --target ${{ matrix.target }} -p plm
-
       - name: Test
         run: cargo test --locked --release --target ${{ matrix.target }}
              --no-default-features
              --features "${{ matrix.features }}"
-
-      - name: Test plm
-        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
 
       # Run the PLM integration harness under the actually-built
       # `wxc-exec.exe` + `plm.exe`. Without this, the JSON fixtures

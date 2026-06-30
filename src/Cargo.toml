@@ -35,44 +35,6 @@ members = [
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
 ]
-# `core/plm` and `testing/plm_tester` are Windows-only. Listing every other
-# member in `default-members` (rather than `default-members = members - plm`,
-# which Cargo doesn't support) keeps `cargo build` / `cargo test` from the
-# workspace root portable across Linux and macOS; build.bat opts them in
-# explicitly on Windows via `-p plm` / `-p plmtester`.
-default-members = [
-    "core/wxc",
-    "core/wxc_common",
-    "core/lxc",
-    "core/mxc_darwin",
-    "core/mxc_pty",
-    "core/mxc_build_common",
-    "core/generated/base_container_specification",
-    "backends/appcontainer/common",
-    "backends/windows_sandbox/daemon",
-    "backends/windows_sandbox/guest",
-    "backends/windows_sandbox/common",
-    "backends/isolation_session/bindings",
-    "backends/isolation_session/common",
-    "backends/hyperlight/common",
-    "backends/nanvix/common",
-    "backends/nanvix/build_common",
-    "backends/nanvix/binaries",
-    "backends/nanvix/runner",
-    "backends/lxc/common",
-    "backends/bubblewrap/common",
-    "backends/wslc/common",
-    "backends/seatbelt/common",
-    "host/wxc_host_prep",
-    "host/wxc_winhttp_proxy_shim",
-    "testing/wxc_e2e_tests",
-    "testing/wxc_test_driver",
-    "testing/wxc_test_proxy",
-    "testing/linux_test_proxy",
-    "testing/wxc_ui_probe",
-    "tools/mxc_diagnostic_console",
-    "tools/mxc_schema_gen",
-]
 exclude = ["testing/fuzz"]
 resolver = "3"
 
