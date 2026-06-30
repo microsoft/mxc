@@ -1,0 +1,12 @@
+{
+  "version": "0.6.0-alpha",
+  "containerId": "CLI-Bubblewrap-Object-Validation",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if cat /mnt/objtest/data/secret.txt 2>/dev/null; then echo OBJECT_LEAK; else echo OBJECT_MASKED_OK; fi"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/objtest/data"],
+    "deniedPaths": ["/mnt/objtest/data_link"]
+  }
+}

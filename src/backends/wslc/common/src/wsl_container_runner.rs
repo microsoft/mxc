@@ -857,6 +857,14 @@ impl WSLContainerRunner {
     ) -> ScriptResponse {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
+        // Object-based FS-policy normalization (D6): tighten aliases of the same
+        // host object to the strictest intent (deny > ro > rw) before mapping to
+        // volume mounts. See `wxc_common::filesystem_object`. (A path moved to
+        // `denied` is simply not mounted by WSLC — unmounted = invisible.)
+        let mut normalized = request.clone();
+        wxc_common::filesystem_object::normalize_object_conflicts(&mut normalized.policy, logger);
+        let request = &normalized;
+
         // -- Init: COM + SDK + preflight --
         let sdk = match Self::init_and_load_sdk(logger) {
             Ok(r) => r,

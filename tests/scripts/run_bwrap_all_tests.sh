@@ -35,6 +35,7 @@ run_test() {
 
 run_test "Basic Bubblewrap" "$SCRIPT_DIR/run_bwrap_basic_test.sh"
 run_test "Bubblewrap Filesystem" "$SCRIPT_DIR/run_bwrap_filesystem_test.sh"
+run_test "Bubblewrap Object Validation" "$SCRIPT_DIR/run_bwrap_filesystem_object_test.sh"
 run_test "Bubblewrap Network Block" "$SCRIPT_DIR/run_bwrap_network_test.sh"
 run_test "Bubblewrap Network Proxy" "$SCRIPT_DIR/run_bwrap_network_proxy_test.sh"
 run_test "Linux Process Default" "$SCRIPT_DIR/run_linux_process_default_test.sh"

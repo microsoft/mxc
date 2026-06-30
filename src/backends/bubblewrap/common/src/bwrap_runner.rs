@@ -99,7 +99,13 @@ impl SandboxBackend for BubblewrapScriptRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         validate_common(request)?;
         self.validate(request)?;
-        let child = self.spawn_bwrap(request, logger, stdio)?;
+        // Object-based FS-policy normalization (D6): tighten aliases of the same
+        // host object to the strictest intent (deny > ro > rw). Done here, close
+        // to mount, on a clone — config_parser stays string-only and the TOCTOU
+        // window between check and mount is minimized.
+        let mut normalized = request.clone();
+        wxc_common::filesystem_object::normalize_object_conflicts(&mut normalized.policy, logger);
+        let child = self.spawn_bwrap(&normalized, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
 }

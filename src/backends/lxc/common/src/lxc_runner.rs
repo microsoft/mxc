@@ -89,6 +89,13 @@ impl LxcScriptRunner {
 
     /// Core execution logic.
     fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        // Object-based FS-policy normalization (D6): tighten aliases of the same
+        // host object to the strictest intent (deny > ro > rw) before building
+        // mounts. See `wxc_common::filesystem_object`.
+        let mut normalized = request.clone();
+        wxc_common::filesystem_object::normalize_object_conflicts(&mut normalized.policy, logger);
+        let request = &normalized;
+
         // Validate required LXC fields
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
             return ScriptResponse::error(
