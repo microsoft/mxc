@@ -1162,6 +1162,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "learning_mode_broker_protocol"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1426,6 +1434,19 @@ dependencies = [
  "windows",
  "windows-core",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_learning_mode_broker"
+version = "0.7.0"
+dependencies = [
+ "learning_mode_broker_protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+ "windows",
+ "windows-service",
 ]
 
 [[package]]
@@ -2659,6 +2680,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-service"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d24d6bcc7f734a4091ecf8d7a64c5f7d7066f45585c1861eba06449909609c8a"
+dependencies = [
+ "bitflags 2.13.0",
+ "widestring",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "windows-strings"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2981,6 +3013,7 @@ dependencies = [
  "thiserror",
  "windows",
  "windows-core",
+ "windows-service",
  "wxc_common",
 ]
 

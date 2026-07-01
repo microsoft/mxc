@@ -28,6 +28,9 @@ privilege-requiring setup work lives in `wxc-host-prep.exe` instead.
 | `prepare-null-device` | Apply MXC's managed security descriptor to `\Device\Null`. |
 | `verify-null-device` | Check `\Device\Null` SD against the target without modifying it. |
 | `dump-null-device` | Print the current `\Device\Null` SD as SDDL. |
+| `install-learning-mode-broker` | Register `mxc-learning-mode-broker.exe` as a Manual-start `LocalService` service so unelevated callers can request scoped ETW sessions for per-PID denial capture. |
+| `uninstall-learning-mode-broker` | Stop and deregister the `MxcLearningModeBroker` service. Idempotent. |
+| `dump-learning-mode-broker` | Report whether the `MxcLearningModeBroker` service is installed, its current state, and the registered binary path. |
 
 All subcommands require elevation. The binary aborts with exit code
 `65` and a clear message if launched without an elevated token (e.g.
@@ -210,6 +213,80 @@ Use for triage after `verify-null-device` reports drift.
 `verify-null-device --json` is the right place to look for the
 drift label; `dump-null-device` deliberately only reports the
 current SD.
+
+### `install-learning-mode-broker`
+
+```
+wxc-host-prep install-learning-mode-broker [--broker-path <path>]
+```
+
+Registers `mxc-learning-mode-broker.exe` as a Windows service named
+`MxcLearningModeBroker`:
+
+- **Account**: `NT AUTHORITY\LocalService` — least-privilege built-in
+  account. `LocalService` does **not** carry
+  `SeSystemProfilePrivilege` by default, so this subcommand first
+  grants the privilege explicitly via the LSA `LsaAddAccountRights`
+  API. The grant is persistent (survives reboots) and idempotent
+  (no-op when already granted). The grant is **not** revoked on
+  `uninstall-learning-mode-broker`: another tool on the box may also have
+  granted the same privilege, and clobbering it would be
+  destructive. Operators who want a clean revert can run
+  `secedit` or `ntrights -u SeSystemProfilePrivilege -m \\.
+  -u "NT AUTHORITY\LocalService"` manually.
+- **Start type**: `Demand` / Manual. SCM idle-shutdown stops it
+  after a short period of inactivity; the next inbound pipe
+  request restarts it.
+- **Display name**: `MXC Denial Capture Broker`.
+- **Install location**: the broker binary is **copied into
+  `%ProgramFiles%\Mxc\mxc-learning-mode-broker.exe`** and the service is
+  registered to run from there. `Program Files` is writable only by
+  administrators / SYSTEM / TrustedInstaller, so unprivileged
+  (Authenticated Users) callers cannot swap the registered service
+  binary. The directory is resolved via the Known Folders API
+  (`FOLDERID_ProgramFiles`), so it is correct on localized / redirected
+  installs.
+- **Source binary** (`--broker-path`): the source `mxc-learning-mode-broker.exe`
+  to copy from, defaulting to the same directory as `wxc-host-prep.exe`.
+  The install always copies that source into `%ProgramFiles%\Mxc`;
+  `--broker-path` only changes where the bits are copied *from*.
+
+Re-running the install with the same registration refreshes the copied
+binary (so an install after a rebuild updates the bits). A service
+registered with a *different* binary path is an explicit conflict — run
+`uninstall-learning-mode-broker` first.
+
+The broker itself loans ETW-session-creation privilege to
+unelevated callers (e.g. `wxc-exec --capture-denials …`). It
+does not consume events; the caller drives `OpenTrace` /
+`ProcessTrace` against the session name returned by the broker.
+See the per-PID denial-capture prototype plan for design notes.
+
+### `uninstall-learning-mode-broker`
+
+```
+wxc-host-prep uninstall-learning-mode-broker
+```
+
+Stops the `MxcLearningModeBroker` service if running, then
+`DeleteService`s it, and best-effort removes the copied
+`%ProgramFiles%\Mxc\mxc-learning-mode-broker.exe` binary (and the `Mxc`
+directory if now empty). Idempotent — exits 0 with a "no change"
+message when the service is already absent. Failures during the
+best-effort stop or binary removal are non-fatal; the delete still
+proceeds and the OS reaps the service on its next service restart.
+
+### `dump-learning-mode-broker`
+
+```
+wxc-host-prep dump-learning-mode-broker [--json]
+```
+
+Reports whether `MxcLearningModeBroker` is installed, its current state
+(`Running` / `Stopped` / etc.), and the registered binary path.
+Exit code 0 when installed, 1 when not installed. With `--json`
+emits a single-line JSON object for machine consumption; without
+`--json` emits a short human-readable block on stdout.
 
 ## Logs
 

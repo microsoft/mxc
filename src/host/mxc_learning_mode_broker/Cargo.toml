@@ -1,0 +1,22 @@
+[package]
+name = "mxc_learning_mode_broker"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mxc-learning-mode-broker"
+path = "src/main.rs"
+
+# Windows-only binary: a privileged service that loans ETW-session
+# creation privilege to unelevated callers (e.g. wxc-exec) for a single
+# scoped denial-capture session per request. See
+# `docs/learning-mode/deployment-and-lifecycle.md` for the design notes.
+
+[target.'cfg(target_os = "windows")'.dependencies]
+learning_mode_broker_protocol = { workspace = true }
+windows = { workspace = true }
+windows-service = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
