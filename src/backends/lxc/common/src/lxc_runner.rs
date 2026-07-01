@@ -92,20 +92,22 @@ impl LxcScriptRunner {
         // Object-based FS-policy normalization (D6): tighten aliases of the same
         // host object to the strictest intent (deny > ro > rw) before building
         // mounts. See `wxc_common::filesystem_object`. Only clone the request
-        // when an aliasing conflict actually needs tightening.
+        // when an aliasing conflict actually needs tightening; an unresolvable
+        // path with deniedPaths present fails closed.
         let normalized;
         let request = match wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
             logger,
         ) {
-            Some(policy) => {
+            Ok(Some(policy)) => {
                 normalized = ExecutionRequest {
                     policy,
                     ..request.clone()
                 };
                 &normalized
             }
-            None => request,
+            Ok(None) => request,
+            Err(msg) => return ScriptResponse::error(&msg),
         };
 
         // Validate required LXC fields

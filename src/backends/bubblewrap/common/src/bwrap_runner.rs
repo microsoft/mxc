@@ -103,20 +103,22 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // host object to the strictest intent (deny > ro > rw). Done here, close
         // to mount — config_parser stays string-only and the TOCTOU window
         // between check and mount is minimized. Only clone the request when an
-        // aliasing conflict actually needs tightening (the common case is none).
+        // aliasing conflict actually needs tightening (the common case is none);
+        // an unresolvable path with deniedPaths present fails closed.
         let normalized;
         let request = match wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
             logger,
         ) {
-            Some(policy) => {
+            Ok(Some(policy)) => {
                 normalized = ExecutionRequest {
                     policy,
                     ..request.clone()
                 };
                 &normalized
             }
-            None => request,
+            Ok(None) => request,
+            Err(msg) => return Err(ScriptResponse::error(&msg)),
         };
         let child = self.spawn_bwrap(request, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
