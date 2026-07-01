@@ -1057,7 +1057,6 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: write
     concurrency:
       group: "gh-aw-conclusion-issue-triage"
       cancel-in-progress: false
