@@ -857,6 +857,15 @@ impl WSLContainerRunner {
     ) -> ScriptResponse {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
+        // Delegation check (D3): reject any policy path the invoking user cannot
+        // access, so the sandbox never gains access the caller lacks. Done here,
+        // close to mount, where the real filesystem state is visible (paths may
+        // not exist at parse time) and the TOCTOU window is minimized. On Windows
+        // this covers directory readwrite paths (the common WSLC case).
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return ScriptResponse::error(&msg);
+        }
+
         // -- Init: COM + SDK + preflight --
         let sdk = match Self::init_and_load_sdk(logger) {
             Ok(r) => r,

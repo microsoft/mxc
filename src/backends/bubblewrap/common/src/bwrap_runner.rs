@@ -99,6 +99,13 @@ impl SandboxBackend for BubblewrapScriptRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         validate_common(request)?;
         self.validate(request)?;
+        // Delegation check (D3): reject any policy path the invoking user cannot
+        // access, so the sandbox never gains access the caller lacks. Done here,
+        // close to mount, where the real filesystem state is visible (paths may
+        // not exist at parse time) and the TOCTOU window is minimized.
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return Err(ScriptResponse::error(&msg));
+        }
         let child = self.spawn_bwrap(request, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
