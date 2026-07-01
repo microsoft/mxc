@@ -4,4 +4,4 @@
 [tool]
 windows_bindgen_version = "0.62.1"
 target_windows_crate = "0.62"
-generated_date = "2026-06-27"
+generated_date = "2026-07-01"

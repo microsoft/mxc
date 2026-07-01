@@ -54,6 +54,8 @@ contract (including fields not yet exposed via the SDK).
 | Field | Type | Description |
 |---|---|---|
 | `agentUserName` | string | OS-assigned account name. Diagnostic only — not used as an addressing key. |
+| `agentUserSid` | string | SID of the agent user. Diagnostic only. |
+| `ephemeralWorkspacePath` | string | A directory shared between the caller and this isolated user for staging files into the session. Each isolated user sees only its own workspace; the caller can access every concurrent sandbox's workspace. Deleted when the sandbox is deprovisioned. Does not change the working directory. |
 
 ### Start
 

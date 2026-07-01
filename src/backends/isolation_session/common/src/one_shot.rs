@@ -56,9 +56,13 @@ impl ScriptRunner for IsolationSessionRunner {
         // Entra). Provision returns the OS-assigned account name; the
         // manager is then pegged to it for the rest of the lifecycle.
         let agent_user_name = match IsolationSessionManager::add_user("", "") {
-            Ok(name) => {
-                let _ = writeln!(logger, "Isolation Session: agent user = {}", name);
-                name
+            Ok(provisioned) => {
+                let _ = writeln!(
+                    logger,
+                    "Isolation Session: agent user = {}",
+                    provisioned.agent_user_name
+                );
+                provisioned.agent_user_name
             }
             Err(e) => return e.into(),
         };

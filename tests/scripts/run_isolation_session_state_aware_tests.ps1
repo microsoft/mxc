@@ -295,8 +295,12 @@ try {
             Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
             $script:sandboxId = $envObj.result.sandboxId
             $agentUserName = $envObj.result.metadata.agentUserName
+            $agentUserSid = $envObj.result.metadata.agentUserSid
+            $workspacePath = $envObj.result.metadata.ephemeralWorkspacePath
             Assert-True ($script:sandboxId -match '^iso:.+$') "sandbox_id is iso:<opaque agent user name> ($script:sandboxId)"
             Assert-True ($null -ne $agentUserName) "metadata.agentUserName is present ($agentUserName)"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($agentUserSid)) "metadata.agentUserSid is present ($agentUserSid)"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($workspacePath)) "metadata.ephemeralWorkspacePath is present ($workspacePath)"
         }
     } | Out-Null
 
@@ -888,6 +892,154 @@ try {
             Write-Host "[cleanup] best-effort deprovision of Lifecycle E sandbox $($entry.label) ($($entry.id))" -ForegroundColor DarkGray
             try {
                 $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.id -Experimental
+            } catch { }
+        }
+    }
+}
+
+
+# ---------------- Lifecycle F: Ephemeral workspace sharing ----------------
+#
+# Provision now returns `ephemeralWorkspacePath` -- a directory shared between
+# the calling user (this harness) and the isolated agent user. This group
+# verifies the sharing + isolation contract end to end:
+#   - the caller can stage a file INTO a session through its workspace,
+#   - a session can hand a file back to the caller through its workspace,
+#   - an isolated user can access ONLY its own workspace, not a peer's,
+#   - the workspace is deleted when the sandbox is deprovisioned.
+#
+# It also exercises `agentUserSid` (asserted present at provision).
+
+$script:fA = $null   # @{ SandboxId; Workspace; Sid }
+$script:fB = $null
+$fADeprov = $false
+$fBDeprov = $false
+
+# Provision a sandbox and capture its workspace path + agent SID from the
+# provision metadata. Returns $null on failure.
+function Provision-LifecycleFSandbox {
+    param([string]$Label)
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    if ((Envelope-Arm $envObj) -ne 'result') {
+        Write-Host "  $Label provision arm: $(Envelope-Arm $envObj)" -ForegroundColor Red
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        return $null
+    }
+    $meta = $envObj.result.metadata
+    $obj = @{
+        SandboxId = [string]$envObj.result.sandboxId
+        Workspace = if ($meta) { [string]$meta.ephemeralWorkspacePath } else { '' }
+        Sid       = if ($meta) { [string]$meta.agentUserSid } else { '' }
+    }
+    Write-Host "  $Label provisioned: sandboxId=$($obj.SandboxId) workspace=$($obj.Workspace) sid=$($obj.Sid)" -ForegroundColor DarkGray
+    return $obj
+}
+
+# Exec an arbitrary command inside a started session.
+function Exec-InSession {
+    param([string]$SandboxId, [string]$CommandLine)
+    $req = @{
+        phase     = 'exec'
+        sandboxId = $SandboxId
+        process   = @{ commandLine = $CommandLine; timeout = 30000 }
+    }
+    Invoke-StateAware -Request $req -Experimental
+}
+
+try {
+    Run-StateAwareTest "Lifecycle F: provision A + B with workspaces" {
+        $script:fA = Provision-LifecycleFSandbox -Label "F-A"
+        $script:fB = Provision-LifecycleFSandbox -Label "F-B"
+        Assert-True ($null -ne $script:fA) "A provisioned"
+        Assert-True ($null -ne $script:fB) "B provisioned"
+        if ($null -ne $script:fA -and $null -ne $script:fB) {
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fA.Workspace)) "A ephemeralWorkspacePath present ($($script:fA.Workspace))"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fB.Workspace)) "B ephemeralWorkspacePath present ($($script:fB.Workspace))"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fA.Sid)) "A agentUserSid present ($($script:fA.Sid))"
+            Assert-True ($script:fA.Workspace -ne $script:fB.Workspace) "A and B have distinct workspaces"
+            # The caller (this harness == the provisioning user) can access every
+            # concurrent sandbox's workspace directory.
+            Assert-True (Test-Path -LiteralPath $script:fA.Workspace) "caller can access A's workspace dir"
+            Assert-True (Test-Path -LiteralPath $script:fB.Workspace) "caller can access B's workspace dir"
+        }
+    } | Out-Null
+
+    if ($null -ne $script:fA -and $null -ne $script:fB -and $script:fA.Workspace -and $script:fB.Workspace) {
+        Run-StateAwareTest "Lifecycle F: start A + B" {
+            $rsa = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rsa.ExitCode -eq 0) "start A exit 0"
+            $rsb = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rsb.ExitCode -eq 0) "start B exit 0"
+        } | Out-Null
+
+        # F2: caller -> session. The caller stages a file into A's workspace;
+        # session A reads it back.
+        Run-StateAwareTest "Lifecycle F: caller shares a file into session A" {
+            $wsA = $script:fA.Workspace
+            Set-Content -LiteralPath (Join-Path $wsA 'caller_to_A.txt') -Value 'from-caller' -Encoding Ascii
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c type `"$wsA\caller_to_A.txt`""
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "session A reads the caller's file (exit 0)"
+            Assert-True ($out.Contains('from-caller')) "session A sees caller_to_A.txt content"
+        } | Out-Null
+
+        # F3: session -> caller. Session A writes into its workspace; the caller
+        # reads it back on the host.
+        Run-StateAwareTest "Lifecycle F: session A shares a file back to the caller" {
+            $wsA = $script:fA.Workspace
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c echo from-session-A> `"$wsA\A_to_caller.txt`""
+            Assert-True ($r.ExitCode -eq 0) "session A writes to its workspace (exit 0)"
+            $backFile = Join-Path $wsA 'A_to_caller.txt'
+            Assert-True (Test-Path -LiteralPath $backFile) "caller sees the file session A wrote"
+            $content = Get-Content -LiteralPath $backFile -Raw -ErrorAction SilentlyContinue
+            Assert-True ($content -match 'from-session-A') "caller reads session A's content"
+        } | Out-Null
+
+        # F4: cross-session isolation. The caller stages a marker into B's
+        # workspace; session A must NOT be able to read B's workspace.
+        Run-StateAwareTest "Lifecycle F: session A cannot access session B's workspace" {
+            $wsB = $script:fB.Workspace
+            Set-Content -LiteralPath (Join-Path $wsB 'caller_to_B.txt') -Value 'B-only' -Encoding Ascii
+            Assert-True (Test-Path -LiteralPath (Join-Path $wsB 'caller_to_B.txt')) "caller can stage into B's workspace"
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c type `"$wsB\caller_to_B.txt`""
+            $out = [string]$r.Stdout
+            Assert-True (-not $out.Contains('B-only')) "session A does NOT see B's workspace content"
+            Assert-True ($r.ExitCode -ne 0) "session A's read of B's workspace fails (access denied)"
+        } | Out-Null
+
+        # F5: teardown deletes the workspace.
+        $script:fADeprovOk = $false
+        Run-StateAwareTest "Lifecycle F: deprovision A deletes its workspace" {
+            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rstop.ExitCode -eq 0) "stop A exit 0"
+            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rdep.ExitCode -eq 0) "deprovision A exit 0"
+            if ($rdep.ExitCode -eq 0) { $script:fADeprovOk = $true }
+            Assert-True (-not (Test-Path -LiteralPath $script:fA.Workspace)) "A's workspace dir is gone after deprovision"
+        } | Out-Null
+        if ($script:fADeprovOk) { $fADeprov = $true }
+
+        $script:fBDeprovOk = $false
+        Run-StateAwareTest "Lifecycle F: deprovision B" {
+            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rstop.ExitCode -eq 0) "stop B exit 0"
+            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rdep.ExitCode -eq 0) "deprovision B exit 0"
+            if ($rdep.ExitCode -eq 0) { $script:fBDeprovOk = $true }
+        } | Out-Null
+        if ($script:fBDeprovOk) { $fBDeprov = $true }
+    }
+} finally {
+    foreach ($entry in @(
+            @{ obj = $script:fA; done = $fADeprov; label = 'F-A' },
+            @{ obj = $script:fB; done = $fBDeprov; label = 'F-B' }
+        )) {
+        if ($null -ne $entry.obj -and -not $entry.done) {
+            Write-Host ""
+            Write-Host "[cleanup] best-effort deprovision of Lifecycle F sandbox $($entry.label) ($($entry.obj.SandboxId))" -ForegroundColor DarkGray
+            try {
+                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.obj.SandboxId -Experimental
             } catch { }
         }
     }

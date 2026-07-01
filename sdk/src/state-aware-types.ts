@@ -93,11 +93,16 @@ export interface IsolationSessionDeprovisionConfig {
 }
 
 /**
- * IsolationSession's provision-phase metadata: the per-instance agent user
- * account name minted for this sandbox.
+ * IsolationSession's provision-phase metadata surfaced to the caller: the
+ * per-instance agent user account name minted for this sandbox, the agent
+ * user's SID, and the ephemeral workspace directory shared between the caller
+ * and this isolated user (through which the caller can stage files into the
+ * session; deleted when the sandbox is deprovisioned).
  */
 export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
+  agentUserSid: string;
+  ephemeralWorkspacePath: string;
 }
 
 /**

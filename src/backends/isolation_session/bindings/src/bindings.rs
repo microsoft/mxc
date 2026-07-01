@@ -1056,7 +1056,7 @@ pub struct IIsoSessionResult_Vtbl {
 windows_core::imp::define_interface!(
     IIsoSessionUserResult,
     IIsoSessionUserResult_Vtbl,
-    0xdd09c0c8_54fd_551c_bb76_d5bb9da73349
+    0x8733fb07_cce2_5483_95a7_0a68cbd7641a
 );
 impl windows_core::RuntimeType for IIsoSessionUserResult {
     const SIGNATURE: windows_core::imp::ConstBuffer =
@@ -1067,6 +1067,8 @@ impl windows_core::RuntimeName for IIsoSessionUserResult {
 }
 pub trait IIsoSessionUserResult_Impl: windows_core::IUnknownImpl {
     fn AgentUserName(&self) -> windows_core::Result<windows_core::HSTRING>;
+    fn AgentUserSid(&self) -> windows_core::Result<windows_core::HSTRING>;
+    fn EphemeralWorkspacePath(&self) -> windows_core::Result<windows_core::HSTRING>;
     fn Error(&self) -> windows_core::Result<IsoSessionError>;
 }
 impl IIsoSessionUserResult_Vtbl {
@@ -1082,6 +1084,46 @@ impl IIsoSessionUserResult_Vtbl {
                 let this: &Identity =
                     &*((this as *const *const ()).offset(OFFSET) as *const Identity);
                 match IIsoSessionUserResult_Impl::AgentUserName(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn AgentUserSid<
+            Identity: IIsoSessionUserResult_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionUserResult_Impl::AgentUserSid(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn EphemeralWorkspacePath<
+            Identity: IIsoSessionUserResult_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionUserResult_Impl::EphemeralWorkspacePath(this) {
                     Ok(ok__) => {
                         result__.write(core::mem::transmute_copy(&ok__));
                         core::mem::forget(ok__);
@@ -1115,6 +1157,8 @@ impl IIsoSessionUserResult_Vtbl {
             base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionUserResult, OFFSET>(
             ),
             AgentUserName: AgentUserName::<Identity, OFFSET>,
+            AgentUserSid: AgentUserSid::<Identity, OFFSET>,
+            EphemeralWorkspacePath: EphemeralWorkspacePath::<Identity, OFFSET>,
             Error: Error::<Identity, OFFSET>,
         }
     }
@@ -1127,6 +1171,14 @@ impl IIsoSessionUserResult_Vtbl {
 pub struct IIsoSessionUserResult_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
     pub AgentUserName: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub AgentUserSid: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub EphemeralWorkspacePath: unsafe extern "system" fn(
         *mut core::ffi::c_void,
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
@@ -1776,6 +1828,28 @@ impl IsoSessionUserResult {
         unsafe {
             let mut result__ = core::mem::zeroed();
             (windows_core::Interface::vtable(this).AgentUserName)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
+        }
+    }
+    pub fn AgentUserSid(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = self;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).AgentUserSid)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| core::mem::transmute(result__))
+        }
+    }
+    pub fn EphemeralWorkspacePath(&self) -> windows_core::Result<windows_core::HSTRING> {
+        let this = self;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).EphemeralWorkspacePath)(
                 windows_core::Interface::as_raw(this),
                 &mut result__,
             )

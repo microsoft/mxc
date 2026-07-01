@@ -28,8 +28,10 @@ use super::policy::{
 use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
 
-/// Provision-phase metadata. Carries the OS-assigned agent account name
-/// for diagnostics; the SID is omitted (can be added when a caller needs it).
+/// Provision-phase metadata surfaced to the caller: the OS-assigned agent
+/// account name, the agent user's SID, and the shared ephemeral workspace
+/// path. All are diagnostic/metadata — the addressing key remains the
+/// `sandboxId` tail (the agent user name).
 ///
 /// `pub` is required because the trait associated type slot
 /// (`StatefulSandboxBackend::ProvisionMetadata`) reaches public callers via
@@ -38,6 +40,10 @@ use super::IsolationSessionRunner;
 pub struct IsolationSessionProvisionMetadata {
     #[serde(rename = "agentUserName")]
     pub agent_user_name: String,
+    #[serde(rename = "agentUserSid")]
+    pub agent_user_sid: String,
+    #[serde(rename = "ephemeralWorkspacePath")]
+    pub ephemeral_workspace_path: String,
 }
 
 /// Parses the `iso:<agentUserName>` form of a state-aware sandbox_id and
@@ -86,12 +92,16 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
             Some(u) => (u.upn.as_str(), u.wam_token.as_str()),
             None => ("", ""),
         };
-        let agent_user_name = IsolationSessionManager::add_user(entra_account, wam_token)
+        let provisioned = IsolationSessionManager::add_user(entra_account, wam_token)
             .map_err(map_lifecycle_error)?;
 
         Ok(ProvisionResult {
-            sandbox_id: format!("{}:{}", Self::ID_PREFIX, agent_user_name),
-            metadata: Some(IsolationSessionProvisionMetadata { agent_user_name }),
+            sandbox_id: format!("{}:{}", Self::ID_PREFIX, provisioned.agent_user_name),
+            metadata: Some(IsolationSessionProvisionMetadata {
+                agent_user_name: provisioned.agent_user_name,
+                agent_user_sid: provisioned.agent_user_sid,
+                ephemeral_workspace_path: provisioned.ephemeral_workspace_path,
+            }),
         })
     }
 
@@ -280,6 +290,27 @@ mod tests {
         assert_eq!(
             <IsolationSessionRunner as StatefulSandboxBackend>::ID_PREFIX,
             "iso"
+        );
+    }
+
+    // Provision metadata must serialize to exactly the three camelCase wire
+    // keys the SDK's `IsolationSessionProvisionMetadata` reads. A missing or
+    // misnamed field would silently strip provision data from the result.
+    #[test]
+    fn provision_metadata_serializes_all_fields() {
+        let meta = IsolationSessionProvisionMetadata {
+            agent_user_name: "agent-1".to_string(),
+            agent_user_sid: "S-1-5-21-1001".to_string(),
+            ephemeral_workspace_path: "C:\\ProgramData\\ws\\agent-1".to_string(),
+        };
+        let v = serde_json::to_value(&meta).unwrap();
+        assert_eq!(v["agentUserName"], "agent-1");
+        assert_eq!(v["agentUserSid"], "S-1-5-21-1001");
+        assert_eq!(v["ephemeralWorkspacePath"], "C:\\ProgramData\\ws\\agent-1");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "unexpected fields in provision metadata: {v}"
         );
     }
 
