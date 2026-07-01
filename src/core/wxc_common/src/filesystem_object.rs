@@ -151,7 +151,7 @@ fn object_id(_path: &str) -> Option<ObjectId> {
     None
 }
 
-/// Normalize cross-path object conflicts in `policy` in place.
+/// Detect cross-path object conflicts and return a tightened copy of `policy`.
 ///
 /// For each set of policy paths that resolve to the same filesystem object but
 /// carry differing intents, the looser-intent paths are moved into the strictest
@@ -159,14 +159,22 @@ fn object_id(_path: &str) -> Option<ObjectId> {
 /// each moved path. Paths that can't be stat'd are left as-is. This never
 /// removes a path entirely or rejects the config; it only tightens intents.
 ///
+/// Returns `Some(new_policy)` only when at least one path's intent was
+/// tightened; returns `None` when there is nothing to change (the common case —
+/// no symlink / hard-link / bind-mount aliases among the policy paths), so
+/// callers can avoid cloning the request entirely.
+///
 /// Run this *after* the string-level normalization in `config_parser`, close to
 /// where the backend builds its mounts.
-pub fn normalize_object_conflicts(policy: &mut ContainerPolicy, logger: &mut Logger) {
+pub fn normalize_object_conflicts(
+    policy: &ContainerPolicy,
+    logger: &mut Logger,
+) -> Option<ContainerPolicy> {
     if policy.readwrite_paths.is_empty()
         && policy.readonly_paths.is_empty()
         && policy.denied_paths.is_empty()
     {
-        return;
+        return None;
     }
 
     use std::collections::{HashMap, HashSet};
@@ -195,6 +203,7 @@ pub fn normalize_object_conflicts(policy: &mut ContainerPolicy, logger: &mut Log
 
     // Final intent per entry (defaults to its declared intent).
     let mut final_intent: Vec<Intent> = entries.iter().map(|(_, it)| *it).collect();
+    let mut changed = false;
 
     for members in groups.values() {
         if members.len() < 2 {
@@ -227,8 +236,15 @@ pub fn normalize_object_conflicts(policy: &mut ContainerPolicy, logger: &mut Log
                     entries[i].0,
                 ));
                 final_intent[i] = target;
+                changed = true;
             }
         }
+    }
+
+    // Nothing was tightened: no aliasing conflict, so the caller can keep using
+    // the original policy without cloning.
+    if !changed {
+        return None;
     }
 
     // Rebuild the three lists from the resolved intents. Within each list,
@@ -260,9 +276,11 @@ pub fn normalize_object_conflicts(policy: &mut ContainerPolicy, logger: &mut Log
             }
         }
     }
-    policy.readwrite_paths = rw;
-    policy.readonly_paths = ro;
-    policy.denied_paths = dn;
+    let mut new_policy = policy.clone();
+    new_policy.readwrite_paths = rw;
+    new_policy.readonly_paths = ro;
+    new_policy.denied_paths = dn;
+    Some(new_policy)
 }
 
 #[cfg(test)]
@@ -281,27 +299,24 @@ mod tests {
 
     #[test]
     fn empty_policy_is_noop() {
-        let mut p = ContainerPolicy::default();
+        let p = ContainerPolicy::default();
         let mut logger = Logger::new(Mode::Buffer);
-        normalize_object_conflicts(&mut p, &mut logger);
-        assert!(p.readwrite_paths.is_empty());
-        assert!(p.readonly_paths.is_empty());
-        assert!(p.denied_paths.is_empty());
+        assert!(normalize_object_conflicts(&p, &mut logger).is_none());
     }
 
     #[test]
     fn missing_paths_left_untouched() {
         // Non-existent paths can't be stat'd, so no grouping / no change.
-        let mut p = policy(
+        let p = policy(
             &["/nonexistent/mxc-test-rw"],
             &["/nonexistent/mxc-test-ro"],
             &["/nonexistent/mxc-test-dn"],
         );
         let mut logger = Logger::new(Mode::Buffer);
-        normalize_object_conflicts(&mut p, &mut logger);
-        assert_eq!(p.readwrite_paths, vec!["/nonexistent/mxc-test-rw"]);
-        assert_eq!(p.readonly_paths, vec!["/nonexistent/mxc-test-ro"]);
-        assert_eq!(p.denied_paths, vec!["/nonexistent/mxc-test-dn"]);
+        assert!(
+            normalize_object_conflicts(&p, &mut logger).is_none(),
+            "unstattable paths must not trigger a change"
+        );
     }
 
     #[test]
@@ -313,19 +328,17 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
 
-        let mut p = policy(&[a], &[b], &[]);
+        let p = policy(&[a], &[b], &[]);
         let mut logger = Logger::new(Mode::Buffer);
-        normalize_object_conflicts(&mut p, &mut logger);
-        assert_eq!(p.readwrite_paths, vec![a.to_string()]);
-        assert_eq!(p.readonly_paths, vec![b.to_string()]);
+        // Distinct objects, no aliasing: nothing to tighten.
+        assert!(normalize_object_conflicts(&p, &mut logger).is_none());
     }
 
     #[test]
     fn same_object_same_intent_is_not_a_conflict() {
         // Two distinct path strings to the same object via a hard link (works on
         // both Unix and Windows, and exercises the platform object_id grouping),
-        // both read-write — redundant but not a conflict, so nothing moves and
-        // both paths are preserved in order.
+        // both read-write — redundant but not a conflict, so nothing moves.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         std::fs::write(&target, b"x").unwrap();
@@ -333,13 +346,10 @@ mod tests {
         std::fs::hard_link(&target, &alias).unwrap();
 
         let (t, a) = (target.to_str().unwrap(), alias.to_str().unwrap());
-        let mut p = policy(&[t, a], &[], &[]);
+        let p = policy(&[t, a], &[], &[]);
         let mut logger = Logger::new(Mode::Buffer);
-        normalize_object_conflicts(&mut p, &mut logger);
-        assert!(p.readonly_paths.is_empty());
-        assert!(p.denied_paths.is_empty());
-        // Both distinct paths remain read-write, original order preserved.
-        assert_eq!(p.readwrite_paths, vec![t.to_string(), a.to_string()]);
+        // Same object, same intent: no tightening, so no new policy is produced.
+        assert!(normalize_object_conflicts(&p, &mut logger).is_none());
     }
 
     #[cfg(unix)]
@@ -353,16 +363,17 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (t, l) = (target.to_str().unwrap(), link.to_str().unwrap());
 
-        let mut p = policy(&[t], &[], &[l]);
+        let p = policy(&[t], &[], &[l]);
         let mut logger = Logger::new(Mode::Buffer);
-        normalize_object_conflicts(&mut p, &mut logger);
+        let out = normalize_object_conflicts(&p, &mut logger)
+            .expect("rw+denied aliases of one object must produce a tightened policy");
 
         assert!(
-            p.readwrite_paths.is_empty(),
+            out.readwrite_paths.is_empty(),
             "rw alias of a denied object must be tightened to denied"
         );
-        assert!(p.denied_paths.contains(&t.to_string()));
-        assert!(p.denied_paths.contains(&l.to_string()));
+        assert!(out.denied_paths.contains(&t.to_string()));
+        assert!(out.denied_paths.contains(&l.to_string()));
     }
 
     #[cfg(unix)]
@@ -376,16 +387,17 @@ mod tests {
         std::fs::hard_link(&a, &b).unwrap();
         let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
 
-        let mut p = policy(&[a], &[b], &[]);
+        let p = policy(&[a], &[b], &[]);
         let mut logger = Logger::new(Mode::Buffer);
-        normalize_object_conflicts(&mut p, &mut logger);
+        let out = normalize_object_conflicts(&p, &mut logger)
+            .expect("rw+ro aliases of one object must produce a tightened policy");
 
         assert!(
-            p.readwrite_paths.is_empty(),
+            out.readwrite_paths.is_empty(),
             "rw alias of a read-only object must be tightened to read-only"
         );
-        assert!(p.readonly_paths.contains(&a.to_string()));
-        assert!(p.readonly_paths.contains(&b.to_string()));
+        assert!(out.readonly_paths.contains(&a.to_string()));
+        assert!(out.readonly_paths.contains(&b.to_string()));
     }
 
     #[cfg(unix)]
@@ -406,12 +418,13 @@ mod tests {
         );
 
         // t = rw, a = ro, b = denied.
-        let mut p = policy(&[t], &[a], &[b]);
+        let p = policy(&[t], &[a], &[b]);
         let mut logger = Logger::new(Mode::Buffer);
-        normalize_object_conflicts(&mut p, &mut logger);
+        let out = normalize_object_conflicts(&p, &mut logger)
+            .expect("three aliases across all lists must produce a tightened policy");
 
-        assert!(p.readwrite_paths.is_empty());
-        assert!(p.readonly_paths.is_empty());
-        assert_eq!(p.denied_paths.len(), 3);
+        assert!(out.readwrite_paths.is_empty());
+        assert!(out.readonly_paths.is_empty());
+        assert_eq!(out.denied_paths.len(), 3);
     }
 }
