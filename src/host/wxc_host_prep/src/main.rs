@@ -25,6 +25,8 @@ mod cli;
 #[cfg(target_os = "windows")]
 mod elevation_check;
 #[cfg(target_os = "windows")]
+mod learning_mode_broker;
+#[cfg(target_os = "windows")]
 mod log;
 #[cfg(target_os = "windows")]
 mod null_device;

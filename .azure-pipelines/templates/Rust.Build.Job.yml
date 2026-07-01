@@ -49,6 +49,7 @@ jobs:
         signPattern: |
             wxc-exec.exe
             wxc-host-prep.exe
+            mxc-learning-mode-broker.exe
             winhttp-proxy-shim.exe
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe

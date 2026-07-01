@@ -1,0 +1,18 @@
+[package]
+name = "learning_mode_broker_protocol"
+version.workspace = true
+edition.workspace = true
+
+# Cross-platform crate holding the named-pipe RPC wire format shared
+# between the `mxc-learning-mode-broker` service (server) and its clients
+# (`wxc-exec`'s learning-mode backend). It carries only the request and
+# response data shapes (`BrokerRequest`, `BrokerResponse`, PIPE_NAME, protocol
+# version, stable error codes) and depends on nothing OS-specific, so the
+# privileged broker can build against it without pulling in the consumer-side
+# ETW capture backend (`learning_mode_windows`).
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

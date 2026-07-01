@@ -57,6 +57,20 @@ enum Command {
     /// Print the current `\Device\Null` security descriptor in SDDL
     /// form (and optionally as JSON).
     DumpNullDevice(DumpNullDeviceArgs),
+
+    /// Register `mxc-learning-mode-broker.exe` as a Manual-start Windows service
+    /// so unelevated callers (e.g. `wxc-exec`) can request scoped ETW
+    /// sessions for per-PID denial capture. Idempotent when the
+    /// binary path matches.
+    InstallLearningModeBroker(InstallLearningModeBrokerArgs),
+
+    /// Stop and deregister the `MxcLearningModeBroker` service. Idempotent
+    /// when the service is already absent.
+    UninstallLearningModeBroker,
+
+    /// Report whether `MxcLearningModeBroker` is installed, its current state,
+    /// and the registered binary path.
+    DumpLearningModeBroker(DumpLearningModeBrokerArgs),
 }
 
 #[derive(clap::Args)]
@@ -104,6 +118,22 @@ struct DumpNullDeviceArgs {
     json: bool,
 }
 
+#[derive(clap::Args)]
+struct InstallLearningModeBrokerArgs {
+    /// Override the *source* `mxc-learning-mode-broker.exe` to copy from.
+    /// Defaults to the same directory as `wxc-host-prep.exe`. The binary
+    /// is always installed into `%ProgramFiles%\Mxc`.
+    #[arg(long = "broker-path")]
+    broker_path: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct DumpLearningModeBrokerArgs {
+    /// Emit machine-readable JSON results on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
 pub fn run() -> i32 {
     let cli = Cli::parse();
 
@@ -124,5 +154,10 @@ pub fn run() -> i32 {
         }
         Command::VerifyNullDevice(args) => crate::null_device::run_verify(args.json),
         Command::DumpNullDevice(args) => crate::null_device::run_dump(args.json),
+        Command::InstallLearningModeBroker(args) => {
+            crate::learning_mode_broker::run_install(args.broker_path.as_deref())
+        }
+        Command::UninstallLearningModeBroker => crate::learning_mode_broker::run_uninstall(),
+        Command::DumpLearningModeBroker(args) => crate::learning_mode_broker::run_dump(args.json),
     }
 }
