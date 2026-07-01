@@ -59,7 +59,7 @@ Read the triggering issue title and body and triage by meaning, not keyword matc
 - Apply only labels from the configured `add-labels.allowed` list.
 - Apply the OS-*, Container-*, and Area-* labels the issue is genuinely about.
 - Ignore terms mentioned only in passing (for example in file paths, build flags, or examples).
-- Understand synonyms and short forms. Treat "Mac", "Mac x64", "macOS", "darwin", and "Seatbelt" as the macOS backend.
+- Understand synonyms and short forms. Treat "Mac", "Mac x64", "Mac ARM", "Mac aarch64", "macOS", "darwin", and "Seatbelt" as the macOS backend.
 - Do not invent labels.
 
 ### Owner assignment map
