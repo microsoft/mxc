@@ -184,7 +184,7 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
 
   it('builds a provision envelope and unwraps the SandboxId from the response', async () => {
     const fake = fakeSpawn({
-      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","metadata":{"agentUserName":"agent\\\\u1"}}}',
+      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","metadata":{"agentUserName":"agent\\\\u1","agentUserSid":"S-1-5-21-1001","ephemeralWorkspacePath":"C:\\\\ProgramData\\\\ws"}}}',
       exitCode: 0,
     });
     activeFake = fake;
@@ -196,6 +196,8 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     );
     assert.strictEqual(result.sandboxId, 'iso:reg-abc:prov-1');
     assert.strictEqual(result.metadata?.agentUserName, 'agent\\u1');
+    assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
+    assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
     assert.strictEqual(fake.captured.envelope?.phase, 'provision');
     assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
     assert.ok(fake.captured.args?.includes('--experimental'));

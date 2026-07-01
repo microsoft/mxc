@@ -56,6 +56,8 @@ without metadata use `()`.
 | Field | Type | Description |
 |---|---|---|
 | `agentUserName` | string | The OS-assigned agent account name returned by `AddUserAsync`. Diagnostic only — not used as an addressing key. Format is OS-internal and not stable across builds. |
+| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by `AddUserAsync`. Diagnostic only. |
+| `ephemeralWorkspacePath` | string | A directory shared between the calling user and this isolated agent user, through which the caller can stage files into the session. Each isolated user can access only its own workspace; the caller can access every concurrent sandbox's workspace. Created at provision and deleted when the sandbox is deprovisioned. It does **not** change the workload's working directory. |
 
 The provisioned `sandboxId` is always `iso:<agentUserName>`, where
 `agentUserName` is the opaque account name the OS assigns at `AddUserAsync`

@@ -166,8 +166,14 @@ describe('ProvisionResult<C>', () => {
   it('carries backend-typed metadata for isolation_session', () => {
     const result: ProvisionResult<'isolation_session'> = {
       sandboxId: 'iso:abcd' as SandboxId<'isolation_session'>,
-      metadata: { agentUserName: 'iso\\agent' },
+      metadata: {
+        agentUserName: 'iso\\agent',
+        agentUserSid: 'S-1-5-21-1001',
+        ephemeralWorkspacePath: 'C:\\ProgramData\\ws',
+      },
     };
     assert.strictEqual(result.metadata?.agentUserName, 'iso\\agent');
+    assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
+    assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
   });
 });

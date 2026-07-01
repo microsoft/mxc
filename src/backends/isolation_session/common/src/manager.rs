@@ -56,6 +56,22 @@ pub fn is_service_available() -> bool {
     check_service_available_and_activate().is_ok()
 }
 
+/// The provision-time facts the OS assigns to a freshly-created agent user,
+/// read from `IsoSessionUserResult` at `add_user`. The addressing key for
+/// every later lifecycle op remains `agent_user_name`; the other two fields
+/// are provision metadata surfaced to the caller.
+pub(super) struct ProvisionedUser {
+    /// The OS-assigned agent account name (also the `sandboxId` tail).
+    pub agent_user_name: String,
+    /// The security identifier (SID) of the agent user. Diagnostic only.
+    pub agent_user_sid: String,
+    /// A directory shared between the calling user and this isolated agent
+    /// user, through which the caller can stage files into the session. Each
+    /// isolated user can access only its own workspace; the caller can access
+    /// all of them. Deleted when the agent user is deprovisioned.
+    pub ephemeral_workspace_path: String,
+}
+
 /// Manages the isolation session lifecycle. Methods map 1:1 to the granular
 /// API steps.
 pub struct IsolationSessionManager {
@@ -79,8 +95,9 @@ impl IsolationSessionManager {
         })
     }
 
-    /// Provisions an agent user and returns the OS-assigned account name,
-    /// which addresses every subsequent lifecycle op.
+    /// Provisions an agent user and returns its provision-time facts (the
+    /// OS-assigned account name — which addresses every subsequent lifecycle
+    /// op — plus the agent SID and the shared ephemeral workspace path).
     ///
     /// Pass empty strings for a local agent user, or the Entra account name
     /// and its WAM token for an Entra-backed agent; the OS validates
@@ -93,7 +110,7 @@ impl IsolationSessionManager {
     pub(super) fn add_user(
         opt_entra_account_name: &str,
         opt_wam_token: &str,
-    ) -> Result<String, IsolationSessionError> {
+    ) -> Result<ProvisionedUser, IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
         let async_op = ops
             .AddUserAsync(
@@ -115,10 +132,24 @@ impl IsolationSessionManager {
             return Err(format_iso_error("AddUserAsync", &err));
         }
 
-        let name = user_result
+        let agent_user_name = user_result
             .AgentUserName()
             .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserName failed: {}", e)))?;
-        Ok(name.to_string())
+        let agent_user_sid = user_result
+            .AgentUserSid()
+            .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserSid failed: {}", e)))?;
+        let ephemeral_workspace_path = user_result.EphemeralWorkspacePath().map_err(|e| {
+            lifecycle_err(format!(
+                "AddUserAsync: get EphemeralWorkspacePath failed: {}",
+                e
+            ))
+        })?;
+
+        Ok(ProvisionedUser {
+            agent_user_name: agent_user_name.to_string(),
+            agent_user_sid: agent_user_sid.to_string(),
+            ephemeral_workspace_path: ephemeral_workspace_path.to_string(),
+        })
     }
 
     /// Step 2: Start the isolation session for the pegged agent user.
