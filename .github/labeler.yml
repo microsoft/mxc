@@ -14,7 +14,7 @@
 # With `sync-labels: 0` (see the workflow) labels are only ever ADDED, never
 # removed, so a human triager can still correct anything the regexes get wrong.
 # Issue type labels (Issue-Bug / Issue-Feature / Issue-Docs / Issue-Task) are
-# intentionally NOT managed here because the issue templates already apply them.
+# intentionally NOT managed here because .github/policies/labelManagement.issueOpened.yml already applies them.
 #
 # Patterns are derived from previously triaged issues. Prefer high-signal
 # keywords: a missed label is cheap (a human adds it), a wrong label is noisier.
@@ -23,7 +23,7 @@
 # Operating system
 # ---------------------------------------------------------------------------
 OS-Windows:
-  - '/(\bwindows\b|appcontainer|basecontainer|\bmsix\b|dev ?drive|wxc-exec|\bwxc\b|bfscfg|win32|conpty|windows sandbox|\.exe\b)/i'
+  - '/(\bwindows\b|appcontainer|base ?container|\bmsix\b|dev ?drive|wxc-exec|\bwxc\b|bfscfg|win32|conpty|windows sandbox|\.exe\b)/i'
 
 OS-Linux:
   - '/(\blinux\b|\blxc\b|lxc-exec|bubblewrap|\bbwrap\b|iptables|\bubuntu\b|\bdebian\b)/i'
@@ -35,7 +35,7 @@ OS-MacOS:
 # Container / backend type
 # ---------------------------------------------------------------------------
 Container-Process:
-  - '/(process ?container|process ?isolation|appcontainer|basecontainer|file broker|dev ?drive)/i'
+  - '/(process ?container|process ?isolation|appcontainer|base ?container|file broker|dev ?drive)/i'
 
 Container-MicroVM:
   - '/(micro-?vm|nanvix)/i'
