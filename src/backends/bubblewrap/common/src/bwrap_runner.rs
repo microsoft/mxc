@@ -120,6 +120,13 @@ impl SandboxBackend for BubblewrapScriptRunner {
             Ok(None) => request,
             Err(msg) => return Err(ScriptResponse::error(&msg)),
         };
+        // Delegation check (D3): reject any policy path the invoking user cannot
+        // access, so the sandbox never gains access the caller lacks. Runs AFTER
+        // object normalization so it is evaluated against the already-tightened
+        // intents (a path moved rw -> denied must not then require write access).
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return Err(ScriptResponse::error(&msg));
+        }
         let child = self.spawn_bwrap(request, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
