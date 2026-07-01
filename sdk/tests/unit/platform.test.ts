@@ -9,7 +9,6 @@ import {
   getPlatformSupport,
   _resetPlatformSupportCache,
   _setProbeRunner,
-  _setWindowsBuildQuery,
   findWxcExecutable,
 } from '../../src/platform.js';
 
@@ -324,57 +323,62 @@ describe('findWxcExecutable failure modes', () => {
   });
 });
 
-// IsolationSession availability is gated on Windows Insider Preview build
-// 26300.8553+. These tests stub the build-query seam so the gate can be
-// exercised deterministically without depending on the host's actual build.
+// IsolationSession availability is now reported by the native probe
+// (`wxc-exec --probe` -> probes.isolationSessionAvailable). These tests stub
+// the probe runner so the gate can be exercised deterministically without
+// depending on the host's actual build.
 describe('isolation_session availability gate', () => {
   beforeEach(() => {
     _resetPlatformSupportCache();
   });
 
   afterEach(() => {
-    _setWindowsBuildQuery(null);
+    _setProbeRunner(null);
     _resetPlatformSupportCache();
   });
 
-  it('omits isolation_session when minor build is below 8553', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8552 }));
+  it('includes isolation_session when the probe reports it available', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { isolationSessionAvailable: true } }),
+    );
     const support = getPlatformSupport();
     assert.ok(support.isSupported, 'Windows is supported regardless of iso gate');
+    assert.ok(
+      support.availableMethods.includes('isolation_session'),
+      `expected isolation_session present, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+
+  it('omits isolation_session when the probe reports it unavailable', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { isolationSessionAvailable: false } }),
+    );
+    const support = getPlatformSupport();
     assert.ok(
       !support.availableMethods.includes('isolation_session'),
       `expected isolation_session absent, got: ${support.availableMethods.join(',')}`,
     );
   });
 
-  it('includes isolation_session when build is exactly 26300.8553', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8553 }));
-    const support = getPlatformSupport();
-    assert.ok(support.availableMethods.includes('isolation_session'));
-  });
-
-  it('includes isolation_session when minor is newer (26300.9999)', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 9999 }));
-    const support = getPlatformSupport();
-    assert.ok(support.availableMethods.includes('isolation_session'));
-  });
-
-  it('omits isolation_session when major is newer than 26300 (gate is pinned to the Insider Preview)', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26400, minor: 0 }));
+  it('omits isolation_session when the probes block omits the field', { skip: !isWindows }, () => {
+    _setProbeRunner(() => JSON.stringify({ tier: 'base-container', probes: {} }));
     const support = getPlatformSupport();
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
-  it('omits isolation_session when the registry query returns null', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => null);
+  it('omits isolation_session when the probe fails', { skip: !isWindows }, () => {
+    _setProbeRunner(() => {
+      throw new Error('probe failed');
+    });
     const support = getPlatformSupport();
+    assert.ok(support.isSupported, 'Windows support is independent of the probe');
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
   it('always reports processcontainer as the default on Windows (no build gate)', { skip: !isWindows }, () => {
-    // Even on a hypothetical sub-24H2 build the SDK now reports support;
-    // the runtime gate has moved into the native binary.
-    _setWindowsBuildQuery(() => ({ major: 22000, minor: 0 }));
+    // The runtime gate lives in the native binary; the SDK reports Windows
+    // support regardless of isolation-session availability.
+    _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: false } }));
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
     assert.strictEqual(support.availableMethods[0], 'processcontainer');

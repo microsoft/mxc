@@ -30,7 +30,7 @@ pub enum ContainmentBackend {
     Hyperlight,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
-    /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
+    /// Isolation Session — process isolation via the IsolationSession API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
     /// macOS Seatbelt sandbox backend.
@@ -250,43 +250,10 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
-/// Session configuration size for the Isolation Session backend.
-/// Maps to `IsoSessionConfigId` in the in-proc `Windows.AI.IsolationSession`
-/// `IsoSessionOps` APIs, whose values must in turn match `ISOLATION_CONFIG_ID`
-/// in `winsta.h`.
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum IsolationSessionConfigurationId {
-    /// `Small` (1) — smallest pre-defined configuration.
-    Small,
-    /// `Medium` (2) — middle pre-defined configuration.
-    Medium,
-    /// `Large` (3) — largest pre-defined configuration.
-    Large,
-    /// `Composable` (4) — lightweight configuration with UI subsystems
-    /// stripped, intended for command-line workloads. The default.
-    #[default]
-    Composable,
-}
-
-impl From<crate::wire::IsolationConfigurationId> for IsolationSessionConfigurationId {
-    fn from(id: crate::wire::IsolationConfigurationId) -> Self {
-        match id {
-            crate::wire::IsolationConfigurationId::Small => Self::Small,
-            crate::wire::IsolationConfigurationId::Medium => Self::Medium,
-            crate::wire::IsolationConfigurationId::Large => Self::Large,
-            crate::wire::IsolationConfigurationId::Composable => Self::Composable,
-        }
-    }
-}
-
 /// Configuration specific to the Isolation Session backend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IsolationSessionConfig {
-    /// Session size/weight. Default: Composable.
-    #[serde(rename = "configurationId")]
-    pub configuration_id: IsolationSessionConfigurationId,
     /// Optional Entra cloud-agent credentials. Honored on the state-aware
     /// `start` phase; rejected by the one-shot path.
     pub user: Option<IsolationSessionUser>,
@@ -817,14 +784,9 @@ mod tests {
     #[test]
     fn isolation_session_config_carries_optional_user() {
         let wire = json!({
-            "configurationId": "medium",
             "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
         });
         let parsed: IsolationSessionConfig = serde_json::from_value(wire).unwrap();
-        assert_eq!(
-            parsed.configuration_id,
-            IsolationSessionConfigurationId::Medium
-        );
         assert!(parsed.user.is_some());
     }
 }
