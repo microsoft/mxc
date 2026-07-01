@@ -10,8 +10,7 @@ path = "src/main.rs"
 # Windows-only binary: a privileged service that loans ETW-session
 # creation privilege to unelevated callers (e.g. wxc-exec) for a single
 # scoped denial-capture session per request. See
-# `docs/contoso-integration.md` (Phase 2 of the per-PID denial-capture
-# prototype) for the full design.
+# `docs/learning-mode/deployment-and-lifecycle.md` for the design notes.
 
 [target.'cfg(target_os = "windows")'.dependencies]
 learning_mode_broker_protocol = { workspace = true }
