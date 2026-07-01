@@ -4,9 +4,12 @@ name: "Issue Labeler"
 #   1. Applies OS-*, Container-* and Area-* labels via github/issue-labeler
 #      (regex config in .github/labeler.yml). It only ADDS labels
 #      (sync-labels: 0), so human triage decisions are never overwritten.
-#   2. Auto-assigns area owners based on title/body keyword matching.
+#   2. Auto-assigns area owners based on title/body keyword matching, then
+#      removes the Needs-Triage label once the issue has been auto-triaged
+#      (an area label was applied or an owner was assigned).
 #
-# Both steps assist triage; they never remove labels or existing assignees.
+# The labeler never removes labels or existing assignees; the only label this
+# workflow removes is Needs-Triage, and only after successful auto-triage.
 
 on:
   issues:
@@ -30,7 +33,7 @@ jobs:
           sync-labels: 0
           repo-token: ${{ github.token }}
 
-      - name: Assign area owners
+      - name: Assign owners and clear Needs-Triage
         uses: actions/github-script@v7
         with:
           script: |
@@ -54,24 +57,41 @@ jobs:
               { login: 'richiemsft',   regex: /\b(macos|mac ?os|darwin|seatbelt|xcode|mxc-exec-mac)\b/i },
             ];
 
+            const { owner, repo } = context.repo;
             const issue = context.payload.issue;
+            const issue_number = issue.number;
             const haystack = `${issue.title || ''}\n${issue.body || ''}`;
 
+            // 1. Assign area owners (preserving any existing assignees).
             const existing = new Set((issue.assignees || []).map(a => a.login));
             const toAdd = owners
               .filter(o => o.regex.test(haystack))
               .map(o => o.login)
               .filter(login => !existing.has(login));
 
-            if (toAdd.length === 0) {
-              core.info('No area owners matched; leaving assignees unchanged.');
-              return;
+            if (toAdd.length > 0) {
+              core.info(`Assigning: ${toAdd.join(', ')}`);
+              await github.rest.issues.addAssignees({ owner, repo, issue_number, assignees: toAdd });
+            } else {
+              core.info('No new area owners matched; leaving assignees unchanged.');
             }
 
-            core.info(`Assigning: ${toAdd.join(', ')}`);
-            await github.rest.issues.addAssignees({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              assignees: toAdd,
-            });
+            // 2. Clear Needs-Triage if the issue has been auto-triaged, i.e. the
+            //    labeler step applied an OS-*/Container-*/Area-* label, or the
+            //    issue now has an owner assigned. Re-fetch labels so we observe
+            //    what the preceding labeler step just added (the webhook payload
+            //    is a stale snapshot from before this run).
+            const current = await github.rest.issues.listLabelsOnIssue({ owner, repo, issue_number });
+            const labelNames = current.data.map(l => l.name);
+            const hasAreaLabel = labelNames.some(n => /^(OS-|Container-|Area-)/.test(n));
+            const hasAssignee = toAdd.length > 0 || existing.size > 0;
+
+            if (labelNames.includes('Needs-Triage') && (hasAreaLabel || hasAssignee)) {
+              core.info('Auto-triaged; removing Needs-Triage.');
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'Needs-Triage' });
+              } catch (e) {
+                // 404 => label already removed (race with a concurrent run); ignore.
+                if (e.status !== 404) throw e;
+              }
+            }
