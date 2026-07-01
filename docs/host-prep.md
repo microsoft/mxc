@@ -28,7 +28,7 @@ privilege-requiring setup work lives in `wxc-host-prep.exe` instead.
 | `prepare-null-device` | Apply MXC's managed security descriptor to `\Device\Null`. |
 | `verify-null-device` | Check `\Device\Null` SD against the target without modifying it. |
 | `dump-null-device` | Print the current `\Device\Null` SD as SDDL. |
-| `install-learning-mode-broker` | Register `mxc-learning-mode-broker.exe` as a Manual-start `LocalSystem` service so unelevated callers can request scoped ETW sessions for per-PID denial capture. |
+| `install-learning-mode-broker` | Register `mxc-learning-mode-broker.exe` as a Manual-start `LocalService` service so unelevated callers can request scoped ETW sessions for per-PID denial capture. |
 | `uninstall-learning-mode-broker` | Stop and deregister the `MxcLearningModeBroker` service. Idempotent. |
 | `dump-learning-mode-broker` | Report whether the `MxcLearningModeBroker` service is installed, its current state, and the registered binary path. |
 
