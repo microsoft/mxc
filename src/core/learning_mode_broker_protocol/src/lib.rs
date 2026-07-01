@@ -4,9 +4,11 @@
 //! Wire protocol shared between `wxc-exec` (client) and `mxc-learning-mode-broker`
 //! (server).
 //!
-//! The protocol is request/response over a named pipe. Both sides use
-//! newline-delimited JSON for messages. The broker accepts one request per
-//! connection, returns a response, and closes the connection.
+//! The protocol is request/response over a **message-mode** named pipe
+//! (`PIPE_TYPE_MESSAGE` | `PIPE_READMODE_MESSAGE`): each side writes exactly
+//! one JSON message per pipe operation — there is no newline framing. The
+//! broker accepts one request per connection, returns one response, and
+//! closes the connection.
 //!
 //! Two request kinds are defined:
 //!

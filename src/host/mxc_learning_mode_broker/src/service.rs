@@ -27,10 +27,14 @@ use crate::pipe_server;
 
 define_windows_service!(ffi_service_main, service_main);
 
-/// Hands control to the SCM dispatcher under `service_name`. Blocks until
+/// Canonical SCM service name. Single-sourced here so the dispatcher
+/// registration and the control-handler registration can never desync.
+pub const SERVICE_NAME: &str = "MxcLearningModeBroker";
+
+/// Hands control to the SCM dispatcher under [`SERVICE_NAME`]. Blocks until
 /// the service stops.
-pub fn start_dispatcher(service_name: &str) -> Result<(), Box<dyn Error>> {
-    service_dispatcher::start(service_name, ffi_service_main)?;
+pub fn start_dispatcher() -> Result<(), Box<dyn Error>> {
+    service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
     Ok(())
 }
 
@@ -61,7 +65,7 @@ fn run_service() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let status_handle = service_control_handler::register("MxcLearningModeBroker", event_handler)?;
+    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
 
     let set_status =
         |state: ServiceState, accept: ServiceControlAccept| -> Result<(), windows_service::Error> {

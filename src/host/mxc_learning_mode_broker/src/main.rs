@@ -42,8 +42,6 @@ mod service;
 
 use std::env;
 
-const SERVICE_NAME: &str = "MxcLearningModeBroker";
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let debug = args.iter().any(|a| a == "--debug");
@@ -54,6 +52,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Hand control to SCM. `service::ffi_service_main` will be invoked
         // by the SCM dispatcher when the service is started.
-        service::start_dispatcher(SERVICE_NAME)
+        service::start_dispatcher()
     }
 }

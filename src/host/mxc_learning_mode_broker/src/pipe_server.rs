@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL,
-    INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, LocalFree, ERROR_MORE_DATA, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+    HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -76,6 +76,12 @@ type OwnershipMap = Arc<Mutex<HashMap<String, String>>>;
 const PIPE_SDDL: &str = "D:(A;;GA;;;LS)(A;;0x12019b;;;IU)(A;;GA;;;BA)";
 
 const PIPE_BUFFER_SIZE: u32 = 8 * 1024;
+
+/// Hard cap on a single reassembled request. Message-mode reads can span
+/// multiple `ReadFile` calls (`ERROR_MORE_DATA`) when a request exceeds
+/// `PIPE_BUFFER_SIZE`; this bounds how much an untrusted caller can send
+/// before we reject with `BAD_REQUEST`, preventing unbounded allocation.
+const MAX_REQUEST_SIZE: usize = 256 * 1024;
 
 /// Runs the pipe accept loop until the process is signaled to stop. Used
 /// by the `--debug` mode where there's no SCM stop signal — Ctrl-C kills
@@ -213,22 +219,54 @@ fn handle_connection(pipe: HANDLE, ownership: &OwnershipMap) -> Result<(), Box<d
         }
     };
 
+    // Message-mode pipe: a single logical request may still span multiple
+    // `ReadFile` calls if it exceeds `PIPE_BUFFER_SIZE` — each partial read
+    // returns `ERROR_MORE_DATA` until the final chunk. Reassemble the full
+    // message, bounded by `MAX_REQUEST_SIZE`, so an oversized request yields
+    // a structured `BAD_REQUEST` instead of a dropped connection.
     let mut buf = vec![0u8; PIPE_BUFFER_SIZE as usize];
-    let mut bytes_read = 0u32;
+    let mut message: Vec<u8> = Vec::new();
 
-    let read_ok = unsafe { ReadFile(pipe, Some(&mut buf), Some(&mut bytes_read), None) };
+    loop {
+        let mut bytes_read = 0u32;
+        let read_ok = unsafe { ReadFile(pipe, Some(&mut buf), Some(&mut bytes_read), None) };
+        message.extend_from_slice(&buf[..bytes_read as usize]);
 
-    if read_ok.is_err() {
-        let last = unsafe { GetLastError() };
-        if last == ERROR_NO_DATA {
-            // Client closed without sending — nothing to reply to.
-            return Ok(());
+        if read_ok.is_ok() {
+            break;
         }
-        return Err(format!("ReadFile failed: {last:?}").into());
+
+        let last = unsafe { GetLastError() };
+        match last {
+            ERROR_NO_DATA => {
+                // Client closed without sending — nothing to reply to.
+                return Ok(());
+            }
+            ERROR_MORE_DATA => {
+                if message.len() > MAX_REQUEST_SIZE {
+                    // Refuse oversized requests with a structured error
+                    // rather than silently dropping the connection.
+                    let resp =
+                        BrokerResponse::OpenDenialSession(OpenDenialSessionResponse::Error {
+                            code: error_code::BAD_REQUEST.to_string(),
+                            message: format!("request exceeds maximum of {MAX_REQUEST_SIZE} bytes"),
+                        });
+                    if let Ok(body) = serde_json::to_vec(&resp) {
+                        let mut written = 0u32;
+                        unsafe {
+                            let _ = WriteFile(pipe, Some(&body), Some(&mut written), None);
+                            let _ = FlushFileBuffers(pipe);
+                        }
+                    }
+                    return Ok(());
+                }
+                // More chunks pending — keep reading.
+            }
+            _ => return Err(format!("ReadFile failed: {last:?}").into()),
+        }
     }
 
-    let request_bytes = &buf[..bytes_read as usize];
-    let response = handle_request(request_bytes, &caller, pipe, ownership);
+    let response = handle_request(&message, &caller, pipe, ownership);
     let response_bytes = serde_json::to_vec(&response)?;
 
     let mut written = 0u32;
