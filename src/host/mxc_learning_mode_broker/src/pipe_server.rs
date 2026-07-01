@@ -3,10 +3,10 @@
 
 //! Named-pipe server that hosts the `OpenDenialSession` RPC.
 //!
-//! Phase 2.1 (this commit): accept connections, parse a request, return
-//! `OpenDenialSessionResponse::Error { code: NOT_IMPLEMENTED, ... }`,
-//! disconnect. Validates that the SCM + pipe + protocol shape work
-//! end-to-end before adding the privileged ETW work in Phase 2.2.
+//! Accepts connections, parses a single [`BrokerRequest`] from the pipe, writes a
+//! single [`BrokerResponse`], then disconnects.
+//!
+//! Connections are handled serially in the accept loop thread.
 //!
 //! Pipe ACL: scoped to interactive-logon users. The broker runs as
 //! `LocalService` and would be vulnerable to confused-deputy attacks if
