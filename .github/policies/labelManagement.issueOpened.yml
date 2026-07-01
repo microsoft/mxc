@@ -112,39 +112,5 @@ configuration:
         then:
           - addLabel:
               label: Issue-Docs
-      ### OS Area Labels
-      - description: Add OS-Linux label from bug report area
-        if:
-          - payloadType: Issues
-          - isAction:
-              action: Opened
-          - bodyContains:
-              pattern: 'Relevant area\(s\)\s*\n.*Linux'
-              isRegex: True
-        then:
-          - addLabel:
-              label: OS-Linux
-      - description: Add OS-MacOS label from bug report area
-        if:
-          - payloadType: Issues
-          - isAction:
-              action: Opened
-          - bodyContains:
-              pattern: 'Relevant area\(s\)\s*\n.*macOS'
-              isRegex: True
-        then:
-          - addLabel:
-              label: OS-MacOS
-      - description: Add OS-Windows label from bug report area
-        if:
-          - payloadType: Issues
-          - isAction:
-              action: Opened
-          - bodyContains:
-              pattern: 'Relevant area\(s\)\s*\n.*Windows'
-              isRegex: True
-        then:
-          - addLabel:
-              label: OS-Windows
 onFailure:
 onSuccess:

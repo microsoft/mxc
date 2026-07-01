@@ -1,0 +1,86 @@
+# Configuration for github/issue-labeler.
+#
+# Each key is a repository label; the value is a list of regexes matched
+# against the issue title + body. If a match is found the label is added.
+#
+# IMPORTANT: github/issue-labeler treats MULTIPLE list entries as AND (every
+# entry must match for the label to apply). To get OR semantics, each label
+# below uses a SINGLE regex with `|` alternation. Do not split alternatives
+# into separate list entries unless you intend AND.
+#
+# The `/.../i` wrapper enables case-insensitive matching (the action parses
+# `^/(.+)/(.*)$` and passes the flags to `new RegExp`).
+#
+# With `sync-labels: 0` (see the workflow) labels are only ever ADDED, never
+# removed, so a human triager can still correct anything the regexes get wrong.
+# Issue type labels (Issue-Bug / Issue-Feature / Issue-Docs / Issue-Task) are
+# intentionally NOT managed here because .github/policies/labelManagement.issueOpened.yml already applies them.
+#
+# Patterns are derived from previously triaged issues. Prefer high-signal
+# keywords: a missed label is cheap (a human adds it), a wrong label is noisier.
+
+# ---------------------------------------------------------------------------
+# Operating system
+# ---------------------------------------------------------------------------
+OS-Windows:
+  - '/(\bwindows\b|appcontainer|base ?container|\bmsix\b|dev ?drive|wxc-exec|\bwxc\b|bfscfg|win32|conpty|windows sandbox|\.exe\b)/i'
+
+OS-Linux:
+  - '/(\blinux\b|\blxc\b|lxc-exec|bubblewrap|\bbwrap\b|iptables|\bubuntu\b|\bdebian\b)/i'
+
+OS-MacOS:
+  - '/(\bmacos\b|mac ?os|\bmac\b|\bdarwin\b|seatbelt|\bapple\b|\bxcode\b|mxc-exec-mac)/i'
+
+# ---------------------------------------------------------------------------
+# Container / backend type
+# ---------------------------------------------------------------------------
+Container-Process:
+  - '/(process ?container|process ?isolation|appcontainer|base ?container|file broker|dev ?drive)/i'
+
+Container-MicroVM:
+  - '/(micro-?vm|nanvix)/i'
+
+Container-Hyperlight:
+  - '/(hyperlight|unikraft|unikernel)/i'
+
+Container-WSLC:
+  - '/(wslc|wsl ?container|wsl2|\bwsl\b)/i'
+
+Container-VM:
+  - '/windows sandbox/i'
+
+Container-Session:
+  - '/(isolation ?session|isosession|iso session ?ops)/i'
+
+# ---------------------------------------------------------------------------
+# Area
+# ---------------------------------------------------------------------------
+Area-Build-Rust:
+  - '/(\bcargo\b|rustc|clippy|rustfmt|rust build|build\.(bat|sh))/i'
+
+Area-Build-TypeScript:
+  - '/(\btsc\b|typescript build|npm run build|esbuild|tsconfig)/i'
+
+Area-Executor-WXC:
+  - '/(wxc-exec|wxc executor)/i'
+
+Area-Executor-LXC:
+  - '/(lxc-exec|lxc executor)/i'
+
+Area-Executor-Schema:
+  - '/(config schema|schema version|schema-version|mxc-config|\$schema)/i'
+
+Area-SDK-Api:
+  - '/(sdk api|c# sdk|\.net sdk|spawnsandbox|provisionsandbox|execinsandbox)/i'
+
+Area-SDK-Policy:
+  - '/(sandbox ?policy|policy layer|readwritepaths|readonlypaths|deniedpaths)/i'
+
+Area-SDK-Configuration:
+  - '/(containerconfig|sdk configuration)/i'
+
+Area-Test-SDK:
+  - '/(sdk test|npm test)/i'
+
+Area-Test-Executor:
+  - '/(e2e test|executor test|wxc_e2e_tests|test driver)/i'
