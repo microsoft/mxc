@@ -4,7 +4,7 @@
 # Appends the public MxcDependencies cargo feed (config.public.toml) to the
 # workspace .cargo/config.toml. Used by Unofficial / fork-PR Rust steps so
 # crate downloads work under 1ES pool network isolation (crates.io is not on
-# the allowlist). Mirrors the Official setup step in Rust.Build.Steps.Official.yml.
+# the allowlist). Mirrors Cargo.Setup.Private.yml (the internal-feed equivalent).
 
 steps:
   - pwsh: |

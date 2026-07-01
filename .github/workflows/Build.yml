@@ -21,19 +21,28 @@ permissions:
   contents: read
 
 jobs:
+  # Dependency feed check: resolve the locked graph through the public MxcDependencies
+  # feed so a crate not yet in the feed fails at PR time.
+  dependency-feed-check:
+    uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
+
   versioning-checks:
     uses: ./.github/workflows/Versioning.Checks.Job.yml
 
   lint:
+    needs: dependency-feed-check
     uses: ./.github/workflows/Lint.Job.yml
 
   windows:
+    needs: dependency-feed-check
     uses: ./.github/workflows/Build.Windows.Job.yml
 
   linux:
+    needs: dependency-feed-check
     uses: ./.github/workflows/Build.Linux.Job.yml
 
   macos:
+    needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
   sdk-unit-tests:

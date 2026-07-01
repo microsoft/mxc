@@ -38,6 +38,9 @@ jobs:
           override: false
           rustflags: ''
 
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -45,6 +48,10 @@ jobs:
             src/core/lxc -> target
           key: ${{ matrix.target }}-v2
           cache-on-failure: false
+
+      - name: Install ARM64 cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
 
       - name: Build lxc
         run: cargo build --locked --release --target ${{ matrix.target }}

@@ -1,0 +1,53 @@
+# Resolves the locked dependency graph through the public MxcDependencies feed so a crate
+# not yet in the feed fails at PR time. On a 401, seed the crate by running the
+# MXC-Update-Feed-Dependencies pipeline in shine-oss with the PR's number (see docs/pull-requests.md).
+
+name: Dependency Feed Check
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Resolve deps through MxcDependencies feed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Surface toolchain file at repo root
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      # Fetch every locked crate for every target triple (no compile; --target only
+      # changes which cfg-gated deps resolve). A 401 means a crate is not yet in the
+      # feed and the check fails with guidance; any other cargo error fails generically.
+      - name: Fetch all locked crates through the feed (anonymous)
+        working-directory: src
+        run: |
+          set -uo pipefail
+          if cargo fetch --locked \
+            --target x86_64-pc-windows-msvc \
+            --target aarch64-pc-windows-msvc \
+            --target x86_64-unknown-linux-gnu \
+            --target aarch64-unknown-linux-gnu \
+            --target aarch64-apple-darwin 2>&1 | tee fetch.log; then
+            exit 0
+          fi
+          if grep -qiE '401|failed to get successful HTTP response' fetch.log; then
+            echo "::error title=Crate may be missing from the MxcDependencies feed::A locked crate could not be fetched through the feed (HTTP 401 above). If this PR adds a new crates.io dependency, it must be added to the feed before this check can pass."
+            echo "To add it: someone with Contributor access to the shine-oss Mxc project runs the MXC-Update-Feed-Dependencies pipeline using the Run pipeline button, with prNumber set to the PR's number."
+            echo "Details: docs/pull-requests.md (Dependency feed check)."
+          else
+            echo "::error title=cargo fetch failed::cargo fetch failed for a reason other than a feed 401 (see the log above)."
+          fi
+          exit 1
