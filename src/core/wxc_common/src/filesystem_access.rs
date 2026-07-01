@@ -10,8 +10,7 @@
 //! not checked. A path the user cannot access is **rejected** so a sandboxed
 //! process can't reach files the caller themselves couldn't.
 //!
-//! This does file I/O (`access(2)` / `CreateFileW`), so — like the object-based
-//! normalization in [`crate::filesystem_object`] and per design review — it runs
+//! This does file I/O (`access(2)` / `CreateFileW`), so it runs
 //! in each backend runner **close to the point of enforcement**, NOT in
 //! `config_parser` (which stays string-only). Two reasons:
 //!
@@ -22,10 +21,10 @@
 //! - **TOCTOU:** doing the check adjacent to enforcement shrinks the window in
 //!   which the filesystem can change between the check and the mount.
 //!
-//! When both this and object normalization are wired into a runner,
-//! [`crate::filesystem_object::normalize_object_conflicts`] must run **first**,
-//! so delegation is checked against the already-tightened intents (a path moved
-//! `rw → denied` must not then be required to have write access).
+//! When object-based filesystem normalization is also wired into a runner
+//! (tightening conflicting path intents to the most restrictive), it must run
+//! **first**, so delegation is checked against the already-tightened intents (a
+//! path moved `rw → denied` must not then be required to have write access).
 
 use crate::models::ContainerPolicy;
 
@@ -62,9 +61,18 @@ impl AccessMode {
 /// `None` when it cannot be determined (e.g. the path does not exist — that case
 /// is surfaced separately by the existence warning, so delegation skips it).
 ///
-/// On Unix this uses `access(2)` against the real UID (the invoking user), which
-/// covers both files and directories — fully implementing spec D3 for the Linux
-/// backends (LXC, Bubblewrap).
+/// On Unix this uses `access(2)`, which checks the requested permissions
+/// against the process's **real** UID/GID (the invoking user) and covers both
+/// files and directories. This has full effect for **Bubblewrap**, which runs
+/// unprivileged.
+///
+/// Caveat — **root**: `access(2)` short-circuits for the superuser, so `R_OK`
+/// (and, on most filesystems, `W_OK`) always succeed for a real UID of 0
+/// regardless of the file mode. The **LXC** backend runs as root, so the
+/// delegation check is effectively a no-op there; it only has teeth for an
+/// unprivileged caller (Bubblewrap). Meaningfully enforcing delegation under a
+/// root LXC would require checking against the pre-elevation user (e.g.
+/// `SUDO_UID`/`SUDO_GID`) — tracked as a follow-up.
 ///
 /// On Windows it probes the caller's effective access with `CreateFileW`
 /// (requesting `GENERIC_READ` / `GENERIC_READ | GENERIC_WRITE`, opened with
@@ -77,9 +85,6 @@ impl AccessMode {
 fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
     use std::ffi::CString;
 
-    if std::fs::metadata(path).is_err() {
-        return None;
-    }
     let c_path = CString::new(path).ok()?;
     let mask = match mode {
         AccessMode::Read => libc::R_OK,
@@ -87,7 +92,18 @@ fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
     };
     // SAFETY: `c_path` is a valid NUL-terminated C string for the duration of the call.
     let rc = unsafe { libc::access(c_path.as_ptr(), mask) };
-    Some(rc == 0)
+    if rc == 0 {
+        return Some(true);
+    }
+    // access(2) failed. Distinguish genuine non-existence — which is skipped
+    // here and surfaced separately by the existence warning — from an access
+    // denial, which is the exact case delegation must catch (including a parent
+    // directory the caller cannot traverse, reported as EACCES). Only a missing
+    // path yields `None`; every other errno is treated as "not accessible".
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ENOENT) | Some(libc::ENOTDIR) => None,
+        _ => Some(false),
+    }
 }
 
 #[cfg(windows)]
@@ -262,6 +278,41 @@ mod tests {
 
         // Restore permissions so the tempdir can be cleaned up.
         let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untraversable_parent_is_rejected_not_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses permission checks, so this case is only meaningful as a
+        // non-root user.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        // A readable file inside a directory the caller cannot traverse. The file
+        // exists, but reaching it requires execute (traversal) on the parent —
+        // which we remove. access(2) then reports EACCES, and the check must
+        // treat that as "not accessible" (a real delegation failure), NOT skip it
+        // as if the path were missing.
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let file = locked.join("data.txt");
+        std::fs::write(&file, b"data").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let f = file.to_str().unwrap();
+
+        assert_eq!(
+            user_can_access(f, AccessMode::Read),
+            Some(false),
+            "an untraversable parent (EACCES) must be reported as inaccessible, not skipped"
+        );
+        assert!(check_delegation(&policy(&[], &[f])).is_err());
+
+        // Restore traversal so the tempdir can recurse in during cleanup.
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
     }
 
     #[cfg(windows)]
