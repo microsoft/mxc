@@ -1,19 +1,24 @@
 name: "Issue Labeler"
 
-# On new/edited issues this workflow:
+# On new/edited/assigned issues this workflow:
 #   1. Applies OS-*, Container-* and Area-* labels via github/issue-labeler
 #      (regex config in .github/labeler.yml). It only ADDS labels
 #      (sync-labels: 0), so human triage decisions are never overwritten.
 #   2. Auto-assigns area owners based on title/body keyword matching, then
 #      removes the Needs-Triage label once the issue has been auto-triaged
-#      (an area label was applied or an owner was assigned).
+#      (an area label was applied or an owner is assigned).
 #
-# The labeler never removes labels or existing assignees; the only label this
-# workflow removes is Needs-Triage, and only after successful auto-triage.
+# This workflow owns OS-*/Container-*/Area- labeling and Needs-Triage removal
+# (previously the OS-* rules lived in .github/policies/labelManagement.issueOpened.yml
+# and the Needs-Triage-on-assign rule in labelManagement.issueAssigned.yml; both were
+# moved here). The `assigned` trigger preserves the old behavior of clearing
+# Needs-Triage when a human manually assigns someone. The labeler never removes
+# labels or existing assignees; the only label this workflow removes is
+# Needs-Triage, and only after successful auto-triage.
 
 on:
   issues:
-    types: [opened, edited]
+    types: [opened, edited, assigned]
 
 permissions:
   issues: write
