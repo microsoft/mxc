@@ -89,6 +89,14 @@ impl LxcScriptRunner {
 
     /// Core execution logic.
     fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        // Delegation check (D3): reject any policy path the invoking user cannot
+        // access, so the sandbox never gains access the caller lacks. Done here,
+        // close to mount, where the real filesystem state is visible (paths may
+        // not exist at parse time) and the TOCTOU window is minimized.
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return ScriptResponse::error(&msg);
+        }
+
         // Validate required LXC fields
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
             return ScriptResponse::error(
