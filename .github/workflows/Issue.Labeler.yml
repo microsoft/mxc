@@ -1,0 +1,77 @@
+name: "Issue Labeler"
+
+# On new/edited issues this workflow:
+#   1. Applies OS-*, Container-* and Area-* labels via github/issue-labeler
+#      (regex config in .github/labeler.yml). It only ADDS labels
+#      (sync-labels: 0), so human triage decisions are never overwritten.
+#   2. Auto-assigns area owners based on title/body keyword matching.
+#
+# Both steps assist triage; they never remove labels or existing assignees.
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply labels
+        uses: github/issue-labeler@v3.4
+        with:
+          configuration-path: .github/labeler.yml
+          enable-versioned-regex: 0
+          include-title: 1
+          include-body: 1
+          sync-labels: 0
+          repo-token: ${{ github.token }}
+
+      - name: Assign area owners
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Area owners, keyed by GitHub login. Each owner has a regex of
+            // high-signal keywords matched (case-insensitive) against the
+            // issue title + body. An issue can match several owners (e.g. a
+            // "linux network firewall" issue -> Soham + Branden); all matching
+            // owners are added. Existing assignees are preserved.
+            const owners = [
+              // Branden - networking / network policies
+              { login: 'bbonaby',      regex: /\b(network|networking|firewall|iptables|proxy|dns|tcp\/?ip|\budp\b|\btcp\b|ipv[46]|network polic)/i },
+              // Soham - Linux family backends
+              { login: 'SohamDas2021', regex: /\b(linux|wslc|wsl2?|lxc|bubblewrap|bwrap)\b/i },
+              // Jeff - AppContainer / BaseContainer / process isolation
+              { login: 'jsidewhite',   regex: /\b(appcontainer|base ?container|process ?isolation|process ?container)\b/i },
+              // Huzaifa - micro-VM backends + Windows Sandbox
+              { login: 'huzaifa-d',    regex: /\b(micro-?vm|nanvix|hyperlight|windows ?sandbox)\b/i },
+              // Adib - session isolation
+              { login: 'adpa-ms',      regex: /\b(session ?isolation|isolation ?session|isosession)\b/i },
+              // Richie - macOS
+              { login: 'richiemsft',   regex: /\b(macos|mac ?os|darwin|seatbelt|xcode|mxc-exec-mac)\b/i },
+            ];
+
+            const issue = context.payload.issue;
+            const haystack = `${issue.title || ''}\n${issue.body || ''}`;
+
+            const existing = new Set((issue.assignees || []).map(a => a.login));
+            const toAdd = owners
+              .filter(o => o.regex.test(haystack))
+              .map(o => o.login)
+              .filter(login => !existing.has(login));
+
+            if (toAdd.length === 0) {
+              core.info('No area owners matched; leaving assignees unchanged.');
+              return;
+            }
+
+            core.info(`Assigning: ${toAdd.join(', ')}`);
+            await github.rest.issues.addAssignees({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              assignees: toAdd,
+            });
