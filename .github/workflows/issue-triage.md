@@ -5,7 +5,6 @@ description: Triage newly opened or edited issues with labels, assignment, and a
 on:
   issues:
     types: [opened, edited]
-  reaction: eyes
 engine: copilot
 permissions:
   contents: read
