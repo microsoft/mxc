@@ -5,15 +5,11 @@ description: Triage newly opened or edited issues with labels, assignment, and a
 on:
   issues:
     types: [opened, edited]
+  reaction: eyes
 engine: copilot
-reaction: eyes
 permissions:
   contents: read
   issues: read
-tools:
-  github:
-    mode: gh-proxy
-    toolsets: [default]
 safe-outputs:
   add-labels:
     allowed:
