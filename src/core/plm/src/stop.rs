@@ -1,8 +1,8 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
-//! `plm stop` — stop the in-progress WPR trace and write `trace.etl`
-//! into a log directory.
+//! Port of `stop_plm_logging.ps1`.
+//!
+//! Stops the in-progress WPR trace, parses the .etl, and (optionally)
+//! merges the discovered file-access paths and capability requests into
+//! an MXC container config, writing an `Adjusted_*.json` next to it.
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -10,28 +10,40 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use crate::config::{
-    deny_file_set, initialize_filesystem, load_config, merge_capabilities,
-    resolve_adjusted_config_path, save_adjusted_config, update_from_access_events,
-    write_added_paths_summary, write_detection_summary, write_requested_capabilities_summary,
+    apply_ui_operation_flags, deny_file_set, initialize_filesystem, load_config,
+    merge_capabilities, resolve_adjusted_config_path, save_adjusted_config,
+    set_ui_subsystem_enabled, update_from_access_events, write_added_paths_summary,
+    write_detection_summary, write_requested_capabilities_summary,
 };
-use crate::event_parser::parse_events;
+use crate::event_parser::{parse_events, ParseResult};
 use crate::wpr_path::wpr_command;
+
+/// "Skip adjusted config" predicate extracted from the inline check
+/// in `run`. A trace that produced no access events, no capability
+/// requests, no `CONVERT_TO_GUI` hint, and no `UI_OPERATION` flags has
+/// nothing to merge — emitting an `Adjusted_*.json` byte-identical to
+/// the input would only confuse the harness's diff-based pass/fail
+/// signal.
+pub fn should_skip_adjusted(parse: &ParseResult) -> bool {
+    parse.is_empty()
+}
 
 pub struct StopOptions {
     pub log_dir: Option<PathBuf>,
     pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     pub adjusted_config_path: Option<PathBuf>,
-    /// When set, skip `wpr -stop` and treat the supplied .etl as the
-    /// captured trace. Useful for re-processing a previously captured
-    /// trace without an active WPR session.
+    /// When set, skip `wpr -stop` and parse the supplied .etl directly.
+    /// Useful for re-processing a previously captured trace without an
+    /// active WPR session.
     pub trace_file: Option<PathBuf>,
     pub verbose: bool,
 }
 
 /// Abstraction over `wpr -stop` invocations so the failure-mapping
 /// state machine in `stop_plm_trace_with` is testable without
-/// actually spawning processes. Mirrors `start::WprLauncher`.
+/// actually spawning processes. Mirrors `start::WprLauncher`
+///.
 pub trait WprStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus>;
 }
@@ -62,9 +74,10 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
 }
 
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
-/// to its canonical form. Later PRs feed this into the self-access
-/// filter; this PR exposes it so the canonicalize fallback chain is
-/// pinned by tests from day one.
+/// to its canonical form for the self-access filter in
+/// `config::update_from_access_events`. Returns the resolved path
+/// plus an optional warning when canonicalize diverged from operator
+/// intent.
 ///
 /// Fallback chain:
 ///   1. `canonicalize(opt.bin_path)` if `Some`
@@ -86,7 +99,8 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
                 e
             );
             // Prefer the raw operator-supplied path over silently
-            // substituting exe_dir; that would drop operator intent.
+            // substituting exe_dir; the previous behavior swallowed
+            // operator intent entirely.
             (raw.to_path_buf(), Some(warning))
         }
     }
@@ -141,17 +155,23 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 
     let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
 
-    write_detection_summary(&parse.valid_access_events, &parse.requested_capabilities);
+    write_detection_summary(
+        &parse.valid_access_events,
+        &parse.requested_capabilities,
+        parse.ui_event_count,
+        &parse.ui_events,
+        parse.ui_operation_flags,
+    );
     write_requested_capabilities_summary(&parse.requested_capabilities, opts.verbose);
 
     let config_path = match opts.config_path.as_ref() {
         Some(p) => p,
         None => return Ok(()),
     };
-    if parse.is_empty() {
-        // Nothing mergeable -- skip producing an Adjusted_*.json (which
-        // would be byte-identical to the input and confuse the harness's
-        // diff-based pass/fail signal).
+    // Skip the adjusted config only when the trace yielded nothing
+    // mergeable. Bailing on file/capability emptiness alone would
+    // silently drop UI-only traces.
+    if should_skip_adjusted(&parse) {
         return Ok(());
     }
 
@@ -182,6 +202,13 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         merge_capabilities(&mut config, &parse.requested_capabilities)?;
     }
 
+    if parse.need_ui {
+        set_ui_subsystem_enabled(&mut config)?;
+    }
+    if parse.ui_operation_flags != 0 {
+        apply_ui_operation_flags(&mut config, parse.ui_operation_flags)?;
+    }
+
     let adjusted = resolve_adjusted_config_path(&dest_config, opts.adjusted_config_path.as_deref());
     save_adjusted_config(&config, &adjusted)?;
 
@@ -192,8 +219,75 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_event::LearningModeAccessEvent;
+    use std::collections::HashSet;
+
+    fn empty_parse() -> ParseResult {
+        ParseResult {
+            valid_access_events: Vec::new(),
+            requested_capabilities: HashSet::new(),
+            need_ui: false,
+            ui_event_count: 0,
+            ui_events: Vec::new(),
+            ui_operation_flags: 0,
+        }
+    }
+
+    fn dummy_event() -> LearningModeAccessEvent {
+        LearningModeAccessEvent {
+            time_created: chrono::Utc::now(),
+            process_id: 0,
+            thread_id: 0,
+            learning_mode: String::new(),
+            resource_type: String::new(),
+            file_path: "C:\\foo".into(),
+            app_path: String::new(),
+            access_mask: 0,
+        }
+    }
+
+    // Pin the "skip adjusted config" predicate against each
+    // single-signal ParseResult plus the all-empty case.
+
+    #[test]
+    fn should_skip_when_completely_empty() {
+        assert!(should_skip_adjusted(&empty_parse()));
+    }
+
+    #[test]
+    fn should_not_skip_when_access_events_present() {
+        let mut p = empty_parse();
+        p.valid_access_events.push(dummy_event());
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_requested_capability_present() {
+        let mut p = empty_parse();
+        p.requested_capabilities.insert("internetClient".into());
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_need_ui_set() {
+        let mut p = empty_parse();
+        p.need_ui = true;
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_ui_operation_flag_set() {
+        let mut p = empty_parse();
+        p.ui_operation_flags = 0x004; // JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+        assert!(!should_skip_adjusted(&p));
+    }
 
     // ---- resolve_bin_path -----------------------------------------------
+    //
+    // the bin-path canonicalization
+    // fallback chain affects the self-event filter (and therefore
+    // whether plm.exe leaks into Adjusted_*.json), but was previously
+    // inline in `run()` and untestable without spawning wpr.
 
     #[test]
     fn resolve_bin_path_falls_back_to_exe_dir_when_no_override() {
@@ -205,6 +299,9 @@ mod tests {
 
     #[test]
     fn resolve_bin_path_canonicalizes_existing_override() {
+        // Use the temp dir as a path we know exists and is
+        // canonicalizable. The canonical form may add a `\\?\` prefix
+        // on Windows; assert it ends with the same directory name.
         let exe = std::env::temp_dir();
         let override_path = std::env::temp_dir();
         let (p, warn) = resolve_bin_path(Some(&override_path), &exe);
@@ -215,12 +312,13 @@ mod tests {
     #[test]
     fn resolve_bin_path_warns_and_returns_raw_when_canonicalize_fails() {
         let exe = std::env::temp_dir();
+        // A nonexistent path canonicalize() will refuse to resolve.
         let bogus = std::path::PathBuf::from("Z:\\definitely-does-not-exist-plm-test");
         let (p, warn) = resolve_bin_path(Some(&bogus), &exe);
         assert_eq!(
             p, bogus,
             "must return the raw operator path rather than silently \
-             substituting exe_dir (would drop operator intent)"
+             substituting exe_dir (previous behavior dropped operator intent)"
         );
         let w = warn.expect("canonicalize failure must surface a warning");
         assert!(
@@ -230,6 +328,12 @@ mod tests {
     }
 
     // ---- WprStopper / stop_plm_trace_with -------------------------------
+    //
+    // The start side already has a `WprLauncher` seam, but
+    // `stop_plm_trace` historically hard-coded `wpr_command()`. The
+    // non-zero-exit and spawn-error branches (the ones production
+    // actually hits when WPR or the .etl file are unhealthy) had
+    // zero test coverage. Mirror the start side.
 
     use std::os::windows::process::ExitStatusExt;
 
