@@ -243,6 +243,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let exe = exe_dir()?;
 
+    // Refuse to spawn an unsigned / tampered wpr.exe. `wpr.exe` runs
+    // elevated (the NT Kernel Logger requires SeSystemProfile), so
+    // an attacker-planted binary would execute with full admin
+    // rights. `verify_wpr_signed` caches its result, so every
+    // downstream `wpr_command()` call amortises the cert-chain walk
+    // to a single check.
+    plm::wpr_path::verify_wpr_signed()
+        .map_err(|e| anyhow::anyhow!("wpr.exe signature check failed: {e}"))?;
+
     // Install the Ctrl+C handler unconditionally so signals during any
     // subcommand (in particular interactive `log`) tear down the WPR
     // session and release the singleton before ExitProcess fires.
