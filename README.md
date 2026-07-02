@@ -219,15 +219,13 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
 ### Audit Mode (Permissive Learning Mode)
 
-`--audit` runs the policy in **permissive** mode — denied operations are logged but allowed to proceed — and starts a Permissive Learning Mode (PLM) ETW trace alongside the workload. When the container exits, `plm stop` captures the trace to disk. Parsing the trace into an `Adjusted_*.json` (with the file paths, capabilities, and `ui.*` relaxations needed to make the run succeed under enforcing mode) is not yet wired up on this branch.
+`--audit` runs the policy in **permissive** mode — denied operations are logged but allowed to proceed — and starts a Permissive Learning Mode (PLM) ETW trace alongside the workload. See [src/core/plm/readme.md](src/core/plm/readme.md) for the full PLM tool reference, including standalone `plm.exe` invocation (e.g. re-processing an existing `.etl` with `plm stop --trace-file …`).
 
 ```bash
 wxc-exec.exe --audit policy.json
 ```
 
 > **Warning:** In release builds, `--audit` relaxes the rejection of `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring.
-
-`plm.exe` can also be invoked standalone (e.g. to re-process an existing `.etl` with `plm stop --trace-file …`). See [src/core/plm/readme.md](src/core/plm/readme.md) for the full PLM tool reference.
 
 ## Documentation
 
