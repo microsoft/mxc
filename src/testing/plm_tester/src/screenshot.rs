@@ -88,7 +88,7 @@ fn pick_capture_item() -> Result<GraphicsCaptureItem> {
         .PickSingleItemAsync()
         .context("PickSingleItemAsync failed to start")?;
     let item = op
-        .get()
+        .join()
         .context("PickSingleItemAsync awaited result failed")?;
 
     // A cancelled picker yields a null GraphicsCaptureItem.
@@ -108,7 +108,7 @@ fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
         D3D11CreateDevice(
             None,
             D3D_DRIVER_TYPE_HARDWARE,
-            None,
+            windows::Win32::Foundation::HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             Some(&feature_levels),
             D3D11_SDK_VERSION,

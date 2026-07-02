@@ -17,8 +17,9 @@ use anyhow::{anyhow, Result};
 use clap::Args;
 use std::ffi::c_void;
 
+use windows::core::BOOL;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{GetLastError, BOOL, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -150,9 +151,9 @@ fn create_message_window() -> Result<HWND> {
             0,
             0,
             0,
-            HWND_MESSAGE,
+            Some(HWND_MESSAGE),
             None,
-            hinstance,
+            Some(hinstance),
             None,
         )
     }
