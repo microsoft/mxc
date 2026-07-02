@@ -9,6 +9,11 @@ use chrono::Local;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
+use crate::config::{
+    deny_file_set, initialize_filesystem, load_config, update_from_access_events,
+    write_added_paths_summary,
+};
+use crate::event_parser::parse_events;
 use crate::wpr_path::wpr_command;
 
 pub struct StopOptions {
@@ -101,10 +106,11 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
-    // Resolve bin_path now even though the self-access filter doesn't
-    // exist yet, so the operator-facing warning path is exercised in
-    // PR1 and the canonical form is on disk for later PRs.
-    let (_bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
+    // Resolve bin_path to its canonical form so the self-access filter
+    // in `config::update_from_access_events` can compare it against the
+    // verbatim-prefixed paths ETW emits. The fallback chain is in
+    // `resolve_bin_path`.
+    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
     if let Some(w) = warning {
         eprintln!("[plm] warning: {w}");
     }
@@ -122,22 +128,59 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         p
     };
 
-    println!(
-        "Trace captured at {} (config merging arrives in a later PR).",
-        trace_file.display()
-    );
-
-    // `config_path` / `adjusted_config_path` are accepted today so the
-    // wxc-exec --audit harness can pass them through without breaking
-    // when later PRs wire up the merge.
-    if let Some(p) = opts.config_path.as_ref() {
-        let _ = p;
+    if opts.verbose {
+        println!("Beginning event parsing, this may take several minutes");
     }
+
+    // Current directory at parse time -- events under this path are
+    // treated as test scaffolding noise and skipped.
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
+
+    let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
+
+    let config_path = match opts.config_path.as_ref() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if parse.is_empty() {
+        // Nothing mergeable -- skip producing an Adjusted_*.json (which
+        // would be byte-identical to the input and confuse the harness's
+        // diff-based pass/fail signal).
+        return Ok(());
+    }
+
+    // Copy original config alongside the trace so we have a snapshot of
+    // the exact input that produced this run's output.
+    let leaf = config_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".into());
+    let dest_config = log_dir.join(&leaf);
+    std::fs::copy(config_path, &dest_config)
+        .with_context(|| format!("failed to copy {}", config_path.display()))?;
+
+    let mut config = load_config(&dest_config)?;
+    initialize_filesystem(&mut config)?;
+    let deny = deny_file_set(&config);
+
+    let bin_path_s = bin_path.to_string_lossy().into_owned();
+    let added = update_from_access_events(
+        &mut config,
+        &bin_path_s,
+        &parse.valid_access_events,
+        &deny,
+        opts.verbose,
+    )?;
+
+    write_added_paths_summary(&added);
+
+    // `adjusted_config_path` is accepted today so the wxc-exec --audit
+    // harness can pass it through; the Adjusted_*.json writer arrives
+    // in the next PR (config-generation).
     if let Some(p) = opts.adjusted_config_path.as_ref() {
         let _ = p;
-    }
-    if opts.verbose {
-        println!("verbose logging requested; no events parsed in this PR.");
     }
 
     Ok(())

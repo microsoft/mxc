@@ -10,10 +10,15 @@
 
 use anyhow::{Context, Result};
 use chrono::Local;
+use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use crate::config::{
+    deny_file_set, initialize_filesystem, update_from_access_events, write_added_paths_summary,
+};
 use crate::coordination::PLM_LOG_START_IN_FLIGHT;
+use crate::event_parser::parse_events;
 use crate::start;
 use crate::wpr_path::wpr_command;
 use std::sync::atomic::Ordering;
@@ -74,9 +79,44 @@ pub fn run(
     // any subsequent Ctrl+C doesn't issue a stale `wpr -cancel`.
     on_trace_stopped();
 
-    println!("Trace captured at {}.", trace_file.display());
     if verbose {
-        println!("verbose logging requested.");
+        println!("Beginning event parsing, this may take several minutes");
     }
+
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
+    let parse = parse_events(&trace_file, cwd.as_deref(), verbose);
+
+    // Clean up the temp .etl regardless of parse outcome.
+    let _ = std::fs::remove_file(&trace_file);
+
+    let parse = parse?;
+
+    // Synthesize a blank config and run the FS merge to preview what a
+    // policy authored from scratch would receive. Capability and UI
+    // merging arrive in later PRs.
+    let mut blank: Value = json!({});
+    initialize_filesystem(&mut blank)?;
+    let deny = deny_file_set(&blank);
+
+    // For a blank config there is no app binary to skip -- pass a path
+    // that will never match a real event's file path.
+    let bin_path = String::from("\\\\plm-blank-config-bin-sentinel");
+
+    let added = update_from_access_events(
+        &mut blank,
+        &bin_path,
+        &parse.valid_access_events,
+        &deny,
+        verbose,
+    )?;
+
+    write_added_paths_summary(&added);
+
+    println!();
+    println!("Blank config after merge:");
+    println!("{}", serde_json::to_string_pretty(&blank)?);
+
     Ok(())
 }
