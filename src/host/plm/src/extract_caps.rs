@@ -20,15 +20,13 @@ use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 
 #[cfg(target_os = "windows")]
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::PWSTR;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
 #[cfg(target_os = "windows")]
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 #[cfg(target_os = "windows")]
-use windows::Win32::Security::{
-    DeriveCapabilitySidsFromName, GetLengthSid, IsValidSid, LookupAccountSidW, PSID, SID_NAME_USE,
-};
+use windows::Win32::Security::{DeriveCapabilitySidsFromName, GetLengthSid, IsValidSid, PSID};
 
 const ACE_HEADER_SIZE: usize = 1 + 3 + 4 + 4; // type + 3 padding + 4 flags + 4 mask
 const SID_FIXED_HEADER_SIZE: usize = 1 + 1 + 6; // revision + subauth count + id auth
@@ -321,75 +319,10 @@ pub fn sid_to_string(_sid_bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Try to translate a SID to an NTAccount-style "DOMAIN\Name" string.
-#[cfg(target_os = "windows")]
-pub fn lookup_nt_account(sid_bytes: &[u8]) -> Option<String> {
-    let psid = PSID(sid_bytes.as_ptr() as *mut _);
-    unsafe {
-        if !IsValidSid(psid).as_bool() {
-            return None;
-        }
-        let mut name_len: u32 = 0;
-        let mut domain_len: u32 = 0;
-        let mut sid_use = SID_NAME_USE(0);
-        // First call queries required buffer sizes (expected to fail with
-        // ERROR_INSUFFICIENT_BUFFER and populate the length out-params).
-        let _ = LookupAccountSidW(
-            PCWSTR::null(),
-            psid,
-            None,
-            &mut name_len as *mut _,
-            None,
-            &mut domain_len as *mut _,
-            &mut sid_use as *mut _,
-        );
-        if name_len == 0 {
-            return None;
-        }
-        let mut name = vec![0u16; name_len as usize];
-        // When `domain_len` is 0 the SID has no domain (e.g. an APP_PACKAGE
-        // SID). Pass `None` for the domain pointer rather than a zero-
-        // length Vec — a non-null PWSTR backed by a length-0 buffer is a
-        // dangling pointer that LookupAccountSidW would technically be
-        // free to write to.
-        let mut domain = vec![0u16; domain_len as usize];
-        let ok = LookupAccountSidW(
-            PCWSTR::null(),
-            psid,
-            Some(PWSTR(name.as_mut_ptr())),
-            &mut name_len as *mut _,
-            if domain_len == 0 {
-                None
-            } else {
-                Some(PWSTR(domain.as_mut_ptr()))
-            },
-            &mut domain_len as *mut _,
-            &mut sid_use as *mut _,
-        );
-        if ok.is_err() {
-            return None;
-        }
-        let nm = String::from_utf16_lossy(&name[..name_len as usize]);
-        let dom = String::from_utf16_lossy(&domain[..domain_len as usize]);
-        if dom.is_empty() {
-            Some(nm)
-        } else {
-            Some(format!("{dom}\\{nm}"))
-        }
-    }
-}
-
-/// Non-Windows stub: no NTAccount concept off Windows.
-#[cfg(not(target_os = "windows"))]
-pub fn lookup_nt_account(_sid_bytes: &[u8]) -> Option<String> {
-    None
-}
-
 /// Result of resolving a SID against the capability table.
 pub enum SidResolution<'a> {
     Capability(&'a str),
     GroupCapability(&'a str),
-    NtAccount(String),
     Unknown,
 }
 
@@ -433,31 +366,7 @@ impl CapabilityIndex {
                 SidResolution::Capability(name.as_str())
             };
         }
-        // defer the LSASS-RPC LookupAccountSidW call
-        // to the caller's `verbose` branch. `lookup_nt_account` is a
-        // 2-syscall round-trip per unknown SID; on a 100k-event trace
-        // with ~4 ACEs each and ~50% unknown SIDs, calling it from
-        // here unconditionally burned ~200k RPCs (4-16 s) producing a
-        // string the production (`verbose=false`) path never reads.
         SidResolution::Unknown
-    }
-
-    /// Verbose-only variant that performs the LSASS lookup for
-    /// diagnostic display. Kept separate so the hot path never pays
-    /// the RPC cost.
-    pub fn resolve_verbose<'a>(&'a self, sid_bytes: &[u8]) -> SidResolution<'a> {
-        if let Some((name, is_group)) = self.by_sid.get(sid_bytes) {
-            return if *is_group {
-                SidResolution::GroupCapability(name.as_str())
-            } else {
-                SidResolution::Capability(name.as_str())
-            };
-        }
-        if let Some(nt) = lookup_nt_account(sid_bytes) {
-            SidResolution::NtAccount(nt)
-        } else {
-            SidResolution::Unknown
-        }
     }
 }
 
@@ -477,11 +386,7 @@ pub fn resolve_sid<'a>(sid_bytes: &[u8], table: &'a [CapabilityEntry]) -> SidRes
             }
         }
     }
-    if let Some(nt) = lookup_nt_account(sid_bytes) {
-        SidResolution::NtAccount(nt)
-    } else {
-        SidResolution::Unknown
-    }
+    SidResolution::Unknown
 }
 
 pub(crate) fn parse_hex_string(hex_input: &str) -> Result<Vec<u8>> {
@@ -605,11 +510,7 @@ pub fn invoke_ace_walk_with_index_into(
     while cursor < buf.len() {
         let ace = read_ace_at_offset(buf, cursor)?;
         let is_allow_ace = matches!(ace.ace_type, 0x00 | 0x09);
-        let resolution = if verbose {
-            index.resolve_verbose(ace.sid_bytes)
-        } else {
-            index.resolve(ace.sid_bytes)
-        };
+        let resolution = index.resolve(ace.sid_bytes);
 
         if is_allow_ace {
             match &resolution {
@@ -619,7 +520,7 @@ pub fn invoke_ace_walk_with_index_into(
                 SidResolution::GroupCapability(name) => {
                     found.insert(name.to_string());
                 }
-                SidResolution::NtAccount(_) | SidResolution::Unknown => {}
+                SidResolution::Unknown => {}
             }
         }
 
@@ -629,7 +530,6 @@ pub fn invoke_ace_walk_with_index_into(
                 SidResolution::GroupCapability(name) => {
                     format!("capability \"{name}\" (group SID)")
                 }
-                SidResolution::NtAccount(s) => s.clone(),
                 SidResolution::Unknown => {
                     "<no known capability/account matches this SID>".to_string()
                 }
