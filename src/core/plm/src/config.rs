@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::access_event::LearningModeAccessEvent;
 
@@ -514,4 +514,153 @@ pub fn write_added_paths_summary(added: &AddedPaths) {
             println!("  + {p}");
         }
     }
+}
+
+pub fn resolve_adjusted_config_path(dest_config: &Path, override_path: Option<&Path>) -> PathBuf {
+    if let Some(p) = override_path {
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        return p.to_path_buf();
+    }
+    let parent = dest_config.parent().unwrap_or_else(|| Path::new("."));
+    let leaf = dest_config
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    parent.join(format!("Adjusted_{leaf}"))
+}
+
+pub fn save_adjusted_config(config: &Value, path: &Path) -> Result<()> {
+    let pretty = serde_json::to_string_pretty(config)?;
+    std::fs::write(path, pretty).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+/// Decode a Windows file access mask into a |-separated list of the
+/// mnemonic flag names PLM cares about. Unknown bits are reported as a
+/// trailing OTHER(0x...) token so nothing is silently dropped.
+fn decode_access_mask(mask: u32) -> String {
+    const NAMED: &[(u32, &str)] = &[
+        (FILE_WRITE_MASK, "FILE_WRITE"),
+        (FILE_APPEND_MASK, "FILE_APPEND"),
+        (WRITE_EXTENDED_ATTRIBUTE_WRITE_MASK, "WRITE_EA"),
+        (DIRECTORY_DELETE_MASK, "DIRECTORY_DELETE"),
+        (WRITE_ATTRIBUTE_WRITE_MASK, "WRITE_ATTRIBUTES"),
+        (FILE_DELETE_MASK, "FILE_DELETE"),
+        (FILE_WRITE_DAC, "WRITE_DAC"),
+        (FILE_WRITE_OWNER, "WRITE_OWNER"),
+        (READ_DATA_MASK, "READ_DATA"),
+        (READ_EXTENDED_ATTRIBUTE_MASK, "READ_EA"),
+        (DIRECTORY_TRAVERSE_MASK, "DIRECTORY_TRAVERSE"),
+        (READ_ATTRIBUTE_MASK, "READ_ATTRIBUTES"),
+        (READ_CONTROL_MASK, "READ_CONTROL"),
+        (SYNCHRONIZE_MASK, "SYNCHRONIZE"),
+    ];
+
+    let mut parts: Vec<&str> = Vec::new();
+    let mut covered: u32 = 0;
+    for (bit, name) in NAMED {
+        if mask & bit != 0 {
+            parts.push(name);
+            covered |= bit;
+        }
+    }
+    let leftover = mask & !covered;
+    if leftover != 0 {
+        let joined = parts.join("|");
+        if joined.is_empty() {
+            return format!("OTHER(0x{leftover:X})");
+        }
+        return format!("{joined}|OTHER(0x{leftover:X})");
+    }
+    if parts.is_empty() {
+        "NONE".to_string()
+    } else {
+        parts.join("|")
+    }
+}
+
+fn classify_mask(mask: u32) -> &'static str {
+    let w = mask & WRITE_MASK != 0;
+    let r = mask & READ_MASK != 0;
+    match (r, w) {
+        (true, true) => "RW",
+        (false, true) => "W",
+        (true, false) => "R",
+        (false, false) => "-",
+    }
+}
+
+/// Print every unique file path observed in vents with the OR-ed
+/// access mask requested against it, plus the set of capabilities
+/// discovered in the trace. UI-violation summary lands in a later PR.
+pub fn write_detection_summary(events: &[LearningModeAccessEvent], capabilities: &HashSet<String>) {
+    use std::collections::BTreeMap;
+
+    let mut per_path: BTreeMap<String, u32> = BTreeMap::new();
+    for ev in events {
+        *per_path.entry(ev.file_path.clone()).or_insert(0) |= ev.access_mask;
+    }
+
+    println!();
+    println!("Detected file paths ({}):", per_path.len());
+    if per_path.is_empty() {
+        println!("  (none)");
+    } else {
+        for (path, mask) in &per_path {
+            println!(
+                "  [{:2}] 0x{:08X} {} {}",
+                classify_mask(*mask),
+                mask,
+                decode_access_mask(*mask),
+                path
+            );
+        }
+    }
+
+    println!();
+    println!("Detected capabilities ({}):", capabilities.len());
+    if capabilities.is_empty() {
+        println!("  (none)");
+    } else {
+        let mut sorted: Vec<&String> = capabilities.iter().collect();
+        sorted.sort();
+        for c in sorted {
+            println!("  + {c}");
+        }
+    }
+}
+
+pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose: bool) {
+    if !verbose {
+        return;
+    }
+    println!();
+    println!("All requested capabilities ({}):", requested.len());
+    if requested.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    let mut sorted: Vec<&String> = requested.iter().collect();
+    sorted.sort();
+    for c in sorted {
+        println!("  {c}");
+    }
+}
+
+/// Merge discovered AppContainer capability names into the config's
+/// containment-backend block. Implementation arrives in the
+/// capability-extraction PR; this stub is a no-op for an empty input
+/// (PR2's parser never produces a non-empty set) and bails otherwise so
+/// a stray future caller can't silently drop findings.
+pub fn merge_capabilities(_config: &mut Value, requested: &HashSet<String>) -> Result<()> {
+    if !requested.is_empty() {
+        anyhow::bail!(
+            "merge_capabilities body not yet wired (capability extraction lands in a later PR)"
+        );
+    }
+    Ok(())
 }
