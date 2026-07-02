@@ -15,6 +15,7 @@ pub mod events;
 
 use std::time::Duration;
 
+use crate::logger::Logger;
 use crate::models::{ContainmentBackend, FailurePhase, ScriptResponse, TelemetryConfig};
 
 pub use events::{log_error, log_execution, ExecutionEvent, FailureReason};
@@ -48,17 +49,26 @@ pub fn is_enabled(config: &TelemetryConfig) -> bool {
 /// Initialize the TraceLogging ETW provider.
 ///
 /// If telemetry is enabled, registers the `Microsoft.MXC` provider with ETW.
-/// Returns `true` if telemetry was activated, `false` if disabled or on
-/// non-Windows platforms.
+/// Returns `true` if telemetry was activated, `false` if disabled or if
+/// registration failed.
 ///
-/// Errors during registration are silently swallowed (telemetry must not
-/// affect execution).
-pub fn init(config: &TelemetryConfig) -> bool {
+/// Registration failures never affect execution: they are logged as a
+/// diagnostic via the supplied [`Logger`] (so the failure is visible on the
+/// console when running with diagnostics) and otherwise swallowed — the caller
+/// simply proceeds with telemetry inactive. ETW is Windows-only; on other
+/// platforms `mxc_telemetry::init` is a no-op stub that always returns `false`,
+/// which is expected rather than a failure, so no diagnostic is emitted there.
+pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
     if !is_enabled(config) {
         return false;
     }
 
-    mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL)
+    let activated = mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL);
+    if !activated && cfg!(target_os = "windows") {
+        logger
+            .log_line("telemetry: ETW provider registration failed; continuing without telemetry");
+    }
+    activated
 }
 
 /// Unregister the TraceLogging ETW provider.

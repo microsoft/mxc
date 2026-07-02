@@ -713,7 +713,7 @@ fn main() {
             .experimental
             .telemetry
             .as_ref()
-            .map(telemetry::init)
+            .map(|c| telemetry::init(c, &mut logger))
             .unwrap_or(false)
     } else {
         false
