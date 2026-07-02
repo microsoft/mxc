@@ -9,7 +9,6 @@ set "WITH_NANVIX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
 set "WITH_HYPERLIGHT=0"
-set "WITH_BFS=0"
 
 :: Parse arguments
 :parse_args
@@ -23,7 +22,6 @@ if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_arg
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
 if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
-if /i "%~1"=="--with-bfs" ( set "WITH_BFS=1" & shift & goto :parse_args )
 if /i "%~1"=="--help"    ( goto :usage )
 if /i "%~1"=="-h"        ( goto :usage )
 echo Unknown argument: %~1
@@ -50,7 +48,6 @@ if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
-if "%WITH_BFS%"=="1" set "CARGO_FLAGS=--features tier2_bfs %CARGO_FLAGS%"
 
 :: Build Rust
 echo.
@@ -237,7 +234,6 @@ echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
 echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)
-echo   --with-bfs                Enable AppContainer Tier 2 BFS (Brokered File System) support
 echo   -h, --help        Show this help
 echo.
 echo Default: builds release for the current machine architecture.
