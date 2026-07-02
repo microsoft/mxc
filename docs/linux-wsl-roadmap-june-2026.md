@@ -49,9 +49,9 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 5 | **(D6) Object-based policy — validation** | 🟡 Actionable | Same object reachable via multiple paths (bind mounts, symlinks) should be detected as a conflict. Add `stat()` + `(st_dev, st_ino)` comparison at config time in `wxc_common`. | S |
+| 5 | **(D6) Object-based policy — validation** | ✅ Addressed | Same object reached via multiple paths (bind mount, symlink, hard link) is detected by `(st_dev, st_ino)` comparison. Aliases carrying conflicting intents are tightened to the most-restrictive intent (deny > ro > rw), not rejected. An unresolvable path (permission denied / dead mount, not cleanly missing) with `deniedPaths` present fails closed (config rejected). Runs at the runner, enforcement-adjacent, in `wxc_common`. Done in [PR #593](https://github.com/microsoft/mxc/pull/593). | S |
 
-> **Example (D6).** If `/data` is a bind mount of `/mnt/storage/data` and the policy says `RW /mnt/storage/data`, `D /data`, the agent can access the same files through the RW path — bypassing the deny. The validator should reject this as a conflict.
+> **Example (D6).** If `/data` is a bind mount of `/mnt/storage/data` and the policy says `RW /mnt/storage/data`, `D /data`, the agent could reach the same files through the RW path — bypassing the deny. MXC detects the shared object and tightens every alias to the most-restrictive intent (here: denied), closing the bypass.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
@@ -61,8 +61,8 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 7 | **Same-path conflict detection** | 🟡 Actionable | Same path appearing in both `readwritePaths` and `deniedPaths` (or `readonlyPaths`) is silently accepted. Shared check in `wxc_common` should normalize via most-restrictive-wins (`deny` > `readonly` > `readwrite`). | S |
-| 8 | **Paths must exist at policy-load time** | 🟡 Actionable | No existence check today. Non-existent paths cause opaque failures at container start. Add `path_exists()` check at config parse time in `wxc_common`. | S |
+| 7 | **Same-path conflict detection** | ✅ Addressed | Same path appearing in both `readwritePaths` and `deniedPaths` (or `readonlyPaths`) is silently accepted. Shared check in `wxc_common` should normalize via most-restrictive-wins (`deny` > `readonly` > `readwrite`). Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
+| 8 | **Paths must exist at policy-load time** | ✅ Addressed | No existence check today. Non-existent paths cause opaque failures at container start. Add `path_exists()` check at config parse time in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
 | 9 | **Denied-path masking is heuristic** | 🟡 Actionable | `is_file()` probes the rootfs to choose `/dev/null` (file) vs `tmpfs` (dir) masking. Suffers TOCTOU, symlink-follow, missing-path ambiguity, silent error swallowing. `filesystem_mounts.rs:74-97`. | M |
 
 > **Example (item 9).** Policy: `deniedPaths: ["/etc/shadow"]`. If `/etc/shadow` doesn't exist in the rootfs yet, `is_file()` returns `false` → mounts a tmpfs **directory** where a file should be. If it's a symlink, `is_file()` follows the link and masks the target, not the link itself. **Fix:** add `type: "file" | "dir"` discriminator to schema; harden fallback with `symlink_metadata()`.
@@ -142,10 +142,10 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | Bwrap processes `--bind`, `--ro-bind`, `--tmpfs` left-to-right. Last matching arg wins, not longest-prefix. Shared path-tree resolver needed in `wxc_common`. | M |
-| 5 | **(D6) Object-based — validation** | 🟡 Actionable | Same as LXC — `stat()` + inode comparison in `wxc_common`. | S |
+| 5 | **(D6) Object-based — validation** | ✅ Addressed | Same as LXC — object-identity comparison (`FileIdInfo` on the Windows-hosted path side, `(st_dev, st_ino)` on Linux) with most-restrictive-wins tightening of aliases (deny > ro > rw), not rejection. Fail closed on an unresolvable path when `deniedPaths` present. In `wxc_common`. Done in [PR #593](https://github.com/microsoft/mxc/pull/593). | S |
 | 6 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC — shared `access_check()` in `wxc_common`. | M |
-| 7 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC — shared most-restrictive-wins normalization in `wxc_common`. | S |
-| 8 | **Paths must exist at policy-load time** | 🟡 Actionable | Non-existent `--bind` paths fail at runtime with unclear errors. Shared `path_exists()` in `wxc_common`. | S |
+| 7 | **Same-path conflict detection** | ✅ Addressed | Same as LXC — shared most-restrictive-wins normalization in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
+| 8 | **Paths must exist at policy-load time** | ✅ Addressed | Non-existent `--bind` paths fail at runtime with unclear errors. Shared `path_exists()` in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
 | 9 | **Denied-path file masking** | 🟡 Actionable | `--tmpfs` always treats the path as a directory. A denied *file* gets a tmpfs directory mounted over it (wrong type). Fix: use `--ro-bind /dev/null <path>` for files. | S |
 
 > **Example (item 9).** Policy: `deniedPaths: ["/etc/shadow"]`. Today: `--tmpfs /etc/shadow` creates a directory at `/etc/shadow` — wrong. Fix: detect file vs dir (or accept `type` from schema) and use `--ro-bind /dev/null /etc/shadow` for files.
@@ -235,10 +235,10 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 6 | **(D6) Object-based — validation** | 🟡 Actionable | Same as LXC/Bwrap — `stat()` + inode comparison in `wxc_common`. | S |
+| 6 | **(D6) Object-based — validation** | ✅ Addressed | Same as LXC/Bwrap — object-identity comparison with most-restrictive-wins tightening of aliases (deny > ro > rw), not rejection; fail closed on an unresolvable path when `deniedPaths` present. In `wxc_common`. Done in [PR #593](https://github.com/microsoft/mxc/pull/593). | S |
 | 7 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC/Bwrap — shared `access_check()` in `wxc_common`. | M |
-| 8 | **Same-path conflict detection** | 🟡 Actionable | Same as LXC/Bwrap — shared most-restrictive-wins normalization in `wxc_common`. | S |
-| 9 | **Paths must exist at policy-load time** | 🟡 Actionable | Same as LXC/Bwrap — shared `path_exists()` in `wxc_common`. | S |
+| 8 | **Same-path conflict detection** | ✅ Addressed | Same as LXC/Bwrap — shared most-restrictive-wins normalization in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
+| 9 | **Paths must exist at policy-load time** | ✅ Addressed | Same as LXC/Bwrap — shared `path_exists()` in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
 | 10 | **Explicit `{ windowsPath, containerPath }` mount control** | 🟡 Actionable | Host paths always mounted at `/mnt/<drive>/`; let users specify the in-container mount point. `policy_mapping.rs:23-60`. | M |
 | 11 | **Handle UNC / non-drive paths** | ✅ Addressed | UNC paths (`\\server\share`) now hard-error at parse time as of [PR #537](https://github.com/microsoft/mxc/pull/537) (merged 2026-06-18), instead of being silently dropped with a warning. | — |
 | 12 | **(D5) Deny = ACCESS_DENIED, not hidden** | ⛔ Non-actionable | Same Linux mount-namespace limitation as LXC/Bwrap — overlaying a path hides it entirely. WSLC runs on the same Linux kernel; a deny-mount API from the SDK would still produce hidden (not ACCESS_DENIED) semantics. | — |
