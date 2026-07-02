@@ -23,21 +23,29 @@
 //! (kernel-published, not env-spoofable) once at first call and caches
 //! the result. All PLM call sites must go through `wpr_command()`
 //! instead of `Command::new("wpr")` directly.
+//!
+//! We do **not** call `WinVerifyTrust` on the resolved `wpr.exe`.
+//! System binaries under `%SystemDirectory%` are typically
+//! catalog-signed (`.cat` files in `CatRoot\`) rather than
+//! embedded-signed, so `WinVerifyTrust` with the generic file policy
+//! returns `TRUST_E_NOSIGNATURE` (0x800B0100) on stock Windows
+//! installs. Correctly verifying a catalog-signed binary requires the
+//! `CryptCATAdmin*` fallback dance, and even then the trust boundary
+//! it would enforce is "the file under `System32\\wpr.exe` was placed
+//! there by an entity Windows trusts". Because we resolve that path
+//! via `GetSystemDirectoryW` (not an attacker-controllable env var),
+//! and any write to `%SystemDirectory%` requires `TrustedInstaller`
+//! (or SYSTEM) — a strictly higher privilege than the admin
+//! elevation PLM already runs at — the path resolution itself is our
+//! security boundary. We keep `verify_wpr_signed` as a thin sanity
+//! check that the binary actually exists at the resolved path.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
 /// Cached absolute path to `wpr.exe`, resolved on first use.
 static WPR_PATH: OnceLock<PathBuf> = OnceLock::new();
-
-/// Cached result of the Authenticode signature verification for
-/// `WPR_PATH`. `Ok(())` means WinVerifyTrust returned success; `Err`
-/// carries the human-readable reason. Cached so we pay the cert-chain
-/// walk once per process (`plm log` + `plm stop` back-to-back would
-/// otherwise verify twice).
-#[cfg(target_os = "windows")]
-static WPR_TRUST: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. The kernel
 /// publishes this value at process creation and the env block cannot
@@ -64,98 +72,31 @@ fn resolve_wpr_path() -> PathBuf {
     p
 }
 
-/// Verify `path` (must be an absolute path to a signed binary) via
-/// WinVerifyTrust with the generic policy. Returns `Ok(())` if the
-/// binary carries a valid Authenticode signature that chains to a
-/// trusted root; returns `Err(reason)` otherwise. Does NOT pin to a
-/// specific publisher — callers wanting a `Microsoft`-only gate must
-/// layer that on top (e.g. by cracking `WinTrust`'s signer state).
+/// Sanity-check that the resolved `wpr.exe` actually exists on disk.
 ///
-/// The verification opens the file with `WTD_STATEACTION_VERIFY`,
-/// captures the return status, then closes with
-/// `WTD_STATEACTION_CLOSE` to release the state handle regardless of
-/// the outcome — required per the WinTrust docs.
-#[cfg(target_os = "windows")]
-fn verify_authenticode(path: &Path) -> Result<(), String> {
-    use windows::core::{HSTRING, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{GetLastError, HWND};
-    use windows::Win32::Security::WinTrust::{
-        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
-        WINTRUST_DATA_PROVIDER_FLAGS, WINTRUST_DATA_UICONTEXT, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
-        WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
-    };
-
-    let wide_path = HSTRING::from(path.as_os_str());
-
-    let file_info = WINTRUST_FILE_INFO {
-        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
-        pcwszFilePath: PCWSTR::from_raw(wide_path.as_ptr()),
-        hFile: Default::default(),
-        pgKnownSubject: std::ptr::null_mut(),
-    };
-
-    let mut trust_data = WINTRUST_DATA {
-        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
-        pPolicyCallbackData: std::ptr::null_mut(),
-        pSIPClientData: std::ptr::null_mut(),
-        dwUIChoice: WTD_UI_NONE,
-        fdwRevocationChecks: WTD_REVOKE_NONE,
-        dwUnionChoice: WTD_CHOICE_FILE,
-        Anonymous: WINTRUST_DATA_0 {
-            pFile: &file_info as *const _ as *mut _,
-        },
-        dwStateAction: WTD_STATEACTION_VERIFY,
-        hWVTStateData: Default::default(),
-        pwszURLReference: PWSTR::null(),
-        dwProvFlags: WINTRUST_DATA_PROVIDER_FLAGS(0),
-        dwUIContext: WINTRUST_DATA_UICONTEXT(0),
-        pSignatureSettings: std::ptr::null_mut(),
-    };
-
-    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-    // SAFETY: WINTRUST_DATA is fully initialized; hwnd=NULL is valid
-    // for headless verification (WTD_UI_NONE). File info outlives the
-    // VERIFY + CLOSE calls.
-    let status = unsafe {
-        WinVerifyTrust(
-            HWND::default(),
-            &mut action,
-            &mut trust_data as *mut _ as *mut _,
-        )
-    };
-
-    // Always close the state handle, even on failure — required.
-    trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
-    let _close = unsafe {
-        WinVerifyTrust(
-            HWND::default(),
-            &mut action,
-            &mut trust_data as *mut _ as *mut _,
-        )
-    };
-
-    if status == 0 {
-        Ok(())
-    } else {
-        // WinVerifyTrust returns a signed 32-bit status; render both
-        // decimal + hex so an operator can look it up in the docs.
-        let last = unsafe { GetLastError().0 };
-        Err(format!(
-            "WinVerifyTrust rejected {}: status=0x{:08x} last_error=0x{:08x}",
-            path.display(),
-            status as u32,
-            last
-        ))
-    }
-}
-
-/// Verify the resolved wpr.exe carries a valid Authenticode signature.
-/// Result is cached so callers can invoke this from every command
-/// entry point without paying the cert-chain cost more than once.
+/// The real security guarantee comes from `resolve_wpr_path`
+/// (`GetSystemDirectoryW`, not env-spoofable) plus the OS
+/// `TrustedInstaller`-only ACL on `%SystemDirectory%\\wpr.exe` — an
+/// attacker who can plant a binary there has already escalated past
+/// the admin token PLM runs under, so an in-process signature check
+/// would be defence against a strictly higher privilege than the one
+/// we hold. See the module doc for the full rationale.
+///
+/// Returns `Err` if the resolved path doesn't exist on disk, which
+/// indicates a broken/stripped Windows install (WPT not present) —
+/// something the caller must surface with a clear message rather than
+/// let `CreateProcess` fail cryptically later.
 #[cfg(target_os = "windows")]
 pub fn verify_wpr_signed() -> Result<(), String> {
     let path = WPR_PATH.get_or_init(resolve_wpr_path);
-    WPR_TRUST.get_or_init(|| verify_authenticode(path)).clone()
+    if !path.is_file() {
+        return Err(format!(
+            "wpr.exe not found at {} — install the Windows Performance Toolkit \
+             (part of the Windows ADK) and retry",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Non-Windows stub — PLM is Windows-only, but the crate builds

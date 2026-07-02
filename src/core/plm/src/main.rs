@@ -272,14 +272,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let exe = exe_dir()?;
 
-    // Refuse to spawn an unsigned / tampered wpr.exe. `wpr.exe` runs
-    // elevated (the NT Kernel Logger requires SeSystemProfile), so
-    // an attacker-planted binary would execute with full admin
-    // rights. `verify_wpr_signed` caches its result, so every
-    // downstream `wpr_command()` call amortises the cert-chain walk
-    // to a single check.
-    plm::wpr_path::verify_wpr_signed()
-        .map_err(|e| anyhow::anyhow!("wpr.exe signature check failed: {e}"))?;
+    // Confirm the resolved wpr.exe exists at `%SystemDirectory%`
+    // before we go further. We rely on `GetSystemDirectoryW` (not
+    // env-spoofable) plus the OS TrustedInstaller ACL on that
+    // directory as the trust boundary; see `wpr_path` module docs for
+    // why we do not run WinVerifyTrust on the resolved binary.
+    plm::wpr_path::verify_wpr_signed().map_err(|e| anyhow::anyhow!("wpr.exe check failed: {e}"))?;
 
     // Install the Ctrl+C handler unconditionally so signals during any
     // subcommand (in particular interactive `log`) tear down the WPR
