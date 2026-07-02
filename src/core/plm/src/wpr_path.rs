@@ -108,9 +108,26 @@ pub fn verify_wpr_signed() -> Result<(), String> {
 
 /// Return a `Command` rooted at the absolute `wpr.exe` path. Callers
 /// should still build their own `.args(...)` chain on top.
+///
+/// On Windows we tack on `CREATE_NO_WINDOW` (0x08000000) so the child
+/// wpr.exe process has no attached console. wpr renders its
+/// `100% [>>>>>>]` progress bar via `WriteConsoleW`, which writes
+/// **directly to the console handle** — that bypasses any stdio pipe
+/// redirection (`.stdout(Stdio::piped())` / `.output()`), so without
+/// this flag the progress bar leaks onto the wrapping tool's terminal
+/// even though we capture stdout/stderr. Regular `printf`-style
+/// stdout/stderr traffic still gets captured through the pipes and is
+/// replayed on failure via `replay_wpr_output`.
 pub fn wpr_command() -> Command {
     let p = WPR_PATH.get_or_init(resolve_wpr_path);
-    Command::new(p)
+    let mut cmd = Command::new(p);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 #[cfg(test)]
