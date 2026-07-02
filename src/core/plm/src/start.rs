@@ -1,10 +1,10 @@
-//! Port of `start_plm_logging.ps1`.
-//!
-//! Starts a new permissive-learning-mode trace using the
-//! `AccessFailureProfile` defined in `profile_gen::EMBEDDED_WPRP`
-//! (materialized to disk next to `plm.exe` by `profile_gen`). If a
-//! pre-existing WPR session blocks our start, we cancel it and retry
-//! exactly once.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! `plm start` — start a WPR trace using the `AccessFailureProfile`
+//! defined in `profile_gen::EMBEDDED_WPRP` (materialized to disk next
+//! to `plm.exe` by `profile_gen`). If a pre-existing WPR session
+//! blocks our start, we cancel it and retry exactly once.
 
 use anyhow::Result;
 use std::path::Path;

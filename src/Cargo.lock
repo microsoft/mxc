@@ -1623,6 +1623,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "windows",
+ "wxc_common",
 ]
 
 [[package]]

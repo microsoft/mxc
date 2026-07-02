@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Materialize `plm.wprp` next to the running `plm` binary on demand.
 //!
 //! The canonical profile lives inline below as `EMBEDDED_WPRP`. There
