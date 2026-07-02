@@ -105,8 +105,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "widestring",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows",
+ "windows-core",
  "winreg",
  "wxc_common",
 ]
@@ -904,8 +904,8 @@ dependencies = [
  "tracing-log",
  "uuid",
  "vmm-sys-util",
- "windows 0.62.2",
- "windows-result 0.4.1",
+ "windows",
+ "windows-result",
  "windows-sys 0.61.2",
  "windows-version",
 ]
@@ -950,7 +950,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core",
 ]
 
 [[package]]
@@ -1116,9 +1116,9 @@ name = "isolation_session_bindings"
 version = "0.7.0"
 dependencies = [
  "semver",
- "windows 0.62.2",
+ "windows",
  "windows-collections",
- "windows-core 0.62.2",
+ "windows-core",
  "windows-future",
 ]
 
@@ -1128,9 +1128,9 @@ version = "0.7.0"
 dependencies = [
  "isolation_session_bindings",
  "serde",
- "windows 0.62.2",
+ "windows",
  "windows-collections",
- "windows-core 0.62.2",
+ "windows-core",
  "windows-future",
  "wxc_common",
 ]
@@ -1461,8 +1461,8 @@ dependencies = [
  "mxc_build_common",
  "serde",
  "serde_json",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows",
+ "windows-core",
  "wxc_common",
 ]
 
@@ -1511,7 +1511,7 @@ dependencies = [
  "libc",
  "nanvix_common",
  "uuid",
- "windows 0.62.2",
+ "windows",
  "wxc_common",
 ]
 
@@ -1660,7 +1660,7 @@ dependencies = [
  "roxmltree",
  "serde_json",
  "tempfile",
- "windows 0.62.2",
+ "windows",
  "wxc_common",
 ]
 
@@ -1672,7 +1672,7 @@ dependencies = [
  "clap",
  "image",
  "win-screenshot",
- "windows 0.58.0",
+ "windows",
 ]
 
 [[package]]
@@ -2631,7 +2631,7 @@ version = "4.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e46fb2d7cb00430b7c433b05cc37a0f2f03a5305a975b1886a6ce5e1d8977d4b"
 dependencies = [
- "windows 0.62.2",
+ "windows",
 ]
 
 [[package]]
@@ -2667,22 +2667,12 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
-version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
-dependencies = [
- "windows-core 0.58.0",
- "windows-targets",
-]
-
-[[package]]
-name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
 dependencies = [
  "windows-collections",
- "windows-core 0.62.2",
+ "windows-core",
  "windows-future",
  "windows-numerics",
 ]
@@ -2693,20 +2683,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
 dependencies = [
- "windows-core 0.62.2",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
-dependencies = [
- "windows-implement 0.58.0",
- "windows-interface 0.58.0",
- "windows-result 0.2.0",
- "windows-strings 0.1.0",
- "windows-targets",
+ "windows-core",
 ]
 
 [[package]]
@@ -2715,11 +2692,11 @@ version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
+ "windows-implement",
+ "windows-interface",
  "windows-link",
- "windows-result 0.4.1",
- "windows-strings 0.5.1",
+ "windows-result",
+ "windows-strings",
 ]
 
 [[package]]
@@ -2728,20 +2705,9 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
 dependencies = [
- "windows-core 0.62.2",
+ "windows-core",
  "windows-link",
  "windows-threading",
-]
-
-[[package]]
-name = "windows-implement"
-version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bbd5b46c938e506ecbce286b6628a02171d56153ba733b6c741fc627ec9579b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -2749,17 +2715,6 @@ name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053c4c462dc91d3b1504c6fe5a726dd15e216ba718e84a0e46a88fbe5ded3515"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2789,17 +2744,8 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
 dependencies = [
- "windows-core 0.62.2",
+ "windows-core",
  "windows-link",
-]
-
-[[package]]
-name = "windows-result"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1043d8214f791817bab27572aaa8af63732e11bf84aa21a45a78d6c317ae0e"
-dependencies = [
- "windows-targets",
 ]
 
 [[package]]
@@ -2809,16 +2755,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
-]
-
-[[package]]
-name = "windows-strings"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cd9b125c486025df0eabcb585e62173c6c9eddcec5d117d3b6e8c30e2ee4d10"
-dependencies = [
- "windows-result 0.2.0",
- "windows-targets",
 ]
 
 [[package]]
@@ -3074,7 +3010,7 @@ dependencies = [
  "libloading",
  "tar",
  "tempfile",
- "windows 0.62.2",
+ "windows",
  "wxc_common",
  "zip",
 ]
@@ -3095,7 +3031,7 @@ dependencies = [
  "nanvix_runner",
  "plm",
  "serde_json",
- "windows 0.62.2",
+ "windows",
  "windows_sandbox_common",
  "wslc_common",
  "wxc_common",
@@ -3118,8 +3054,8 @@ dependencies = [
  "url",
  "uuid",
  "widestring",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows",
+ "windows-core",
  "winreg",
 ]
 
@@ -3143,8 +3079,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows",
+ "windows-core",
  "wxc_common",
 ]
 
@@ -3168,7 +3104,7 @@ dependencies = [
  "hyper-util",
  "mxc_build_common",
  "tokio",
- "windows 0.62.2",
+ "windows",
 ]
 
 [[package]]
@@ -3208,8 +3144,8 @@ version = "0.7.0"
 dependencies = [
  "clap",
  "mxc_build_common",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows",
+ "windows-core",
  "wxc_common",
 ]
 
