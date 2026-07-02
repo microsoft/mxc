@@ -262,7 +262,7 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
-| [docs/telemetry.md](docs/telemetry.md) | TraceLogging telemetry architecture |
+| [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |
 
 ## Contributing
 
