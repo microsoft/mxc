@@ -46,6 +46,8 @@ extends:
     featureFlags:
       WindowsHostVersion:
         Version: 2022
+      networkisolation:
+        policy: Preferred,ESRP
 
     cloudvault:
       enabled: false
