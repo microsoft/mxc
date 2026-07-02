@@ -24,6 +24,9 @@ jobs:
           rustup update stable
           rustup target add x86_64-pc-windows-msvc
 
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:

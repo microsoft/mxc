@@ -1,0 +1,23 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Appends the internal Mxc-Azure-Feed cargo config (config.toml) to the
+# workspace .cargo/config.toml and (by default) authenticates cargo to the feed.
+
+parameters:
+- name: authenticate
+  type: boolean
+  default: true
+
+steps:
+  - pwsh: |
+      $cfg = "$(Build.SourcesDirectory)/.cargo/config.toml"
+      New-Item -ItemType Directory -Force -Path (Split-Path $cfg) | Out-Null
+      Add-Content -Path $cfg -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
+    displayName: Setup Cargo Config (Mxc-Azure-Feed)
+
+  - ${{ if eq(parameters.authenticate, true) }}:
+    - task: CargoAuthenticate@0
+      displayName: Authenticate to Mxc-Azure-Feed
+      inputs:
+        configFile: $(Build.SourcesDirectory)/.cargo/config.toml

@@ -1,8 +1,8 @@
 # Configuration Strategy
 
-## For Developers
+## Local development
 
-Developers should to use public registries like `crates.io`
+Developers should use public registries like `crates.io`
 and `npmjs` directly so they can iterate quickly.
 
 ## For CI/Pipelines
