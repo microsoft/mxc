@@ -9,18 +9,33 @@
 // `lib.rs` via `include!`. That keeps the GUID validation and code-generation
 // behaviour unit-testable with `cargo test`.
 
-/// Validates that `s` is a well-formed GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
-/// Prevents code injection via the environment variable since the value is
-/// interpolated into generated Rust source that is `include!()`'d.
+/// Parses `s` as a strict, canonical hyphenated GUID
+/// (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and returns its lowercase canonical
+/// form.
+///
+/// Validation is delegated to the `uuid` crate. Because `uuid`'s parser is
+/// lenient (it also accepts braced `{...}`, `urn:uuid:`, and unhyphenated
+/// 32-hex forms), we additionally require the input to already be in the
+/// canonical hyphenated shape (case-insensitively). This keeps the accepted
+/// grammar identical to the original hand-rolled validator and guarantees the
+/// returned string is a bare hyphenated GUID — safe to interpolate into the
+/// generated Rust source that is `include!()`'d.
+fn canonicalize_guid(s: &str) -> Option<String> {
+    let canonical = uuid::Uuid::try_parse(s).ok()?.as_hyphenated().to_string();
+    s.eq_ignore_ascii_case(&canonical).then_some(canonical)
+}
+
+/// Validates that `s` is a well-formed, canonical hyphenated GUID
+/// (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). Prevents code injection via the
+/// environment variable since the value is interpolated into generated Rust
+/// source that is `include!()`'d.
+///
+/// Only referenced from the unit tests; `generate_provider_def` calls
+/// `canonicalize_guid` directly. `allow(dead_code)` keeps the build script
+/// (which `include!`s this file but never calls the helper) warning-clean.
+#[allow(dead_code)]
 fn is_valid_guid(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == 5
-        && parts[0].len() == 8
-        && parts[1].len() == 4
-        && parts[2].len() == 4
-        && parts[3].len() == 4
-        && parts[4].len() == 12
-        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    canonicalize_guid(s).is_some()
 }
 
 /// Generate the `tracelogging::define_provider!` invocation that is written to
@@ -29,7 +44,8 @@ fn is_valid_guid(s: &str) -> bool {
 /// When `group_guid` is a non-empty, well-formed GUID the provider joins that
 /// ETW provider group (internal Microsoft builds route through the telemetry
 /// pipeline); otherwise a plain provider definition is produced (public/OSS
-/// builds — local ETW only).
+/// builds — local ETW only). The GUID is emitted in its canonical lowercase
+/// hyphenated form.
 ///
 /// # Panics
 ///
@@ -39,14 +55,12 @@ fn is_valid_guid(s: &str) -> bool {
 fn generate_provider_def(group_guid: Option<&str>) -> String {
     match group_guid {
         Some(guid) if !guid.is_empty() => {
-            assert!(
-                is_valid_guid(guid),
-                "MXC_TELEMETRY_PROVIDER_GROUP_GUID is not a valid GUID"
-            );
+            let canonical = canonicalize_guid(guid)
+                .expect("MXC_TELEMETRY_PROVIDER_GROUP_GUID is not a valid GUID");
             format!(
                 "tracelogging::define_provider!(\
                  MXC_PROVIDER, \"Microsoft.MXC\", \
-                 group_id(\"{guid}\"));\n"
+                 group_id(\"{canonical}\"));\n"
             )
         }
         _ => "tracelogging::define_provider!(\
