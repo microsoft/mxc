@@ -46,3 +46,7 @@ jobs:
   sdk-integration-tests:
     needs: package-npm-sdk
     uses: ./.github/workflows/SDK.Integration.Test.Job.yml
+
+  plm-integration-tests:
+    needs: windows
+    uses: ./.github/workflows/PLM.Integration.Test.Job.yml
