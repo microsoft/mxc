@@ -51,7 +51,6 @@ use system_param::SystemParamArgs;
     version,
     about = "AppContainer / PLM behavior probes"
 )]
-#[cfg(target_os = "windows")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
