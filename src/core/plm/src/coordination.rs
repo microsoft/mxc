@@ -89,22 +89,60 @@ pub mod singleton {
     /// Attempt to acquire the host-wide PLM audit mutex, stashing the
     /// raw handle in `slot` so both `Drop`-based release and the
     /// pre-`ExitProcess` cleanup can find it.
+    ///
+    /// Uses the `CreateMutexW` + `WaitForSingleObject(0)` two-step
+    /// pattern rather than `CreateMutexW(bInitialOwner=true)` so we
+    /// correctly detect the "previous owner crashed without
+    /// releasing" case (Windows surfaces this as `WAIT_ABANDONED_0`
+    /// on the wait, never on the create). Treating an abandoned
+    /// mutex as `AlreadyHeld` would leave a stale singleton forever
+    /// after any PLM crash and force operators to reboot; we instead
+    /// take ownership silently, since the abandoned wpr session (if
+    /// any) is torn down separately by the caller's normal cancel
+    /// path.
     pub fn try_acquire(slot: &AtomicIsize) -> Result<(), AcquireError> {
         use windows::core::w;
-        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-        use windows::Win32::System::Threading::CreateMutexW;
+        use windows::Win32::Foundation::{
+            CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 
         let name = w!("Global\\Mxc_Plm_Audit");
+        // Open (or create) the named mutex without requesting initial
+        // ownership; ownership is acquired via the wait below so we
+        // can distinguish "someone else holds it" from "previous
+        // owner crashed and we now own the abandoned mutex".
         let handle =
-            unsafe { CreateMutexW(None, true, name) }.map_err(AcquireError::CreateFailed)?;
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(handle);
+            unsafe { CreateMutexW(None, false, name) }.map_err(AcquireError::CreateFailed)?;
+        let wait = unsafe { WaitForSingleObject(handle, 0) };
+        match wait {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => {
+                // We now own the mutex (either freshly or by
+                // inheriting an abandoned one).
+                slot.store(handle.0 as isize, Ordering::SeqCst);
+                Ok(())
             }
-            return Err(AcquireError::AlreadyHeld);
+            WAIT_TIMEOUT => {
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                Err(AcquireError::AlreadyHeld)
+            }
+            other => {
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                // Prefer the OS's last-error (set by WAIT_FAILED);
+                // fall back to encoding the raw wait return as an
+                // HRESULT for exotic values.
+                let thread_err = windows::core::Error::from_thread();
+                Err(AcquireError::CreateFailed(if thread_err.code().is_err() {
+                    thread_err
+                } else {
+                    windows::core::Error::from_hresult(windows::core::HRESULT(other.0 as i32))
+                }))
+            }
         }
-        slot.store(handle.0 as isize, Ordering::SeqCst);
-        Ok(())
     }
 
     /// Release the singleton if `slot` holds a live handle. Idempotent:

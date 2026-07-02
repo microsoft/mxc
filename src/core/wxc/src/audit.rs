@@ -94,13 +94,26 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
         // rather than a duplicated string literal, so the plm and
         // wxc crates can't drift out of sync without a compile error.
         .env(plm::coordination::SINGLETON_HELD_BY_PARENT_ENV, "1")
-        .status()
+        // Capture plm.exe's stdout/stderr rather than inheriting the
+        // caller's console. Audit tracing is a background side-effect
+        // of `wxc-exec --audit`; leaking plm's chatter into the
+        // workload's stdio breaks any consumer that parses wxc-exec's
+        // stdout. On failure (non-zero exit or spawn error) we replay
+        // the captured streams so operators can still diagnose. In
+        // verbose mode we replay unconditionally.
+        .output()
     {
-        Ok(s) if s.success() => true,
-        Ok(s) => {
-            let _ = writeln!(logger, "[audit] plm exited with status {s}");
+        Ok(o) if o.status.success() => {
             if verbose {
-                eprintln!("[audit] plm exited with status {s}");
+                replay_child_output(logger, &o);
+            }
+            true
+        }
+        Ok(o) => {
+            let _ = writeln!(logger, "[audit] plm exited with status {}", o.status);
+            replay_child_output(logger, &o);
+            if verbose {
+                eprintln!("[audit] plm exited with status {}", o.status);
             }
             false
         }
@@ -111,6 +124,22 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
             }
             false
         }
+    }
+}
+
+/// Replay a captured child's stdout/stderr to the current process's
+/// own streams. Used on failure (and in verbose mode on success) so
+/// the happy path can stay silent while diagnostics still surface.
+fn replay_child_output(logger: &mut Logger, output: &std::process::Output) {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+    if !output.stdout.is_empty() {
+        let _ = std::io::stdout().write_all(&output.stdout);
+        let _ = write!(logger, "{}", String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        let _ = std::io::stderr().write_all(&output.stderr);
+        let _ = write!(logger, "{}", String::from_utf8_lossy(&output.stderr));
     }
 }
 

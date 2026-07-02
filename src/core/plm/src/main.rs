@@ -45,6 +45,14 @@ use plm::{log, profile_gen, start, stop};
 /// `plm start` and the operator's matching `plm stop`) tears down the
 /// kernel ETW session instead of leaking it until reboot or manual
 /// `wpr -cancel`.
+///
+/// This is a process-wide `static` rather than a member of
+/// `AcquiredSingleton` because the Windows console-control handler
+/// (`plm_ctrl_handler`) runs in a distinct OS-owned callback context
+/// with no captured `self`/environment — it can only reach state via
+/// process globals. Making the flag static also matches the peer
+/// pattern in `wxc-exec` (`audit::AUDIT_ACTIVE`) so the two binaries
+/// share the same cleanup contract.
 #[cfg(target_os = "windows")]
 static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -129,6 +137,20 @@ fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
 /// console close, logoff, and shutdown. Tears down any in-flight WPR
 /// session and releases the singleton mutex before the default handler
 /// calls `ExitProcess` (which skips Rust destructors).
+///
+/// We poll `PLM_LOG_START_IN_FLIGHT` via `wait_until_cleared` instead
+/// of a proper wait-object (Event / condvar) for two reasons:
+///  1. `wpr -start`'s underlying kernel session engagement isn't
+///     signalled by any OS-published handle we can wait on; the only
+///     transition we can observe is the child `wpr.exe` process
+///     returning. Wrapping a Rust `Event` around that in the ctrl
+///     handler would still require polling / a spawn-time helper
+///     thread purely to `SetEvent`.
+///  2. The polling interval (50ms) is bounded above by
+///     `CTRL_HANDLER_DRAIN_TIMEOUT` (2s) which is well under
+///     Windows's ~5s ctrl-handler kill budget, so at most ~40 polls
+///     fire — negligible CPU, zero cost on the happy path (the flag
+///     is normally already clear when the handler runs).
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn plm_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     // if `plm log`'s `wpr -start` is

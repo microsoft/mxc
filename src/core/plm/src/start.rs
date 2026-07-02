@@ -28,12 +28,22 @@ impl WprLauncher for WprExe {
         // context so hosts missing the Windows Performance Toolkit
         // (e.g. stripped Server SKUs) get an actionable hint instead
         // of a bare `os error 2`.
+        //
+        // Capture wpr.exe's stdout/stderr rather than inheriting them
+        // (via `.status()`) so a successful `wpr -start` doesn't
+        // pollute the console of any wrapping tool (e.g. wxc-exec
+        // --audit); on non-zero exit we replay the captured streams
+        // so operators can still diagnose real failures.
         let cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        wpr_command()
+        let output = wpr_command()
             .args(["-start", profile_arg, "-filemode"])
-            .status()
-            .map_err(|e| describe_wpr_spawn_error("start", &resolved, e))
+            .output()
+            .map_err(|e| describe_wpr_spawn_error("start", &resolved, e))?;
+        if !output.status.success() {
+            replay_wpr_output("start", &output);
+        }
+        Ok(output.status)
     }
     fn cancel(&mut self) {
         cancel_existing_wpr_trace();
@@ -54,6 +64,21 @@ fn describe_wpr_spawn_error(verb: &str, resolved: &str, e: std::io::Error) -> an
     } else {
         anyhow::anyhow!("failed to spawn wpr -{verb} ({resolved}): {e}",)
     }
+}
+
+/// Replay captured wpr.exe stdout/stderr to the caller's own streams.
+/// Used only on failure paths — the happy path stays silent so PLM
+/// can be embedded in wrappers (e.g. `wxc-exec --audit`) without
+/// polluting their console.
+pub(crate) fn replay_wpr_output(verb: &str, output: &std::process::Output) {
+    use std::io::Write as _;
+    if !output.stdout.is_empty() {
+        let _ = std::io::stdout().write_all(&output.stdout);
+    }
+    if !output.stderr.is_empty() {
+        let _ = std::io::stderr().write_all(&output.stderr);
+    }
+    eprintln!("[plm] wpr -{verb} exited with {}", output.status);
 }
 
 /// Cancel any pre-existing in-memory WPR session before starting a

@@ -34,11 +34,20 @@ pub struct WprExeStopper;
 
 impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
+        // Capture stdio rather than inheriting so a successful `wpr
+        // -stop` doesn't leak wpr chatter into any wrapping tool (e.g.
+        // `wxc-exec --audit`). On non-zero exit we replay the captured
+        // streams so operators can still see wpr's own diagnostic.
         let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        cmd.args(["-stop", &trace_file.to_string_lossy()])
-            .status()
-            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
+        let output = cmd
+            .args(["-stop", &trace_file.to_string_lossy()])
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))?;
+        if !output.status.success() {
+            crate::start::replay_wpr_output("stop", &output);
+        }
+        Ok(output.status)
     }
 }
 
@@ -87,15 +96,11 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
-    // Including PID + sub-second component avoids collisions when
-    // parallel PLM tasks finish in the same second.
+    // $LogDir defaults to "<exe dir>\logs\<timestamp>". The sub-second
+    // component makes parallel PLM runs finishing in the same second
+    // land in distinct directories.
     let log_dir = opts.log_dir.unwrap_or_else(|| {
-        let stamp = format!(
-            "{}_pid{}",
-            Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
-            std::process::id()
-        );
+        let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
         exe_dir.join("logs").join(stamp)
     });
     std::fs::create_dir_all(&log_dir)
