@@ -1,10 +1,14 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Rust port of the permissive learning mode (PLM) PowerShell scripts.
 //!
 //! Subcommands:
 //! - `start`: cancel any active WPR trace and start a new one using
-//!   `plm.wprp!AccessFailureProfile` (port of `start_plm_logging.ps1`).
-//! - `stop`: stop the trace, parse events, merge findings into a config
-//!   (port of `stop_plm_logging.ps1`).
+//!   `plm.wprp!AccessFailureProfile`.
+//! - `stop`: stop the trace and process captured events.
+//! - `log`: interactive — Enter to start, Enter to stop.
+//! - `extract-caps`: standalone ACE decoder.
 //!
 //! The functional binary wraps WPR / ETW / EventLog APIs that have no
 //! cross-platform equivalent and is therefore Windows-only. On
@@ -38,25 +42,18 @@ use plm::{extract_caps, log, profile_gen, start, stop};
 /// Set to `true` while a `wpr -start` has succeeded but the matching
 /// stop hasn't run yet. Read by the console-control handler so that a
 /// Ctrl+C / Ctrl+Break that arrives during `plm log` (or between
-/// `plm start` and the operator's matching `plm stop`) still tears
-/// down the kernel ETW session instead of leaking it.
-///
-/// The `wxc-exec --audit` path has its own AUDIT_ACTIVE flag +
-/// SetConsoleCtrlHandler; the standalone `plm log` interactive flow
-/// had neither, so Ctrl+C left the NT Kernel Logger session live
-/// until reboot or manual `wpr -cancel`.
+/// `plm start` and the operator's matching `plm stop`) tears down the
+/// kernel ETW session instead of leaking it until reboot or manual
+/// `wpr -cancel`.
 #[cfg(target_os = "windows")]
 static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Raw `HANDLE` value of the named-mutex singleton acquired by
 /// `acquire_singleton_if_needed` (zero when unheld). Stashed in a
 /// static so the console-control handler can release the host-wide
-/// guard before `ExitProcess` runs and skips Rust destructors.
-///
-/// `plm log` / direct `plm start` / direct `plm stop` previously
-/// bypassed the `Global\Mxc_Plm_Audit` singleton entirely, so the
-/// retry-on-conflict path in `start_plm_trace` could silently
-/// `wpr -cancel` a peer PLM trace.
+/// `Global\Mxc_Plm_Audit` guard before `ExitProcess` runs and skips
+/// Rust destructors, preventing the retry-on-conflict path in
+/// `start_plm_trace` from `wpr -cancel`ing a peer PLM trace.
 #[cfg(target_os = "windows")]
 static PLM_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
@@ -89,14 +86,7 @@ fn cancel_active_plm_trace() {
 /// Release the named-mutex singleton if held. Idempotent.
 #[cfg(target_os = "windows")]
 fn release_plm_singleton() {
-    let raw = PLM_SINGLETON_HANDLE.swap(0, Ordering::SeqCst);
-    if raw != 0 {
-        let handle = windows::Win32::Foundation::HANDLE(raw as *mut _);
-        unsafe {
-            let _ = windows::Win32::System::Threading::ReleaseMutex(handle);
-            let _ = windows::Win32::Foundation::CloseHandle(handle);
-        }
-    }
+    plm::coordination::singleton::release(&PLM_SINGLETON_HANDLE);
 }
 
 /// Acquire the host-wide PLM audit mutex unless our parent process
@@ -121,25 +111,18 @@ fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
         // re-acquiring here would deadlock.
         return Ok(None);
     }
-    use windows::core::w;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows::Win32::System::Threading::CreateMutexW;
-
-    let name = w!("Global\\Mxc_Plm_Audit");
-    let handle = unsafe { CreateMutexW(None, true, name) }
-        .context("CreateMutexW failed for Global\\Mxc_Plm_Audit")?;
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(handle);
-        }
-        anyhow::bail!(
+    use plm::coordination::singleton::{try_acquire, AcquireError};
+    match try_acquire(&PLM_SINGLETON_HANDLE) {
+        Ok(()) => Ok(Some(AcquiredSingleton)),
+        Err(AcquireError::AlreadyHeld) => anyhow::bail!(
             "another PLM trace is already in progress (Global\\Mxc_Plm_Audit held); \
              refusing to start a second concurrent trace — only one NT Kernel Logger \
              session can exist per host"
-        );
+        ),
+        Err(AcquireError::CreateFailed(e)) => {
+            Err(e).context("CreateMutexW failed for Global\\Mxc_Plm_Audit")
+        }
     }
-    PLM_SINGLETON_HANDLE.store(handle.0 as isize, Ordering::SeqCst);
-    Ok(Some(AcquiredSingleton))
 }
 
 /// Windows console-control handler. Fires on Ctrl+C, Ctrl+Break,

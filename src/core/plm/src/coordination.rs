@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Cross-process coordination primitives shared by `plm.exe` and the
 //! `wxc-exec --audit` driver in the `wxc` crate. Centralises the
 //! singleton bypass env-var name and the `wait_until_cleared` ctrl-
@@ -64,6 +67,59 @@ pub fn wait_until_cleared(flag: &AtomicBool, timeout: Duration, poll_interval: D
         std::thread::sleep(poll_interval);
     }
     true
+}
+
+/// Windows-only shared implementation of the `Global\Mxc_Plm_Audit`
+/// named-mutex singleton. Both `plm.exe` and `wxc-exec --audit`
+/// serialize on the same name so two concurrent PLM traces can't share
+/// the single NT Kernel Logger session.
+#[cfg(target_os = "windows")]
+pub mod singleton {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    /// Outcome of `try_acquire`. Callers translate to their own error
+    /// type (anyhow / String / etc).
+    pub enum AcquireError {
+        /// Another process already holds the singleton mutex.
+        AlreadyHeld,
+        /// `CreateMutexW` failed for a non-conflict reason.
+        CreateFailed(windows::core::Error),
+    }
+
+    /// Attempt to acquire the host-wide PLM audit mutex, stashing the
+    /// raw handle in `slot` so both `Drop`-based release and the
+    /// pre-`ExitProcess` cleanup can find it.
+    pub fn try_acquire(slot: &AtomicIsize) -> Result<(), AcquireError> {
+        use windows::core::w;
+        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+
+        let name = w!("Global\\Mxc_Plm_Audit");
+        let handle =
+            unsafe { CreateMutexW(None, true, name) }.map_err(AcquireError::CreateFailed)?;
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(AcquireError::AlreadyHeld);
+        }
+        slot.store(handle.0 as isize, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Release the singleton if `slot` holds a live handle. Idempotent:
+    /// safe to call from `Drop`, from explicit pre-`process::exit`
+    /// cleanup, and from error paths.
+    pub fn release(slot: &AtomicIsize) {
+        let raw = slot.swap(0, Ordering::SeqCst);
+        if raw != 0 {
+            let handle = windows::Win32::Foundation::HANDLE(raw as *mut _);
+            unsafe {
+                let _ = windows::Win32::System::Threading::ReleaseMutex(handle);
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Locate `wpr.exe` by absolute path.
 //!
 //! `Command::new("wpr")` is unsafe: on Windows it resolves via
@@ -47,7 +50,7 @@ fn resolve_wpr_path() -> PathBuf {
         // fallback rather than reading the env block.
         return PathBuf::from("C:\\Windows\\System32\\wpr.exe");
     }
-    let dir = String::from_utf16_lossy(&buf[..n as usize]);
+    let dir = wxc_common::string_util::from_wide(&buf[..n as usize]);
     let mut p = PathBuf::from(dir);
     p.push("wpr.exe");
     p
