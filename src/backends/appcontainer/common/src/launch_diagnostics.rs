@@ -167,8 +167,9 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
     let message = if key_status.is_empty() {
         "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
          The BaseContainer feature is not enabled on this OS build. \
-         Ensure the required velocity keys are enabled, or use schema \
-         version '0.4.0-alpha' to fall back to the AppContainer backend."
+         Ensure the required velocity keys are enabled, or run on a host \
+         that supports the BaseContainer backend (MXC falls back to \
+         AppContainer automatically on builds without it)."
             .to_string()
     } else {
         let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
@@ -176,7 +177,8 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
             "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
              All known velocity keys appear enabled, but the feature is \
              still gated. The OS build may require additional enablement. \
-             Use schema version '0.4.0-alpha' to fall back to the AppContainer backend."
+             MXC falls back to AppContainer automatically on builds without \
+             BaseContainer support."
                 .to_string()
         } else {
             let disabled_list: Vec<String> =
@@ -184,8 +186,9 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
             format!(
                 "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
                  The following velocity keys are not enabled: {}. \
-                 Enable them and retry, or use schema version '0.4.0-alpha' \
-                 to fall back to the AppContainer backend.",
+                 Enable them and retry, or run on a host that supports the \
+                 BaseContainer backend (MXC falls back to AppContainer \
+                 automatically on builds without it).",
                 disabled_list.join(", ")
             )
         }

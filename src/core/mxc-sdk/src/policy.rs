@@ -727,7 +727,8 @@ fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
 /// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
-/// BaseContainer on Windows).
+/// ProcessContainer on Windows — which itself resolves to BaseContainer or
+/// AppContainer at runtime by host capability).
 fn apply_backend(config: &mut serde_json::Value, policy: &SandboxPolicy, container_id: &str) {
     use serde_json::json;
 
