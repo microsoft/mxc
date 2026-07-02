@@ -139,10 +139,12 @@ through the telemetry pipeline. Community forks that lack access to the private
 GUID do not set this variable — the provider is registered without a group GUID
 (plain ETW only).
 
-> **Follow-up:** The Azure Pipelines wiring that injects this value during the
-> official build is planned as a separate build-integration change. Until it
-> lands, official builds behave like public builds (no group GUID). The build
-> already honors the variable today (see *Local developer testing* below).
+> **Follow-up:** The provider group GUID is now provided by a secret variable
+> on the official Windows build pipeline, so official builds can route events
+> through the telemetry pipeline. The build has always honored the variable
+> (see *Local developer testing* below); public builds and community forks,
+> which do not have access to the variable, continue to register the provider
+> without a group GUID (plain ETW only).
 
 ### Local developer testing
 
