@@ -52,10 +52,9 @@ pub struct WprExeStopper;
 
 impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
-        let cmd = wpr_command();
+        let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        wpr_command()
-            .args(["-stop", &trace_file.to_string_lossy()])
+        cmd.args(["-stop", &trace_file.to_string_lossy()])
             .status()
             .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
     }

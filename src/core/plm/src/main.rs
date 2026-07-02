@@ -121,15 +121,12 @@ fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
         // re-acquiring here would deadlock.
         return Ok(None);
     }
-    use windows::core::PCWSTR;
+    use windows::core::w;
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
-    let name: Vec<u16> = "Global\\Mxc_Plm_Audit"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }
+    let name = w!("Global\\Mxc_Plm_Audit");
+    let handle = unsafe { CreateMutexW(None, true, name) }
         .context("CreateMutexW failed for Global\\Mxc_Plm_Audit")?;
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         unsafe {
@@ -334,22 +331,25 @@ fn main() -> Result<()> {
                     .context("failed to stage plm.wprp next to plm.exe")?,
             };
             // The interactive `log` flow is the only standalone path
-            // that holds a live trace inside a single process. Mark
-            // the trace active so a Ctrl+C between the start and the
-            // operator's matching stdin-Enter tears the session down.
-            mark_plm_trace_active();
-            let result = log::run(&wprp_path, verbose_logging);
-            // On the normal path `log::run` performs its own
-            // `wpr -stop` and the trace is no longer live; clear the
-            // flag so the Ctrl+C handler doesn't issue a stale cancel.
-            // On the error path the trace may still be live (e.g.
-            // stdin EOF on the "press Enter to stop" prompt, or
-            // `wpr -stop` returned non-zero) — issue a `wpr -cancel`
-            // so the NT Kernel Logger session doesn't leak until
-            // reboot.
-            if result.is_ok() {
-                clear_plm_trace_active();
-            } else {
+            // that holds a live trace inside a single process. We hand
+            // `log::run` a `mark_active` callback so PLM_TRACE_ACTIVE
+            // flips true only AFTER `wpr -start` has actually engaged
+            // the kernel session — a stdin-EOF or spawn-fail before
+            // that point cannot trip the Ctrl+C handler into
+            // `wpr -cancel`ing an unrelated host WPR session. The
+            // matching `clear_active` callback fires once `wpr -stop`
+            // has drained the session so subsequent Ctrl+C is a no-op.
+            let result = log::run(
+                &wprp_path,
+                verbose_logging,
+                mark_plm_trace_active,
+                clear_plm_trace_active,
+            );
+            // If `log::run` returned Err AND the trace had been marked
+            // active (start succeeded but stop or later step failed),
+            // the flag is still set — issue `wpr -cancel` so the NT
+            // Kernel Logger session doesn't leak until reboot.
+            if result.is_err() {
                 cancel_active_plm_trace();
             }
             result

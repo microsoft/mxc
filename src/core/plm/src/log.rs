@@ -48,7 +48,12 @@ fn stop_wpr_trace(trace_file: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
+pub fn run(
+    wprp_path: &Path,
+    verbose: bool,
+    on_trace_started: impl FnOnce(),
+    on_trace_stopped: impl FnOnce(),
+) -> Result<()> {
     prompt_enter("Press Enter to start logging...")?;
     // Bracket the `wpr -start` spawn so the console-control handler
     // in `plm/src/main.rs` waits for it to drain before deciding
@@ -58,6 +63,11 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
     let start_result = start::start_plm_trace(wprp_path);
     PLM_LOG_START_IN_FLIGHT.store(false, Ordering::SeqCst);
     start_result?;
+    // `wpr -start` has engaged the kernel session. Only NOW mark the
+    // trace active so a stdin-EOF / spawn-fail before this point can't
+    // trip the Ctrl+C handler into `wpr -cancel`ing an unrelated host
+    // WPR session.
+    on_trace_started();
     println!("Logging started.");
 
     prompt_enter("Press Enter to stop logging...")?;
@@ -73,6 +83,9 @@ pub fn run(wprp_path: &Path, verbose: bool) -> Result<()> {
     );
     let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
     stop_wpr_trace(&trace_file)?;
+    // Kernel session is torn down; safe to clear the active flag so
+    // any subsequent Ctrl+C doesn't issue a stale `wpr -cancel`.
+    on_trace_stopped();
 
     if verbose {
         println!("Beginning event parsing, this may take several minutes");

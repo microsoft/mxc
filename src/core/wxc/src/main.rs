@@ -129,6 +129,15 @@ struct Cli {
     #[arg(long)]
     audit: bool,
 
+    /// Surface the PLM lifecycle diagnostics (spawn banner, plm.exe stderr
+    /// lines, non-zero-exit / spawn-failure reasons) on wxc-exec's stderr in
+    /// addition to the log buffer. Off by default so `--audit` doesn't pollute
+    /// the wrapped workload's stdout/stderr; opt in when debugging the audit
+    /// pipeline itself.
+    #[cfg(target_os = "windows")]
+    #[arg(long)]
+    audit_verbose: bool,
+
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
     /// CLI flags remain usable after the config path. Examples:
@@ -340,8 +349,13 @@ fn plm_exe_path() -> Option<std::path::PathBuf> {
 
 /// Run `plm.exe <subcommand> <args...>` synchronously and route stdio
 /// through to wxc-exec's console. Audit tracing is a best-effort
-/// diagnostic; missing-binary / spawn / non-zero-exit conditions are
-/// logged but never abort the wxc-exec flow.
+/// diagnostic: missing-binary / spawn / non-zero-exit conditions are
+/// logged and returned as `false` — this function never calls
+/// `process::exit` on its own. The caller (currently the `--audit`
+/// entry point) is responsible for deciding whether a `false` return
+/// should abort the workload; today the `plm start` caller does abort
+/// rather than run --audit without an active trace, while `plm stop`
+/// merely falls through to the `wpr -cancel` cleanup path.
 ///
 /// Returns `true` iff the spawn succeeded **and** plm.exe exited with
 /// a zero status. The caller needs this signal to decide whether to
@@ -349,7 +363,7 @@ fn plm_exe_path() -> Option<std::path::PathBuf> {
 /// it, `AUDIT_ACTIVE.store(false)` would run unconditionally and
 /// silently leak the kernel ETW session on every failure path.
 #[cfg(target_os = "windows")]
-fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
+fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: bool) -> bool {
     use std::fmt::Write as _;
 
     let Some(plm) = plm_exe_path() else {
@@ -371,7 +385,9 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
         let _ = write!(summary, " {}", a.to_string_lossy());
     }
     let _ = writeln!(logger, "{summary}");
-    eprintln!("{summary}");
+    if verbose {
+        eprintln!("{summary}");
+    }
 
     match std::process::Command::new(&plm)
         .args(args)
@@ -394,12 +410,16 @@ fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger) -> bool {
         Ok(s) if s.success() => true,
         Ok(s) => {
             let _ = writeln!(logger, "[audit] plm exited with status {s}");
-            eprintln!("[audit] plm exited with status {s}");
+            if verbose {
+                eprintln!("[audit] plm exited with status {s}");
+            }
             false
         }
         Err(e) => {
             let _ = writeln!(logger, "[audit] failed to spawn plm: {e}");
-            eprintln!("[audit] failed to spawn plm: {e}");
+            if verbose {
+                eprintln!("[audit] failed to spawn plm: {e}");
+            }
             false
         }
     }
@@ -464,8 +484,11 @@ fn mark_audit_active() {
 /// invoke `wpr.exe` by absolute path
 /// (`%SystemRoot%\System32\wpr.exe`) rather than as a bare name so
 /// `CreateProcessW`'s implicit CWD-first search order can't be abused
-/// to substitute a planted binary. PLM runs as administrator, so a
-/// CWD-search hit gives an attacker SYSTEM-equivalent code execution.
+/// to substitute a planted binary. `wxc-exec --audit` is typically
+/// launched from an elevated (administrator) context because starting a
+/// WPR kernel session requires it, so a CWD-search hit here would give
+/// an attacker elevated-equivalent code execution — hence the absolute
+/// System32 path.
 #[cfg(target_os = "windows")]
 fn cancel_active_audit_trace() {
     if AUDIT_ACTIVE.swap(false, Ordering::SeqCst) {
@@ -556,15 +579,12 @@ fn release_audit_singleton() {
 
 #[cfg(target_os = "windows")]
 fn try_acquire_audit_singleton() -> Result<AuditSingletonGuard, String> {
-    use windows::core::PCWSTR;
+    use windows::core::w;
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
-    let name: Vec<u16> = "Global\\Mxc_Plm_Audit"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) };
+    let name = w!("Global\\Mxc_Plm_Audit");
+    let handle = unsafe { CreateMutexW(None, true, name) };
     let handle = match handle {
         Ok(h) => h,
         Err(e) => return Err(format!("CreateMutexW failed: {e}")),
@@ -688,7 +708,7 @@ impl Drop for ParkedDaclGuard {
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     if let Some(slot) = DACL_CLEANUP_SLOT.get() {
         use std::time::{Duration, Instant};
-        // // the handler runs TWO bounded waits (this one + the
+        // The handler runs TWO bounded waits (this one + the
         // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
         // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
         // ~5s OS-imposed kill budget. The per-wait budget is sourced
@@ -1043,22 +1063,31 @@ fn main() {
     // but allowed. Works in both debug and release builds; in release the
     // runner-side rejection is relaxed because request.audit is set.
     // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
+    //
+    // Downstream capability lookups are case-sensitive (the AppContainer
+    // runner does exact string matches against the JSON capability name),
+    // so the "already present?" check here matches case-sensitively too.
+    // An operator who explicitly wrote a mis-cased spelling in the config
+    // gets a second, correctly-cased entry appended rather than silently
+    // relying on the mis-cased one that downstream lookups will ignore.
     #[cfg(target_os = "windows")]
     if cli.audit
         && !request
             .policy
             .capabilities
             .iter()
-            .any(|c| c.eq_ignore_ascii_case("permissiveLearningMode"))
+            .any(|c| c == "permissiveLearningMode")
     {
         request
             .policy
             .capabilities
             .push("permissiveLearningMode".to_string());
         logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
-        eprintln!(
-            "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
-        );
+        if cli.audit_verbose {
+            eprintln!(
+                "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
+            );
+        }
     }
 
     // Final validation: a command line must come from somewhere. If neither
@@ -1371,7 +1400,11 @@ fn main() {
         // before `plm.exe`'s child `wpr -start` has engaged the
         // kernel session).
         AUDIT_START_IN_FLIGHT.store(true, Ordering::SeqCst);
-        let start_ok = run_plm_command(&[std::ffi::OsStr::new("start")], &mut logger);
+        let start_ok = run_plm_command(
+            &[std::ffi::OsStr::new("start")],
+            &mut logger,
+            cli.audit_verbose,
+        );
         AUDIT_START_IN_FLIGHT.store(false, Ordering::SeqCst);
         if !start_ok {
             let _ = writeln!(
@@ -1423,7 +1456,7 @@ fn main() {
             .iter()
             .map(std::ffi::OsString::as_os_str)
             .collect();
-        let stop_ok = run_plm_command(&borrowed, &mut logger);
+        let stop_ok = run_plm_command(&borrowed, &mut logger, cli.audit_verbose);
         if stop_ok {
             AUDIT_ACTIVE.store(false, Ordering::SeqCst);
         } else {
