@@ -1,0 +1,36 @@
+[package]
+name = "plm"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "plm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "plm"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+# Portable deps (config / access_event / event_parser) must compile on
+# every target so their unit tests run in cross-platform CI. The
+# `windows` crate stays target-gated below.
+serde_json.workspace = true
+chrono.workspace = true
+roxmltree.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_System_EventLog",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+wxc_common = { workspace = true }
+
+[build-dependencies]
+mxc_build_common.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
