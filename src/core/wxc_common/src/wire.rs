@@ -786,6 +786,113 @@ mod schema_gen {
         let value = schema_value();
         mxc_schema_support::emit_ts(&value)
     }
+
+    /// Render the root object as pretty JSON with a fixed key order — the schema
+    /// metadata (`$schema`, `$id`, `title`, `description`) first, then the
+    /// remaining keys alphabetically — with every nested object also alphabetical.
+    ///
+    /// The output ordering is made explicit here rather than relying on
+    /// `serde_json`'s `Map` type: with default features `Map` is a `BTreeMap`
+    /// (alphabetical), but the global `preserve_order` feature — which any crate
+    /// in the build can turn on, since Cargo unifies features — swaps it for an
+    /// insertion-ordered `IndexMap`. To keep the generated artifacts byte-stable
+    /// regardless of that feature, non-metadata root keys are sorted alphabetically
+    /// and every nested value is rendered through [`sorted_value`] before
+    /// serialising. This is a no-op under `BTreeMap` and produces identical output
+    /// under `preserve_order`.
+    fn render_root_ordered(map: &serde_json::Map<String, serde_json::Value>) -> String {
+        // Only the metadata keys are floated to the front; every other key is
+        // alphabetical after them.
+        const ORDER: &[&str] = &["$schema", "$id", "title", "description"];
+        let rank = |key: &str| ORDER.iter().position(|k| *k == key).unwrap_or(ORDER.len());
+
+        // Sort by (rank, key): metadata keys lead in ORDER order, the rest are
+        // alphabetical — independent of `map`'s iteration order.
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+
+        let mut out = String::from("{\n");
+        for (i, key) in keys.iter().enumerate() {
+            // Render the nested value with recursively-sorted keys so the output is
+            // alphabetical whatever the `Map` backing.
+            let value_pretty = serde_json::to_string_pretty(&sorted_value(&map[*key]))
+                .expect("schema value serialises to JSON");
+            // The value sits one level deep: keep its first line in place after the
+            // key, and indent every following line by two spaces.
+            let mut lines = value_pretty.lines();
+            let mut indented = lines.next().unwrap_or("").to_string();
+            for line in lines {
+                indented.push_str("\n  ");
+                indented.push_str(line);
+            }
+            let key_json = serde_json::to_string(key).expect("object key serialises to JSON");
+            out.push_str("  ");
+            out.push_str(&key_json);
+            out.push_str(": ");
+            out.push_str(&indented);
+            if i + 1 < keys.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push('}');
+        out
+    }
+
+    /// Return a copy of `value` with every nested object's keys sorted
+    /// alphabetically, by rebuilding each `Map` with its keys inserted in sorted
+    /// order. This makes downstream serialisation deterministic regardless of the
+    /// `serde_json::Map` backing: under the default `BTreeMap` it is already sorted
+    /// (a no-op), and under `preserve_order`'s `IndexMap` the sorted insertion order
+    /// is preserved — so the generated schema is byte-stable either way.
+    fn sorted_value(value: &serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                let mut sorted = serde_json::Map::with_capacity(map.len());
+                for key in keys {
+                    sorted.insert(key.clone(), sorted_value(&map[key]));
+                }
+                Value::Object(sorted)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted_value).collect()),
+            other => other.clone(),
+        }
+    }
+
+    /// Recursively rewrite non-standard schemars integer `format`s into draft-07
+    /// constructs: unsigned types (`uint*`) gain `minimum: 0` and drop `format`;
+    /// signed types (`int*`) just drop `format`. Standard string formats
+    /// (`date-time`, `uri`, …) are left untouched.
+    fn normalize_integer_formats(value: &mut serde_json::Value) {
+        use serde_json::Value;
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::String(fmt)) = map.get("format") {
+                    let fmt = fmt.clone();
+                    let is_unsigned = fmt.starts_with("uint");
+                    let is_signed = fmt.starts_with("int");
+                    if is_unsigned || is_signed {
+                        map.remove("format");
+                        if is_unsigned {
+                            map.entry("minimum").or_insert(Value::Number(0.into()));
+                        }
+                    }
+                }
+                for v in map.values_mut() {
+                    normalize_integer_formats(v);
+                }
+            }
+            Value::Array(items) => {
+                for v in items {
+                    normalize_integer_formats(v);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(feature = "schema-gen")]
