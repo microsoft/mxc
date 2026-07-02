@@ -31,12 +31,18 @@ fn prompt_enter(message: &str) -> Result<()> {
 }
 
 fn stop_wpr_trace(trace_file: &Path) -> Result<()> {
-    let status = wpr_command()
+    // Capture stdio rather than inheriting so `wpr -stop`'s progress
+    // bar (`100% [>>>>>>>>>]`) and other chatter don't leak into any
+    // wrapping tool's stdout. On non-zero exit we replay the captured
+    // streams via the shared `replay_wpr_output` helper so operators
+    // can still see wpr's own diagnostic.
+    let output = wpr_command()
         .args(["-stop", &trace_file.to_string_lossy()])
-        .status()
+        .output()
         .context("failed to spawn wpr -stop")?;
-    if !status.success() {
-        anyhow::bail!("wpr -stop exited with {status}");
+    if !output.status.success() {
+        crate::start::replay_wpr_output("stop", &output);
+        anyhow::bail!("wpr -stop exited with {}", output.status);
     }
     Ok(())
 }
