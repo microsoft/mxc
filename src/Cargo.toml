@@ -7,6 +7,7 @@ members = [
     "core/mxc-sdk",
     "core/mxc_pty",
     "core/mxc_build_common",
+    "core/plm",
     "core/generated/base_container_specification",
     "backends/appcontainer/common",
     "backends/windows_sandbox/daemon",
@@ -30,6 +31,7 @@ members = [
     "testing/wxc_test_proxy",
     "testing/linux_test_proxy",
     "testing/wxc_ui_probe",
+    "testing/plm_tester",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
 ]
@@ -82,14 +84,18 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
     "Win32_System_JobObjects",
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+roxmltree = "0.20"
 wxc_common = { path = "core/wxc_common" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
