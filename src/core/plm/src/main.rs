@@ -39,23 +39,6 @@ use plm::coordination::{singleton_bypass_requested, wait_until_cleared, PLM_LOG_
 #[cfg(target_os = "windows")]
 use plm::{log, profile_gen, start, stop};
 
-/// Set to `true` while a `wpr -start` has succeeded but the matching
-/// stop hasn't run yet. Read by the console-control handler so that a
-/// Ctrl+C / Ctrl+Break that arrives during `plm log` (or between
-/// `plm start` and the operator's matching `plm stop`) tears down the
-/// kernel ETW session instead of leaking it until reboot or manual
-/// `wpr -cancel`.
-///
-/// This is a process-wide `static` rather than a member of
-/// `AcquiredSingleton` because the Windows console-control handler
-/// (`plm_ctrl_handler`) runs in a distinct OS-owned callback context
-/// with no captured `self`/environment — it can only reach state via
-/// process globals. Making the flag static also matches the peer
-/// pattern in `wxc-exec` (`audit::AUDIT_ACTIVE`) so the two binaries
-/// share the same cleanup contract.
-#[cfg(target_os = "windows")]
-static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
 /// Raw `HANDLE` value of the named-mutex singleton acquired by
 /// `acquire_singleton_if_needed` (zero when unheld). Stashed in a
 /// static so the console-control handler can release the host-wide
@@ -65,22 +48,36 @@ static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 static PLM_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
-/// Mark the kernel ETW session as live; called immediately after
-/// `start::start_plm_trace` succeeds.
+/// Backing storage for `AcquiredSingleton::mark_trace_active` /
+/// `clear_trace_active` / `cancel_active_trace`.
+///
+/// Kept as a process-wide `static` (not an owned field of
+/// `AcquiredSingleton`) for one narrow reason: the Windows console-
+/// control handler `plm_ctrl_handler` is an OS-owned `extern "system"`
+/// callback with no `self` / captured environment. It can only reach
+/// state via process globals. Access from the `main` thread, however,
+/// is gated behind `&AcquiredSingleton` methods so it is a
+/// compile-time invariant that the trace-active flag can only be
+/// mutated while we hold the host-wide singleton mutex — you can't
+/// call `mark_trace_active()` in a free function without first
+/// producing an `AcquiredSingleton`.
 #[cfg(target_os = "windows")]
-fn mark_plm_trace_active() {
-    PLM_TRACE_ACTIVE.store(true, Ordering::SeqCst);
+static PLM_TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Release the named-mutex singleton if held. Idempotent.
+#[cfg(target_os = "windows")]
+fn release_plm_singleton() {
+    plm::coordination::singleton::release(&PLM_SINGLETON_HANDLE);
 }
 
+/// Cancel any active PLM trace from a context that can't produce an
+/// `&AcquiredSingleton` — currently just the ctrl handler, which
+/// runs in an OS-owned callback with no captured environment. All
+/// non-signal-context callers should use
+/// `AcquiredSingleton::cancel_active_trace(&self)` instead so the
+/// call site proves the singleton is held.
 #[cfg(target_os = "windows")]
-fn clear_plm_trace_active() {
-    PLM_TRACE_ACTIVE.store(false, Ordering::SeqCst);
-}
-
-/// Issue `wpr -cancel` iff a trace was marked active by this process.
-/// Idempotent and safe to call from the console-control handler.
-#[cfg(target_os = "windows")]
-fn cancel_active_plm_trace() {
+fn cancel_active_plm_trace_from_signal() {
     if PLM_TRACE_ACTIVE.swap(false, Ordering::SeqCst) {
         // Use the kernel-published System32 path.
         let _ = plm::wpr_path::wpr_command()
@@ -91,23 +88,43 @@ fn cancel_active_plm_trace() {
     }
 }
 
-/// Release the named-mutex singleton if held. Idempotent.
-#[cfg(target_os = "windows")]
-fn release_plm_singleton() {
-    plm::coordination::singleton::release(&PLM_SINGLETON_HANDLE);
-}
-
-/// Acquire the host-wide PLM audit mutex unless our parent process
-/// (typically `wxc-exec --audit`) already holds it. Returns an
-/// `AcquiredSingleton` whose `Drop` releases the mutex on the normal
-/// path; the static handle is also drained by the console-control
-/// handler so Ctrl+C cleanup tears it down.
+/// RAII wrapper for the host-wide `Global\Mxc_Plm_Audit` singleton.
+/// Ownership of the singleton is the precondition for touching the
+/// trace-active flag — the methods below take `&self` so a live
+/// `AcquiredSingleton` must exist at every call site.
 #[cfg(target_os = "windows")]
 struct AcquiredSingleton;
 
 #[cfg(target_os = "windows")]
+impl AcquiredSingleton {
+    /// Mark the kernel ETW session as live; called immediately after
+    /// `start::start_plm_trace` succeeds.
+    fn mark_trace_active(&self) {
+        PLM_TRACE_ACTIVE.store(true, Ordering::SeqCst);
+    }
+
+    /// Clear the trace-active flag; called after `wpr -stop` drains
+    /// the kernel session so a subsequent Ctrl+C doesn't issue a
+    /// stale `wpr -cancel`.
+    fn clear_trace_active(&self) {
+        PLM_TRACE_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    /// Issue `wpr -cancel` iff a trace was marked active by this
+    /// process. Idempotent. Non-signal-context callers use this
+    /// method; the ctrl handler uses `cancel_active_plm_trace_from_signal`.
+    fn cancel_active_trace(&self) {
+        cancel_active_plm_trace_from_signal();
+    }
+}
+
+#[cfg(target_os = "windows")]
 impl Drop for AcquiredSingleton {
     fn drop(&mut self) {
+        // Cancel any leftover trace before releasing the singleton so
+        // a caller that returns an error mid-flow can't leak the
+        // kernel session past our exit.
+        self.cancel_active_trace();
         release_plm_singleton();
     }
 }
@@ -170,7 +187,7 @@ unsafe extern "system" fn plm_ctrl_handler(_ctrl_type: u32) -> windows::core::BO
         plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT,
         Duration::from_millis(50),
     );
-    cancel_active_plm_trace();
+    cancel_active_plm_trace_from_signal();
     release_plm_singleton();
     // Return FALSE so the default handler still runs and terminates
     // the process. Matches `wxc-exec`'s dacl_ctrl_handler pattern.
@@ -314,7 +331,7 @@ fn main() -> Result<()> {
             wprp,
             verbose_logging,
         } => {
-            let _singleton = acquire_singleton_if_needed()?;
+            let singleton = acquire_singleton_if_needed()?;
             // see `Cmd::Start` above — stage the embedded profile if
             // missing.
             let wprp_path = match wprp {
@@ -324,25 +341,46 @@ fn main() -> Result<()> {
             };
             // The interactive `log` flow is the only standalone path
             // that holds a live trace inside a single process. We hand
-            // `log::run` a `mark_active` callback so PLM_TRACE_ACTIVE
-            // flips true only AFTER `wpr -start` has actually engaged
-            // the kernel session — a stdin-EOF or spawn-fail before
-            // that point cannot trip the Ctrl+C handler into
-            // `wpr -cancel`ing an unrelated host WPR session. The
-            // matching `clear_active` callback fires once `wpr -stop`
-            // has drained the session so subsequent Ctrl+C is a no-op.
-            let result = log::run(
-                &wprp_path,
-                verbose_logging,
-                mark_plm_trace_active,
-                clear_plm_trace_active,
-            );
+            // `log::run` closures that call
+            // `AcquiredSingleton::mark_trace_active` /
+            // `clear_trace_active` on the borrowed singleton — the
+            // `&AcquiredSingleton` methods encode at compile time that
+            // trace-active can only be set while we hold the host-wide
+            // singleton mutex. `mark_trace_active` flips the flag only
+            // AFTER `wpr -start` has actually engaged the kernel
+            // session, so a stdin-EOF or spawn-fail before that point
+            // cannot trip the Ctrl+C handler into `wpr -cancel`ing an
+            // unrelated host WPR session.
+            let result = if let Some(s) = singleton.as_ref() {
+                log::run(
+                    &wprp_path,
+                    verbose_logging,
+                    || s.mark_trace_active(),
+                    || s.clear_trace_active(),
+                )
+            } else {
+                // Singleton bypass path (wxc-exec --audit already
+                // holds the mutex). No `AcquiredSingleton` exists in
+                // this process, so we can't gate the flag on it —
+                // fall back to the free-function path that the ctrl
+                // handler also uses. The outer process owns cleanup.
+                log::run(
+                    &wprp_path,
+                    verbose_logging,
+                    || PLM_TRACE_ACTIVE.store(true, Ordering::SeqCst),
+                    || PLM_TRACE_ACTIVE.store(false, Ordering::SeqCst),
+                )
+            };
             // If `log::run` returned Err AND the trace had been marked
             // active (start succeeded but stop or later step failed),
             // the flag is still set — issue `wpr -cancel` so the NT
             // Kernel Logger session doesn't leak until reboot.
             if result.is_err() {
-                cancel_active_plm_trace();
+                if let Some(s) = singleton.as_ref() {
+                    s.cancel_active_trace();
+                } else {
+                    cancel_active_plm_trace_from_signal();
+                }
             }
             result
         }
