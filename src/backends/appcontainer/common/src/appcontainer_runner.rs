@@ -442,7 +442,7 @@ impl AppContainerScriptRunner {
         // --- Validate permissiveLearningMode ---
         for cap in &request.policy.capabilities {
             if cap == "permissiveLearningMode" {
-                if cfg!(debug_assertions) || request.audit {
+                if request.audit {
                     logger.log_line("*** SECURITY WARNING ***");
                     logger.log_line(
                         "permissiveLearningMode is ENABLED. \
@@ -450,8 +450,7 @@ impl AppContainerScriptRunner {
                     );
                 } else {
                     return Err(WxcError::Validation(
-                        "SECURITY: permissiveLearningMode not allowed in release builds (pass --audit to override)"
-                            .to_string(),
+                        "SECURITY: permissiveLearningMode requires --audit".to_string(),
                     ));
                 }
             }
