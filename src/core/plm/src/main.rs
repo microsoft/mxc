@@ -129,6 +129,7 @@ fn acquire_singleton_if_needed() -> Result<Option<AcquiredSingleton>> {
 /// console close, logoff, and shutdown. Tears down any in-flight WPR
 /// session and releases the singleton mutex before the default handler
 /// calls `ExitProcess` (which skips Rust destructors).
+#[cfg(target_os = "windows")]
 unsafe extern "system" fn plm_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     // if `plm log`'s `wpr -start` is
     // still in flight when Ctrl+C arrives, briefly wait for it to
