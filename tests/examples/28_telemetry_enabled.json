@@ -4,9 +4,6 @@
     "process": {
         "commandLine": "cmd.exe /c echo Hello from telemetry-enabled sandbox"
     },
-    "processContainer": {
-        "capabilities": ["permissiveLearningMode"]
-    },
     "experimental": {
         "telemetry": {
             "enabled": true
