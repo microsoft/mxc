@@ -328,7 +328,7 @@ fn create_owned_window() -> Result<OwnedWindow> {
             120,
             None,
             None,
-            hinst,
+            Some(hinst.into()),
             None,
         )
         .context("CreateWindowExW failed")?;
@@ -371,7 +371,7 @@ struct ClipboardGuard;
 impl ClipboardGuard {
     fn open(hwnd: HWND) -> Result<Self> {
         eprintln!("[step] OpenClipboard(hwnd={:p})", hwnd.0);
-        let r = unsafe { OpenClipboard(hwnd) };
+        let r = unsafe { OpenClipboard(Some(hwnd)) };
         if r.is_err() {
             let (code, msg) = last_error_pair();
             eprintln!("[fail] OpenClipboard failed");
@@ -418,7 +418,7 @@ pub fn clipboard_set(hwnd: HWND, value: &str) -> Result<()> {
     unsafe {
         let dst = GlobalLock(hmem) as *mut u16;
         if dst.is_null() {
-            let _ = GlobalFree(hmem);
+            let _ = GlobalFree(Some(hmem));
             return Err(anyhow!("GlobalLock returned null"));
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
@@ -426,11 +426,11 @@ pub fn clipboard_set(hwnd: HWND, value: &str) -> Result<()> {
     }
 
     let handle = HANDLE(hmem.0);
-    let set_result = unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, handle) };
+    let set_result = unsafe { SetClipboardData(CF_UNICODETEXT.0 as u32, Some(handle)) };
     if set_result.is_err() {
         let (code, msg) = last_error_pair();
         unsafe {
-            let _ = GlobalFree(hmem);
+            let _ = GlobalFree(Some(hmem));
         }
         eprintln!("[fail] SetClipboardData failed");
         eprintln!("       win32 error    : 0x{code:08X} ({code}) — {msg}");
