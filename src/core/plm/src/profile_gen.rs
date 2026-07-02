@@ -130,6 +130,21 @@ fn write_then_rename(tmp: &Path, dst: &Path) -> io::Result<()> {
     f.write_all(EMBEDDED_WPRP.as_bytes())?;
     f.sync_all()?;
     drop(f);
+    // Byte-compare the staged file against the compile-time source of
+    // truth. Detects filter drivers, disk-quota clamps, and AV rewrites
+    // that would otherwise let a corrupted `plm.wprp` slip through
+    // `write_all` + `sync_all` and be adopted on every subsequent run
+    // via the early-return existence check in `ensure_wprp_next_to_exe`.
+    let staged = std::fs::read(tmp)?;
+    if staged != EMBEDDED_WPRP.as_bytes() {
+        // Best-effort cleanup; propagate the integrity error, not the
+        // secondary remove failure.
+        let _ = std::fs::remove_file(tmp);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged plm.wprp does not match embedded profile",
+        ));
+    }
     // `rename` over a nonexistent dst is atomic on Windows + Unix.
     // If another writer beat us to it, surface AlreadyExists so the
     // caller can adopt the winner.
