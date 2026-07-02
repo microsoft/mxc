@@ -42,6 +42,7 @@ run_test() {
 
 run_test "Basic LXC" "$SCRIPT_DIR/run_lxc_basic_test.sh"
 run_test "LXC Filesystem" "$SCRIPT_DIR/run_lxc_filesystem_test.sh"
+run_test "LXC Object Validation" "$SCRIPT_DIR/run_lxc_object_test.sh"
 run_test "LXC Network" "$SCRIPT_DIR/run_lxc_network_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
