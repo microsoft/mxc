@@ -1,9 +1,8 @@
-//! Trace-lifecycle skeleton for the `plm stop` subcommand.
-//!
-//! Stops the in-progress WPR trace and writes `trace.etl` into a log
-//! directory. Event parsing, capability extraction, and the
-//! `Adjusted_*.json` writer land in later PRs; for now this is just
-//! the WPR teardown plus the testable seams that those PRs will reuse.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! `plm stop` — stop the in-progress WPR trace and write `trace.etl`
+//! into a log directory.
 
 use anyhow::{Context, Result};
 use chrono::Local;

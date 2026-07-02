@@ -1,12 +1,12 @@
-//! Interactive "logging" mode — trace-lifecycle skeleton only.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Interactive "logging" mode.
 //!
 //! 1. Prompts the user to press Enter to start logging.
 //! 2. Starts a WPR trace (same `AccessFailureProfile` used by `start`).
 //! 3. Prompts the user to press Enter to stop logging.
 //! 4. Stops the trace into a temp .etl and reports where it landed.
-//!
-//! In-memory parsing and the "changes a blank config would receive"
-//! preview arrive in later PRs.
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -67,23 +67,16 @@ pub fn run(
 
     // Per-run trace file in temp; PID + sub-second component prevents
     // parallel `plm log` invocations from colliding on the same .etl.
-    let stamp = format!(
-        "{}_pid{}",
-        Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
-        std::process::id()
-    );
+    let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
     let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
     stop_wpr_trace(&trace_file)?;
     // Kernel session is torn down; safe to clear the active flag so
     // any subsequent Ctrl+C doesn't issue a stale `wpr -cancel`.
     on_trace_stopped();
 
-    println!(
-        "Trace captured at {} (parse-and-preview arrives in a later PR).",
-        trace_file.display()
-    );
+    println!("Trace captured at {}.", trace_file.display());
     if verbose {
-        println!("verbose logging requested; no events parsed in this PR.");
+        println!("verbose logging requested.");
     }
     Ok(())
 }
