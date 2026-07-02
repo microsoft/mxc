@@ -77,9 +77,13 @@ impl AccessMode {
 /// On Windows it probes the caller's effective access with `CreateFileW`
 /// (requesting `GENERIC_READ` / `GENERIC_READ | GENERIC_WRITE`, opened with
 /// `FILE_FLAG_BACKUP_SEMANTICS` so directories are covered too). A successful
-/// open means the access is granted; an `ERROR_ACCESS_DENIED` failure means it
-/// is not; any other failure is treated as undeterminable (`None`) and skipped.
-/// This covers files *and* directories — including the common WSLC
+/// open means the access is granted. Matching the Unix posture, the check
+/// **fails closed**: only a genuinely missing path (`ERROR_FILE_NOT_FOUND` /
+/// `ERROR_PATH_NOT_FOUND` — surfaced separately by the existence warning) is
+/// skipped (`None`); every other failure, including `ERROR_ACCESS_DENIED` and
+/// ambiguous errors (sharing/lock violation, transient I/O), is treated as
+/// "cannot confirm access" and rejected (`Some(false)`) rather than silently
+/// allowed. This covers files *and* directories — including the common WSLC
 /// `readwritePaths` directory case — implementing spec D3 for the WSLC backend.
 #[cfg(unix)]
 fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
@@ -110,7 +114,8 @@ fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
 fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE,
+        CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ,
+        GENERIC_WRITE,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -150,16 +155,17 @@ fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
             Some(true)
         }
         _ => {
-            // Only an explicit access denial is a delegation failure. Any other
-            // error (non-existent path — surfaced separately by the existence
-            // warning — sharing violation, etc.) is undeterminable and skipped
-            // rather than rejected, matching the Unix `None`-on-missing behavior.
+            // Fail closed, mirroring the Unix posture: skip ONLY a genuinely
+            // missing path (surfaced separately by the existence warning). Every
+            // other failure — access denied, sharing/lock violation, transient
+            // I/O — means we cannot confirm the caller has the access, which for
+            // a security delegation gate must reject rather than silently allow.
             // SAFETY: reads the thread-local last error set by the failed call above.
             let err = unsafe { GetLastError() };
-            if err == ERROR_ACCESS_DENIED {
-                Some(false)
-            } else {
+            if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
                 None
+            } else {
+                Some(false)
             }
         }
     }
@@ -249,6 +255,20 @@ mod tests {
     #[test]
     fn empty_policy_is_ok() {
         assert!(check_delegation(&ContainerPolicy::default()).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ambiguous_error_fails_closed() {
+        // A path Windows rejects for a reason OTHER than not-found or
+        // access-denied (here an invalid name containing an illegal `<`
+        // character → ERROR_INVALID_NAME) must fail closed — `Some(false)` →
+        // rejected — not be silently skipped. This locks the Unix/Windows
+        // posture alignment: only a genuinely-missing path is skipped; every
+        // other failure is treated as "cannot confirm access" and rejected.
+        let invalid = "C:\\mxc_invalid<name";
+        assert_eq!(user_can_access(invalid, AccessMode::Read), Some(false));
+        assert!(check_delegation(&policy(&[], &[invalid])).is_err());
     }
 
     #[cfg(unix)]
