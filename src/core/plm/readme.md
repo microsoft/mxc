@@ -64,7 +64,7 @@ plm.exe log [--wprp <path>] [--verbose-logging]
 PLM is part of the MXC workspace but excluded from `default-members` because it's Windows-only. Build it explicitly:
 
 ```powershell
-cd C:\Tessera\mxc\src
+cd C:\src\mxc\src
 cargo build -p plm --target x86_64-pc-windows-msvc
 # or for release:
 cargo build -p plm --target x86_64-pc-windows-msvc --release
