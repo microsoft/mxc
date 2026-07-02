@@ -37,7 +37,7 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 use plm::coordination::{singleton_bypass_requested, wait_until_cleared, PLM_LOG_START_IN_FLIGHT};
 #[cfg(target_os = "windows")]
-use plm::{log, profile_gen, start, stop};
+use plm::{extract_caps, log, profile_gen, start, stop};
 
 /// Set to `true` while a `wpr -start` has succeeded but the matching
 /// stop hasn't run yet. Read by the console-control handler so that a
@@ -208,6 +208,16 @@ enum Cmd {
         #[arg(long)]
         verbose_logging: bool,
     },
+    /// Run extract_caps on a hex-encoded ACE blob and print matched
+    /// capability names. Mirrors the standalone usage of extract_caps.ps1.
+    ExtractCaps {
+        /// Hex-encoded ACE buffer (whitespace allowed, even length).
+        #[arg(long)]
+        hex_bytes: String,
+        /// Emit per-ACE diagnostic output.
+        #[arg(long)]
+        verbose_logging: bool,
+    },
     /// Interactive: press Enter to start logging, press Enter again to stop.
     Log {
         /// Override path to plm.wprp. Defaults to <exe dir>\plm.wprp.
@@ -287,6 +297,18 @@ fn main() -> Result<()> {
                 },
                 &exe,
             )
+        }
+        Cmd::ExtractCaps {
+            hex_bytes,
+            verbose_logging,
+        } => {
+            let caps = extract_caps::extract_caps(&hex_bytes, verbose_logging)?;
+            let mut sorted: Vec<&String> = caps.iter().collect();
+            sorted.sort();
+            for c in sorted {
+                println!("{c}");
+            }
+            Ok(())
         }
         Cmd::Log {
             wprp,
