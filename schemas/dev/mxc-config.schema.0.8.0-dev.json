@@ -3,177 +3,11 @@
   "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.8.0-dev.json",
   "title": "MXC Configuration",
   "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
-  "type": "object",
-  "properties": {
-    "$schema": {
-      "description": "Optional JSON Schema reference for editor validation. Accepted but ignored by the parser.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "_comment": {
-      "description": "Optional human-readable annotation. Accepted but ignored by the parser."
-    },
-    "containerId": {
-      "description": "Externally assigned container identifier.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "containment": {
-      "description": "Containment backend to use for execution. Accepts abstract intents (`process`, `vm`) and concrete backends; the binary resolves intents to a concrete backend per host at run time.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Containment"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "experimental": {
-      "description": "Experimental features. Only honored when `--experimental` is passed.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Experimental"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "fallback": {
-      "description": "AppContainer DACL-mutation fallback policy (Windows).",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Fallback"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "filesystem": {
-      "description": "Filesystem access policy. Shared across all backends.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Filesystem"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "lifecycle": {
-      "description": "Container lifecycle settings.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Lifecycle"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "lxc": {
-      "description": "LXC container settings (Linux). Used when containment is `lxc`.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Lxc"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "network": {
-      "description": "Network access policy. Shared across all backends.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Network"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "phase": {
-      "description": "State-aware lifecycle phase. When present, the request is a state-aware request (`sandboxId` is required for non-provision phases); when absent, the request is one-shot.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Phase"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "process": {
-      "description": "Process to execute and its environment.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Process"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "processContainer": {
-      "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/ProcessContainer"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "sandboxId": {
-      "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "seatbelt": {
-      "description": "macOS Seatbelt backend configuration. Used when containment is `seatbelt`.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Seatbelt"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "ui": {
-      "description": "Cross-platform UI isolation policy.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Ui"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "version": {
-      "description": "MXC config schema version (semver), e.g. `\"0.8.0-alpha\"`.",
-      "type": [
-        "string",
-        "null"
-      ]
-    }
-  },
   "additionalProperties": false,
   "definitions": {
     "BaseProcessUi": {
+      "additionalProperties": false,
       "description": "BaseProcessContainer UI isolation settings.",
-      "type": "object",
       "properties": {
         "desktopSystemControl": {
           "description": "Whether desktop system control is allowed.",
@@ -190,7 +24,6 @@
           ]
         },
         "isolation": {
-          "description": "UI isolation level.",
           "anyOf": [
             {
               "$ref": "#/definitions/UiIsolation"
@@ -198,7 +31,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "UI isolation level."
         },
         "systemSettings": {
           "description": "System settings access level.",
@@ -208,106 +42,104 @@
           ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "ClipboardPolicy": {
       "description": "Clipboard access level.",
-      "type": "string",
       "enum": [
         "none",
         "read",
         "write",
         "all"
-      ]
+      ],
+      "type": "string"
     },
     "Containment": {
       "description": "Containment backend (abstract intent or concrete backend).",
       "oneOf": [
         {
           "description": "OS-native process sandbox (resolved per host).",
-          "type": "string",
           "enum": [
             "process"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Windows AppContainer / BaseContainer.",
-          "type": "string",
           "enum": [
             "processcontainer"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "VM-class isolation (resolved per host).",
-          "type": "string",
           "enum": [
             "vm"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Windows Sandbox (experimental).",
-          "type": "string",
           "enum": [
             "windows_sandbox"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Full Linux container.",
-          "type": "string",
           "enum": [
             "lxc"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "NanVix micro-VM (experimental).",
-          "type": "string",
           "enum": [
             "microvm"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Hyperlight micro-VM (experimental).",
-          "type": "string",
           "enum": [
             "hyperlight"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "WSL container (experimental).",
-          "type": "string",
           "enum": [
             "wslc"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "macOS Seatbelt.",
-          "type": "string",
           "enum": [
             "seatbelt"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Windows IsolationSession (experimental).",
-          "type": "string",
           "enum": [
             "isolation_session"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Unprivileged Linux bubblewrap sandbox.",
-          "type": "string",
           "enum": [
             "bubblewrap"
-          ]
+          ],
+          "type": "string"
         }
       ]
     },
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
-      "type": "object",
       "properties": {
         "isolation_session": {
-          "description": "IsolationSession backend config (Windows).",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationSession"
@@ -315,10 +147,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "IsolationSession backend config (Windows)."
         },
         "seatbelt": {
-          "description": "Seatbelt backend config (pre-promotion alias).",
           "anyOf": [
             {
               "$ref": "#/definitions/Seatbelt"
@@ -326,10 +158,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Seatbelt backend config (pre-promotion alias)."
         },
         "test": {
-          "description": "Placeholder feature for testing experimental infrastructure.",
           "anyOf": [
             {
               "$ref": "#/definitions/TestFeature"
@@ -337,10 +169,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Placeholder feature for testing experimental infrastructure."
         },
         "windows_sandbox": {
-          "description": "Windows Sandbox backend config.",
           "anyOf": [
             {
               "$ref": "#/definitions/WindowsSandbox"
@@ -348,10 +180,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Windows Sandbox backend config."
         },
         "wslc": {
-          "description": "WSL container backend config.",
           "anyOf": [
             {
               "$ref": "#/definitions/Wslc"
@@ -359,13 +191,15 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "WSL container backend config."
         }
-      }
+      },
+      "type": "object"
     },
     "Fallback": {
+      "additionalProperties": false,
       "description": "AppContainer DACL-mutation fallback policy.",
-      "type": "object",
       "properties": {
         "allowDaclMutation": {
           "description": "Allow the runner to mutate DACLs as a fallback.",
@@ -375,61 +209,59 @@
           ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "Filesystem": {
+      "additionalProperties": false,
       "description": "Filesystem access policy.",
-      "type": "object",
       "properties": {
         "deniedPaths": {
           "description": "Paths explicitly denied (override broader allow rules).",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "readonlyPaths": {
           "description": "Paths the process can read but not write.",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "readwritePaths": {
           "description": "Paths the process can read and write.",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "IsolationConfigurationId": {
       "description": "IsolationSession sizing profile.",
-      "type": "string",
       "enum": [
         "small",
         "medium",
         "large",
         "composable"
-      ]
+      ],
+      "type": "string"
     },
     "IsolationSession": {
       "description": "IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).",
-      "type": "object",
       "properties": {
         "configurationId": {
-          "description": "Sizing profile (one-shot).",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationConfigurationId"
@@ -437,10 +269,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Sizing profile (one-shot)."
         },
         "deprovision": {
-          "description": "State-aware deprovision-phase configuration.",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationSessionPhase"
@@ -448,10 +280,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "State-aware deprovision-phase configuration."
         },
         "provision": {
-          "description": "State-aware provision-phase configuration.",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationSessionPhase"
@@ -459,10 +291,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "State-aware provision-phase configuration."
         },
         "start": {
-          "description": "State-aware start-phase configuration.",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationSessionPhase"
@@ -470,10 +302,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "State-aware start-phase configuration."
         },
         "stop": {
-          "description": "State-aware stop-phase configuration.",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationSessionPhase"
@@ -481,10 +313,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "State-aware stop-phase configuration."
         },
         "user": {
-          "description": "Optional Entra cloud-agent user bundle (one-shot).",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationUser"
@@ -492,16 +324,16 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Optional Entra cloud-agent user bundle (one-shot)."
         }
-      }
+      },
+      "type": "object"
     },
     "IsolationSessionPhase": {
       "description": "Per-phase IsolationSession configuration (state-aware lifecycle).",
-      "type": "object",
       "properties": {
         "configurationId": {
-          "description": "Sizing profile for this phase.",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationConfigurationId"
@@ -509,10 +341,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Sizing profile for this phase."
         },
         "user": {
-          "description": "Entra cloud-agent user bundle for this phase.",
           "anyOf": [
             {
               "$ref": "#/definitions/IsolationUser"
@@ -520,17 +352,14 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Entra cloud-agent user bundle for this phase."
         }
-      }
+      },
+      "type": "object"
     },
     "IsolationUser": {
       "description": "Entra cloud-agent user bundle. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
-      "type": "object",
-      "required": [
-        "upn",
-        "wamToken"
-      ],
       "properties": {
         "upn": {
           "description": "User principal name.",
@@ -540,30 +369,35 @@
           "description": "Short-lived WAM bearer token (passed verbatim to the OS service).",
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "upn",
+        "wamToken"
+      ],
+      "type": "object"
     },
     "LaunchMethod": {
       "description": "Seatbelt inner-process launch method.",
       "oneOf": [
         {
           "description": "sandbox_init() + exec (default). Works for third-party GUI apps.",
-          "type": "string",
           "enum": [
             "exec"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Launch via macOS LaunchServices (`open`), then apply the sandbox to the inner shell via sandbox-exec. Required for apps with launch constraints.",
-          "type": "string",
           "enum": [
             "open"
-          ]
+          ],
+          "type": "string"
         }
       ]
     },
     "Lifecycle": {
+      "additionalProperties": false,
       "description": "Container lifecycle settings.",
-      "type": "object",
       "properties": {
         "destroyOnExit": {
           "description": "Destroy the container when the process exits (default true).",
@@ -580,11 +414,11 @@
           ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "Lxc": {
+      "additionalProperties": false,
       "description": "LXC container settings.",
-      "type": "object",
       "properties": {
         "distribution": {
           "description": "Distribution image (e.g. `alpine`).",
@@ -601,11 +435,11 @@
           ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "Network": {
+      "additionalProperties": false,
       "description": "Network access policy.",
-      "type": "object",
       "properties": {
         "allowLocalNetwork": {
           "description": "Allow binding/listening on local IPs and accepting inbound connections.",
@@ -616,26 +450,25 @@
         },
         "allowedHosts": {
           "description": "Hosts explicitly allowed.",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "blockedHosts": {
           "description": "Hosts explicitly blocked.",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "defaultPolicy": {
-          "description": "Default outbound policy when no host rule matches.",
           "anyOf": [
             {
               "$ref": "#/definitions/NetworkPolicy"
@@ -643,10 +476,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Default outbound policy when no host rule matches."
         },
         "enforcementMode": {
-          "description": "How the policy is enforced.",
           "anyOf": [
             {
               "$ref": "#/definitions/NetworkEnforcement"
@@ -654,10 +487,10 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "How the policy is enforced."
         },
         "proxy": {
-          "description": "Proxy configuration (one of localhost / builtinTestServer / url).",
           "anyOf": [
             {
               "$ref": "#/definitions/Proxy"
@@ -665,72 +498,67 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Proxy configuration (one of localhost / builtinTestServer / url)."
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "NetworkEnforcement": {
       "description": "Network enforcement mechanism.",
       "oneOf": [
         {
           "description": "Per-process capability-based filtering.",
-          "type": "string",
           "enum": [
             "capabilities"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Host firewall rules.",
-          "type": "string",
           "enum": [
             "firewall"
-          ]
+          ],
+          "type": "string"
         },
         {
           "description": "Both capability and firewall enforcement.",
-          "type": "string",
           "enum": [
             "both"
-          ]
+          ],
+          "type": "string"
         }
       ]
     },
     "NetworkPolicy": {
       "description": "Default network policy.",
-      "type": "string",
       "enum": [
         "allow",
         "block"
-      ]
+      ],
+      "type": "string"
     },
     "Phase": {
       "description": "State-aware lifecycle phase.",
-      "type": "string",
       "enum": [
         "provision",
         "start",
         "exec",
         "stop",
         "deprovision"
-      ]
+      ],
+      "type": "string"
     },
     "PortMapping": {
       "description": "A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
-      "type": "object",
-      "required": [
-        "containerPort",
-        "windowsPort"
-      ],
       "properties": {
         "containerPort": {
           "description": "Container port.",
-          "type": "integer",
+          "maximum": 65535.0,
           "minimum": 1.0,
-          "maximum": 65535.0
+          "type": "integer"
         },
         "protocol": {
-          "description": "Transport protocol for the mapping. Only `tcp` is currently supported.",
           "anyOf": [
             {
               "$ref": "#/definitions/TransportProtocol"
@@ -738,19 +566,25 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Transport protocol for the mapping. Only `tcp` is currently supported."
         },
         "windowsPort": {
           "description": "Host (Windows) port.",
-          "type": "integer",
+          "maximum": 65535.0,
           "minimum": 1.0,
-          "maximum": 65535.0
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "containerPort",
+        "windowsPort"
+      ],
+      "type": "object"
     },
     "Process": {
+      "additionalProperties": false,
       "description": "Process execution settings.",
-      "type": "object",
       "properties": {
         "commandLine": {
           "description": "Command line (or script) to execute.",
@@ -768,38 +602,38 @@
         },
         "env": {
           "description": "Environment variables as `\"KEY=VALUE\"` strings.",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "timeout": {
           "description": "Wall-clock timeout in milliseconds.",
+          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ],
-          "minimum": 0.0
+          ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "ProcessContainer": {
+      "additionalProperties": false,
       "description": "ProcessContainer-specific settings.",
-      "type": "object",
       "properties": {
         "capabilities": {
           "description": "AppContainer capabilities (e.g. `internetClient`, `registryRead`).",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "learningMode": {
           "description": "AppContainer permissive learning mode.",
@@ -816,7 +650,6 @@
           ]
         },
         "ui": {
-          "description": "BaseProcessContainer UI settings (Windows).",
           "anyOf": [
             {
               "$ref": "#/definitions/BaseProcessUi"
@@ -824,14 +657,15 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "BaseProcessContainer UI settings (Windows)."
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "Proxy": {
+      "additionalProperties": false,
       "description": "Proxy configuration. Exactly one variant applies.",
-      "type": "object",
       "properties": {
         "builtinTestServer": {
           "description": "Have wxc launch its own built-in test proxy.",
@@ -842,12 +676,12 @@
         },
         "localhost": {
           "description": "External localhost proxy port.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
           "type": [
             "integer",
             "null"
-          ],
-          "minimum": 1.0,
-          "maximum": 65535.0
+          ]
         },
         "url": {
           "description": "Proxy URL (parsed into host:port).",
@@ -857,21 +691,21 @@
           ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "Seatbelt": {
+      "additionalProperties": false,
       "description": "macOS Seatbelt backend configuration.",
-      "type": "object",
       "properties": {
         "extraMachLookups": {
           "description": "Additional Mach service global-names the inner process may resolve.",
+          "items": {
+            "type": "string"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "type": "string"
-          }
+          ]
         },
         "guiAccess": {
           "description": "Allow GUI (WindowServer) access.",
@@ -888,7 +722,6 @@
           ]
         },
         "launchMethod": {
-          "description": "Inner process launch method.",
           "anyOf": [
             {
               "$ref": "#/definitions/LaunchMethod"
@@ -896,7 +729,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Inner process launch method."
         },
         "nestedPty": {
           "description": "Attach the inner process to a nested pty (default true).",
@@ -913,11 +747,10 @@
           ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "TestFeature": {
       "description": "Placeholder experimental feature.",
-      "type": "object",
       "properties": {
         "message": {
           "description": "Message to log when the feature is applied.",
@@ -926,21 +759,21 @@
             "null"
           ]
         }
-      }
+      },
+      "type": "object"
     },
     "TransportProtocol": {
       "description": "Port-forward transport protocol. Only `tcp` is currently supported by the vendored WSLC SDK runtime; `udp` is rejected at parse time.",
-      "type": "string",
       "enum": [
         "tcp"
-      ]
+      ],
+      "type": "string"
     },
     "Ui": {
+      "additionalProperties": false,
       "description": "Cross-platform UI isolation policy.",
-      "type": "object",
       "properties": {
         "clipboard": {
-          "description": "Clipboard access level.",
           "anyOf": [
             {
               "$ref": "#/definitions/ClipboardPolicy"
@@ -948,7 +781,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Clipboard access level."
         },
         "disable": {
           "description": "Disable all UI access (default true).",
@@ -965,21 +799,20 @@
           ]
         }
       },
-      "additionalProperties": false
+      "type": "object"
     },
     "UiIsolation": {
       "description": "Desktop UI isolation level.",
-      "type": "string",
       "enum": [
         "desktop",
         "handles",
         "atoms",
         "container"
-      ]
+      ],
+      "type": "string"
     },
     "WindowsSandbox": {
       "description": "Windows Sandbox backend config.",
-      "type": "object",
       "properties": {
         "daemonPipeName": {
           "description": "Daemon named-pipe override.",
@@ -990,33 +823,33 @@
         },
         "idleTimeout": {
           "description": "Idle timeout (legacy seconds field).",
+          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ],
-          "minimum": 0.0
+          ]
         },
         "idleTimeoutMs": {
           "description": "Idle timeout before teardown (ms).",
+          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ],
-          "minimum": 0.0
+          ]
         }
-      }
+      },
+      "type": "object"
     },
     "Wslc": {
       "description": "WSL container backend config.",
-      "type": "object",
       "properties": {
         "cpuCount": {
           "description": "vCPU count.",
+          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ],
-          "minimum": 0.0
+          ]
         },
         "gpu": {
           "description": "Enable GPU passthrough.",
@@ -1041,21 +874,21 @@
         },
         "memoryMb": {
           "description": "Memory limit (MB).",
+          "minimum": 0.0,
           "type": [
             "integer",
             "null"
-          ],
-          "minimum": 0.0
+          ]
         },
         "portMappings": {
           "description": "Host → container port forwards. Only TCP is currently supported by the vendored WSLC SDK runtime (Microsoft.WSL.Containers 2.8.1); the parser rejects `udp` because the shipped runtime returns `E_NOTIMPL`.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/PortMapping"
-          }
+          ]
         },
         "storagePath": {
           "description": "Storage path override.",
@@ -1071,7 +904,174 @@
             "null"
           ]
         }
-      }
+      },
+      "type": "object"
     }
-  }
+  },
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema reference for editor validation. Accepted but ignored by the parser.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "_comment": {
+      "description": "Optional human-readable annotation. Accepted but ignored by the parser."
+    },
+    "containerId": {
+      "description": "Externally assigned container identifier.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "containment": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Containment"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Containment backend to use for execution. Accepts abstract intents (`process`, `vm`) and concrete backends; the binary resolves intents to a concrete backend per host at run time."
+    },
+    "experimental": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Experimental"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Experimental features. Only honored when `--experimental` is passed."
+    },
+    "fallback": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Fallback"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "AppContainer DACL-mutation fallback policy (Windows)."
+    },
+    "filesystem": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Filesystem"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Filesystem access policy. Shared across all backends."
+    },
+    "lifecycle": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lifecycle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Container lifecycle settings."
+    },
+    "lxc": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lxc"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "LXC container settings (Linux). Used when containment is `lxc`."
+    },
+    "network": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Network"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Network access policy. Shared across all backends."
+    },
+    "phase": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Phase"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "State-aware lifecycle phase. When present, the request is a state-aware request (`sandboxId` is required for non-provision phases); when absent, the request is one-shot."
+    },
+    "process": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Process"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Process to execute and its environment."
+    },
+    "processContainer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ProcessContainer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`."
+    },
+    "sandboxId": {
+      "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "seatbelt": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Seatbelt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "macOS Seatbelt backend configuration. Used when containment is `seatbelt`."
+    },
+    "ui": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Ui"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Cross-platform UI isolation policy."
+    },
+    "version": {
+      "description": "MXC config schema version (semver), e.g. `\"0.8.0-alpha\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
 }
