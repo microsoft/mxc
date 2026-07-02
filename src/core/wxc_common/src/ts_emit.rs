@@ -15,8 +15,10 @@
 //! enums (`oneOf` of single-value `enum`s, or a direct `enum` array), closed and
 //! open objects, `$ref`, `anyOf [T, null]` nullable wrappers, arrays, and scalar
 //! types (`string`/`integer`/`number`/`boolean`). The emitter is deterministic:
-//! `serde_json`'s default `Map` is a `BTreeMap`, so definitions and properties
-//! come out in stable alphabetical order.
+//! definitions and properties are sorted alphabetically before emission, so the
+//! output is stable regardless of the `serde_json::Map` backing (`BTreeMap` by
+//! default, or an insertion-ordered `IndexMap` under the `preserve_order`
+//! feature, which any crate in the build can enable).
 
 use serde_json::Value;
 
@@ -50,8 +52,12 @@ pub fn emit_ts(schema: &Value) -> String {
     let mut out = String::from(BANNER);
 
     if let Some(Value::Object(defs)) = root.get("definitions") {
-        for (name, def) in defs {
-            emit_definition(&mut out, name, def);
+        // Sort explicitly so the emitted order is independent of the
+        // `serde_json::Map` backing (`BTreeMap` vs `preserve_order`'s `IndexMap`).
+        let mut names: Vec<&String> = defs.keys().collect();
+        names.sort();
+        for name in names {
+            emit_definition(&mut out, name, &defs[name]);
         }
     }
 
@@ -127,7 +133,12 @@ fn emit_object(out: &mut String, name: &str, obj: &serde_json::Map<String, Value
         .unwrap_or_default();
 
     if let Some(Value::Object(props)) = obj.get("properties") {
-        for (pname, pval) in props {
+        // Sort explicitly so field order is independent of the `serde_json::Map`
+        // backing (`BTreeMap` vs `preserve_order`'s `IndexMap`).
+        let mut pnames: Vec<&String> = props.keys().collect();
+        pnames.sort();
+        for pname in pnames {
+            let pval = &props[pname];
             let (ty, nullable) = ts_type(pval);
             let optional = !required.contains(&pname.as_str());
             push_field_doc(out, pval.get("description"));
