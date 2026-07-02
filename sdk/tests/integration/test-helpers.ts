@@ -47,7 +47,6 @@ export function getSdkBinDir(): string {
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
   'wxc-host-prep.exe',
-  'mxc-learning-mode-broker.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
@@ -67,7 +66,8 @@ export const EXPECTED_MACOS_BINARIES = [
 // Binaries that are optional (feature-gated or only present in certain builds)
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
-  'wslcsdk.dll',   // Only built with --with-wslc
+  'wslcsdk.dll',                    // Only built with --with-wslc
+  'mxc-learning-mode-broker.exe',  // Learning-mode broker service; copied only when built (full build.bat)
 ];
 
 // Combined list of all known binaries across platforms. The npm package
