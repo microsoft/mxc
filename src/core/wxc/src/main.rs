@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "windows")]
 mod audit;
+#[cfg(target_os = "windows")]
+mod elevation;
 
 use std::fmt::Write;
 use std::fs;
@@ -581,6 +583,26 @@ fn main() {
             }
         }
         return;
+    }
+
+    // --audit needs Administrator (wpr.exe starts a kernel ETW session).
+    // Detect non-elevated up-front and re-launch under UAC so the caller
+    // sees the standard consent dialog instead of a mid-trace failure.
+    // Runs AFTER `--probe` (probe is non-privileged and used on cold
+    // startup) but BEFORE COM init / SetConsoleCtrlHandler so the
+    // relaunched elevated child does that work in a clean process.
+    #[cfg(target_os = "windows")]
+    if cli.audit && !elevation::is_elevated() {
+        if cli.audit_verbose {
+            eprintln!("[mxc] --audit requires elevation; requesting UAC and re-launching.");
+        }
+        match elevation::relaunch_elevated_and_wait() {
+            Ok(code) => process::exit(code),
+            Err(msg) => {
+                eprintln!("Error: {msg}");
+                process::exit(1);
+            }
+        }
     }
 
     // Initialize COM/WinRT for backends that use WinRT APIs (Isolation Session).
