@@ -6,9 +6,8 @@
 //! Subcommands:
 //! - `start`: cancel any active WPR trace and start a new one using
 //!   `plm.wprp!AccessFailureProfile`.
-//! - `stop`: stop the trace and process captured events.
+//! - `stop`: stop the trace and write `trace.etl` into a log directory.
 //! - `log`: interactive — Enter to start, Enter to stop.
-//! - `extract-caps`: standalone ACE decoder.
 //!
 //! The functional binary wraps WPR / ETW / EventLog APIs that have no
 //! cross-platform equivalent and is therefore Windows-only. On
@@ -223,7 +222,7 @@ enum Cmd {
         #[arg(long)]
         wprp: Option<PathBuf>,
     },
-    /// Stop the trace. Event parsing / config merging arrives in later PRs.
+    /// Stop the trace and write `trace.etl` into a log directory.
     Stop {
         /// Directory for trace.etl, copied input config, and Adjusted_*.json.
         #[arg(long)]

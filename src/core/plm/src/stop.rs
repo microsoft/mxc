@@ -65,9 +65,9 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
 }
 
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
-/// to its canonical form. Later PRs feed this into the self-access
-/// filter; this PR exposes it so the canonicalize fallback chain is
-/// pinned by tests from day one.
+/// to its canonical form. Exposed even though the self-access filter
+/// consumer isn't wired here, so the canonicalize fallback chain is
+/// pinned by tests.
 ///
 /// Fallback chain:
 ///   1. `canonicalize(opt.bin_path)` if `Some`
@@ -106,9 +106,9 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
-    // Resolve bin_path now even though the self-access filter doesn't
-    // exist yet, so the operator-facing warning path is exercised in
-    // PR1 and the canonical form is on disk for later PRs.
+    // Resolve bin_path so the operator-facing warning path is
+    // exercised and the canonical form is on disk for downstream
+    // consumers, even though the self-access filter isn't wired here.
     let (_bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
     if let Some(w) = warning {
         eprintln!("[plm] warning: {w}");
@@ -127,14 +127,11 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         p
     };
 
-    println!(
-        "Trace captured at {} (config merging arrives in a later PR).",
-        trace_file.display()
-    );
+    println!("Trace captured at {}.", trace_file.display());
 
     // `config_path` / `adjusted_config_path` are accepted today so the
     // wxc-exec --audit harness can pass them through without breaking
-    // when later PRs wire up the merge.
+    // for downstream consumers.
     if let Some(p) = opts.config_path.as_ref() {
         let _ = p;
     }
@@ -142,7 +139,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         let _ = p;
     }
     if opts.verbose {
-        println!("verbose logging requested; no events parsed in this PR.");
+        println!("verbose logging is a no-op in this build.");
     }
 
     Ok(())
