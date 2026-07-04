@@ -1,5 +1,9 @@
 # MXC Playground — Known Limitations & Compatibility
 
+> For a per-release policy-support matrix (filesystem, network, and UI
+> restrictions across Nickel / Germanium / Germanium+), see
+> [Windows OS-version policy support](./base-process-container/os-version-support.md).
+
 ## Platform Support
 
 | Feature | Windows 24H2 (build 26100) | Windows 25H2+ (build 26600+) | Linux |

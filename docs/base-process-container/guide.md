@@ -7,6 +7,10 @@ to the Windows process container backend.
 For other backends (LXC, microVM, etc.), the pattern is
 similar but the OS layer differs.
 
+For which policy aspects this backend can enforce on each Windows release
+(Nickel / Germanium / Germanium+), see
+[Windows OS-version policy support](./os-version-support.md).
+
 ## Prerequisites
 
 1. Read the
