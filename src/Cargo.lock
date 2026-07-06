@@ -1618,6 +1618,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "embed-manifest",
  "mxc_build_common",
  "roxmltree",
  "serde_json",

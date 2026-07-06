@@ -81,39 +81,22 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
         eprintln!("{summary}");
     }
 
-    match std::process::Command::new(&plm)
-        .args(args)
-        // plm.exe itself acquires the `Global\Mxc_Plm_Audit` named-
-        // mutex singleton on direct operator invocations (`plm log` /
-        // `plm start` / `plm stop`) so its retry-on-conflict path
-        // can't silently `wpr -cancel` a peer trace. When wxc-exec
-        // spawns plm.exe we already hold that mutex for the whole
-        // audit window — tell the child to skip its own acquisition
-        // so we don't deadlock on the same global name. The env-var
-        // name comes from `plm::coordination::SINGLETON_HELD_BY_PARENT_ENV`
-        // rather than a duplicated string literal, so the plm and
-        // wxc crates can't drift out of sync without a compile error.
-        .env(plm::coordination::SINGLETON_HELD_BY_PARENT_ENV, "1")
-        // Capture plm.exe's stdout/stderr rather than inheriting the
-        // caller's console. Audit tracing is a background side-effect
-        // of `wxc-exec --audit`; leaking plm's chatter into the
-        // workload's stdio breaks any consumer that parses wxc-exec's
-        // stdout. On failure (non-zero exit or spawn error) we replay
-        // the captured streams so operators can still diagnose. In
-        // verbose mode we replay unconditionally.
-        .output()
-    {
-        Ok(o) if o.status.success() => {
+    match crate::plm_launch::run_plm_elevated(
+        &plm,
+        args,
+        &[(plm::coordination::SINGLETON_HELD_BY_PARENT_ENV, "1")],
+    ) {
+        Ok(o) if o.exit_code == 0 => {
             if verbose {
-                replay_child_output(logger, &o);
+                replay_captured(logger, &o.stdout, &o.stderr);
             }
             true
         }
         Ok(o) => {
-            let _ = writeln!(logger, "[audit] plm exited with status {}", o.status);
-            replay_child_output(logger, &o);
+            let _ = writeln!(logger, "[audit] plm exited with status {}", o.exit_code);
+            replay_captured(logger, &o.stdout, &o.stderr);
             if verbose {
-                eprintln!("[audit] plm exited with status {}", o.status);
+                eprintln!("[audit] plm exited with status {}", o.exit_code);
             }
             false
         }
@@ -127,19 +110,20 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
     }
 }
 
-/// Replay a captured child's stdout/stderr to the current process's
-/// own streams. Used on failure (and in verbose mode on success) so
-/// the happy path can stay silent while diagnostics still surface.
-fn replay_child_output(logger: &mut Logger, output: &std::process::Output) {
+/// Replay captured child stdout/stderr byte buffers to the current
+/// process's own streams. Used on failure (and in verbose mode on
+/// success) so the happy path can stay silent while diagnostics still
+/// surface.
+fn replay_captured(logger: &mut Logger, stdout: &[u8], stderr: &[u8]) {
     use std::fmt::Write as _;
     use std::io::Write as _;
-    if !output.stdout.is_empty() {
-        let _ = std::io::stdout().write_all(&output.stdout);
-        let _ = write!(logger, "{}", String::from_utf8_lossy(&output.stdout));
+    if !stdout.is_empty() {
+        let _ = std::io::stdout().write_all(stdout);
+        let _ = write!(logger, "{}", String::from_utf8_lossy(stdout));
     }
-    if !output.stderr.is_empty() {
-        let _ = std::io::stderr().write_all(&output.stderr);
-        let _ = write!(logger, "{}", String::from_utf8_lossy(&output.stderr));
+    if !stderr.is_empty() {
+        let _ = std::io::stderr().write_all(stderr);
+        let _ = write!(logger, "{}", String::from_utf8_lossy(stderr));
     }
 }
 

@@ -267,7 +267,44 @@ fn exe_dir() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+fn redirect_stdio_from_env() {
+    use std::fs::OpenOptions;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+
+    fn redirect_one(env_key: &str, which: windows::Win32::System::Console::STD_HANDLE) {
+        let Some(path) = std::env::var_os(env_key) else {
+            return;
+        };
+        let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) else {
+            return;
+        };
+        let handle = HANDLE(f.as_raw_handle());
+        // Leak the file so the handle stays alive for the process's
+        // lifetime. `SetStdHandle` records the raw handle; if the
+        // File drops, the handle closes and subsequent writes fail.
+        std::mem::forget(f);
+        // SAFETY: `which` is a valid STD_* constant; `handle` was
+        // just returned from OpenOptions::open and remains valid
+        // because we forgot the File.
+        let _ = unsafe { SetStdHandle(which, handle) };
+    }
+
+    redirect_one("MXC_PLM_STDOUT_FILE", STD_OUTPUT_HANDLE);
+    redirect_one("MXC_PLM_STDERR_FILE", STD_ERROR_HANDLE);
+}
+
+#[cfg(target_os = "windows")]
 fn main() -> Result<()> {
+    // If wxc-exec spawned us elevated via ShellExecuteExW+runas, it
+    // cannot inherit our stdio pipes across the elevation boundary.
+    // Redirect our stdout/stderr to the temp files it pointed us at
+    // via env so any diagnostic output survives back to the operator.
+    // Silent no-op when the env vars are absent (direct user
+    // invocation from an already-elevated shell).
+    redirect_stdio_from_env();
+
     let cli = Cli::parse();
     let exe = exe_dir()?;
 

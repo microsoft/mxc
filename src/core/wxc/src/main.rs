@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "windows")]
 mod audit;
+#[cfg(target_os = "windows")]
+mod plm_launch;
 
 use std::fmt::Write;
 use std::fs;
