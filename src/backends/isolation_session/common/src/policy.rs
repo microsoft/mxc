@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Policy validation for the IsolationSession backend. Filesystem `rw` and
-//! `ro` paths are honored at provision (applied via `share_folders`); every
-//! other filesystem field is rejected, and network / proxy policy is
-//! rejected at every phase — the backend has no equivalent primitive.
+//! Policy validation for the IsolationSession backend. Every filesystem
+//! field (`rw`, `ro`, `denied`) and all network / proxy policy is rejected
+//! at every phase — the backend has no host-folder-sharing, network, or
+//! proxy primitive.
 
 use wxc_common::models::{ExecutionRequest, IsolationSessionUser, NetworkPolicy};
 use wxc_common::mxc_error::MxcError;
@@ -16,18 +16,14 @@ const ERR_FILESYSTEM_POLICY: &str =
 const ERR_NETWORK_POLICY: &str = "network policy is not supported by the isolation session backend";
 const ERR_PROXY_POLICY: &str = "network proxy is not supported by the isolation session backend";
 
-/// Validates the request for the provision phase. `rw` and `ro` paths are
-/// honored (applied later via `share_folders`); `denied_paths` is rejected
-/// because the underlying API has no equivalent primitive.
+/// Validates the request for the provision phase. The isolation session
+/// backend has no host-folder-sharing primitive, so every filesystem field
+/// (`rw`, `ro`, `denied`) is rejected — identically to the post-provision
+/// phases.
 pub(super) fn validate_provision_policy(
     request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
-    if !request.policy.denied_paths.is_empty() {
-        return Err(IsolationSessionError::Policy(
-            ERR_FILESYSTEM_POLICY.to_string(),
-        ));
-    }
-    validate_network_and_proxy_policy(request)
+    validate_post_provision_policy(request)
 }
 
 /// Validates the request for any non-provision phase. All filesystem fields
@@ -108,7 +104,7 @@ mod tests {
     // every branch of the shared helper runs at least once.
 
     #[test]
-    fn provision_policy_accepts_readwrite_paths() {
+    fn provision_policy_rejects_readwrite_paths() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\src".to_string()],
@@ -116,11 +112,14 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(validate_provision_policy(&request).is_ok());
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
     }
 
     #[test]
-    fn provision_policy_accepts_readonly_paths() {
+    fn provision_policy_rejects_readonly_paths() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readonly_paths: vec!["C:\\data".to_string()],
@@ -128,11 +127,14 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(validate_provision_policy(&request).is_ok());
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
     }
 
     #[test]
-    fn provision_policy_accepts_readwrite_and_readonly_together() {
+    fn provision_policy_rejects_readwrite_and_readonly_together() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\src".to_string()],
@@ -141,7 +143,10 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(validate_provision_policy(&request).is_ok());
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
     }
 
     #[test]

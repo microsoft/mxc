@@ -15,14 +15,14 @@ pub(super) enum IsolationSessionError {
     /// Caller-supplied container policy carries a field this backend does
     /// not support (filesystem rules, network rules, proxy).
     Policy(String),
-    /// The in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API is not
+    /// The in-proc `Windows.AI.IsolationSession.Preview` `IsoSessionOps` API is not
     /// available on this host (DLL not registered or the OS feature gate
     /// is off).
     ServiceUnavailable(String),
-    /// A lifecycle step (register / provision / start / exec / stop /
-    /// deprovision) returned a failure from the OS API.
+    /// A lifecycle step (provision / start / exec / stop / deprovision)
+    /// returned a failure from the OS API.
     Lifecycle(String),
-    /// The OS API could not find the provisionId — the sandbox has been
+    /// The OS API could not find the agent user — the sandbox has been
     /// deprovisioned (or never existed in this user's session). Surfaces
     /// as `MxcError::StaleId` at the dispatch boundary.
     Stale(String),
@@ -53,7 +53,7 @@ pub(super) fn lifecycle_err(msg: impl Into<String>) -> IsolationSessionError {
 
 /// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`. Every non-provision lifecycle op
 /// (start / exec / stop / deprovision) surfaces this HRESULT when the
-/// provisionId is unknown to the OS API; we promote it to `Stale` so a
+/// agent user is unknown to the OS API; we promote it to `Stale` so a
 /// deprovisioned `sandbox_id` reads as `MxcError::StaleId` at the dispatch
 /// boundary, not a generic backend error.
 const ERROR_NOT_FOUND_HRESULT: u32 = 0x80070490;

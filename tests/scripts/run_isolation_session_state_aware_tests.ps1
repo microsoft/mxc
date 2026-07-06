@@ -11,9 +11,8 @@
 .DESCRIPTION
     Each test invokes wxc-exec.exe with a base64-encoded state-aware request
     envelope, parses the JSON response on stdout, and asserts on the
-    envelope's `result` or `error` fields. Subsequent commits extend the
-    skeleton with start, exec, stop, and deprovision tests; this revision
-    asserts only the provision phase.
+    envelope's `result` or `error` fields. The corpus covers lifecycle,
+    process execution, sandbox-internal persistence, and validation errors.
 
     This script must run INTERACTIVELY on the test host. The OS-side service
     calling-process identity check rejects network-logon tokens, so
@@ -193,33 +192,6 @@ function Envelope-Arm {
     '<unknown>'
 }
 
-# Creates a directory with a locked-down DACL: inheritance disabled,
-# ACEs reset to current user + SYSTEM + Administrators (FullControl).
-# Subdirectories created inside inherit this ACL automatically.
-#
-# Why: by default, dirs under C:\ inherit Authenticated Users / Users
-# read+execute ACEs. The agent user is a member of those groups, so
-# without lockdown the "control" test (agent has no share, so cannot
-# access the dir) would spuriously pass and the readonly-deny test (B6)
-# would not actually prove the ACE granted is read-only.
-function Setup-LockedDownTestDir {
-    param([string]$Path)
-
-    New-Item -Path $Path -ItemType Directory -Force | Out-Null
-
-    $acl = Get-Acl $Path
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $inherit = "ContainerInherit,ObjectInherit"
-    foreach ($principal in @($currentUser, "SYSTEM", "Administrators")) {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $principal, "FullControl", $inherit, "None", "Allow")))
-    }
-    Set-Acl -Path $Path -AclObject $acl
-}
-
 # ---------------- Backend-availability probe ----------------
 
 # Sends a state-aware provision request and surfaces a `backend_unavailable`
@@ -300,40 +272,6 @@ function Run-StateAwareTest {
     return $script:currentTestPassed
 }
 
-# Test-dir setup. Lifecycle A's "control" test, Lifecycle B's full
-# filesystem-policy lifecycle, and the grant-scope check all run against
-# a single locked-down host directory tree:
-#
-#   C:\mxc_share_test\        (locked-down: current user + SYSTEM + Admins)
-#     rw\                     (inherits parent ACL; granted to B agent as rw)
-#     ro\
-#       marker.txt            (pre-populated; granted to B agent as ro)
-#     restricted\
-#       marker.txt            (pre-populated; NOT granted to B agent --
-#                              proves grants are path-specific, not blanket
-#                              on the parent)
-#
-# The lockdown is essential -- without it the agent user (a member of
-# Authenticated Users / Users) would inherit read access by default, so
-# the control test would not actually demonstrate that share_folders is
-# what enables access in Lifecycle B.
-$script:TestRoot = 'C:\mxc_share_test'
-$script:FilterTestRoot = 'C:\mxc_filter_test'
-$script:RoMarkerContent = 'readonly-marker-content'
-$script:RestrictedMarkerContent = 'restricted-marker-content'
-Setup-LockedDownTestDir $script:TestRoot
-New-Item -Path "$script:TestRoot\rw" -ItemType Directory -Force | Out-Null
-New-Item -Path "$script:TestRoot\ro" -ItemType Directory -Force | Out-Null
-New-Item -Path "$script:TestRoot\restricted" -ItemType Directory -Force | Out-Null
-$script:RoMarkerContent | Set-Content -Path "$script:TestRoot\ro\marker.txt" -NoNewline
-$script:RestrictedMarkerContent | Set-Content -Path "$script:TestRoot\restricted\marker.txt" -NoNewline
-Setup-LockedDownTestDir $script:FilterTestRoot
-New-Item -Path "$script:FilterTestRoot\rw" -ItemType Directory -Force | Out-Null
-
-# Outer try-finally: ensures the host directory tree is removed even if a
-# test panics. The summary at the end runs after the cleanup.
-try {
-
 # try-finally wraps the lifecycle so any mid-flow failure still triggers a
 # best-effort deprovision. Mirrors the defensive cleanup in
 # IsolationSessionRunner::execute -- failed runs do not leak Indefinite-
@@ -342,8 +280,8 @@ $script:sandboxId = $null
 $deprovisionedOk = $false
 try {
 
-    # Test 1: provision returns iso:wxc-<8-hex> and a backend_unavailable-free
-    # envelope.
+    # Test 1: provision returns iso:<opaque agent user name> and a
+    # backend_unavailable-free envelope.
     Run-StateAwareTest "provision (sandbox_id format)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
         $envObj = Parse-Envelope -Stdout $r.Stdout
@@ -357,8 +295,12 @@ try {
             Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
             $script:sandboxId = $envObj.result.sandboxId
             $agentUserName = $envObj.result.metadata.agentUserName
-            Assert-True ($script:sandboxId -match '^iso:wxc-[0-9a-f]{8}$') "sandbox_id matches iso:wxc-<8-hex> ($script:sandboxId)"
+            $agentUserSid = $envObj.result.metadata.agentUserSid
+            $workspacePath = $envObj.result.metadata.ephemeralWorkspacePath
+            Assert-True ($script:sandboxId -match '^iso:.+$') "sandbox_id is iso:<opaque agent user name> ($script:sandboxId)"
             Assert-True ($null -ne $agentUserName) "metadata.agentUserName is present ($agentUserName)"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($agentUserSid)) "metadata.agentUserSid is present ($agentUserSid)"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($workspacePath)) "metadata.ephemeralWorkspacePath is present ($workspacePath)"
         }
     } | Out-Null
 
@@ -398,20 +340,7 @@ try {
         }
     }
 
-    # Test 2b: control -- the main sandbox has no fs grants, so the agent
-    # user must NOT be able to read C:\mxc_share_test\ro\marker.txt. The
-    # locked-down DACL (no Authenticated Users / Users) is what makes this
-    # check meaningful: without it the agent would inherit read access via
-    # default group membership. Pairs with Lifecycle B's B5, where the same
-    # read SUCCEEDS because B's sandbox was provisioned with readonlyPaths.
-    if ($startedOk) {
-        Run-StateAwareTest "control (unshared path inaccessible)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_readonly.json' -SandboxId $script:sandboxId -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (read denied)"
-        } | Out-Null
-    }
-
-    # Test 2c: start rejects requests that carry filesystem policy. Filesystem
+    # Test 2b: start rejects requests that carry filesystem policy. Filesystem
     # policy is bound to provision and immutable thereafter; a non-empty
     # readwritePaths on a start request must be rejected with policy_validation.
     if ($startedOk) {
@@ -466,13 +395,12 @@ try {
         } | Out-Null
     }
 
-    # Test 4: filesystem state continuity across separate wxc-exec invocations
-    # against the same sandbox_id. exec #1 writes a marker file to the agent
-    # user's TEMP, exec #2 reads it back. Each exec is a fresh wxc-exec
-    # process consuming the same sandbox_id, exercising the cross-process
-    # state-aware path.
+    # Test 4: sandbox-internal %TEMP% continuity across separate wxc-exec
+    # invocations against the same sandbox_id. exec #1 writes a marker file
+    # to the agent user's TEMP, exec #2 reads it back. Each exec is a fresh
+    # wxc-exec process consuming the same sandbox_id.
     if ($execedOk) {
-        Run-StateAwareTest "multi-exec (filesystem state continuity)" {
+        Run-StateAwareTest "multi-exec (%TEMP% state continuity)" {
             $w = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_marker.json' -SandboxId $script:sandboxId -Experimental
             Assert-True ($w.ExitCode -eq 0) "exec #1 (write) exit code = 0"
             $rd = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_marker.json' -SandboxId $script:sandboxId -Experimental
@@ -678,374 +606,27 @@ try {
     }
 }
 
-# ---------------- Lifecycle B: Filesystem policy ----------------
 
-# A separate sandbox provisioned with both readwritePaths and readonlyPaths,
-# exercising the full read/write semantics of share_folders end-to-end:
-#   - rw grant: agent can write a file the host then sees, and read it back
-#   - ro grant: agent can read pre-populated host content, but cannot write
-#   - no grant: a sibling subdir (restricted) under the same parent is
-#     inaccessible -- proves grants are path-specific, not blanket on parent
-$script:fsSandboxId = $null
-$fsDeprovisionedOk = $false
-try {
-    $fsProvisionedOk = Run-StateAwareTest "filesystem: provision (rw + ro)" {
-        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
-        $envObj = Parse-Envelope -Stdout $r.Stdout
-        $arm = Envelope-Arm $envObj
-        if ($arm -ne 'result') {
-            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-            Assert-True $false "filesystem provision returned a result envelope"
-        } else {
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            $script:fsSandboxId = $envObj.result.sandboxId
-            Assert-True ($script:fsSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
-                "sandbox_id matches iso:wxc-<8-hex> ($script:fsSandboxId)"
-            $agentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
-            Write-Host "  filesystem provisioned: agentUserName=$agentUserName" -ForegroundColor DarkGray
-        }
-    }
+# ---------------- Lifecycle B: Filesystem policy rejection ----------------
 
-    $fsStartedOk = $false
-    if ($fsProvisionedOk) {
-        $fsStartedOk = Run-StateAwareTest "filesystem: start" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fsSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filesystem start returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-    }
+# Filesystem policy is no longer accepted at any lifecycle phase. Provision
+# with readwrite/readonly policy now fails before creating a sandbox, so no
+# cleanup is needed.
+Run-StateAwareTest "filesystem: provision rejected" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+} | Out-Null
 
-    if ($fsStartedOk) {
-        Run-StateAwareTest "filesystem: exec write-to-rw" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_shared.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 (agent wrote successfully)"
-            Assert-True ($r.Stdout -match 'shared-write-content') `
-                "agent's own type-back read succeeded ('shared-write-content' in stdout)"
-            $hostPath = Join-Path $script:TestRoot 'rw\agent_wrote.txt'
-            $hostExists = Test-Path $hostPath
-            Assert-True $hostExists "host sees the file the agent wrote ($hostPath)"
-            if ($hostExists) {
-                $hostContent = Get-Content $hostPath -Raw
-                Assert-True ($hostContent -match 'shared-write-content') `
-                    "host file contains 'shared-write-content'"
-            }
-        } | Out-Null
 
-        Run-StateAwareTest "filesystem: exec read-from-rw" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_shared.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Assert-True ($r.Stdout -match 'shared-write-content') `
-                "agent reads back the file it wrote earlier"
-        } | Out-Null
 
-        Run-StateAwareTest "filesystem: exec read-from-ro" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_readonly.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            $expected = [regex]::Escape($script:RoMarkerContent)
-            Assert-True ($r.Stdout -match $expected) `
-                "agent reads pre-populated marker.txt ('$($script:RoMarkerContent)')"
-        } | Out-Null
+# ---------------- Lifecycle D: Entra user-bundle shape validation ----------------
 
-        Run-StateAwareTest "filesystem: exec write-to-ro denied" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_readonly_denied.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (write to read-only path failed)"
-            $hostPath = Join-Path $script:TestRoot 'ro\agent_should_fail.txt'
-            Assert-True (-not (Test-Path $hostPath)) `
-                "host did not see the file (write was actually denied, not silently swallowed)"
-        } | Out-Null
-
-        Run-StateAwareTest "filesystem: exec read-from-restricted denied" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_restricted.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (read from unshared sibling failed)"
-            $stdoutText = if ($null -eq $r.Stdout) { "" } else { [string]$r.Stdout }
-            $leaked = $stdoutText.Contains($script:RestrictedMarkerContent)
-            Assert-True (-not $leaked) `
-                "stdout does NOT contain the restricted marker content (grant is path-specific, not blanket)"
-        } | Out-Null
-    }
-
-    $fsStoppedOk = $false
-    if ($fsStartedOk) {
-        $fsStoppedOk = Run-StateAwareTest "filesystem: stop" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fsSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filesystem stop returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            }
-        }
-    }
-
-    if ($fsStoppedOk) {
-        $fsDeprovPassed = Run-StateAwareTest "filesystem: deprovision" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fsSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filesystem deprovision returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            }
-        }
-        if ($fsDeprovPassed) { $fsDeprovisionedOk = $true }
-    }
-} finally {
-    if ($null -ne $script:fsSandboxId -and -not $fsDeprovisionedOk) {
-        Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of $script:fsSandboxId" -ForegroundColor DarkGray
-        try {
-            $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fsSandboxId -Experimental
-        } catch {
-            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
-        }
-    }
-}
-
-# ---------------- Lifecycle BF: filesystem-policy path filter ----------------
-#
-# Verifies the wxc-exec filesystem-policy path filter (MXC issue #330).
-# Provisions with a mix of protected (drive root, C:\Windows) and
-# non-protected (C:\mxc_filter_test\rw) paths in readwritePaths. Expected:
-# provision succeeds (the filter is silent -- no error returned, no
-# filter-specific metadata field added), the protected paths get NO new
-# agent ACE (filter dropped them before ShareFolderBatchAsync), and the
-# non-protected path receives the agent's ACE as normal (positive control:
-# legitimate path not accidentally dropped).
-#
-# Test-dir setup happens at file scope alongside $script:TestRoot so the
-# outer try-finally can clean both up between runs; without that cleanup
-# a stale $script:FilterTestRoot from a prior run causes Setup-LockedDownTestDir
-# to fail with SeSecurityPrivilege (Set-Acl on an existing
-# inheritance-disabled directory writes the SACL slot, which non-elevated
-# admins cannot do).
-
-# Translates a local-account name to its SID. Returns $null if the
-# translation fails (e.g., the user no longer exists).
-function Get-LocalAccountSid {
-    param([string]$Name)
-    try {
-        $nt = New-Object System.Security.Principal.NTAccount($Name)
-        $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
-    } catch {
-        $null
-    }
-}
-
-# Returns $true if the ACL on $Path has any access rule whose
-# IdentityReference translates to $TargetSid.
-function Test-AclContainsSid {
-    param([string]$Path, [string]$TargetSid)
-    $acl = Get-Acl $Path
-    foreach ($ace in $acl.Access) {
-        try {
-            $aceSid = $ace.IdentityReference.Translate(
-                [System.Security.Principal.SecurityIdentifier]).Value
-            if ($aceSid -eq $TargetSid) { return $true }
-        } catch {
-            # IdentityReference may be untranslatable (orphan SID etc.); skip.
-        }
-    }
-    $false
-}
-
-$script:filterSandboxId = $null
-$script:filterAgentUserName = $null
-$filterDeprovisionedOk = $false
-try {
-    $filterProvisionedOk = Run-StateAwareTest "filter: provision (protected + non-protected paths)" {
-        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filter.json' -Experimental
-        $envObj = Parse-Envelope -Stdout $r.Stdout
-        $arm = Envelope-Arm $envObj
-        if ($arm -ne 'result') {
-            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-            Assert-True $false "filter provision returned a result envelope (filter is silent -- no error expected)"
-        } else {
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 (filter dropped protected paths silently)"
-            $script:filterSandboxId = $envObj.result.sandboxId
-            Assert-True ($script:filterSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
-                "sandbox_id matches iso:wxc-<8-hex> ($script:filterSandboxId)"
-            $script:filterAgentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
-            Write-Host "  filter test provisioned: agentUserName=$($script:filterAgentUserName)" -ForegroundColor DarkGray
-        }
-    }
-
-    if ($filterProvisionedOk -and $script:filterAgentUserName -and $script:filterAgentUserName -ne '<absent>') {
-        $filterAgentSid = Get-LocalAccountSid -Name $script:filterAgentUserName
-
-        Run-StateAwareTest "filter: agent user name translates to SID" {
-            Assert-True ($null -ne $filterAgentSid) `
-                "translated '$($script:filterAgentUserName)' to SID ($filterAgentSid)"
-        } | Out-Null
-
-        if ($null -ne $filterAgentSid) {
-            Run-StateAwareTest "filter: protected drive root receives no agent ACE" {
-                Assert-True (-not (Test-AclContainsSid -Path 'C:\' -TargetSid $filterAgentSid)) `
-                    "agent SID is NOT in ACL of C:\ (drive root filter dropped the entry)"
-            } | Out-Null
-
-            Run-StateAwareTest "filter: protected SystemRoot receives no agent ACE" {
-                Assert-True (-not (Test-AclContainsSid -Path 'C:\Windows' -TargetSid $filterAgentSid)) `
-                    "agent SID is NOT in ACL of C:\Windows (SystemRoot filter dropped the entry)"
-            } | Out-Null
-
-            Run-StateAwareTest "filter: non-protected path receives agent ACE (positive control)" {
-                $nonProtected = Join-Path $script:FilterTestRoot 'rw'
-                Assert-True (Test-AclContainsSid -Path $nonProtected -TargetSid $filterAgentSid) `
-                    "agent SID IS in ACL of $nonProtected (filter passed legitimate path through)"
-            } | Out-Null
-        }
-    }
-
-    if ($filterProvisionedOk) {
-        $filterDeprovPassed = Run-StateAwareTest "filter: deprovision" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:filterSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filter deprovision returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            }
-        }
-        if ($filterDeprovPassed) { $filterDeprovisionedOk = $true }
-    }
-} finally {
-    if ($null -ne $script:filterSandboxId -and -not $filterDeprovisionedOk) {
-        Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of $script:filterSandboxId" -ForegroundColor DarkGray
-        try {
-            $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:filterSandboxId -Experimental
-        } catch {
-            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
-        }
-    }
-}
-
-# ---------------- Lifecycle C: Medium configurationId ----------------
-
-# A separate, throwaway sandbox that exercises the Medium config-id end-to-end.
-# Lifecycle A defaulted to Composable (no `experimental.isolation_session.start`
-# block). This lifecycle proves Medium also works on the target OS build:
-# provision -> start with configurationId=medium -> one echo exec -> stop ->
-# deprovision. Independent of Lifecycle A's sandbox so a failure here does not
-# pollute the main lifecycle's results.
-$script:mediumSandboxId = $null
-$mediumDeprovisionedOk = $false
-try {
-    Run-StateAwareTest "Medium: provision" {
-        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
-        $envObj = Parse-Envelope -Stdout $r.Stdout
-        $arm = Envelope-Arm $envObj
-        if ($arm -ne 'result') {
-            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-            Assert-True $false "Medium provision returned a result envelope"
-        } else {
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            $script:mediumSandboxId = $envObj.result.sandboxId
-            Assert-True ($script:mediumSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
-                "sandbox_id matches iso:wxc-<8-hex> ($script:mediumSandboxId)"
-            $agentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
-            Write-Host "  Medium provisioned: agentUserName=$agentUserName" -ForegroundColor DarkGray
-        }
-    } | Out-Null
-
-    $mediumStartedOk = $false
-    if ($null -ne $script:mediumSandboxId) {
-        $mediumStartedOk = Run-StateAwareTest "Medium: start (configurationId=medium)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_medium.json' -SandboxId $script:mediumSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-                Assert-True $false "Medium start returned a result envelope"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-    }
-
-    $mediumExecedOk = $false
-    if ($mediumStartedOk) {
-        $mediumExecedOk = Run-StateAwareTest "Medium: exec (basic echo)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_basic.json' -SandboxId $script:mediumSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            Assert-True ($r.Stdout -match 'state-aware-exec-marker') `
-                "stdout contains the script's output (Medium config supports process launch)"
-        }
-    }
-
-    $mediumStoppedOk = $false
-    if ($mediumExecedOk) {
-        $mediumStoppedOk = Run-StateAwareTest "Medium: stop" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:mediumSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-                Assert-True $false "Medium stop returned a result envelope"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-    }
-
-    if ($mediumStoppedOk) {
-        $mediumDeprovPassed = Run-StateAwareTest "Medium: deprovision" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:mediumSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-                Assert-True $false "Medium deprovision returned a result envelope"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-        if ($mediumDeprovPassed) { $mediumDeprovisionedOk = $true }
-    }
-} finally {
-    if ($null -ne $script:mediumSandboxId -and -not $mediumDeprovisionedOk) {
-        Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of $script:mediumSandboxId" -ForegroundColor DarkGray
-        try {
-            $cleanupResult = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:mediumSandboxId -Experimental
-            if ($cleanupResult.ExitCode -eq 0) {
-                Write-Host "  cleanup deprovision succeeded" -ForegroundColor DarkGray
-            } else {
-                Write-Host "  cleanup deprovision exit $($cleanupResult.ExitCode); stdout: $($cleanupResult.Stdout)" -ForegroundColor DarkGray
-            }
-        } catch {
-            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
-        }
-    }
-}
-
-# ---------------- Lifecycle D: Entra agent validation rejections ----------------
-
-# Validation runs before any OS-side call, so these tests never reach the
-# IsoEnvBroker service and need no sandbox cleanup. They cover the four
-# rejection cells of the validate_provision/validate_start matrix added
-# alongside the v2 binding wiring: malformed user shape at provision, and
-# the three sandboxId-vs-user mismatches at start.
+# These validation tests reject malformed user bundles at provision before a
+# sandbox is created, so no cleanup is needed.
 
 Run-StateAwareTest "provision (user.upn malformed: missing @)" {
     $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_malformed_upn.json' -Experimental
@@ -1067,44 +648,14 @@ Run-StateAwareTest "provision (user.wamToken empty)" {
     Assert-True ($msg.Contains('wamToken')) "error.message mentions 'wamToken' (got '$msg')"
 } | Out-Null
 
-Run-StateAwareTest "start (Entra sandbox without user)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_entra_missing_user.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('Entra sandbox requires user')) "error.message mentions Entra-requires-user (got '$msg')"
-} | Out-Null
 
-Run-StateAwareTest "start (local sandbox with user)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_local_with_user.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('not allowed for local sandbox')) "error.message mentions local-sandbox restriction (got '$msg')"
-} | Out-Null
 
-Run-StateAwareTest "start (user.upn mismatches sandboxId)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_upn_mismatch.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('does not match sandboxId')) "error.message mentions sandboxId mismatch (got '$msg')"
-} | Out-Null
 
 # ---------------- Lifecycle E: Simultaneous isolation-session sandboxes ----------------
 #
 # Three concurrently-provisioned sandboxes (A, B, C) verify that
-# deprovisioning one does not tear down the others. The runner does not
-# call UnregisterAppAsync (see IsolationSessionManager::unregister_client)
-# so the per-user hardcoded `regid` registration survives a deprovision of
-# any individual sandbox. Without that property the first deprovision
-# would break every still-running concurrent sandbox.
+# deprovisioning one does not tear down the others. The first deprovision
+# must not break every still-running concurrent sandbox.
 #
 # Per-agent state isolation is verified by having each sandbox write a
 # unique marker file into its agent's %TEMP% and asserting that each
@@ -1171,7 +722,7 @@ try {
         $script:saSandboxA = Provision-LifecycleESandbox -Label "A"
         Assert-True ($null -ne $script:saSandboxA) "saSandboxA is non-null"
         if ($null -ne $script:saSandboxA) {
-            Assert-True ($script:saSandboxA -match '^iso:wxc-[0-9a-f]{8}$') "saSandboxA matches expected format ($script:saSandboxA)"
+            Assert-True ($script:saSandboxA -match '^iso:.+$') "saSandboxA is iso:<opaque agent user name> ($script:saSandboxA)"
         }
     } | Out-Null
     Run-StateAwareTest "Lifecycle E: provision B" {
@@ -1247,8 +798,8 @@ try {
             Assert-True (-not $out.Contains("marker_B.txt")) "C does not see marker_B.txt"
         } | Out-Null
 
-        # E5: Stop + deprovision B. The regid leak means the registration
-        # survives B's deprovision and A / C remain functional.
+        # E5: Stop + deprovision B. Each sandbox is a distinct OS agent user,
+        # so deprovisioning B removes only B's user; A / C remain functional.
         Run-StateAwareTest "Lifecycle E: stop B" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxB -Experimental
             Assert-True ($r.ExitCode -eq 0) "stop B exit 0"
@@ -1260,17 +811,17 @@ try {
         if ($bDeprovPassed) { $saBDeprov = $true }
 
         # E6: Regression check -- A and C remain functional after B
-        # deprovisioned. Would fail without the regid leak.
+        # deprovisioned. Per-user isolation means B's teardown cannot affect them.
         Run-StateAwareTest "Lifecycle E: A still functional after B deprov" {
             $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxA
             $out = [string]$r.Stdout
-            Assert-True ($r.ExitCode -eq 0) "list exit 0 (regid not torn down by B's deprovision)"
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (A's agent user not torn down by B's deprovision)"
             Assert-True ($out.Contains("marker_A.txt")) "A still sees marker_A.txt"
         } | Out-Null
         Run-StateAwareTest "Lifecycle E: C still functional after B deprov" {
             $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxC
             $out = [string]$r.Stdout
-            Assert-True ($r.ExitCode -eq 0) "list exit 0 (regid not torn down by B's deprovision)"
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (C's agent user not torn down by B's deprovision)"
             Assert-True ($out.Contains("marker_C.txt")) "C still sees marker_C.txt"
         } | Out-Null
 
@@ -1305,8 +856,8 @@ try {
         if ($cDeprovPassed) { $saCDeprov = $true }
     }
 
-    # E10: Fresh provision D after all three torn down -- the leaked regid
-    # must not poison new sandboxes either.
+    # E10: Fresh provision D after all three torn down -- per-user isolation
+    # means new sandboxes are unaffected by the earlier teardowns.
     Run-StateAwareTest "Lifecycle E: provision D after all torn down" {
         $script:saSandboxD = Provision-LifecycleESandbox -Label "D"
         Assert-True ($null -ne $script:saSandboxD) "saSandboxD is non-null"
@@ -1346,15 +897,154 @@ try {
     }
 }
 
-} finally {
-    # Outer-try finally: remove the locked-down test trees. Runs even if a
-    # test panics so we don't leak the directories between runs. Cleanup is
-    # necessary: re-running Setup-LockedDownTestDir on an existing locked-down
-    # directory fails non-elevated because Set-Acl tries to write the SACL
-    # slot, which requires SeSecurityPrivilege.
-    Remove-Item -Recurse -Force $script:TestRoot -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force $script:FilterTestRoot -ErrorAction SilentlyContinue
+
+# ---------------- Lifecycle F: Ephemeral workspace sharing ----------------
+#
+# Provision now returns `ephemeralWorkspacePath` -- a directory shared between
+# the calling user (this harness) and the isolated agent user. This group
+# verifies the sharing + isolation contract end to end:
+#   - the caller can stage a file INTO a session through its workspace,
+#   - a session can hand a file back to the caller through its workspace,
+#   - an isolated user can access ONLY its own workspace, not a peer's,
+#   - the workspace is deleted when the sandbox is deprovisioned.
+#
+# It also exercises `agentUserSid` (asserted present at provision).
+
+$script:fA = $null   # @{ SandboxId; Workspace; Sid }
+$script:fB = $null
+$fADeprov = $false
+$fBDeprov = $false
+
+# Provision a sandbox and capture its workspace path + agent SID from the
+# provision metadata. Returns $null on failure.
+function Provision-LifecycleFSandbox {
+    param([string]$Label)
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    if ((Envelope-Arm $envObj) -ne 'result') {
+        Write-Host "  $Label provision arm: $(Envelope-Arm $envObj)" -ForegroundColor Red
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        return $null
+    }
+    $meta = $envObj.result.metadata
+    $obj = @{
+        SandboxId = [string]$envObj.result.sandboxId
+        Workspace = if ($meta) { [string]$meta.ephemeralWorkspacePath } else { '' }
+        Sid       = if ($meta) { [string]$meta.agentUserSid } else { '' }
+    }
+    Write-Host "  $Label provisioned: sandboxId=$($obj.SandboxId) workspace=$($obj.Workspace) sid=$($obj.Sid)" -ForegroundColor DarkGray
+    return $obj
 }
+
+# Exec an arbitrary command inside a started session.
+function Exec-InSession {
+    param([string]$SandboxId, [string]$CommandLine)
+    $req = @{
+        phase     = 'exec'
+        sandboxId = $SandboxId
+        process   = @{ commandLine = $CommandLine; timeout = 30000 }
+    }
+    Invoke-StateAware -Request $req -Experimental
+}
+
+try {
+    Run-StateAwareTest "Lifecycle F: provision A + B with workspaces" {
+        $script:fA = Provision-LifecycleFSandbox -Label "F-A"
+        $script:fB = Provision-LifecycleFSandbox -Label "F-B"
+        Assert-True ($null -ne $script:fA) "A provisioned"
+        Assert-True ($null -ne $script:fB) "B provisioned"
+        if ($null -ne $script:fA -and $null -ne $script:fB) {
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fA.Workspace)) "A ephemeralWorkspacePath present ($($script:fA.Workspace))"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fB.Workspace)) "B ephemeralWorkspacePath present ($($script:fB.Workspace))"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fA.Sid)) "A agentUserSid present ($($script:fA.Sid))"
+            Assert-True ($script:fA.Workspace -ne $script:fB.Workspace) "A and B have distinct workspaces"
+            # The caller (this harness == the provisioning user) can access every
+            # concurrent sandbox's workspace directory.
+            Assert-True (Test-Path -LiteralPath $script:fA.Workspace) "caller can access A's workspace dir"
+            Assert-True (Test-Path -LiteralPath $script:fB.Workspace) "caller can access B's workspace dir"
+        }
+    } | Out-Null
+
+    if ($null -ne $script:fA -and $null -ne $script:fB -and $script:fA.Workspace -and $script:fB.Workspace) {
+        Run-StateAwareTest "Lifecycle F: start A + B" {
+            $rsa = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rsa.ExitCode -eq 0) "start A exit 0"
+            $rsb = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rsb.ExitCode -eq 0) "start B exit 0"
+        } | Out-Null
+
+        # F2: caller -> session. The caller stages a file into A's workspace;
+        # session A reads it back.
+        Run-StateAwareTest "Lifecycle F: caller shares a file into session A" {
+            $wsA = $script:fA.Workspace
+            Set-Content -LiteralPath (Join-Path $wsA 'caller_to_A.txt') -Value 'from-caller' -Encoding Ascii
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c type `"$wsA\caller_to_A.txt`""
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "session A reads the caller's file (exit 0)"
+            Assert-True ($out.Contains('from-caller')) "session A sees caller_to_A.txt content"
+        } | Out-Null
+
+        # F3: session -> caller. Session A writes into its workspace; the caller
+        # reads it back on the host.
+        Run-StateAwareTest "Lifecycle F: session A shares a file back to the caller" {
+            $wsA = $script:fA.Workspace
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c echo from-session-A> `"$wsA\A_to_caller.txt`""
+            Assert-True ($r.ExitCode -eq 0) "session A writes to its workspace (exit 0)"
+            $backFile = Join-Path $wsA 'A_to_caller.txt'
+            Assert-True (Test-Path -LiteralPath $backFile) "caller sees the file session A wrote"
+            $content = Get-Content -LiteralPath $backFile -Raw -ErrorAction SilentlyContinue
+            Assert-True ($content -match 'from-session-A') "caller reads session A's content"
+        } | Out-Null
+
+        # F4: cross-session isolation. The caller stages a marker into B's
+        # workspace; session A must NOT be able to read B's workspace.
+        Run-StateAwareTest "Lifecycle F: session A cannot access session B's workspace" {
+            $wsB = $script:fB.Workspace
+            Set-Content -LiteralPath (Join-Path $wsB 'caller_to_B.txt') -Value 'B-only' -Encoding Ascii
+            Assert-True (Test-Path -LiteralPath (Join-Path $wsB 'caller_to_B.txt')) "caller can stage into B's workspace"
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c type `"$wsB\caller_to_B.txt`""
+            $out = [string]$r.Stdout
+            Assert-True (-not $out.Contains('B-only')) "session A does NOT see B's workspace content"
+            Assert-True ($r.ExitCode -ne 0) "session A's read of B's workspace fails (access denied)"
+        } | Out-Null
+
+        # F5: teardown deletes the workspace.
+        $script:fADeprovOk = $false
+        Run-StateAwareTest "Lifecycle F: deprovision A deletes its workspace" {
+            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rstop.ExitCode -eq 0) "stop A exit 0"
+            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rdep.ExitCode -eq 0) "deprovision A exit 0"
+            if ($rdep.ExitCode -eq 0) { $script:fADeprovOk = $true }
+            Assert-True (-not (Test-Path -LiteralPath $script:fA.Workspace)) "A's workspace dir is gone after deprovision"
+        } | Out-Null
+        if ($script:fADeprovOk) { $fADeprov = $true }
+
+        $script:fBDeprovOk = $false
+        Run-StateAwareTest "Lifecycle F: deprovision B" {
+            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rstop.ExitCode -eq 0) "stop B exit 0"
+            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rdep.ExitCode -eq 0) "deprovision B exit 0"
+            if ($rdep.ExitCode -eq 0) { $script:fBDeprovOk = $true }
+        } | Out-Null
+        if ($script:fBDeprovOk) { $fBDeprov = $true }
+    }
+} finally {
+    foreach ($entry in @(
+            @{ obj = $script:fA; done = $fADeprov; label = 'F-A' },
+            @{ obj = $script:fB; done = $fBDeprov; label = 'F-B' }
+        )) {
+        if ($null -ne $entry.obj -and -not $entry.done) {
+            Write-Host ""
+            Write-Host "[cleanup] best-effort deprovision of Lifecycle F sandbox $($entry.label) ($($entry.obj.SandboxId))" -ForegroundColor DarkGray
+            try {
+                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.obj.SandboxId -Experimental
+            } catch { }
+        }
+    }
+}
+
 
 # ---------------- Summary ----------------
 

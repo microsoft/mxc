@@ -11,7 +11,7 @@ windows-collections = "0.3"
 windows-future = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true }
+windows = { workspace = true, features = ["Foundation"] }
 
 [build-dependencies]
 semver = "1"
