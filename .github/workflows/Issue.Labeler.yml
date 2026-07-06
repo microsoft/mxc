@@ -48,12 +48,15 @@ jobs:
             // "linux network firewall" issue -> Soham + Branden); all matching
             // owners are added. Existing assignees are preserved.
             const owners = [
-              // Branden - networking / network policies
-              { login: 'bbonaby',      regex: /\b(network|networking|firewall|iptables|proxy|dns|tcp\/?ip|\budp\b|\btcp\b|ipv[46]|network polic)/i },
-              // Soham - Linux family backends
-              { login: 'SohamDas2021', regex: /\b(linux|wslc|wsl2?|lxc|bubblewrap|bwrap)\b/i },
+              // Branden - networking / network policies + AppContainer / BaseContainer /
+              // process isolation/container (co-owner with Jeff and Martin).
+              { login: 'bbonaby',      regex: /\b(network|networking|firewall|iptables|proxy|dns|tcp\/?ip|\budp\b|\btcp\b|ipv[46]|network polic|appcontainer|base ?container|process ?isolation|process ?container)/i },
+              // Soham - Linux family backends; also proxy / iptables.
+              { login: 'SohamDas2021', regex: /\b(linux|wslc|wsl2?|lxc|bubblewrap|bwrap|proxy|iptables)\b/i },
               // Jeff - AppContainer / BaseContainer / process isolation
               { login: 'jsidewhite',   regex: /\b(appcontainer|base ?container|process ?isolation|process ?container)\b/i },
+              // Martin - AppContainer / BaseContainer / process isolation (co-owner with Jeff and Branden).
+              { login: 'MGudgin',      regex: /\b(appcontainer|base ?container|process ?isolation|process ?container)\b/i },
               // Huzaifa - micro-VM backends + Windows Sandbox
               { login: 'huzaifa-d',    regex: /\b(micro-?vm|nanvix|hyperlight|windows ?sandbox)\b/i },
               // Adib - session isolation
@@ -68,15 +71,32 @@ jobs:
             const haystack = `${issue.title || ''}\n${issue.body || ''}`;
 
             // 1. Assign area owners (preserving any existing assignees).
+            //    GitHub caps issues at 10 assignees; adding past that returns an
+            //    error. Cap to the remaining slots and treat assignment failures
+            //    as non-fatal so a full or re-edited issue never reds the job.
+            const MAX_ASSIGNEES = 10;
             const existing = new Set((issue.assignees || []).map(a => a.login));
-            const toAdd = owners
+            const remainingSlots = Math.max(0, MAX_ASSIGNEES - existing.size);
+            const matched = owners
               .filter(o => o.regex.test(haystack))
               .map(o => o.login)
               .filter(login => !existing.has(login));
+            const toAdd = matched.slice(0, remainingSlots);
 
+            let assigned = [];
+            if (toAdd.length < matched.length) {
+              core.info(`Assignee cap (${MAX_ASSIGNEES}) reached; skipping: ${matched.slice(remainingSlots).join(', ')}`);
+            }
             if (toAdd.length > 0) {
               core.info(`Assigning: ${toAdd.join(', ')}`);
-              await github.rest.issues.addAssignees({ owner, repo, issue_number, assignees: toAdd });
+              try {
+                await github.rest.issues.addAssignees({ owner, repo, issue_number, assignees: toAdd });
+                assigned = toAdd;
+              } catch (e) {
+                // Never fail triage over assignment (e.g. cap reached, invalid
+                // assignee, transient error); labels + Needs-Triage still apply.
+                core.warning(`addAssignees failed (${e.status || 'unknown'}): ${e.message}`);
+              }
             } else {
               core.info('No new area owners matched; leaving assignees unchanged.');
             }
@@ -89,7 +109,7 @@ jobs:
             const current = await github.rest.issues.listLabelsOnIssue({ owner, repo, issue_number });
             const labelNames = current.data.map(l => l.name);
             const hasAreaLabel = labelNames.some(n => /^(OS-|Container-|Area-)/.test(n));
-            const hasAssignee = toAdd.length > 0 || existing.size > 0;
+            const hasAssignee = assigned.length > 0 || existing.size > 0;
 
             if (labelNames.includes('Needs-Triage') && (hasAreaLabel || hasAssignee)) {
               core.info('Auto-triaged; removing Needs-Triage.');
