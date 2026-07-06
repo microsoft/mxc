@@ -33,7 +33,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 
 The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`, and `seatbelt`) do not require experimental mode; Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for the default backend, or the lxc toolset for the lxc backend. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI flag.
 
-For which filesystem, network, and UI-restriction policy aspects the Windows `processcontainer` backend can enforce on each Windows release (Nickel / Germanium / Germanium+), see [Windows OS-version policy support](./docs/base-process-container/os-version-support.md).
+For which filesystem, network, and UI-restriction policy aspects the Windows `processcontainer` backend can enforce on each Windows release (22H2 / 24H2 / 25H2+), see [Windows OS-version policy support](./docs/process-container/os-version-support.md).
 
 
 ### Requirements
@@ -227,7 +227,7 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 | [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
 | [docs/sandbox-policy/v1/policy.md](docs/sandbox-policy/v1/policy.md) | Sandbox policy v1 specification |
-| [docs/base-process-container/guide.md](docs/base-process-container/guide.md) | Windows AppContainer / BaseContainer guide |
+| [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |
 | [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md) | LXC backend (Linux) |
 | [docs/bwrap-support/bubblewrap-backend.md](docs/bwrap-support/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
 | [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md) | Seatbelt backend (macOS) |

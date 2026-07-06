@@ -87,7 +87,7 @@ the OS engineer.
 > flows through all layers.
 
 For detailed OS contribution steps (FlatBuffer schema, processmodel,
-BaseContainerRunner), see [base-process-container/guide.md](base-process-container/guide.md).
+BaseContainerRunner), see [process-container/guide.md](process-container/guide.md).
 
 ## Step 3+: Implementation
 

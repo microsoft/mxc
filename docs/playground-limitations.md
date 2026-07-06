@@ -1,8 +1,8 @@
 # MXC Playground — Known Limitations & Compatibility
 
 > For a per-release policy-support matrix (filesystem, network, and UI
-> restrictions across Nickel / Germanium / Germanium+), see
-> [Windows OS-version policy support](./base-process-container/os-version-support.md).
+> restrictions across 22H2 / 24H2 / 25H2+), see
+> [Windows OS-version policy support](./process-container/os-version-support.md).
 
 ## Platform Support
 
@@ -10,7 +10,7 @@
 |---------|---------------------------|------------------------------|-------|
 | AppContainer (v0.4.0) | ✅ Works | ✅ Works | N/A |
 | BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works when the BaseContainer feature is enabled; otherwise falls back to AppContainer+DACL | N/A |
-| BFS filesystem brokering | ❌ Broker helper not available | ✅ Works | N/A |
+| BFS filesystem brokering | ❌ Broker helper not available | ⚠️ Disabled (`tier2_bfs` off; `bfscfg.exe` risks host hang) | N/A |
 | Proxy (AppContainer) | ✅ Works (needs admin for shim) | ✅ Works | N/A |
 | Proxy (BaseContainer) | N/A | ⚠️ WinHTTP only, see below | N/A |
 | LXC containers | N/A | N/A | ✅ Works |

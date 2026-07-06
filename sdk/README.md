@@ -193,7 +193,7 @@ console.log(result.stdout);
 
 | Backend | Intent | Platforms | Stable? | Guide |
 | --- | --- | --- | --- | --- |
-| `processcontainer` | `process` | Windows | ✅ | [`docs/base-process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/base-process-container/guide.md) |
+| `processcontainer` | `process` | Windows | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
 | `bubblewrap` | `process` | Linux | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
 | `lxc` | (concrete only) | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
 | `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/macos-support/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md) |

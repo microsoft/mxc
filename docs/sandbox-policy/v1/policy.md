@@ -393,7 +393,7 @@ Only `"process"` is end-to-end implemented today.
 > See [authoring-a-new-feature.md](../../authoring-a-new-feature.md) for the full workflow and
 > decision tree.
 >
-> See [base-process-container/guide.md](../../base-process-container/guide.md) for OS-level implementation
+> See [process-container/guide.md](../../process-container/guide.md) for OS-level implementation
 > details.
 
 ---
@@ -532,7 +532,7 @@ Object UI restriction flags.
 > [authoring-a-new-feature.md](../../authoring-a-new-feature.md)
 > for the full workflow.
 > See
-> [base-process-container/guide.md](../../base-process-container/guide.md) for
+> [process-container/guide.md](../../process-container/guide.md) for
 > the executor and OS implementation guide.
 
 ---

@@ -141,8 +141,9 @@ Core references:
 
 Per-backend guides:
 
-- `docs/base-process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
-- `docs/base-process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
+- `docs/process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
+- `docs/process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
+- `docs/process-container/os-version-support.md` — per-Windows-release policy-support matrix (filesystem / network / UI)
 - `docs/lxc-support/lxc-backend.md` — LXC container backend (Linux)
 - `docs/macos-support/seatbelt-backend.md` — macOS Seatbelt backend
 - `docs/windows-sandbox/windows-sandbox.md` / `docs/windows-sandbox/windows-sandbox-reference.md` — Windows Sandbox backend

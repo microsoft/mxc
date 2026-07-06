@@ -1,14 +1,11 @@
-# BaseProcessContainer: Adding OS Features
+# Process Container: Adding OS Features
 
 This guide covers adding new OS-level features that flow
-through MXC's BaseProcessContainer pipeline. It is specific
+through MXC's process container pipeline. It is specific
 to the Windows process container backend.
 
-For other backends (LXC, microVM, etc.), the pattern is
-similar but the OS layer differs.
-
 For which policy aspects this backend can enforce on each Windows release
-(Nickel / Germanium / Germanium+), see
+(22H2 / 24H2 / 25H2+), see
 [Windows OS-version policy support](./os-version-support.md).
 
 ## Prerequisites
