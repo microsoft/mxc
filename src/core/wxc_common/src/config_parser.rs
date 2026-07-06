@@ -1017,14 +1017,11 @@ fn convert_wire_config(
         } else {
             None
         };
-        let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
-            let mut config = IsolationSessionConfig::default();
-            if let Some(id) = as_cfg.configuration_id {
-                config.configuration_id = id.into();
-            }
-            config.user = as_cfg.user.map(Into::into);
-            config
-        });
+        let isolation_session = raw_exp
+            .isolation_session
+            .map(|as_cfg| IsolationSessionConfig {
+                user: as_cfg.user.map(Into::into),
+            });
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
@@ -1354,7 +1351,7 @@ mod tests {
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {
-                "isolation_session": {"start": {"configurationId": "small"}}
+                "isolation_session": {"start": {"user": {"upn": "alice@contoso.com"}}}
             }
         }"#;
         match load_mxc(json).unwrap() {
@@ -1368,7 +1365,7 @@ mod tests {
                 assert_eq!(
                     exp,
                     serde_json::json!({
-                        "isolation_session": {"start": {"configurationId": "small"}}
+                        "isolation_session": {"start": {"user": {"upn": "alice@contoso.com"}}}
                     })
                 );
             }
@@ -3607,92 +3604,6 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Small
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_medium() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Medium
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_large() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Large
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_composable() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_unknown_is_rejected() {
-        // Strict enums: an unrecognized configurationId is rejected at
-        // deserialize time rather than silently defaulting to `composable`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unknown variant") && msg.contains("xlarge"),
-            "expected an unknown-variant rejection for configurationId 'xlarge', got: {msg}"
-        );
-    }
-
-    #[test]
     fn isolation_session_absent_from_experimental() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -3719,7 +3630,7 @@ mod tests {
 
     #[test]
     fn isolation_session_user_absent_when_field_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 

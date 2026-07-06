@@ -98,3 +98,14 @@ fn command_succeeds(program: &str, args: &[&str]) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+/// Read-only activation probe of the in-process IsolationSession service.
+///
+/// Reports whether the isolation-session backend's OS-side service is
+/// available on this host. Exposed from the engine so `wxc` reaches the
+/// isolation-session backend through `mxc_engine` rather than depending on
+/// `isolation_session_common` directly.
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+pub fn isolation_session_available() -> bool {
+    isolation_session_common::is_service_available()
+}

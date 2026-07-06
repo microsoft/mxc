@@ -1,4 +1,4 @@
-# MXC IsolationSession Backend — Initial Bringup Plan
+# MXC IsolationSession Backend — One-Shot Bringup
 
 ## Problem
 
@@ -11,7 +11,7 @@ session. Use cases that need this — per the broader claw-on-MXC scenario — c
 - **OS-managed session lifecycle** that the OS-side service tears down cleanly when
   the calling process exits, and
 - a **path toward stateful execution** where one provisioned user and session
-  can host multiple sequential exec calls without re-paying the registration /
+  can host multiple sequential exec calls without re-paying the
   provisioning / session-start cost each time.
 
 ## Proposed Solution
@@ -20,10 +20,10 @@ Add an **IsolationSession runner** to `wxc-exec.exe`, behind `--experimental`.
 When the JSON config specifies `"containment": "isolation_session"` and the
 experimental flag is set, the binary routes to a new `IsolationSessionRunner`
 (implementing the existing `ScriptRunner` trait). The runner orchestrates the
-full lifecycle against the OS-side Isolation Session API: register the
-calling app, provision an agent user, start a session, run the script
-(capturing stdout / stderr / exit code into `ScriptResponse`), then stop the
-session, deprovision the agent, and unregister. All of this happens through
+full lifecycle against the OS-side Isolation Session API: provision an
+agent user, start a session, run the script (capturing stdout / stderr /
+exit code into `ScriptResponse`), then stop the session and deprovision the
+agent. All of this happens through
 Rust bindings auto-generated from a private WinMD; the OS-side API is gated
 on an internal Windows feature flag.
 
@@ -44,21 +44,19 @@ wxc-exec.exe (Rust — single binary, multiple backends)
    ├── Parses JSON config → sees containment = "isolation_session"
    ├── Checks --experimental flag → instantiates IsolationSessionRunner
    ├── Calls IsolationSessionManager methods 1:1 with the OS-side service:
-   │     register_client(regId)              → Step 0
-   │     provision_agent_user(...)           → Step 1 — creates agent user
-   │     start_session(..., configId)        → Step 2 — boots session
-   │     create_process(..., path, args, opts) → Step 3 — launches in session
-   │     [Read stdout + stderr handles]      → drives ScriptResponse
-   │     [WaitForExitAsync + ExitCode]       → drives exit_code
-   │     stop_session(...)                   → Step 4
-   │     deprovision_agent_user(...)         → Step 5
-   │     unregister_client(regId)            → Step 6
+   │     add_user(...)               → Step 1 — creates agent user
+   │     start_session(...)          → Step 2 — boots session
+   │     create_process(...)         → Step 3 — launches in session
+   │     [Read stdout + stderr]      → drives ScriptResponse
+   │     [WaitForExitAsync + ExitCode] → drives exit_code
+   │     stop_session(...)           → Step 4
+   │     deprovision_agent_user(...) → Step 5
    └── Returns ScriptResponse with stdout, stderr, exit_code
 ```
 
-The OS-side service does the heavy lifting: it provisions a Windows agent user account
-(named `<CallingUser>-IEB-<NNN>`), launches an `IsolationProxy.exe` per
-session, and exposes the running script as an `IIsolationSessionWorkerProcess`
+The OS-side service does the heavy lifting: it provisions a fresh per-execution
+Windows agent user account (an opaque, OS-assigned name), launches a per-session
+host process, and exposes the running script as an `IsoSessionProcess` handle
 from which the runner reads pipe handles for I/O.
 
 ## Architecture
@@ -83,9 +81,8 @@ let mut runner: Box<dyn ScriptRunner> = match request.containment {
 The runner is split into two layers:
 
 - **`IsolationSessionManager`** — reusable, lifecycle methods that map 1:1
-  to the OS-side API. Methods: `new`, `register_client`,
-  `provision_agent_user`, `start_session`, `create_process`, `stop_session`,
-  `deprovision_agent_user`, `unregister_client`.
+  to the OS-side API. Methods: `new`, `add_user`, `start_session`,
+  `create_process`, `stop_session`, `deprovision_agent_user`.
 - **`IsolationSessionRunner`** — thin one-shot `ScriptRunner` impl that
   drives the manager's methods in order. Disposable when a stateful path
   lands.
@@ -135,46 +132,45 @@ interface.
         "timeout": 30000
     },
     "experimental": {
-        "isolation_session": {
-            "configurationId": "small"
-        }
+        "isolation_session": {}
     }
 }
 ```
 
-The only `experimental.isolation_session` knob is `configurationId`, which
-selects the OS-side session size: `"small"` (1, default), `"medium"` (2),
-`"large"` (3), or `"commandline"` (4). Other process options (`cwd`, `env`,
-`timeout`) read from the existing top-level `process` section, matching the
-contract every other backend honors.
+The one-shot `experimental.isolation_session` block currently carries no
+honored knobs — the Entra `user` bundle is a state-aware-only field and is
+rejected on the one-shot path. Process options (`cwd`, `env`, `timeout`) read
+from the existing top-level `process` section, matching the contract every
+other backend honors.
 
 Run with: `wxc-exec.exe --experimental config.json`.
 
 ## OS API Dependency
 
 The runner calls into the WinRT API namespaced
-`Windows.AI.IsolationEnvironment.Session`, exposed by the OS-side Isolation
+`Windows.AI.IsolationSession.Preview`, exposed by the OS-side Isolation
 Session service (running as SYSTEM via `svchost.exe`). The API is gated
 on an internal Windows feature flag.
 
-Activation goes through
-`RoGetActivationFactory(RuntimeClass_Windows_AI_IsolationEnvironment_Session_IsolationSessionClient)`.
+Activation goes through the WinRT activation factory for the
+`Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class.
 Activation requires `RoInitialize(RO_INIT_MULTITHREADED)` (handled in
 `main.rs` at startup, applied unconditionally because it's benign for other
 backends).
 
-The API surface includes seven lifecycle methods plus
-`IIsolationSessionWorkerProcess` (the running-process handle). The runner
-uses a minimal subset of the worker-process surface: stdout pipe, stderr
-pipe, `WaitForExitAsync`, `ExitCode`. It does not use stdin, terminate,
+The API surface includes the lifecycle methods plus
+`IsoSessionProcess` (the running-process handle). The runner
+uses a minimal subset of the process surface: stdout pipe, stderr
+pipe, exit-wait, and exit code. It does not use stdin, terminate,
 control signals, or interactive ConPTY mode.
 
 ## Bindings Workflow
 
-**Why a private WinMD.** The OS-side API ships its WinMD
-(`windows.ai.isolationenvironment.winmd`) as part of an internal Windows OS
-build. There is no public NuGet or release distribution today. MXC stores
-generated Rust bindings in the workspace and tracks their provenance.
+**Why a private WinMD.** The OS-side API ships its WinMD as part of an
+internal Windows OS build (the exact file name and provenance are recorded
+in `GENERATION_INFO.toml`). There is no public NuGet or release distribution
+today. MXC stores generated Rust bindings in the workspace and tracks their
+provenance.
 
 **Future direction.** The OS API is expected to land in the public Windows
 SDK eventually, at which point the `windows` crate (auto-generated from
@@ -194,15 +190,12 @@ moves), the bindings must be regenerated by a Microsoft engineer with
 access to the private WinMD. `windows-bindgen` X.Y generates code that
 targets the `windows` X.Y crate, so a regenerator must use a
 `windows-bindgen` release whose major.minor matches the workspace
-`windows` crate. For avoidance of doubt: although earlier draft text in
-this document may refer to the WinRT namespace
-`Windows.AI.IsolationEnvironment.Session`, the generated bindings and the
-Rust code in this repo use `Windows.AI.IsolationSession` (for example,
-`IsoSessionOps`), and that is the naming to use when diagnosing
-regeneration or version-coupling issues. The build-time check below
-catches the most common slip — bumping the workspace `windows` crate
-without regenerating — by comparing the workspace version against the
-recorded `target_windows_crate`.
+`windows` crate. The generated bindings and the Rust code in this repo use
+the `Windows.AI.IsolationSession.Preview` namespace (for example,
+`IsoSessionOps`) — that is the naming to use when diagnosing regeneration or
+version-coupling issues. The build-time check below catches the most common
+slip — bumping the workspace `windows` crate without regenerating — by
+comparing the workspace version against the recorded `target_windows_crate`.
 
 **`build.rs` version check.** `isolation_session_bindings/build.rs` reads
 the expected `windows` crate version from `GENERATION_INFO.toml`
@@ -214,17 +207,15 @@ versions and stating that the bindings must be regenerated.
 
 **Implemented:**
 
-- Single-shot `register → provision → start → run → stop → deprovision →
-  unregister` lifecycle, gated by `--experimental`.
+- Single-shot `provision → start → run → stop → deprovision` lifecycle,
+  gated by `--experimental`.
 - `process.commandLine` (the script command, wrapped via `cmd.exe /c "..."`
   — the same pattern the LXC runner uses with `/bin/sh -c`).
 - `process.cwd` (working directory inside the session).
-- `process.env` (environment variables forwarded via
-  `IIsolationSessionWorkerProcessCreateOptions::SetEnvironmentVariables`).
+- `process.env` (environment variables forwarded via the OS-side
+  `IsoSessionProcessOptions`).
 - `process.timeout` (forwarded to the OS-side per-process timeout
   enforcement).
-- `experimental.isolation_session.configurationId`
-  (Small / Medium / Large / CommandLine).
 - `lifecycle.destroyOnExit` (mapped to the OS-side `LifetimePolicy`: `true` →
   `CallerProcess`, `false` → `Indefinite`; matches how other backends
   interpret this field).
@@ -250,8 +241,8 @@ versions and stating that the bindings must be regenerated.
 
 | Category | Count | Location | What it verifies |
 |---|---:|---|---|
-| Config parsing | ~8 | `config_parser.rs` | `"isolation_session"` containment value, `experimental.isolation_session` section, `configurationId` values + defaults |
-| Policy validation | ~15 | `isolation_session_runner.rs` | Phase-specific behaviour: provision accepts `readwritePaths` / `readonlyPaths` and rejects `deniedPaths`; non-provision phases reject every filesystem field; network and proxy are rejected at every phase |
+| Config parsing | ~8 | `config_parser.rs` | `"isolation_session"` containment value and `experimental.isolation_session` section parsing |
+| Policy validation | ~15 | `policy.rs` | Every filesystem field (`readwritePaths` / `readonlyPaths` / `deniedPaths`), network, and proxy policy is rejected at every phase |
 | Option building | ~6 | `isolation_session_runner.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | 1 | `isolation_session_runner.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
@@ -265,7 +256,7 @@ Two end-to-end configs live under `tests/configs/`:
 
 - `isolation_session_hello.json` — happy path. Prints `USERNAME`,
   `MYVAR`, `CWD`, and `whoami` from inside the session. Validates the
-  agent identity (`<calling-user>-IEB-<NNN>`), env-var pass-through,
+  agent identity (the freshly-provisioned agent account), env-var pass-through,
   working-directory pass-through, and that the running account differs
   from the caller.
 - `isolation_session_exit42.json` — runs `exit 42` and validates that
@@ -318,7 +309,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | OS API not present on older Windows builds | the IsolationSession feature is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
-| One-shot lifecycle is heavy (full register → provision → start per call) | Accepted for v0.1; experimental flag indicates rough edges. Stateful API is the planned mitigation |
+| One-shot lifecycle is heavy (full provision → start per call) | Accepted for v0.1; experimental flag indicates rough edges. Stateful API is the planned mitigation |
 | `ProvisionAgentUserAsync` re-provision hang under `Indefinite` lifetime | Manager calls `GetAgentUser` first and skips a redundant provision when the user already exists |
 | `DeprovisionAgentUserAsync` failure under `Indefinite` lifetime | Manager re-provisions with `CallerProcess` lifetime as part of teardown so the OS-side process-exit callback handles cleanup naturally |
 
@@ -327,8 +318,9 @@ The following were observed during VM testing and are accepted for v0.1.
 **For end users:**
 
 - A Windows build with the IsolationSession feature enabled.
-- `IsolationProxy.exe` present in `%SystemRoot%\System32\` (ships with
-  Windows as part of the OS-side service).
+- The OS-side isolation-session host binary present in
+  `%SystemRoot%\System32\` (ships with Windows as part of the OS-side
+  service).
 - WinRT initialized as MTA (handled by `wxc-exec`).
 
 **For developers:**
@@ -358,13 +350,13 @@ wxc-exec.exe --experimental hello.json
     "timeout": 30000
   },
   "experimental": {
-    "isolation_session": { "configurationId": "small" }
+    "isolation_session": {}
   }
 }
 ```
 
-Expected stdout: `<host>\<caller>-ieb-<nnn>` (the freshly-provisioned agent
-user, distinct from whichever account ran `wxc-exec`).
+Expected stdout: the freshly-provisioned agent account name (an opaque,
+OS-assigned account, distinct from whichever account ran `wxc-exec`).
 
 ## Supported Workloads
 

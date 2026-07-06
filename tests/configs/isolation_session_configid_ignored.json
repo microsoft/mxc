@@ -1,11 +1,13 @@
 {
   "version": "0.6.0-alpha",
-  "containerId": "isolation-session-hello-medium",
+  "containerId": "isolation-session-hello",
   "containment": "isolation_session",
   "process": {
     "commandLine": "echo USERNAME=%USERNAME% & echo MYVAR=%MYVAR% & echo CWD=%CD% & whoami",
     "cwd": "C:\\mxc_workdir_test",
-    "env": ["MYVAR=IsolationSessionTest"],
+    "env": [
+      "MYVAR=IsolationSessionTest"
+    ],
     "timeout": 30000
   },
   "experimental": {
