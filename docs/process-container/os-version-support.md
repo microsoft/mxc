@@ -4,7 +4,6 @@ This is the authoritative reference for **which policy aspects the Windows
 `processcontainer` backend can enforce on each Windows release**. It covers the
 filesystem, network, and UI-restriction policy surfaces. **All releases in this
 document are Windows 11**, and the minimum considered here is Windows 11 23H2.
-(Windows 10 also shipped a "22H2" — that is a different OS and is out of scope.)
 
 For the enforcement mechanisms themselves see the
 [UI policy schema](./UIPolicy_Schema.md) and the
