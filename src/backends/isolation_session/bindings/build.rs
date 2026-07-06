@@ -5,9 +5,13 @@
 //! the version the generated bindings were produced for.
 
 fn main() {
-    // Path to the generation provenance file.
+    // Path to the generation provenance file. This crate lives at
+    // <repo>/src/backends/isolation_session/bindings, so four `..` segments
+    // walk back up to the repo root, where `external/` lives.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let info_path = std::path::Path::new(&manifest_dir)
+        .join("..")
+        .join("..")
         .join("..")
         .join("..")
         .join("external")
@@ -40,8 +44,11 @@ fn main() {
         return;
     };
 
-    // Read the actual windows crate version from Cargo.lock.
+    // Read the actual windows crate version from Cargo.lock. The workspace root
+    // (and its Cargo.lock) is at <repo>/src, three `..` up from this crate.
     let lock_path = std::path::Path::new(&manifest_dir)
+        .join("..")
+        .join("..")
         .join("..")
         .join("Cargo.lock");
 

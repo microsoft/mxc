@@ -23,87 +23,6 @@ function getSdkPackageRoot(): string {
   }
 }
 
-/**
- * Query Windows Registry for a value
- * @param key - Registry key path (e.g., "HKLM\\Software\\...")
- * @param valueName - Name of the value to query
- * @returns The registry value as a string, or null if not found
- */
-function queryWindowsRegistry(key: string, valueName: string): string | null {
-  try {
-    const command = `reg query "${key}" /v "${valueName}"`;
-    const output = execSync(command, { encoding: 'utf-8', stdio: 'pipe' });
-
-    // Parse output - format is:
-    // HKEY_LOCAL_MACHINE\...
-    //     ValueName    REG_SZ    Value
-    const lines = output.split('\n');
-    for (const line of lines) {
-      if (line.includes(valueName)) {
-        // Extract value after REG_SZ or REG_DWORD
-        const match = line.match(/REG_\w+\s+(.+)/);
-        if (match) {
-          return match[1].trim();
-        }
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Result of querying the host's Windows build number, or `null` when the
- * registry values are missing or unparseable.
- */
-type WindowsBuild = { major: number; minor: number } | null;
-
-/**
- * Default implementation that reads `CurrentBuild` / `UBR` from the
- * registry. Replaceable via {@link _setWindowsBuildQuery} in tests so we
- * can exercise the IsolationSession version gate deterministically.
- */
-function defaultWindowsBuildQuery(): WindowsBuild {
-  const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
-  const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
-  const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
-  if (!currentBuild || !ubrValue) {
-    return null;
-  }
-  const major = parseInt(currentBuild, 10);
-  const minor = Number(ubrValue);
-  if (isNaN(major) || isNaN(minor)) {
-    return null;
-  }
-  return { major, minor };
-}
-
-let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
-
-/** @internal Test-only: override the Windows build lookup. */
-export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
-  windowsBuildQuery = fn ?? defaultWindowsBuildQuery;
-}
-
-/**
- * Check whether the host supports the IsolationSession backend.
- * Requires Windows Insider Preview build 26300.8553 or later.
- *
- * No internal cache — `getPlatformSupport` memoizes the full result, and
- * registry reads are cheap relative to the rest of the probe.
- */
-function isIsoSessionSupported(): boolean {
-  const build = windowsBuildQuery();
-  if (!build) {
-    return false;
-  }
-
-  // Pin to the Windows Insider Preview build that introduced IsolationSession
-  // (26300.8553+). Other major builds are not yet supported.
-  return build.major === 26300 && build.minor >= 8553;
-}
-
 let windowsSandboxAvailableCache: boolean | undefined;
 
 /**
@@ -217,11 +136,12 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
 }
 
 /**
- * Run the probe binary and merge its results into `support`. On any
- * failure (binary missing, timeout, malformed JSON, unknown tier), the
- * function silently leaves `support.isolationTier` and
- * `support.isolationWarnings` unset — callers see the same contract as
- * pre-Phase-5 SDKs.
+ * Run the probe binary and merge its results into `support`: the isolation
+ * tier, any warnings, portable UI capabilities, and — when the probe reports
+ * the isolation-session service available — the `isolation_session` method.
+ * On any failure (binary missing, timeout, malformed JSON), the function
+ * silently leaves those fields unset, so callers see the same contract as
+ * pre-probe SDKs.
  */
 function populateIsolationFromProbe(support: PlatformSupport): void {
   try {
@@ -241,6 +161,9 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
       if (facts && typeof facts === 'object') {
         if (isUiCapabilitySupport(facts.uiCapabilities)) {
           support.uiCapabilities = facts.uiCapabilities;
+        }
+        if (facts.isolationSessionAvailable === true) {
+          support.availableMethods.push('isolation_session');
         }
       }
     }
@@ -292,9 +215,6 @@ function computeSupport(): PlatformSupport {
   support.availableMethods = ['processcontainer'];
   if (isWindowsSandboxAvailable()) {
     support.availableMethods.push('windows_sandbox');
-  }
-  if (isIsoSessionSupported()) {
-    support.availableMethods.push('isolation_session');
   }
   populateIsolationFromProbe(support);
   return support;
