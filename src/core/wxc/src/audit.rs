@@ -81,39 +81,48 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
         eprintln!("{summary}");
     }
 
-    match crate::plm_launch::run_plm_elevated(
-        &plm,
-        args,
-        &[(plm::coordination::SINGLETON_HELD_BY_PARENT_ENV, "1")],
-    ) {
-        Ok(o) if o.exit_code == 0 => {
+    // plm.exe normally acquires the `Global\Mxc_Plm_Audit` named-
+    // mutex singleton on direct operator invocations (`plm log` /
+    // `plm start` / `plm stop`) so its retry-on-conflict path can't
+    // silently `wpr -cancel` a peer trace. When wxc-exec spawns
+    // plm.exe we already hold that mutex for the whole audit window
+    // — tell the child to skip its own acquisition so we don't
+    // deadlock on the same global name. The signal used to be an env
+    // var (SINGLETON_HELD_BY_PARENT_ENV) but `ShellExecuteExW` +
+    // `runas` (used by run_plm_elevated) does not propagate the
+    // caller's environment across the elevation boundary, so it now
+    // rides on a hidden CLI flag.
+    match crate::plm_launch::run_plm_elevated(&plm, args, true) {
+        Ok(run) if run.exit_code == 0 => {
             if verbose {
-                replay_captured(logger, &o.stdout, &o.stderr);
+                replay_captured(logger, &run.stdout, &run.stderr);
             }
             true
         }
-        Ok(o) => {
-            let _ = writeln!(logger, "[audit] plm exited with status {}", o.exit_code);
-            replay_captured(logger, &o.stdout, &o.stderr);
+        Ok(run) => {
+            let _ = writeln!(logger, "[audit] plm exited with code {}", run.exit_code);
+            replay_captured(logger, &run.stdout, &run.stderr);
             if verbose {
-                eprintln!("[audit] plm exited with status {}", o.exit_code);
+                eprintln!("[audit] plm exited with code {}", run.exit_code);
             }
             false
         }
-        Err(e) => {
-            let _ = writeln!(logger, "[audit] failed to spawn plm: {e}");
+        Err(msg) => {
+            let _ = writeln!(logger, "[audit] failed to launch elevated plm: {msg}");
             if verbose {
-                eprintln!("[audit] failed to spawn plm: {e}");
+                eprintln!("[audit] failed to launch elevated plm: {msg}");
             }
             false
         }
     }
 }
 
-/// Replay captured child stdout/stderr byte buffers to the current
-/// process's own streams. Used on failure (and in verbose mode on
-/// success) so the happy path can stay silent while diagnostics still
-/// surface.
+/// Replay captured stdout/stderr bytes to the current process's own
+/// streams. Used on failure (and in verbose mode on success) so the
+/// happy path can stay silent while diagnostics still surface. Byte
+/// slices come from `ShellExecuteExW`-elevated child capture, which
+/// cannot go through OS pipe inheritance and is redirected to temp
+/// files at the plm.exe end (see `plm_launch::run_plm_elevated`).
 fn replay_captured(logger: &mut Logger, stdout: &[u8], stderr: &[u8]) {
     use std::fmt::Write as _;
     use std::io::Write as _;

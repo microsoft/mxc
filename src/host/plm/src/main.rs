@@ -209,6 +209,23 @@ fn install_ctrl_handler() {
 )]
 #[cfg(target_os = "windows")]
 struct Cli {
+    /// Internal handshake flag used by `wxc-exec --audit` to hand off
+    /// a directory the elevated `plm.exe` writes its stdout/stderr
+    /// into. See `redirect_stdio_from_argv`. Hidden from `--help`;
+    /// not part of the user-facing CLI. Declared here so clap accepts
+    /// (and ignores) the flag during subcommand parsing.
+    #[arg(long = "wxc-capture-dir", hide = true)]
+    _wxc_capture_dir: Option<std::path::PathBuf>,
+
+    /// Internal handshake flag used by `wxc-exec --audit` to tell us
+    /// it already holds the `Global\Mxc_Plm_Audit` singleton so we
+    /// skip acquisition and avoid a deadlock. Companion of
+    /// `--wxc-capture-dir`; both migrated off the previous env-var
+    /// mechanism because `ShellExecuteExW` + `runas` does not
+    /// propagate environment across the elevation boundary.
+    #[arg(long = "wxc-singleton-held-by-parent", hide = true)]
+    wxc_singleton_held_by_parent: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -266,18 +283,45 @@ fn exe_dir() -> Result<PathBuf> {
         .unwrap_or_else(|| PathBuf::from(".")))
 }
 
+/// Scan argv for `--wxc-capture-dir <path>` and, if present, redirect
+/// this process's stdout/stderr to `<path>/stdout.log` and
+/// `<path>/stderr.log`. Called before `Cli::parse()` so any error the
+/// runtime prints (including our own arg-parse errors) reaches the
+/// capture files.
+///
+/// Used when `wxc-exec --audit` launches us elevated via
+/// `ShellExecuteExW` + `runas`. That elevation path can inherit
+/// neither our stdio handles nor our environment block (the AppInfo
+/// service creates the child with a fresh env for the elevated
+/// token), so environment-variable–based handoff of the capture
+/// paths does not work — we must pass them on the command line. The
+/// flag is also declared as a hidden `#[arg(long, hide = true)]` on
+/// `Cli` so clap accepts (and ignores) it during subcommand parsing.
+///
+/// On file-open failure we silently fall through — the operator
+/// loses that stream's diagnostics but the rest of plm still runs.
 #[cfg(target_os = "windows")]
-fn redirect_stdio_from_env() {
+fn redirect_stdio_from_argv() {
     use std::fs::OpenOptions;
     use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 
-    fn redirect_one(env_key: &str, which: windows::Win32::System::Console::STD_HANDLE) {
-        let Some(path) = std::env::var_os(env_key) else {
-            return;
-        };
-        let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) else {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let mut dir: Option<std::path::PathBuf> = None;
+    let mut i = 1;
+    while i < argv.len() {
+        if argv[i] == "--wxc-capture-dir" && i + 1 < argv.len() {
+            dir = Some(std::path::PathBuf::from(&argv[i + 1]));
+            break;
+        }
+        i += 1;
+    }
+    let Some(dir) = dir else { return };
+
+    fn redirect_one(path: &Path, which: windows::Win32::System::Console::STD_HANDLE) {
+        let Ok(f) = OpenOptions::new().create(true).append(true).open(path) else {
             return;
         };
         let handle = HANDLE(f.as_raw_handle());
@@ -291,21 +335,33 @@ fn redirect_stdio_from_env() {
         let _ = unsafe { SetStdHandle(which, handle) };
     }
 
-    redirect_one("MXC_PLM_STDOUT_FILE", STD_OUTPUT_HANDLE);
-    redirect_one("MXC_PLM_STDERR_FILE", STD_ERROR_HANDLE);
+    redirect_one(&dir.join("stdout.log"), STD_OUTPUT_HANDLE);
+    redirect_one(&dir.join("stderr.log"), STD_ERROR_HANDLE);
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> Result<()> {
     // If wxc-exec spawned us elevated via ShellExecuteExW+runas, it
-    // cannot inherit our stdio pipes across the elevation boundary.
-    // Redirect our stdout/stderr to the temp files it pointed us at
-    // via env so any diagnostic output survives back to the operator.
-    // Silent no-op when the env vars are absent (direct user
-    // invocation from an already-elevated shell).
-    redirect_stdio_from_env();
+    // cannot inherit our stdio pipes across the elevation boundary
+    // AND the AppInfo service that brokers the elevation does not
+    // propagate our environment block to the elevated child. The
+    // capture-file directory is therefore passed as a hidden CLI
+    // argument (`--wxc-capture-dir`) rather than via env; we redirect
+    // stdout/stderr to files inside it before touching clap so any
+    // arg-parse errors also reach the operator. Silent no-op when
+    // the flag is absent (direct user invocation from an elevated
+    // shell).
+    redirect_stdio_from_argv();
 
     let cli = Cli::parse();
+    // Honour the parent-holds-singleton signal wxc-exec passed as a
+    // CLI flag. Set BEFORE any acquire_singleton_if_needed call so
+    // the bypass fires. We keep the env-var path in
+    // singleton_bypass_requested as a compatibility fallback for
+    // direct callers that inherit env normally (see coordination.rs).
+    if cli.wxc_singleton_held_by_parent {
+        plm::coordination::set_singleton_bypass_override(true);
+    }
     let exe = exe_dir()?;
 
     // Confirm the resolved wpr.exe exists at `%SystemDirectory%`

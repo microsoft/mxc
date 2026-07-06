@@ -42,13 +42,40 @@ pub const CTRL_HANDLER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// acquisition because the outer `wxc-exec` already holds it for the
 /// whole audit window. Avoids a deadlock between parent and child on
 /// the same `Global\Mxc_Plm_Audit` name.
+///
+/// NOTE: kept as a signalling path for tests and for direct callers
+/// that inherit env normally, but `wxc-exec --audit` itself no longer
+/// uses it — `ShellExecuteExW` + `runas` does not propagate the
+/// caller's environment block across the elevation boundary, so
+/// wxc-exec passes the bypass signal as a hidden CLI flag instead
+/// and `main.rs` calls `set_singleton_bypass_override(true)` from
+/// clap. See `singleton_bypass_requested`.
 pub const SINGLETON_HELD_BY_PARENT_ENV: &str = "MXC_PLM_AUDIT_SINGLETON_HELD";
 
-/// True when the env-var set by the audit-driving parent process is
-/// present. Extracted from `acquire_singleton_if_needed` so the
-/// bypass branch is reachable from unit tests.
+/// Process-wide override for `singleton_bypass_requested`, populated
+/// from the hidden `--wxc-singleton-held-by-parent` CLI flag in
+/// `plm.exe`'s `main`. Needed because `ShellExecuteExW` + `runas`
+/// (the elevation path used by `wxc-exec --audit`) creates the
+/// elevated child with a fresh environment block for the elevated
+/// token, so the env-var signalling path cannot reach us.
+static SINGLETON_BYPASS_OVERRIDE: AtomicBool = AtomicBool::new(false);
+
+/// Set the process-wide singleton-bypass override. Called from
+/// `plm.exe`'s `main` after clap parses the hidden
+/// `--wxc-singleton-held-by-parent` flag that `wxc-exec` passes when
+/// it spawns us elevated.
+pub fn set_singleton_bypass_override(v: bool) {
+    SINGLETON_BYPASS_OVERRIDE.store(v, Ordering::SeqCst);
+}
+
+/// True when the audit-driving parent process has signalled that it
+/// already holds the `Global\Mxc_Plm_Audit` singleton and this child
+/// should skip acquisition. Reads both the env var (legacy path,
+/// still honoured for direct callers and tests) and the CLI-driven
+/// override.
 pub fn singleton_bypass_requested() -> bool {
-    std::env::var_os(SINGLETON_HELD_BY_PARENT_ENV).is_some()
+    SINGLETON_BYPASS_OVERRIDE.load(Ordering::SeqCst)
+        || std::env::var_os(SINGLETON_HELD_BY_PARENT_ENV).is_some()
 }
 
 /// Spin until `flag` reads `false`, or `timeout` elapses. Polls every

@@ -82,21 +82,22 @@ fn quote_arg(arg: &str) -> String {
 /// Invoke `plm_path <args...>` elevated via `ShellExecuteExW` + `runas`,
 /// wait for it to exit, and return its exit code + captured stdio.
 ///
-/// Because `ShellExecuteExW` cannot inherit stdio pipes across the
-/// elevation boundary, the elevated child is asked to redirect its own
-/// stdout/stderr to two temp files via `MXC_PLM_STDOUT_FILE` /
-/// `MXC_PLM_STDERR_FILE`. We create the files, publish the env vars on
-/// *this* process (elevated child inherits our env by default), launch,
-/// read the files back, and clean up.
+/// The elevation broker (AppInfo service) creates the elevated child
+/// with a fresh environment block and no inheritable stdio handles,
+/// so we cannot use env vars to hand off the capture-file paths or
+/// the singleton-held bypass. Both signals travel as hidden CLI
+/// arguments the child parses out (see `redirect_stdio_from_argv`
+/// and the `--wxc-singleton-held-by-parent` handling in plm's
+/// `main`).
 ///
-/// Any additional env vars in `extra_env` are set on *this* process
-/// before the launch (and unset after) so the elevated child inherits
-/// them too. This is how the `SINGLETON_HELD_BY_PARENT_ENV` bypass
-/// flag gets to the child under UAC.
+/// `singleton_held_by_parent = true` tells the elevated child that
+/// the caller already holds the `Global\Mxc_Plm_Audit` mutex and it
+/// should skip acquisition; without this the child bails with
+/// "another PLM trace is already in progress".
 pub fn run_plm_elevated(
     plm_path: &Path,
     args: &[&std::ffi::OsStr],
-    extra_env: &[(&str, &str)],
+    singleton_held_by_parent: bool,
 ) -> Result<ElevatedRun, String> {
     // Build a temp directory for the two capture files. Using a
     // per-invocation directory + fixed filenames keeps cleanup simple
@@ -109,29 +110,20 @@ pub fn run_plm_elevated(
     let _ = std::fs::write(&stdout_path, b"");
     let _ = std::fs::write(&stderr_path, b"");
 
-    // Publish env vars on the current process for inheritance. We save
-    // any prior values and restore them via `EnvGuard::drop` so a
-    // concurrent thread reading the env can't observe a permanent
-    // change (and so nested / repeat calls don't accumulate leftovers).
-    let mut guards: Vec<EnvGuard> = Vec::with_capacity(2 + extra_env.len());
-    guards.push(EnvGuard::set(
-        "MXC_PLM_STDOUT_FILE",
-        stdout_path.as_os_str(),
-    ));
-    guards.push(EnvGuard::set(
-        "MXC_PLM_STDERR_FILE",
-        stderr_path.as_os_str(),
-    ));
-    for (k, v) in extra_env {
-        guards.push(EnvGuard::set(k, v.as_ref()));
+    // Build the parameter string ShellExecuteExW expects. Prepend the
+    // internal handshake flags before the subcommand args so clap
+    // parses them as top-level Cli options. `--wxc-capture-dir` and
+    // `--wxc-singleton-held-by-parent` are hidden `#[arg]`s on Cli.
+    let mut param_parts: Vec<String> = Vec::with_capacity(args.len() + 3);
+    param_parts.push("--wxc-capture-dir".to_string());
+    param_parts.push(quote_arg(&tmp_dir.to_string_lossy()));
+    if singleton_held_by_parent {
+        param_parts.push("--wxc-singleton-held-by-parent".to_string());
     }
-
-    // Build the parameter string ShellExecuteExW expects.
-    let params_str: String = args
-        .iter()
-        .map(|a| quote_arg(&a.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(" ");
+    for a in args {
+        param_parts.push(quote_arg(&a.to_string_lossy()));
+    }
+    let params_str = param_parts.join(" ");
 
     let verb_w = to_wide("runas");
     let file_w = to_wide(plm_path.as_os_str());
@@ -154,9 +146,6 @@ pub fn run_plm_elevated(
     };
 
     let result = unsafe { ShellExecuteExW(&mut sei) };
-    // Drop guards early so the env change window is minimized. The
-    // elevated child has already inherited its snapshot.
-    drop(guards);
 
     if let Err(e) = result {
         let raw = (e.code().0 as u32) & 0xFFFF;
@@ -201,33 +190,4 @@ pub fn run_plm_elevated(
         stdout,
         stderr,
     })
-}
-
-/// RAII scope-guard for setting a process env var and restoring the
-/// prior value on drop. Prevents env vars from leaking past the
-/// ShellExecute call so nested / repeat invocations don't accumulate
-/// state and concurrent env readers don't observe permanent changes.
-struct EnvGuard {
-    key: String,
-    prior: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &str, value: &std::ffi::OsStr) -> Self {
-        let prior = env::var_os(key);
-        env::set_var(key, value);
-        EnvGuard {
-            key: key.to_string(),
-            prior,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.prior {
-            Some(v) => env::set_var(&self.key, v),
-            None => env::remove_var(&self.key),
-        }
-    }
 }
