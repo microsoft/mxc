@@ -15,7 +15,8 @@ For the enforcement mechanisms themselves see the
 |--------------------|-------|
 | 23H2 | 22631 |
 | 24H2 | 26100 |
-| 25H2+ | 26200 / 26600+ |
+| 25H2 | 26200 |
+| 25H2+ | 26600+ |
 
 > **Product floor:** the [README](../../README.md#platforms) and
 > [SDK README](../../sdk/README.md) state that `processcontainer`'s **minimum
@@ -30,11 +31,11 @@ The Windows backend selects one of three isolation tiers at runtime
 (`src/backends/appcontainer/common/src/fallback_detector.rs`). Which tiers are
 available bounds what policy can be enforced.
 
-| Tier | Mechanism | 23H2 | 24H2 | 25H2+ |
-|------|-----------|:--:|:--:|:--:|
-| **T1** BaseContainer | `Experimental_CreateProcessInSandbox` (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ✅ when the OS feature is enabled, else falls back to T3 |
-| **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF (bfscfg.exe hangs the host on 25H2) |
-| **T3** AppContainer + DACL | Host-side DACL ACE augmentation | ✅ | ✅ | ✅ |
+| Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
+|------|-----------|:--:|:--:|:--:|:--:|
+| **T1** BaseContainer | `Experimental_CreateProcessInSandbox` (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when the OS feature is enabled, else falls back to T3 |
+| **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF |
+| **T3** AppContainer + DACL | Host-side DACL ACE augmentation | ✅ | ✅ | ✅ | ✅ |
 
 - **T1 (BaseContainer)** requires `processmodel.dll` to export
   `Experimental_CreateProcessInSandbox` *and* the OS feature to be enabled; this
@@ -50,11 +51,11 @@ available bounds what policy can be enforced.
 
 ## Filesystem policy
 
-| Aspect | 23H2 | 24H2 | 25H2+ |
-|--------|:--:|:--:|:--:|
-| `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
-| `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when `SANDBOX_CAP_DENY_PATHS` is set, otherwise rejected at launch and dispatched to T3) |
-| BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
+| Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
+|--------|:--:|:--:|:--:|:--:|
+| `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
+| `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when `SANDBOX_CAP_DENY_PATHS` is set, otherwise rejected at launch and dispatched to T3) |
+| BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
 
 Notes:
 - On 25H2+, T1 can grant `readwrite`/`readonly` paths natively via the FlatBuffer
@@ -64,16 +65,16 @@ Notes:
   (`BaseContainerRunner::base_container_supports_deny_paths()`); when the bit is
   clear, `deniedPaths` is rejected and the run relies on default-deny plus
   explicit grants (or T3 DENY ACEs).
-- On 23H2 and 24H2 (and on 25H2+ hosts where T1 is unavailable), all
+- On 23H2, 24H2, and 25H2 (and on 25H2+ hosts where T1 is unavailable), all
   filesystem policy — grants **and** denies — is enforced by T3 host-path DACLs.
 
 ## Network policy
 
-| Aspect | 23H2 | 24H2 | 25H2+ |
-|--------|:--:|:--:|:--:|
-| Capabilities (`internetClient`) | ✅ | ✅ | ✅ |
-| Firewall rules (`netsh advfirewall`, needs admin) | ✅ | ✅ | ✅ |
-| Proxy via OS / BaseContainer (`appinfosvc`, FlatBuffer `network_policy.proxy`) | ❌ | ❌ | ✅ (T1 only) |
+| Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
+|--------|:--:|:--:|:--:|:--:|
+| Capabilities (`internetClient`) | ✅ | ✅ | ✅ | ✅ |
+| Firewall rules (`netsh advfirewall`, needs admin) | ✅ | ✅ | ✅ | ✅ |
+| Proxy via OS / BaseContainer (`appinfosvc`, FlatBuffer `network_policy.proxy`) | ❌ | ❌ | ❌ | ✅ (T1 only) |
 
 Notes:
 - Capability- and firewall-based network enforcement is an AppContainer
@@ -94,15 +95,15 @@ available regardless of tier — subject to per-flag build gating. The effective
 mask is always `requested & supported`, so the kernel is never handed a flag it
 would reject; `wxc-exec --probe` reports what a host can enforce.
 
-| Restriction (`ui` field) | 23H2 | 24H2 | 25H2+ |
-|--------------------------|:--:|:--:|:--:|
-| `isolation` — HANDLES / GLOBALATOMS | ✅ | ✅ | ✅ |
-| `clipboard` — READCLIPBOARD / WRITECLIPBOARD | ✅ | ✅ | ✅ |
-| `systemSettings` — SYSTEMPARAMETERS / DISPLAYSETTINGS | ✅ | ✅ | ✅ |
-| `desktopSystemControl` — DESKTOP / EXITWINDOWS | ✅ | ✅ | ✅ |
-| `ime` — IME (`0x100`, ≥ 22621) | ✅ | ✅ | ✅ |
-| `injection` — INJECTION (`0x200`, ≥ 26100) | ❌ | ✅ | ✅ |
-| `disable` — `disallowWin32kSystemCalls` mitigation | ✅ | ✅ | ✅ |
+| Restriction (`ui` field) | 23H2 | 24H2 | 25H2 | 25H2+ |
+|--------------------------|:--:|:--:|:--:|:--:|
+| `isolation` — HANDLES / GLOBALATOMS | ✅ | ✅ | ✅ | ✅ |
+| `clipboard` — READCLIPBOARD / WRITECLIPBOARD | ✅ | ✅ | ✅ | ✅ |
+| `systemSettings` — SYSTEMPARAMETERS / DISPLAYSETTINGS | ✅ | ✅ | ✅ | ✅ |
+| `desktopSystemControl` — DESKTOP / EXITWINDOWS | ✅ | ✅ | ✅ | ✅ |
+| `ime` — IME (`0x100`, ≥ 22621) | ✅ | ✅ | ✅ | ✅ |
+| `injection` — INJECTION (`0x200`, ≥ 26100) | ❌ | ✅ | ✅ | ✅ |
+| `disable` — `disallowWin32kSystemCalls` mitigation | ✅ | ✅ | ✅ | ✅ |
 
 The single UI differentiator for 23H2 is **`injection`**
 (`JOB_OBJECT_UILIMIT_INJECTION`), which the kernel accepts only on build 26100

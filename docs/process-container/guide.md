@@ -5,7 +5,7 @@ through MXC's process container pipeline. It is specific
 to the Windows process container backend.
 
 For which policy aspects this backend can enforce on each Windows 11 release
-(23H2 / 24H2 / 25H2+), see
+(23H2 / 24H2 / 25H2 / 25H2+), see
 [Windows OS-version policy support](./os-version-support.md).
 
 ## Prerequisites
