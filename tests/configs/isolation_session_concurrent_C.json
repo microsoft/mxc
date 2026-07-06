@@ -5,8 +5,5 @@
   "process": {
     "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\mxc_concurrent_log\\C.ps1",
     "timeout": 75000
-  },
-  "filesystem": {
-    "readwritePaths": ["C:\\mxc_concurrent_log"]
   }
 }

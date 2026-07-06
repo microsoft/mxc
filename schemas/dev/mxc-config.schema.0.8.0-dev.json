@@ -259,30 +259,9 @@
       },
       "type": "object"
     },
-    "IsolationConfigurationId": {
-      "description": "IsolationSession sizing profile.",
-      "enum": [
-        "small",
-        "medium",
-        "large",
-        "composable"
-      ],
-      "type": "string"
-    },
     "IsolationSession": {
-      "description": "IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).",
+      "description": "IsolationSession backend config. Carries the one-shot `user` field and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).",
       "properties": {
-        "configurationId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationConfigurationId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Sizing profile (one-shot)."
-        },
         "deprovision": {
           "anyOf": [
             {
@@ -344,17 +323,6 @@
     "IsolationSessionPhase": {
       "description": "Per-phase IsolationSession configuration (state-aware lifecycle).",
       "properties": {
-        "configurationId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationConfigurationId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Sizing profile for this phase."
-        },
         "user": {
           "anyOf": [
             {

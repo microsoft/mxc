@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Generated WinRT bindings for the IsoEnvBroker Session API.
+//! Generated WinRT bindings for the IsolationSession Preview API.
 //!
 //! This crate contains Rust projections generated from the
-//! `Windows.AI.IsolationSession` WinMD using `windows-bindgen`.
+//! `Windows.AI.IsolationSession.Preview` WinMD using `windows-bindgen`.
 //!
 //! See `external/windows-sdk/isolation-session/GENERATION_INFO.toml`
 //! for provenance details.
