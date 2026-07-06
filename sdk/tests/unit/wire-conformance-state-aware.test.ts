@@ -67,13 +67,6 @@ import type {
 // The lifecycle phase enum must be value-for-value identical to the wire `Phase`.
 type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 
-// Sizing profile: the SDK exposes it inline on `startSandbox`. This is the exact
-// drift case — a new wire `IsolationConfigurationId` value would otherwise be
-// unrequestable through the SDK with no CI signal.
-type _ConfigurationId = AssertTrue<
-  Equivalent<NonNullable<IsolationSessionStartConfig['configurationId']>, WireIsolationConfigurationId>
->;
-
 // --- user bundle conformance ----------------------------------------------
 
 // `IsolationSessionUserConfig` is a class; compare its DATA shape (the symbol
@@ -87,15 +80,6 @@ type _UserBundleVals = AssertTrue<Equivalent<PublicUserData, WireIsolationUser>>
 type _UserBundleWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicUserData, WireIsolationUser>, never>>;
 type _UserBundlePublicKeys = AssertTrue<Equivalent<OnlyInPublic<PublicUserData, WireIsolationUser>, never>>;
 
-// Both phases that accept a user bundle must reuse the SAME public type, so the
-// bundle check above covers them transitively.
-type _ProvisionUserReuse = AssertTrue<
-  Equivalent<NonNullable<IsolationSessionProvisionConfig['user']>, IsolationSessionUserConfig>
->;
-type _StartUserReuse = AssertTrue<
-  Equivalent<NonNullable<IsolationSessionStartConfig['user']>, IsolationSessionUserConfig>
->;
-
 // --- IsolationSessionPhase field-set conformance ---------------------------
 
 // The per-phase wire surface is DERIVED from the real public phase configs, not
@@ -106,6 +90,12 @@ type _StartUserReuse = AssertTrue<
 // backend-specific fields that map onto the wire `IsolationSessionPhase` object.
 // `PublicPhaseKeys` is the union of those backend-specific keys across all five
 // phase configs.
+type PhaseConfigUnion =
+  | IsolationSessionProvisionConfig
+  | IsolationSessionStartConfig
+  | IsolationSessionExecConfig
+  | IsolationSessionStopConfig
+  | IsolationSessionDeprovisionConfig;
 type LiftedPhaseKey = 'version' | 'filesystem' | 'process';
 type PublicPhaseKeys = Exclude<
   | keyof IsolationSessionProvisionConfig
@@ -116,6 +106,21 @@ type PublicPhaseKeys = Exclude<
   LiftedPhaseKey
 >;
 type WirePhaseKeys = keyof StripIndex<WireIsolationSessionPhase>;
+type PublicPhaseFieldValue<K extends PropertyKey, Config = PhaseConfigUnion> = Config extends object
+  ? K extends keyof Config
+    ? NonNullable<Config[K]>
+    : never
+  : never;
+// `user` is normalised because the public SDK type is a class with an inspect
+// method, while the wire contract is just its data shape.
+type ComparablePublicPhaseFieldValue<K extends PublicPhaseKeys> =
+  K extends 'user' ? PublicUserData : PublicPhaseFieldValue<K>;
+type PublicPhaseFieldValues = {
+  [K in PublicPhaseKeys]: ComparablePublicPhaseFieldValue<K>;
+};
+type WirePhaseFieldValues = {
+  [K in WirePhaseKeys]: NonNullable<StripIndex<WireIsolationSessionPhase>[K]>;
+};
 
 // A public phase field with no wire `IsolationSessionPhase` counterpart fails
 // (the SDK exposes a field the wire model does not define).
@@ -123,9 +128,13 @@ type _PhasePublicKeys = AssertTrue<Equivalent<Exclude<PublicPhaseKeys, WirePhase
 // A wire `IsolationSessionPhase` field no phase config exposes fails (the wire
 // model gained a per-phase field the SDK forgot to surface).
 type _PhaseWireKeys = AssertTrue<Equivalent<Exclude<WirePhaseKeys, PublicPhaseKeys>, never>>;
-// The per-field VALUES of the two backend-specific phase fields are pinned
-// individually above: `configurationId` by `_ConfigurationId` and `user` by the
-// `_UserBundle*` checks.
+// Matching public/wire phase field names must also carry matching value types.
+type _PhaseFieldValueTypes = AssertTrue<Equivalent<PublicPhaseFieldValues, WirePhaseFieldValues>>;
+// Sizing profile remains named explicitly because it is an important SDK-facing
+// enum, but the broad value-type guard above is the primary drift check.
+type _ConfigurationId = AssertTrue<Equivalent<PublicPhaseFieldValue<'configurationId'>, WireIsolationConfigurationId>>;
+// Phases that accept a user bundle must reuse the same public type.
+type _PhaseUserBundleReuse = AssertTrue<Equivalent<PublicPhaseFieldValue<'user'>, IsolationSessionUserConfig>>;
 
 // --- delegation to the one-shot oracle (documented, asserted) --------------
 
@@ -141,14 +150,14 @@ type _ProvisionFilesystemReuse = AssertTrue<
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type StateAwareWireConformanceAssertions = [
   _Phase,
-  _ConfigurationId,
   _UserBundleVals,
   _UserBundleWireKeys,
   _UserBundlePublicKeys,
-  _ProvisionUserReuse,
-  _StartUserReuse,
   _PhaseWireKeys,
   _PhasePublicKeys,
+  _PhaseFieldValueTypes,
+  _ConfigurationId,
+  _PhaseUserBundleReuse,
   _ExecProcessReuse,
   _ProvisionFilesystemReuse,
 ];
