@@ -100,12 +100,12 @@ pub fn run_plm_elevated(
     singleton_held_by_parent: bool,
 ) -> Result<ElevatedRun, String> {
     // Build a temp directory for the two capture files. Uses a
-    // random-suffix `tempfile::Builder::tempdir_in` (not a
+    // random-suffix `tempfile::Builder::tempdir` (not a
     // deterministic `%TEMP%\mxc-plm-<pid>`) so a same-user medium-IL
     // attacker cannot pre-squat the directory or its contents before
     // the elevated child (running under the admin token) opens files
-    // inside it. `tempdir_in` fails if the directory already exists
-    // — treat that failure as fatal rather than silently reusing an
+    // inside it. `tempdir` fails if the directory already exists —
+    // treat that failure as fatal rather than silently reusing an
     // attacker-controlled path.
     //
     // We deliberately do NOT wrap this in a `TempDir` RAII guard:
@@ -124,10 +124,14 @@ pub fn run_plm_elevated(
     let stdout_path = tmp_dir.join("stdout.log");
     let stderr_path = tmp_dir.join("stderr.log");
     // No pre-truncation: the elevated child creates the files
-    // itself with `create(true).append(true)` + reparse-point
-    // rejection. Any parent-side pre-write here would defeat that
-    // reparse-point check by materialising the target as a plain
-    // file first.
+    // itself with `create_new(true).append(true)`, which fails with
+    // `ERROR_FILE_EXISTS` if anything (regular file, symlink,
+    // junction) already occupies the path. Any parent-side
+    // pre-write here would defeat that check by materialising the
+    // target as a plain file first — either turning a legitimate
+    // capture into `ERROR_FILE_EXISTS`, or (worse) having the
+    // unelevated parent follow an attacker-planted symlink before
+    // the elevated child ever runs.
 
     // Build the parameter string ShellExecuteExW expects. Prepend the
     // internal handshake flags before the subcommand args so clap
