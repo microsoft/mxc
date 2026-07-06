@@ -37,6 +37,7 @@ safe-outputs:
   assign-to-user:
     allowed:
       - jsidewhite
+      - mgudgin
       - SohamDas2021
       - bbonaby
       - huzaifa-d
@@ -68,8 +69,9 @@ Assign matching owner(s) with `assign_to_user` using this map:
 | Owner (login) | Area |
 |---|---|
 | @jsidewhite | AppContainer / BaseContainer / process isolation/container |
-| @SohamDas2021 | Linux / LXC / WSLC / Bubblewrap (bwrap) |
-| @bbonaby | networking / firewall / DNS / proxy / iptables |
+| @mgudgin | AppContainer / BaseContainer / process isolation/container |
+| @bbonaby | AppContainer / BaseContainer / process isolation/container / networking / firewall / DNS / proxy / iptables |
+| @SohamDas2021 | Linux / LXC / WSLC / Bubblewrap (bwrap) / proxy on Linux / iptables |
 | @huzaifa-d | MicroVM / NanVix / Hyperlight / Windows Sandbox |
 | @adpa-ms | IsolationSession / session isolation |
 | @richiemsft | macOS / Seatbelt |
