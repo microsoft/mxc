@@ -878,6 +878,14 @@ impl WSLContainerRunner {
             Ok(None) => request,
             Err(msg) => return ScriptResponse::error(&msg),
         };
+        // Delegation check (D3): reject any policy path the invoking user cannot
+        // access, so the sandbox never gains access the caller lacks. Runs AFTER
+        // object normalization so it is evaluated against the already-tightened
+        // intents. On Windows this covers directory readwrite paths (the common
+        // WSLC case).
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return ScriptResponse::error(&msg);
+        }
 
         // -- Init: COM + SDK + preflight --
         let sdk = match Self::init_and_load_sdk(logger) {

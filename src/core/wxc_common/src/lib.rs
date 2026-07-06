@@ -7,6 +7,7 @@ pub mod cmdline;
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+pub mod filesystem_access;
 pub mod filesystem_object;
 pub mod id;
 pub mod log_symbols;
