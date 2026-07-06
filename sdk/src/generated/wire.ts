@@ -107,18 +107,9 @@ export interface Filesystem {
 }
 
 /**
- * IsolationSession sizing profile.
- */
-export type IsolationConfigurationId = "small" | "medium" | "large" | "composable";
-
-/**
- * IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).
+ * IsolationSession backend config. Carries the one-shot `user` field and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).
  */
 export interface IsolationSession {
-  /**
-   * Sizing profile (one-shot).
-   */
-  configurationId?: IsolationConfigurationId | null;
   /**
    * State-aware deprovision-phase configuration.
    */
@@ -146,10 +137,6 @@ export interface IsolationSession {
  * Per-phase IsolationSession configuration (state-aware lifecycle).
  */
 export interface IsolationSessionPhase {
-  /**
-   * Sizing profile for this phase.
-   */
-  configurationId?: IsolationConfigurationId | null;
   /**
    * Entra cloud-agent user bundle for this phase.
    */

@@ -39,12 +39,13 @@ describe('SandboxId<C> brand', () => {
 });
 
 describe('IsolationSessionProvisionConfig', () => {
-  it('accepts version and filesystem', () => {
+  it('accepts version and rejects filesystem', () => {
     const cfg: IsolationSessionProvisionConfig = {
       version: '0.6.0-alpha',
+      // @ts-expect-error — filesystem is rejected at provision; the backend has no host-folder-sharing primitive.
       filesystem: { readwritePaths: ['C:\\workspace'] },
     };
-    assert.deepStrictEqual(cfg.filesystem?.readwritePaths, ['C:\\workspace']);
+    assert.ok(cfg);
   });
 
   it('rejects network and ui until those features land Rust-side', () => {
@@ -82,20 +83,16 @@ describe('IsolationSessionStartConfig', () => {
     assert.ok(cfg);
   });
 
-  it('accepts configurationId only from the closed enum', () => {
-    const ok: IsolationSessionStartConfig = { configurationId: 'composable' };
-    assert.strictEqual(ok.configurationId, 'composable');
-
-    const bogus: IsolationSessionStartConfig = {
-      // @ts-expect-error — configurationId must be in the closed enum.
-      configurationId: 'xlarge',
+  it('rejects configurationId (sizing profiles were removed)', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — configurationId is no longer part of the start config.
+      configurationId: 'composable',
     };
-    assert.ok(bogus);
+    assert.ok(cfg);
   });
 
   it('accepts user only as an IsolationSessionUserConfig instance', () => {
     const ok: IsolationSessionStartConfig = {
-      configurationId: 'composable',
       user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
     };
     const bare: IsolationSessionStartConfig = {
@@ -169,8 +166,14 @@ describe('ProvisionResult<C>', () => {
   it('carries backend-typed metadata for isolation_session', () => {
     const result: ProvisionResult<'isolation_session'> = {
       sandboxId: 'iso:abcd' as SandboxId<'isolation_session'>,
-      metadata: { agentUserName: 'iso\\agent' },
+      metadata: {
+        agentUserName: 'iso\\agent',
+        agentUserSid: 'S-1-5-21-1001',
+        ephemeralWorkspacePath: 'C:\\ProgramData\\ws',
+      },
     };
     assert.strictEqual(result.metadata?.agentUserName, 'iso\\agent');
+    assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
+    assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
   });
 });

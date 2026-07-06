@@ -3,7 +3,6 @@
 
 import {
   ContainmentBackend,
-  FilesystemConfig,
   ProcessConfig,
 } from './types.js';
 
@@ -58,7 +57,6 @@ export class IsolationSessionUserConfig {
 export interface IsolationSessionProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
-  filesystem?: FilesystemConfig;
   /**
    * Optional Entra credentials. When supplied, provisioning uses the Entra
    * identity for the sandbox; the same `user` must be supplied to
@@ -71,14 +69,9 @@ export interface IsolationSessionStartConfig {
   /** Schema version (semver). */
   version?: string;
   /**
-   * Selected IsoSession size profile. Unknown values are warned and
-   * downgraded to `'composable'` on the Rust side.
-   */
-  configurationId?: 'small' | 'medium' | 'large' | 'composable';
-  /**
-   * Entra credentials. Required when the sandbox was provisioned with a
-   * `user` bundle; rejected otherwise. When required, `upn` must match the
-   * UPN supplied at provision (case-insensitive).
+   * Entra credentials for an Entra-backed sandbox. Supply the same UPN used
+   * at provision, with a current WAM token; the OS validates the token
+   * against the agent user assigned at provision.
    */
   user?: IsolationSessionUserConfig;
 }
@@ -100,11 +93,16 @@ export interface IsolationSessionDeprovisionConfig {
 }
 
 /**
- * IsolationSession's provision-phase metadata: the per-instance agent user
- * account name minted for this sandbox.
+ * IsolationSession's provision-phase metadata surfaced to the caller: the
+ * per-instance agent user account name minted for this sandbox, the agent
+ * user's SID, and the ephemeral workspace directory shared between the caller
+ * and this isolated user (through which the caller can stage files into the
+ * session; deleted when the sandbox is deprovisioned).
  */
 export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
+  agentUserSid: string;
+  ephemeralWorkspacePath: string;
 }
 
 /**

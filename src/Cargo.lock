@@ -1277,6 +1277,7 @@ version = "0.7.0"
 dependencies = [
  "isolation_session_bindings",
  "serde",
+ "serde_json",
  "windows",
  "windows-collections",
  "windows-core",
