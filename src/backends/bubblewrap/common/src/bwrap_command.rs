@@ -7,6 +7,7 @@
 //! arguments without spawning any processes, so it compiles and can be
 //! unit-tested on every host (Windows, macOS, Linux).
 
+use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
 
 /// Env var keys that the proxy block manages. Listed here so we can strip
@@ -161,21 +162,31 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
     args.extend(["--proc".into(), "/proc".into()]);
     args.extend(["--tmpfs".into(), "/tmp".into()]);
 
-    // Read-write paths (override the base ro-bind and any standard mount
-    // they overlap).
-    for path in &request.policy.readwrite_paths {
-        args.extend(["--bind".into(), path.clone(), path.clone()]);
-    }
-
-    // Read-only paths (already covered by the base ro-bind, but listed
-    // explicitly so the intent is clear and they override any rw parent).
-    for path in &request.policy.readonly_paths {
-        args.extend(["--ro-bind".into(), path.clone(), path.clone()]);
-    }
-
-    // Denied paths: mask with an empty tmpfs so contents are invisible.
-    for path in &request.policy.denied_paths {
-        args.extend(["--tmpfs".into(), path.clone()]);
+    // Policy mounts, emitted in most-specific-path-wins order so a deeper path
+    // always overrides a shallower ancestor with a different intent regardless
+    // of which policy list it came from (e.g. `readwritePaths: ["/data/secrets"]`
+    // must survive `deniedPaths: ["/data"]`). bwrap applies mounts in order and
+    // the last at a path wins, so walking the specificity-ordered list last —
+    // after the baseline + virtual filesystems above — gives the intended
+    // precedence. `resolve_mount_order` assumes object normalization already ran
+    // (it does, in the runner before `build_args`), so exact same-path conflicts
+    // are already collapsed to the strictest intent.
+    for mount in wxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
+        match mount.intent {
+            // Read-write: override the base ro-bind and any standard mount.
+            FsIntent::ReadWrite => {
+                args.extend(["--bind".into(), mount.path.clone(), mount.path.clone()]);
+            }
+            // Read-only: already covered by the base ro-bind, but listed
+            // explicitly so the intent is clear and it overrides any rw parent.
+            FsIntent::ReadOnly => {
+                args.extend(["--ro-bind".into(), mount.path.clone(), mount.path.clone()]);
+            }
+            // Denied: mask with an empty tmpfs so contents are invisible.
+            FsIntent::Denied => {
+                args.extend(["--tmpfs".into(), mount.path.clone()]);
+            }
+        }
     }
 
     // -- Working directory -------------------------------------------------
@@ -309,6 +320,57 @@ mod tests {
         assert!(
             secrets_mount.is_some(),
             "denied path should be tmpfs-masked"
+        );
+    }
+
+    /// Helper: index of the `op` mount whose **destination** path is `path`.
+    /// `--tmpfs` emits `op DEST` (one path); `--bind`/`--ro-bind` emit
+    /// `op SRC DEST`, so the destination is the second path. Matching the
+    /// destination (rather than the arg immediately after the op) keeps this
+    /// correct even if the backend ever emits `SRC != DEST`. Searches from the
+    /// end so a policy mount is matched rather than a same-named baseline entry.
+    fn policy_mount_pos(args: &[String], op: &str, path: &str) -> usize {
+        let dest_offset = if op == "--tmpfs" { 1 } else { 2 };
+        (0..args.len())
+            .rev()
+            .find(|&i| args[i] == op && args.get(i + dest_offset).map(String::as_str) == Some(path))
+            .unwrap_or_else(|| panic!("expected `{op} ... {path}` in args: {args:?}"))
+    }
+
+    /// A deep denied path must be emitted AFTER a shallower read-write ancestor
+    /// so the mask wins on the subtree (most-specific-path-wins).
+    #[test]
+    fn deep_denied_child_masks_rw_parent() {
+        let mut r = base_request();
+        r.policy.readwrite_paths = vec!["/data".into()];
+        r.policy.denied_paths = vec!["/data/secrets".into()];
+        let args = build_args(&r, None);
+
+        let parent = policy_mount_pos(&args, "--bind", "/data");
+        let child = policy_mount_pos(&args, "--tmpfs", "/data/secrets");
+        assert!(
+            child > parent,
+            "denied /data/secrets (pos {child}) must come after rw /data (pos {parent}) \
+             so it masks the subtree: {args:?}"
+        );
+    }
+
+    /// Regression for the previously-broken case: a deep read-write path under a
+    /// shallower denied parent must be emitted AFTER the parent tmpfs so the deep
+    /// bind is not shadowed by the mask (most-specific-path-wins).
+    #[test]
+    fn deep_rw_child_survives_denied_parent() {
+        let mut r = base_request();
+        r.policy.readwrite_paths = vec!["/data/secrets".into()];
+        r.policy.denied_paths = vec!["/data".into()];
+        let args = build_args(&r, None);
+
+        let parent = policy_mount_pos(&args, "--tmpfs", "/data");
+        let child = policy_mount_pos(&args, "--bind", "/data/secrets");
+        assert!(
+            child > parent,
+            "rw /data/secrets (pos {child}) must come after denied /data (pos {parent}) \
+             so the deep bind is not shadowed by the mask: {args:?}"
         );
     }
 
