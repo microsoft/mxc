@@ -4,8 +4,8 @@ This guide covers adding new OS-level features that flow
 through MXC's process container pipeline. It is specific
 to the Windows process container backend.
 
-For which policy aspects this backend can enforce on each Windows release
-(22H2 / 24H2 / 25H2+), see
+For which policy aspects this backend can enforce on each Windows 11 release
+(23H2 / 24H2 / 25H2+), see
 [Windows OS-version policy support](./os-version-support.md).
 
 ## Prerequisites

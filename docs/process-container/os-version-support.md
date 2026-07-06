@@ -2,27 +2,28 @@
 
 This is the authoritative reference for **which policy aspects the Windows
 `processcontainer` backend can enforce on each Windows release**. It covers the
-filesystem, network, and UI-restriction policy surfaces across the supported
-Windows 11 releases.
+filesystem, network, and UI-restriction policy surfaces. **All releases in this
+document are Windows 11**, and the minimum considered here is Windows 11 23H2.
+(Windows 10 also shipped a "22H2" — that is a different OS and is out of scope.)
 
 For the enforcement mechanisms themselves see the
 [UI policy schema](./UIPolicy_Schema.md) and the
 [sandbox policy spec](../sandbox-policy/v1/policy.md).
 
-## Windows releases
+## Windows 11 releases
 
-| Windows release | Build(s) |
-|-----------------|----------|
-| 22H2 / 23H2 | 22621 / 22631 |
+| Windows 11 release | Build |
+|--------------------|-------|
+| 23H2 | 22631 |
 | 24H2 | 26100 |
 | 25H2+ | 26200 / 26600+ |
 
 > **Product floor:** the [README](../../README.md#platforms) and
 > [SDK README](../../sdk/README.md) state that `processcontainer`'s **minimum
-> supported build is 26100 (24H2)**. The Rust code nonetheless build-gates
-> individual capabilities down to 22H2 (build 22621). The **22H2 / 23H2**
-> column below therefore describes *what the code can enforce if run there* —
-> it is below the officially supported floor and is not a support commitment.
+> supported build is 26100 (24H2)**. The Rust code build-gates individual
+> capabilities down to 23H2 (build 22631); the **23H2** column below therefore
+> describes *what the code can enforce if run there* — it is below the
+> officially supported floor and is not a support commitment.
 
 ## Enforcement tiers
 
@@ -30,7 +31,7 @@ The Windows backend selects one of three isolation tiers at runtime
 (`src/backends/appcontainer/common/src/fallback_detector.rs`). Which tiers are
 available bounds what policy can be enforced.
 
-| Tier | Mechanism | 22H2 / 23H2 | 24H2 | 25H2+ |
+| Tier | Mechanism | 23H2 | 24H2 | 25H2+ |
 |------|-----------|:--:|:--:|:--:|
 | **T1** BaseContainer | `Experimental_CreateProcessInSandbox` (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ✅ when the OS feature is enabled, else falls back to T3 |
 | **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF (bfscfg.exe hangs the host on 25H2) |
@@ -50,7 +51,7 @@ available bounds what policy can be enforced.
 
 ## Filesystem policy
 
-| Aspect | 22H2 / 23H2 | 24H2 | 25H2+ |
+| Aspect | 23H2 | 24H2 | 25H2+ |
 |--------|:--:|:--:|:--:|
 | `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
 | `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when `SANDBOX_CAP_DENY_PATHS` is set, otherwise rejected at launch and dispatched to T3) |
@@ -64,12 +65,12 @@ Notes:
   (`BaseContainerRunner::base_container_supports_deny_paths()`); when the bit is
   clear, `deniedPaths` is rejected and the run relies on default-deny plus
   explicit grants (or T3 DENY ACEs).
-- On 22H2/23H2 and 24H2 (and on 25H2+ hosts where T1 is unavailable), all
+- On 23H2 and 24H2 (and on 25H2+ hosts where T1 is unavailable), all
   filesystem policy — grants **and** denies — is enforced by T3 host-path DACLs.
 
 ## Network policy
 
-| Aspect | 22H2 / 23H2 | 24H2 | 25H2+ |
+| Aspect | 23H2 | 24H2 | 25H2+ |
 |--------|:--:|:--:|:--:|
 | Capabilities (`internetClient`) | ✅ | ✅ | ✅ |
 | Firewall rules (`netsh advfirewall`, needs admin) | ✅ | ✅ | ✅ |
@@ -94,7 +95,7 @@ available regardless of tier — subject to per-flag build gating. The effective
 mask is always `requested & supported`, so the kernel is never handed a flag it
 would reject; `wxc-exec --probe` reports what a host can enforce.
 
-| Restriction (`ui` field) | 22H2 / 23H2 | 24H2 | 25H2+ |
+| Restriction (`ui` field) | 23H2 | 24H2 | 25H2+ |
 |--------------------------|:--:|:--:|:--:|
 | `isolation` — HANDLES / GLOBALATOMS | ✅ | ✅ | ✅ |
 | `clipboard` — READCLIPBOARD / WRITECLIPBOARD | ✅ | ✅ | ✅ |
@@ -104,11 +105,11 @@ would reject; `wxc-exec --probe` reports what a host can enforce.
 | `injection` — INJECTION (`0x200`, ≥ 26100) | ❌ | ✅ | ✅ |
 | `disable` — `disallowWin32kSystemCalls` mitigation | ✅ | ✅ | ✅ |
 
-The single UI differentiator for 22H2/23H2 is **`injection`**
+The single UI differentiator for 23H2 is **`injection`**
 (`JOB_OBJECT_UILIMIT_INJECTION`), which the kernel accepts only on build 26100
-and later (`MIN_BUILD_FOR_INJECTION_LIMIT`). `ime` (`JOB_OBJECT_UILIMIT_IME`)
-requires build 22621 (`MIN_BUILD_FOR_IME_LIMIT`), so it is available on 22H2 and
-later.
+and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
+23H2. `ime` (`JOB_OBJECT_UILIMIT_IME`) requires build 22621
+(`MIN_BUILD_FOR_IME_LIMIT`) and so is available on every supported release.
 
 ## Sources
 

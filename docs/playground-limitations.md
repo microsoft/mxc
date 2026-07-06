@@ -1,7 +1,7 @@
 # MXC Playground — Known Limitations & Compatibility
 
 > For a per-release policy-support matrix (filesystem, network, and UI
-> restrictions across 22H2 / 24H2 / 25H2+), see
+> restrictions across Windows 11 23H2 / 24H2 / 25H2+), see
 > [Windows OS-version policy support](./process-container/os-version-support.md).
 
 ## Platform Support
