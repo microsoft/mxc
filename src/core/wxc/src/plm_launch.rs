@@ -3,6 +3,15 @@
 
 //! Elevated spawn of `plm.exe` from unelevated `wxc-exec --audit`.
 //!
+//! **Invariant: `wxc-exec.exe` itself never runs elevated.** It ships
+//! without a `requireAdministrator` manifest and is expected to be
+//! launched by an unelevated (medium-integrity) user. Any operation
+//! that legitimately needs admin — currently only the PLM audit-trace
+//! WPR/ETW session — is delegated to a dedicated admin-manifested
+//! helper binary (`plm.exe`), which we spawn via UAC and wait on.
+//! This matches the pattern used by `wxc-host-prep.exe` for the
+//! system-drive / null-device ACL work.
+//!
 //! `plm.exe` carries a `requireAdministrator` application manifest
 //! (see `src/host/plm/build.rs`). A standard `std::process::Command`
 //! spawn from an unelevated parent fails with
@@ -10,8 +19,11 @@
 //! binary except via a UAC-mediated launch. This module wraps that
 //! launch using `ShellExecuteExW` with the `runas` verb, waits for
 //! the elevated child to exit, and surfaces its exit code + any
-//! diagnostic output the child wrote to file-capture paths passed via
-//! env.
+//! diagnostic output the child captured to files in a random-suffix
+//! temp directory whose path is passed on the command line (the
+//! elevation broker does not propagate env vars or stdio handles
+//! across the elevation boundary, so both signals must ride on
+//! `lpParameters`).
 //!
 //! Windows-only.
 

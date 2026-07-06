@@ -3,6 +3,16 @@
 
 //! Graceful-exit PLM audit-trace lifecycle for `wxc-exec --audit`.
 //!
+//! **Invariant: `wxc-exec.exe` runs unelevated.** Starting a WPR
+//! kernel ETW session requires administrator, so `--audit` does NOT
+//! self-elevate `wxc-exec`; instead it delegates the privileged work
+//! to `plm.exe`, which carries a `requireAdministrator` manifest and
+//! is spawned via `ShellExecuteExW` + `runas` (UAC). See
+//! [`crate::plm_launch::run_plm_elevated`] for the spawn wrapper.
+//! Every `run_plm_command(...)` call in this module therefore
+//! triggers a UAC prompt when invoked from a medium-IL shell — one
+//! prompt per `plm start`, one per `plm stop`.
+//!
 //! `--audit` runs `plm.exe start`, which leaves a live WPR ETW session
 //! in the kernel for the duration of the workload. The matching
 //! `plm.exe stop` tears it down. If anything between those two calls
