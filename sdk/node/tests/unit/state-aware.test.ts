@@ -42,18 +42,15 @@ describe('buildStateAwareEnvelope', () => {
     assert.strictEqual(env.sandboxId, undefined);
   });
 
-  it('produces a start envelope with backend-specific configurationId nested under experimental', () => {
+  it('produces a start envelope with no experimental block when no backend config is supplied', () => {
     const env = buildStateAwareEnvelope({
       phase: 'start',
       backendKey: 'isolation_session',
       sandboxId: 'iso:reg-abc:prov-123',
-      config: { configurationId: 'small' },
     });
     assert.strictEqual(env.phase, 'start');
     assert.strictEqual(env.sandboxId, 'iso:reg-abc:prov-123');
-    assert.deepStrictEqual(env.experimental, {
-      isolation_session: { start: { configurationId: 'small' } },
-    });
+    assert.strictEqual(env.experimental, undefined);
   });
 
   it('produces an exec envelope with process at top-level and no experimental block', () => {
@@ -107,13 +104,12 @@ describe('buildStateAwareEnvelope', () => {
     });
   });
 
-  it('nests start user under experimental.isolation_session.start alongside configurationId', () => {
+  it('nests start user under experimental.isolation_session.start', () => {
     const env = buildStateAwareEnvelope({
       phase: 'start',
       backendKey: 'isolation_session',
       sandboxId: 'iso:alice@contoso.com',
       config: {
-        configurationId: 'composable',
         user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
       },
     });
@@ -121,7 +117,6 @@ describe('buildStateAwareEnvelope', () => {
     assert.deepStrictEqual(wire.experimental, {
       isolation_session: {
         start: {
-          configurationId: 'composable',
           user: { upn: 'alice@contoso.com', wamToken: 'tok' },
         },
       },
@@ -207,21 +202,22 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
 
   it('builds a provision envelope and unwraps the SandboxId from the response', async () => {
     const fake = fakeSpawn({
-      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","metadata":{"agentUserName":"agent\\\\u1"}}}',
+      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","metadata":{"agentUserName":"agent\\\\u1","agentUserSid":"S-1-5-21-1001","ephemeralWorkspacePath":"C:\\\\ProgramData\\\\ws"}}}',
       exitCode: 0,
     });
     activeFake = fake;
     _setSpawnImpl(fake.spawn);
     const result = await provisionSandbox(
       'isolation_session',
-      { filesystem: { readwritePaths: ['C:\\workspace'] } },
+      { user: new IsolationSessionUserConfig('alice@contoso.com', 'tok') },
       testOptions(),
     );
     assert.strictEqual(result.sandboxId, 'iso:reg-abc:prov-1');
     assert.strictEqual(result.metadata?.agentUserName, 'agent\\u1');
+    assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
+    assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
     assert.strictEqual(fake.captured.envelope?.phase, 'provision');
     assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
-    assert.deepStrictEqual(fake.captured.envelope?.filesystem, { readwritePaths: ['C:\\workspace'] });
     assert.ok(fake.captured.args?.includes('--experimental'));
   });
 
@@ -270,15 +266,20 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
 describe('startSandbox', { skip: platformSkip }, () => {
   afterEach(() => { _resetSpawnImpl(); });
 
-  it('infers backend from sandboxId prefix and nests configurationId under experimental', async () => {
+  it('infers backend from sandboxId prefix and nests start user under experimental', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id, { configurationId: 'small' }, testOptions());
+    await startSandbox(
+      id,
+      { user: new IsolationSessionUserConfig('alice@contoso.com', 'tok') },
+      testOptions(),
+    );
     assert.strictEqual(fake.captured.envelope?.phase, 'start');
     assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:reg-abc:prov-1');
-    assert.deepStrictEqual(fake.captured.envelope?.experimental, {
-      isolation_session: { start: { configurationId: 'small' } },
+    const wire = JSON.parse(JSON.stringify(fake.captured.envelope));
+    assert.deepStrictEqual(wire.experimental, {
+      isolation_session: { start: { user: { upn: 'alice@contoso.com', wamToken: 'tok' } } },
     });
   });
 

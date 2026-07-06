@@ -1,7 +1,0 @@
-{
-    "phase": "provision",
-    "containment": "isolation_session",
-    "filesystem": {
-        "readwritePaths": ["C:\\Windows", "C:\\", "C:\\mxc_filter_test\\rw"]
-    }
-}
