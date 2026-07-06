@@ -7,7 +7,7 @@ members = [
     "core/mxc-sdk",
     "core/mxc_pty",
     "core/mxc_build_common",
-    "core/plm",
+    "host/plm",
     "core/generated/base_container_specification",
     "backends/appcontainer/common",
     "backends/windows_sandbox/daemon",

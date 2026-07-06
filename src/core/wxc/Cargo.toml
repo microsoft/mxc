@@ -28,7 +28,7 @@ wslc_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
 # Shared PLM dep for the singleton env-var name and `wait_until_cleared`
 # helper — single source of truth so the two crates can't drift.
-plm = { path = "../plm" }
+plm = { path = "../../host/plm" }
 
 [build-dependencies]
 mxc_build_common.workspace = true
