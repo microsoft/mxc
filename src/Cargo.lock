@@ -2954,6 +2954,7 @@ dependencies = [
  "nanvix_runner",
  "plm",
  "serde_json",
+ "tempfile",
  "windows",
  "windows_sandbox_common",
  "wslc_common",

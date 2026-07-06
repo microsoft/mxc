@@ -321,7 +321,22 @@ fn redirect_stdio_from_argv() {
     let Some(dir) = dir else { return };
 
     fn redirect_one(path: &Path, which: windows::Win32::System::Console::STD_HANDLE) {
-        let Ok(f) = OpenOptions::new().create(true).append(true).open(path) else {
+        // `create_new(true)` maps to `CREATE_NEW` on Windows, which
+        // fails with `ERROR_FILE_EXISTS` if anything (regular file,
+        // directory, symlink, junction target — any reparse point)
+        // already occupies the path. Combined with the caller-side
+        // random-suffix temp dir (see `plm_launch::run_plm_elevated`),
+        // this closes the elevation-boundary symlink attack: a same-
+        // user medium-IL attacker cannot pre-plant `stdout.log` /
+        // `stderr.log` as a symlink pointing at an admin-only file
+        // and have this elevated (admin-token) process silently
+        // append attacker-controllable bytes to that target.
+        //
+        // If create_new fails (attacker successfully raced us, or
+        // some other fs error) we silently give up — the operator
+        // loses that stream's diagnostics but no privilege boundary
+        // is crossed.
+        let Ok(f) = OpenOptions::new().create_new(true).append(true).open(path) else {
             return;
         };
         let handle = HANDLE(f.as_raw_handle());

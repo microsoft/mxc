@@ -99,16 +99,35 @@ pub fn run_plm_elevated(
     args: &[&std::ffi::OsStr],
     singleton_held_by_parent: bool,
 ) -> Result<ElevatedRun, String> {
-    // Build a temp directory for the two capture files. Using a
-    // per-invocation directory + fixed filenames keeps cleanup simple
-    // and avoids two `TempPath`s.
-    let tmp_dir = env::temp_dir().join(format!("mxc-plm-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&tmp_dir);
+    // Build a temp directory for the two capture files. Uses a
+    // random-suffix `tempfile::Builder::tempdir_in` (not a
+    // deterministic `%TEMP%\mxc-plm-<pid>`) so a same-user medium-IL
+    // attacker cannot pre-squat the directory or its contents before
+    // the elevated child (running under the admin token) opens files
+    // inside it. `tempdir_in` fails if the directory already exists
+    // — treat that failure as fatal rather than silently reusing an
+    // attacker-controlled path.
+    //
+    // We deliberately do NOT wrap this in a `TempDir` RAII guard:
+    // the elevated child writes into the dir long after this
+    // function's stack frame is gone, and we need the paths to
+    // survive across the `WaitForSingleObject`. We clean up
+    // explicitly on every exit path via `remove_dir_all(&tmp_dir)`.
+    let tmp_dir = match tempfile::Builder::new()
+        .prefix("mxc-plm-")
+        .rand_bytes(16)
+        .tempdir()
+    {
+        Ok(td) => td.keep(),
+        Err(e) => return Err(format!("failed to create plm capture temp dir: {e}")),
+    };
     let stdout_path = tmp_dir.join("stdout.log");
     let stderr_path = tmp_dir.join("stderr.log");
-    // Truncate any pre-existing content.
-    let _ = std::fs::write(&stdout_path, b"");
-    let _ = std::fs::write(&stderr_path, b"");
+    // No pre-truncation: the elevated child creates the files
+    // itself with `create(true).append(true)` + reparse-point
+    // rejection. Any parent-side pre-write here would defeat that
+    // reparse-point check by materialising the target as a plain
+    // file first.
 
     // Build the parameter string ShellExecuteExW expects. Prepend the
     // internal handshake flags before the subcommand args so clap
