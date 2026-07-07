@@ -164,16 +164,23 @@ pub fn detect(
 
     // Tier 1 — BaseContainer
     if prefer_base_container && is_base_container_usable() {
-        if denied {
-            ensure_dacl_augmentation_allowed(policy)?;
-            verify_write_dac_all(&policy.denied_paths)?;
+        // Keep deny on Tier 1 only with native fs_deny support
+        // (SANDBOX_CAP_FS_DENY); T1 applies no host DACL, so otherwise
+        // fall through to a DACL-enforcing tier.
+        if !denied || base_container_supports_deny_paths() {
+            return Ok(TierDecision {
+                tier: IsolationTier::BaseContainer,
+                needs_dacl_augmentation: false,
+                bfscfg_path: None,
+                warnings,
+            });
         }
-        return Ok(TierDecision {
-            tier: IsolationTier::BaseContainer,
-            needs_dacl_augmentation: denied,
-            bfscfg_path: None,
-            warnings,
-        });
+        warnings.push(
+            "BaseContainer usable but this OS does not advertise SANDBOX_CAP_FS_DENY; \
+             deniedPaths cannot be enforced natively at Tier 1 — falling back to AppContainer \
+             for deniedPaths enforcement"
+                .to_string(),
+        );
     }
     // Tier 2 — AppContainer + BFS
     //
@@ -186,8 +193,7 @@ pub fn detect(
     // entirely and fall through to Tier 3 (AppContainer + DACL).
     if cfg!(feature = "tier2_bfs") {
         warnings.push(
-            "BaseContainer API not present or not preferred; falling back to AppContainer + BFS"
-                .to_string(),
+            "BaseContainer tier not selected; falling back to AppContainer + BFS".to_string(),
         );
 
         // When the policy has no filesystem rules at all there is
@@ -215,7 +221,7 @@ pub fn detect(
         warnings.push("bfscfg.exe not present; falling back to AppContainer + DACL".to_string());
     } else {
         warnings.push(
-            "BaseContainer API not present or not preferred, and AppContainer + BFS is not \
+            "BaseContainer tier not selected, and AppContainer + BFS is not \
              compiled into this binary; falling back to AppContainer + DACL"
                 .to_string(),
         );
@@ -465,6 +471,23 @@ pub fn is_base_container_usable() -> bool {
     *USABLE.get_or_init(crate::base_container_runner::BaseContainerRunner::is_base_container_usable)
 }
 
+/// Whether the OS advertises native deny-paths enforcement
+/// (`SANDBOX_CAP_FS_DENY`, i.e. it honors the SandboxSpec `fs_deny` field).
+/// [`detect`] uses this to keep deny on Tier 1; otherwise it falls through to a
+/// DACL-enforcing tier. Probed once and cached for the process lifetime.
+pub fn base_container_supports_deny_paths() -> bool {
+    // Test seam: force the capability without real OS support.
+    #[cfg(test)]
+    if let Ok(forced) = std::env::var("MXC_FORCE_DENY_PATHS") {
+        return forced == "1";
+    }
+
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(
+        crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths,
+    )
+}
+
 /// Returns `Ok(Some(path))` when `bfscfg.exe` is present, where `path`
 /// is the **absolute** path the caller MUST pass to
 /// `CreateProcessW`'s `lpApplicationName` (or as a quoted absolute
@@ -707,6 +730,74 @@ mod tests {
             detect(&policy, true),
             Err(FallbackError::DaclFallbackDisabled)
         ));
+    }
+
+    /// Tier 1 keeps a denied-paths policy (native `fs_deny`, no host DACL) when
+    /// `SANDBOX_CAP_FS_DENY` is advertised.
+    #[test]
+    fn denied_paths_stay_on_t1_when_capability_present() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_TIER");
+            std::env::set_var("MXC_FORCE_BC_USABLE", "1");
+            std::env::set_var("MXC_FORCE_DENY_PATHS", "1");
+        }
+        let policy = policy_with_denied();
+        let d = detect(&policy, true).expect("native deny support keeps T1");
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_BC_USABLE");
+            std::env::remove_var("MXC_FORCE_DENY_PATHS");
+        }
+        assert!(matches!(d.tier, IsolationTier::BaseContainer));
+        assert!(!d.needs_dacl_augmentation);
+    }
+
+    /// Without `SANDBOX_CAP_FS_DENY`, deny must not stay on Tier 1; it falls
+    /// through to a DACL-enforcing AppContainer tier.
+    #[test]
+    fn denied_paths_fall_through_when_capability_absent() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_TIER");
+            std::env::set_var("MXC_FORCE_BC_USABLE", "1");
+            std::env::set_var("MXC_FORCE_DENY_PATHS", "0");
+        }
+        // Temp dir so the DACL-tier WRITE_DAC precheck succeeds for a non-admin user.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut policy = ContainerPolicy::default();
+        policy
+            .denied_paths
+            .push(dir.path().to_string_lossy().into_owned());
+        policy.fallback.allow_dacl_mutation = true;
+        let d = detect(&policy, true).expect("falls through to a DACL tier");
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_BC_USABLE");
+            std::env::remove_var("MXC_FORCE_DENY_PATHS");
+        }
+        assert!(
+            !matches!(d.tier, IsolationTier::BaseContainer),
+            "deny without native capability must not stay on T1, got {:?}",
+            d.tier
+        );
+        assert!(d.needs_dacl_augmentation);
+        assert!(
+            d.warnings.iter().any(|w| w.contains("SANDBOX_CAP_FS_DENY")),
+            "expected the capability-absent fall-through warning, got: {:?}",
+            d.warnings
+        );
+        // The API is present and was preferred here — fall-through warnings must
+        // not claim otherwise.
+        assert!(
+            !d.warnings
+                .iter()
+                .any(|w| w.contains("not present or not preferred")),
+            "fall-through warnings must not claim the API is absent, got: {:?}",
+            d.warnings
+        );
     }
     #[test]
     fn force_tier_env_var_parses_all_three_values() {
