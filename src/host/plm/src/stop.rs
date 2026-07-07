@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use crate::config::{
-    deny_file_set, initialize_filesystem, load_config, merge_capabilities,
-    resolve_adjusted_config_path, save_adjusted_config, update_from_access_events,
-    write_added_paths_summary, write_detection_summary, write_requested_capabilities_summary,
+    apply_ui_operation_flags, deny_file_set, initialize_filesystem, load_config,
+    merge_capabilities, resolve_adjusted_config_path, save_adjusted_config,
+    set_ui_subsystem_enabled, update_from_access_events, write_added_paths_summary,
+    write_detection_summary, write_requested_capabilities_summary,
 };
 use crate::event_parser::parse_events;
 use crate::wpr_path::wpr_command;
@@ -143,7 +144,13 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 
     let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
 
-    write_detection_summary(&parse.valid_access_events, &parse.requested_capabilities);
+    write_detection_summary(
+        &parse.valid_access_events,
+        &parse.requested_capabilities,
+        parse.ui_event_count,
+        &parse.ui_events,
+        parse.ui_operation_flags,
+    );
     write_requested_capabilities_summary(&parse.requested_capabilities, opts.verbose);
 
     let config_path = match opts.config_path.as_ref() {
@@ -199,6 +206,13 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 
     if !parse.requested_capabilities.is_empty() {
         merge_capabilities(&mut config, &parse.requested_capabilities)?;
+    }
+
+    if parse.need_ui {
+        set_ui_subsystem_enabled(&mut config)?;
+    }
+    if parse.ui_operation_flags != 0 {
+        apply_ui_operation_flags(&mut config, parse.ui_operation_flags)?;
     }
 
     let adjusted = resolve_adjusted_config_path(&dest_config, opts.adjusted_config_path.as_deref());
