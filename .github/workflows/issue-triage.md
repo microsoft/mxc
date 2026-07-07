@@ -10,7 +10,12 @@ permissions:
   contents: read
   issues: read
   copilot-requests: write
+tools:
+  github:
+    allowed-repos: "${{ github.repository }}"
+    min-integrity: unapproved
 safe-outputs:
+  report-failure-as-issue: false
   add-labels:
     allowed:
       - OS-Linux
@@ -96,3 +101,10 @@ Post one short triage comment with `add_comment` that:
 - explicitly says when nothing clearly matched and `Needs-Triage` was left in place.
 
 Use `noop` only if the issue cannot be analyzed from the available title/body content.
+
+### Do not falsely report missing or filtered content
+
+- The triggering issue number is provided in the context above. Always read the issue title and body with the GitHub tools first.
+- If that read returns a title or body, you HAVE the content: proceed to triage it. Do not stop.
+- Never emit `missing_data`, and never claim the content is "filtered", "unreadable", "blocked", or "missing", when the issue read returned content.
+- `missing_data` is reserved for a genuine tool or API failure where no title or body could be retrieved at all. If a read fails, retry once before concluding anything is missing.
