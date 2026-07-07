@@ -50,9 +50,18 @@ impl From<std::io::Error> for WxcError {
 
 #[cfg(target_os = "windows")]
 pub const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
-    "filesystem.deniedPaths is not yet supported on Windows. Paths are denied by \
-     default unless granted via readwritePaths or readonlyPaths. Remove deniedPaths, \
-     or narrow readwritePaths/readonlyPaths to exclude the path you wanted to deny.";
+    "filesystem.deniedPaths is not supported by this AppContainer filesystem mode. \
+     Paths are denied by default unless granted via readwritePaths or readonlyPaths. \
+     Remove deniedPaths, or narrow readwritePaths/readonlyPaths to exclude the path \
+     you wanted to deny.";
+
+#[cfg(target_os = "windows")]
+pub const DENIED_PATHS_FEATURE_DISABLED_MSG: &str =
+    "filesystem.deniedPaths cannot be enforced by the BaseContainer backend on this \
+     OS build: it does not advertise the native deny-paths capability \
+     (SANDBOX_CAP_FS_DENY via Experimental_QuerySandboxSupport). Run on a build with \
+     BaseContainer deny support, or use schema version '0.4.0-alpha' to select the \
+     AppContainer backend (which enforces deniedPaths via DENY ACEs).";
 
 #[cfg(target_os = "windows")]
 pub const HOST_LISTS_NOT_SUPPORTED_MSG: &str =

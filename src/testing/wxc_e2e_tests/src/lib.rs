@@ -234,7 +234,7 @@ pub fn run_lxc_config(config_file: &str, extra_args: &[&str]) -> CommandResult {
 }
 
 /// Return whether the Hyperlight snapshot is installed at the default
-/// location (`%LOCALAPPDATA%\pyhl\snapshot.hls`).
+/// location (`%LOCALAPPDATA%\pyhl\snapshot\index.json`).
 pub fn has_hyperlight_snapshot() -> bool {
     let home = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -243,7 +243,7 @@ pub fn has_hyperlight_snapshot() -> bool {
                 .map(|v| PathBuf::from(v).join("AppData").join("Local"))
                 .unwrap_or_default()
         });
-    let snapshot = home.join("pyhl").join("snapshot.hls");
+    let snapshot = home.join("pyhl").join("snapshot").join("index.json");
     if snapshot.is_file() {
         println!("Using Hyperlight snapshot at {}", snapshot.display());
         true
@@ -438,10 +438,20 @@ fn command_result(label: &str, output: Output, wall_time_ms: u128) -> CommandRes
     }
 }
 
-/// Run `wxc-exec.exe` with the supplied config file and extra arguments.
+/// Run `wxc-exec.exe` with a config file from `tests/configs/` and extra arguments.
 pub fn run_wxc_config(config_file: &str, extra_args: &[&str]) -> CommandResult {
     let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
     let config = test_configs_dir().join(config_file);
+    let mut args: Vec<String> = extra_args.iter().map(|arg| (*arg).to_string()).collect();
+    args.push(config.display().to_string());
+
+    run_executable(config_file, &exe, args)
+}
+
+/// Run `wxc-exec.exe` with a config file from `tests/examples/` and extra arguments.
+pub fn run_wxc_example(config_file: &str, extra_args: &[&str]) -> CommandResult {
+    let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
+    let config = examples_dir().join(config_file);
     let mut args: Vec<String> = extra_args.iter().map(|arg| (*arg).to_string()).collect();
     args.push(config.display().to_string());
 

@@ -257,6 +257,17 @@ export interface PortMapping {
 }
 
 /**
+ * Telemetry configuration for experimental TraceLogging ETW support.
+ */
+export interface TelemetryConfig {
+  /**
+   * Explicit telemetry override. `true` = force on, `false` = force off,
+   * `undefined` = off (default).
+   */
+  enabled?: boolean;
+}
+
+/**
  * Main WXC configuration
  */
 export interface ContainerConfig {
@@ -292,6 +303,8 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
+    /** Telemetry configuration for experimental TraceLogging ETW support */
+    telemetry?: TelemetryConfig;
   };
   /** macOS Seatbelt sandbox configuration (macOS only) */
   seatbelt?: SeatbeltConfig;

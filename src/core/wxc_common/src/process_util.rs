@@ -10,16 +10,14 @@ use crate::sandbox_process::StreamCloser;
 use crate::string_util;
 
 use windows::Win32::Foundation::{
-    CloseHandle, LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
-    HLOCAL, WAIT_OBJECT_0,
+    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
-use windows::Win32::Security::{DeriveCapabilitySidsFromName, PSID, SECURITY_ATTRIBUTES};
+use windows::Win32::Security::{PSID, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::System::IO::CancelIoEx;
 use windows_core::BOOL;
-use windows_core::PCWSTR;
 
 /// A readable end of an anonymous pipe (e.g. the child's stdout/stderr),
 /// owning the handle and closing it on drop. Implements [`std::io::Read`]
@@ -520,58 +518,6 @@ pub fn run_process_with_captured_output(
 pub struct SidAndAttributes {
     pub sid: PSID,
     pub attributes: u32,
-}
-
-/// Derive the capability SID for a given capability name.
-/// Returns the raw SID pointer. The caller is responsible for freeing it with `LocalFree`.
-pub fn get_capability_sid_from_name(name: &str) -> Result<*mut core::ffi::c_void, WxcError> {
-    let wide_name = string_util::to_wide(name);
-    let pcwstr = PCWSTR(wide_name.as_ptr());
-
-    let mut capability_sids: *mut PSID = std::ptr::null_mut();
-    let mut capability_sid_count: u32 = 0;
-    let mut group_sids: *mut PSID = std::ptr::null_mut();
-    let mut group_sid_count: u32 = 0;
-
-    unsafe {
-        DeriveCapabilitySidsFromName(
-            pcwstr,
-            &mut group_sids,
-            &mut group_sid_count,
-            &mut capability_sids,
-            &mut capability_sid_count,
-        )
-        .map_err(|e| {
-            WxcError::Process(format!("DeriveCapabilitySidsFromName({name}) failed: {e}"))
-        })?;
-
-        // Free group SIDs
-        for i in 0..group_sid_count {
-            let sid = *group_sids.add(i as usize);
-            let _ = LocalFree(Some(HLOCAL(sid.0)));
-        }
-        let _ = LocalFree(Some(HLOCAL(group_sids as *mut _)));
-
-        if capability_sid_count == 0 {
-            let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
-            return Err(WxcError::Process(format!(
-                "No capability SID returned for {}",
-                name
-            )));
-        }
-
-        // Take the first capability SID
-        let result_sid = (*capability_sids).0;
-
-        // Free remaining capability SIDs (index 1+)
-        for i in 1..capability_sid_count {
-            let sid = *capability_sids.add(i as usize);
-            let _ = LocalFree(Some(HLOCAL(sid.0)));
-        }
-        let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
-
-        Ok(result_sid)
-    }
 }
 
 // ── Sibling binary resolution ─────────────────────────────────────────────

@@ -227,6 +227,37 @@ wxc-exec.exe --audit policy.json
 
 > **Warning:** In release builds, `--audit` relaxes the rejection of `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring.
 
+## Telemetry (Experimental)
+
+MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
+
+Telemetry is **experimental** and requires:
+1. The `--experimental` CLI flag
+2. `"experimental": { "telemetry": { "enabled": true } }` in the JSON config
+
+On non-Windows platforms, all telemetry functions are no-ops.
+
+### Data Collection
+
+The software may collect information about you and your use of the software and send it to Microsoft. Microsoft may use this information to provide services and improve our products and services. You may turn off the telemetry as described in the repository. There are also some features in the software that may enable you and Microsoft to collect data from users of your applications. If you use these features, you must comply with applicable law, including providing appropriate notices to users of your applications together with a copy of Microsoft's privacy statement. Our privacy statement is located at https://go.microsoft.com/fwlink/?LinkID=824704. You can learn more about data collection and use in the help documentation and our privacy statement. Your use of the software operates as your consent to these practices.
+
+#### How to turn telemetry off
+
+Telemetry is **off by default**. MXC emits telemetry only when **both** of the following are set, so no action is required to keep it disabled:
+
+1. The `--experimental` CLI flag is passed, **and**
+2. `"experimental": { "telemetry": { "enabled": true } }` is present in the JSON config.
+
+Omitting either (the default) turns telemetry off entirely. On non-Windows platforms all telemetry functions are no-ops.
+
+#### What official builds send
+
+Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route `MXC.Execution` and `MXC.Error` events to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
+
+No PII is collected. Events contain only execution metrics (duration, backend type, exit code) and a bounded error category (`error_type`). Free-form error message text is never emitted, so paths, usernames, and credentials cannot leak through telemetry. If you use the SDK to build applications, you are responsible for providing appropriate telemetry notices to your own users.
+
+Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.
+
 ## Documentation
 
 | Document | Description |
@@ -243,6 +274,7 @@ wxc-exec.exe --audit policy.json
 | [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
+| [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |
 
 ## Contributing
 

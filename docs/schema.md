@@ -85,6 +85,9 @@ production configs and the dev schema when working on experimental features:
             "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
             "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
             "keychainAccess": false        // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+        },
+        "telemetry": {                // Telemetry (experimental, Windows only)
+            "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
         }
     }
 }
@@ -99,6 +102,18 @@ The `filesystem` section defines path access policy shared across backends:
 | `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
+
+On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
+containment tier selected at runtime:
+
+- **BaseContainer (Tier 1):** enforced natively by the OS when the build advertises
+  the `SANDBOX_CAP_FS_DENY` capability. No host filesystem changes are made.
+- **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
+  the run and removed on exit. This path is gated by `allowDaclMutation`, requires
+  `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
+  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
+  runs sharing the same `containerId` can revoke each other's ACEs — use distinct
+  `containerId` values for parallel runs.
 
 ### Fallback Policy
 

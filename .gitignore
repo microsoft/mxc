@@ -37,12 +37,13 @@ vcpkg_installed/
 # build artifacts
 output
 **/target/
+*.pdb
 
 # Copilot
-.copilot/TEST_COVERAGE_ANALYSIS.md
 .copilot/
-*.pdb
-pathrel_test.exe
 
 # Claude
 .claude/
+
+# review channel artifacts
+.review/

@@ -70,7 +70,7 @@ jobs:
           $pyhlHome = Join-Path $env:LOCALAPPDATA "pyhl"
           New-Item -ItemType Directory -Force -Path $pyhlHome | Out-Null
 
-          $tag = "v0.10.0"
+          $tag = "v0.12.1"
           .\crane.exe export ghcr.io/hyperlight-dev/hyperlight-unikraft/python-agent-driver-kernel:$tag kernel.tar
           tar -xf kernel.tar -C $pyhlHome kernel
 

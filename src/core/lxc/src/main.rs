@@ -10,6 +10,7 @@ use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::telemetry;
 
 #[cfg(target_os = "linux")]
 use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
@@ -215,6 +216,18 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
+    // ── Telemetry init (experimental) ───────────────────────────────
+    let telemetry_active = if request.experimental_enabled {
+        request
+            .experimental
+            .telemetry
+            .as_ref()
+            .map(|c| telemetry::init(c, &mut logger))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     log_request(&request, &mut logger);
 
     // Dispatch by containment backend. On Linux, Bubblewrap is now the
@@ -242,6 +255,11 @@ fn main() {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
                 );
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -257,6 +275,11 @@ fn main() {
             #[cfg(not(feature = "microvm"))]
             {
                 eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -268,6 +291,11 @@ fn main() {
             #[cfg(not(target_os = "linux"))]
             {
                 eprintln!("Error: Bubblewrap backend is only available on Linux");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -297,6 +325,14 @@ fn main() {
     }
 
     display_script_results(&response, &mut logger);
+
+    // ── Telemetry emit (experimental) ───────────────────────────────
+    telemetry::emit_completion(
+        telemetry_active,
+        &request.containment,
+        &response,
+        run_elapsed,
+    );
 
     print!("{}", response.standard_out);
     eprint!("{}", response.standard_err);

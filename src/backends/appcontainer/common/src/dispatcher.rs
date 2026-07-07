@@ -12,14 +12,12 @@
 //!
 //! Filesystem-policy enforcement under T1 is delegated entirely to
 //! BaseContainer's own `Experimental_CreateProcessInSandbox` API
-//! (including `deniedPaths` once native deny support lands); the
-//! dispatcher does **not** apply host DACLs in T1. The opaque
-//! `identity` BaseContainer runs the child under is not guaranteed to
-//! match an `AppContainer` SID derived from the same container name, so
-//! adding host-DACL belt-and-suspenders here would risk silently
-//! targeting the wrong principal.
-//!
-//! See `docs/proposals/downlevel_support/basecontainer-fallback-plan-v2.md`.
+//! (`deniedPaths` via the SandboxSpec `fs_deny` field); the dispatcher
+//! does **not** apply host DACLs in T1. When the OS advertises native
+//! deny support the OS enforces `deniedPaths` itself; when it does not,
+//! a denied-paths policy never reaches T1 (the detector falls through to
+//! the AppContainer tiers, which stamp the deny DACLs). So T1 has no
+//! deny ACEs to apply either way.
 //!
 //! # Why T2 (BFS) also gets DACL deny augmentation
 //!
@@ -282,12 +280,10 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
     let (runner, dacl_manager): (Box<dyn ScriptRunner>, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
             // Tier 1 delegates filesystem-policy enforcement to
-            // BaseContainer's native API. We do NOT stamp host-DACL
-            // deny ACEs here because the AppContainer SID derived from
-            // `container_name(request)` is not guaranteed to match the
-            // opaque principal `Experimental_CreateProcessInSandbox`
-            // actually runs the child under; a mismatch would render
-            // the ACEs inert and silently un-enforce `deniedPaths`.
+            // BaseContainer's native API. We stamp no host-DACL deny ACEs
+            // here: the detector only routes a denied-paths policy to T1
+            // when the OS enforces `fs_deny` natively, so there is nothing
+            // for a host DACL to add.
             let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(BaseContainerRunner::new()));
             (runner, None)
         }
@@ -412,10 +408,8 @@ mod tests {
     fn dispatch_t1_with_denied_paths_has_no_dacl() {
         // T1 delegates filesystem-policy enforcement (including
         // `deniedPaths`) to BaseContainer's native API; the dispatcher
-        // does not stamp host-DACL deny ACEs on the T1 path, so no
-        // `DaclManager` is attached regardless of the `deniedPaths`
-        // contents. See the module-level doc for the principal-match
-        // reasoning.
+        // attaches no `DaclManager` on the T1 path regardless of the
+        // `deniedPaths` contents.
         let _g = ForceTierGuard::set("base-container");
         let (policy, _tmp) = policy_with_denied_temp();
         let req = test_request(policy);

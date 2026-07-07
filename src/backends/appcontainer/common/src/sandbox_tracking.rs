@@ -65,18 +65,14 @@ pub fn derive_sid_string(identity: &str) -> Result<String, String> {
     };
 
     // Reuse the shared SID-to-string helper from string_util.
-    let result = unsafe { string_util::sid_to_string(psid.0, "") };
+    let result = unsafe { string_util::sid_to_string(psid.0) };
 
     // SAFETY: SID was allocated by the OS and must be freed with FreeSid.
     unsafe {
         FreeSid(psid);
     }
 
-    if result.is_empty() {
-        return Err("ConvertSidToStringSidW failed".into());
-    }
-
-    Ok(result)
+    result.ok_or_else(|| "ConvertSidToStringSidW failed".into())
 }
 
 /// Information about a tracked sandbox entry, used for logging and cleanup.

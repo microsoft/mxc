@@ -21,6 +21,7 @@ semver = "1"
 schemars = { version = "0.8", optional = true }
 nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
+mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }

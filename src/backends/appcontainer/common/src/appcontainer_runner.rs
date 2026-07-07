@@ -12,7 +12,7 @@ use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows::Win32::Security::{FreeSid, PSID, TOKEN_QUERY};
+use windows::Win32::Security::{DeriveCapabilitySidsFromName, FreeSid, PSID, TOKEN_QUERY};
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
@@ -36,8 +36,8 @@ use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
 use wxc_common::process_util::{
-    create_std_pipes, get_capability_sid_from_name, InterruptiblePipeReader, OwnedHandle,
-    PipeReadCanceller, PipeWriter, SendOwnedHandle, SidAndAttributes,
+    create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
+    SendOwnedHandle, SidAndAttributes,
 };
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
@@ -173,25 +173,91 @@ fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::mod
     entries.push(("HTTPS_PROXY".to_string(), proxy_url));
 }
 
-/// RAII guard that frees capability SID pointers via `LocalFree` on drop.
-/// Ensures SIDs are freed regardless of the error return path.
-struct CapabilitySidGuard(Vec<*mut core::ffi::c_void>);
+/// Owned capability SID derived from a capability name. Frees the underlying
+/// `LocalAlloc`'d SID with `LocalFree` on drop, so callers don't have to track
+/// and free the raw pointer themselves.
+struct OwnedCapabilitySid {
+    sid: PSID,
+}
 
-impl CapabilitySidGuard {
-    fn new() -> Self {
-        Self(Vec::new())
+impl OwnedCapabilitySid {
+    fn new(sid: PSID) -> Self {
+        Self { sid }
     }
 
-    fn push(&mut self, sid: *mut core::ffi::c_void) {
-        self.0.push(sid);
+    /// Derive the capability SID for a given capability name. Capability SIDs
+    /// are an AppContainer concept, so this helper lives in the AppContainer
+    /// backend rather than the shared foundation crate.
+    fn from_capability_name(name: &str) -> Result<Self, WxcError> {
+        let wide_name = string_util::to_wide(name);
+        let pcwstr = PCWSTR(wide_name.as_ptr());
+
+        let mut capability_sids: *mut PSID = std::ptr::null_mut();
+        let mut capability_sid_count: u32 = 0;
+        let mut group_sids: *mut PSID = std::ptr::null_mut();
+        let mut group_sid_count: u32 = 0;
+
+        // SAFETY: the Windows API writes LocalAlloc-compatible SID arrays and
+        // counts. We read only within those counts, free each returned pointer
+        // or array once, and transfer one capability SID into OwnedCapabilitySid.
+        unsafe {
+            DeriveCapabilitySidsFromName(
+                pcwstr,
+                &mut group_sids,
+                &mut group_sid_count,
+                &mut capability_sids,
+                &mut capability_sid_count,
+            )
+            .map_err(|e| {
+                WxcError::Process(format!("DeriveCapabilitySidsFromName({name}) failed: {e}"))
+            })?;
+
+            // Free group SIDs
+            for i in 0..group_sid_count {
+                let sid = *group_sids.add(i as usize);
+                let _ = LocalFree(Some(HLOCAL(sid.0)));
+            }
+            let _ = LocalFree(Some(HLOCAL(group_sids as *mut _)));
+
+            if capability_sid_count == 0 {
+                let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
+                return Err(WxcError::Process(format!(
+                    "No capability SID returned for {}",
+                    name
+                )));
+            }
+
+            // Take the first capability SID
+            let result_sid = *capability_sids;
+
+            // Free remaining capability SIDs (index 1+)
+            for i in 1..capability_sid_count {
+                let sid = *capability_sids.add(i as usize);
+                let _ = LocalFree(Some(HLOCAL(sid.0)));
+            }
+            let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
+
+            Ok(Self::new(result_sid))
+        }
+    }
+
+    /// Borrow the raw `PSID` for building a `SID_AND_ATTRIBUTES` array. The
+    /// pointer is valid only while `self` is alive — keep the owner around
+    /// until the process-creation call has returned.
+    fn as_psid(&self) -> PSID {
+        self.sid
     }
 }
 
-impl Drop for CapabilitySidGuard {
+impl Drop for OwnedCapabilitySid {
     fn drop(&mut self) {
-        for &sid in &self.0 {
+        let ptr = self.sid.0;
+
+        if !ptr.is_null() {
+            // SAFETY: `OwnedCapabilitySid` owns this SID pointer and frees it
+            // exactly once using the allocator required by the Windows API.
             unsafe {
-                let _ = LocalFree(Some(HLOCAL(sid)));
+                let _ = LocalFree(Some(HLOCAL(ptr)));
             }
         }
     }
@@ -472,17 +538,20 @@ impl AppContainerScriptRunner {
         }
 
         // --- Derive SIDs for each capability ---
-        let mut capability_sid_guard = CapabilitySidGuard::new();
+        // `owned_capability_sids` owns the derived SIDs (freed on drop); it
+        // must outlive `sid_attrs` / `security_capabilities`, which borrow the
+        // raw pointers for the process-creation call below.
+        let mut owned_capability_sids: Vec<OwnedCapabilitySid> = Vec::new();
         let mut sid_attrs: Vec<SidAndAttributes> = Vec::new();
 
         for cap_name in &capabilities_to_add {
-            match get_capability_sid_from_name(cap_name) {
-                Ok(sid_ptr) => {
+            match OwnedCapabilitySid::from_capability_name(cap_name) {
+                Ok(sid) => {
                     sid_attrs.push(SidAndAttributes {
-                        sid: PSID(sid_ptr),
+                        sid: sid.as_psid(),
                         attributes: SE_GROUP_ENABLED as u32,
                     });
-                    capability_sid_guard.push(sid_ptr);
+                    owned_capability_sids.push(sid);
                 }
                 Err(e) => {
                     logger.log_line(&format!(
@@ -925,7 +994,8 @@ impl AppContainerScriptRunner {
         if self.app_container_sid.0.is_null() {
             return "unknown-sid".to_string();
         }
-        unsafe { string_util::sid_to_string(self.app_container_sid.0, "unknown-sid") }
+        unsafe { string_util::sid_to_string(self.app_container_sid.0) }
+            .unwrap_or_else(|| "unknown-sid".to_string())
     }
 }
 
