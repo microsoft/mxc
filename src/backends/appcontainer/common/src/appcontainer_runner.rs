@@ -324,6 +324,74 @@ pub enum FilesystemMode {
     Dacl,
 }
 
+/// Config capability string that enables **learning mode**: the OS logs every
+/// *failed* access check for the AppContainer, but the access is still
+/// **denied** (deny-and-record). Containment is unchanged.
+pub(crate) const CAP_LEARNING_MODE: &str = "learningMode";
+
+/// Config capability string that enables **permissive learning mode**: the OS
+/// logs every access check and **allows** it (audit / allow-all). This does not
+/// enforce deny-by-default, so it emits a security warning — but it is still
+/// permitted in every build because it is useful for auditing.
+pub(crate) const CAP_PERMISSIVE_LEARNING_MODE: &str = "permissiveLearningMode";
+
+/// A recognized Windows learning-mode capability.
+///
+/// The two learning-mode capabilities are semantically **distinct** and must
+/// not be conflated: [`Learning`](Self::Learning) only records denials (accesses
+/// stay denied), while [`Permissive`](Self::Permissive) additionally *allows*
+/// the accesses it logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearningModeCapability {
+    /// `learningMode` — log *failed* accesses; accesses remain **denied**
+    /// (deny-and-record). Containment is unchanged.
+    Learning,
+    /// `permissiveLearningMode` — log every access check and **allow** it
+    /// (audit / allow-all). Does not enforce deny-by-default.
+    Permissive,
+}
+
+impl LearningModeCapability {
+    /// Classify a policy capability string as a learning-mode capability, or
+    /// `None` if it is an unrelated capability.
+    pub(crate) fn from_capability_name(name: &str) -> Option<Self> {
+        match name {
+            CAP_LEARNING_MODE => Some(Self::Learning),
+            CAP_PERMISSIVE_LEARNING_MODE => Some(Self::Permissive),
+            _ => None,
+        }
+    }
+}
+
+/// Return the diagnostic lines the caller should log for the learning-mode
+/// capabilities requested by a policy.
+///
+/// Both capabilities are permitted in every build. `permissiveLearningMode`
+/// logs *and allows* every access check (audit mode) — it is still allowed,
+/// including in release builds where it can be used for auditing, but it emits a
+/// security warning because it does not enforce deny-by-default.
+/// `learningMode` only records denials and emits an informational note.
+pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+    for cap in capabilities {
+        match LearningModeCapability::from_capability_name(cap) {
+            Some(LearningModeCapability::Permissive) => diagnostics.push(
+                "*** SECURITY WARNING *** permissiveLearningMode is ENABLED: every access \
+                 check is logged AND ALLOWED (audit mode); the container is not enforcing \
+                 deny-by-default."
+                    .to_string(),
+            ),
+            Some(LearningModeCapability::Learning) => diagnostics.push(
+                "learningMode is ENABLED: failed access attempts are logged; accesses are \
+                 still denied (deny-and-record)."
+                    .to_string(),
+            ),
+            None => {}
+        }
+    }
+    diagnostics
+}
+
 /// Script runner that executes commands inside a Windows AppContainer.
 pub struct AppContainerScriptRunner {
     app_container_name: String,
@@ -439,27 +507,15 @@ impl AppContainerScriptRunner {
         logger: &mut Logger,
         capture: bool,
     ) -> Result<SpawnedChild, WxcError> {
-        // --- Validate permissiveLearningMode ---
-        for cap in &request.policy.capabilities {
-            if cap == "permissiveLearningMode" {
-                #[cfg(debug_assertions)]
-                {
-                    logger.log_line("*** SECURITY WARNING ***");
-                    logger.log_line(
-                        "permissiveLearningMode is ENABLED. \
-                         Container will learn and record access patterns.",
-                    );
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    return Err(WxcError::Validation(
-                        "SECURITY: permissiveLearningMode not allowed in release builds"
-                            .to_string(),
-                    ));
-                }
-            }
+        // --- Learning-mode capabilities ---
+        // `learningMode` (deny-and-record) and `permissiveLearningMode` (allow-all
+        // audit) are distinct; both are permitted in every build. Permissive is
+        // allowed in release too so it can be used for auditing, but it emits a
+        // security warning because it does not enforce deny-by-default. See
+        // [`learning_mode_capability_diagnostics`].
+        for line in learning_mode_capability_diagnostics(&request.policy.capabilities) {
+            logger.log_line(&line);
         }
-
         // --- Build capability list ---
         let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
         capabilities_to_add.push("AgenticAppContainer".to_string());
@@ -1415,6 +1471,62 @@ mod tests {
     fn attr_count_pipe_mode() {
         assert_eq!(super::compute_attr_count(false, false, true), 2);
         assert_eq!(super::compute_attr_count(true, true, true), 4);
+    }
+
+    #[test]
+    fn learning_mode_capability_classification() {
+        use super::LearningModeCapability;
+        assert_eq!(
+            LearningModeCapability::from_capability_name("learningMode"),
+            Some(LearningModeCapability::Learning)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("permissiveLearningMode"),
+            Some(LearningModeCapability::Permissive)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("internetClient"),
+            None
+        );
+    }
+
+    #[test]
+    fn learning_mode_diagnostic_is_deny_and_record() {
+        let caps = vec!["learningMode".to_string()];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("deny-and-record"));
+        assert!(!out[0].contains("SECURITY WARNING"));
+    }
+
+    #[test]
+    fn permissive_learning_mode_warns_but_is_allowed() {
+        // Permissive mode is permitted in all builds (useful for auditing) but
+        // must surface a distinct security warning.
+        let caps = vec!["permissiveLearningMode".to_string()];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("SECURITY WARNING"));
+        assert!(out[0].contains("ALLOWED"));
+    }
+
+    #[test]
+    fn unrelated_capabilities_produce_no_diagnostics() {
+        // Ordinary (non-learning-mode) capabilities must be ignored entirely.
+        let caps = vec!["internetClient".to_string(), "registryRead".to_string()];
+        assert!(super::learning_mode_capability_diagnostics(&caps).is_empty());
+    }
+
+    #[test]
+    fn both_learning_capabilities_are_reported_distinctly() {
+        let caps = vec![
+            "learningMode".to_string(),
+            "permissiveLearningMode".to_string(),
+        ];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|l| l.contains("deny-and-record")));
+        assert!(out.iter().any(|l| l.contains("SECURITY WARNING")));
     }
 
     #[test]
