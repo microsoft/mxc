@@ -144,15 +144,15 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         Some(p) => p,
         None => return Ok(()),
     };
-    if parse.is_empty() {
-        // Nothing mergeable -- skip producing an Adjusted_*.json (which
-        // would be byte-identical to the input and confuse the harness's
-        // diff-based pass/fail signal).
-        return Ok(());
-    }
 
-    // Copy original config alongside the trace so we have a snapshot of
-    // the exact input that produced this run's output.
+    // Copy original config alongside the trace unconditionally so
+    // operators always have a snapshot of the exact input that
+    // produced this run's `trace.etl`, even when the parse yielded
+    // nothing mergeable. Previously this copy sat below the
+    // `parse.is_empty()` bail, so an empty parse silently produced
+    // a bare `trace.etl` with no accompanying input config —
+    // leaving operators unable to correlate the trace with what
+    // was run.
     let leaf = config_path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -160,6 +160,13 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     let dest_config = log_dir.join(&leaf);
     std::fs::copy(config_path, &dest_config)
         .with_context(|| format!("failed to copy {}", config_path.display()))?;
+
+    if parse.is_empty() {
+        // Nothing mergeable -- skip producing an Adjusted_*.json (which
+        // would be byte-identical to the input and confuse the harness's
+        // diff-based pass/fail signal).
+        return Ok(());
+    }
 
     let mut config = load_config(&dest_config)?;
     initialize_filesystem(&mut config)?;
