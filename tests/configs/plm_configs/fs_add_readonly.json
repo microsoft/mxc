@@ -1,0 +1,12 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "PLM-Filesystem-AddReadonly",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd /c \"type C:\\plm_fs_test\\src\\input.txt > NUL\"",
+    "timeout": 30000
+  },
+  "ui": {
+    "disable": false
+  }
+}
