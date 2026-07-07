@@ -100,6 +100,18 @@ The `filesystem` section defines path access policy shared across backends:
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
+On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
+containment tier selected at runtime:
+
+- **BaseContainer (Tier 1):** enforced natively by the OS when the build advertises
+  the `SANDBOX_CAP_FS_DENY` capability. No host filesystem changes are made.
+- **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
+  the run and removed on exit. This path is gated by `allowDaclMutation`, requires
+  `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
+  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
+  runs sharing the same `containerId` can revoke each other's ACEs — use distinct
+  `containerId` values for parallel runs.
+
 ### Fallback Policy
 
 The `fallback` section gates the runner's host-impacting fallbacks. Each flag is an explicit operator consent for a specific mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).

@@ -95,6 +95,32 @@ impl Drop for BcUsableGuard {
     }
 }
 
+/// RAII guard for `MXC_FORCE_DENY_PATHS`, mirroring [`BcUsableGuard`]. Forces
+/// `base_container_supports_deny_paths()` to a fixed value in tests.
+pub(crate) struct DenyPathsGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl DenyPathsGuard {
+    pub(crate) fn supported(supported: bool) -> Self {
+        let guard = lock();
+        // SAFETY: env-var mutation is gated by ENV_LOCK.
+        unsafe {
+            std::env::set_var("MXC_FORCE_DENY_PATHS", if supported { "1" } else { "0" });
+        }
+        DenyPathsGuard { _lock: guard }
+    }
+}
+
+impl Drop for DenyPathsGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized by ENV_LOCK still held in `_lock`.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_DENY_PATHS");
+        }
+    }
+}
+
 /// RAII guard for `MXC_BFSCFG_PATH`, mirroring [`ForceTierGuard`].
 ///
 /// Only compiled in under the `tier2_bfs` feature, because the
