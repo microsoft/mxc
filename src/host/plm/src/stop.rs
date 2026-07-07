@@ -15,17 +15,27 @@ use crate::config::{
     set_ui_subsystem_enabled, update_from_access_events, write_added_paths_summary,
     write_detection_summary, write_requested_capabilities_summary,
 };
-use crate::event_parser::parse_events;
+use crate::event_parser::{parse_events, ParseResult};
 use crate::wpr_path::wpr_command;
+
+/// "Skip adjusted config" predicate extracted from the inline check
+/// in `run`. A trace that produced no access events, no capability
+/// requests, no `CONVERT_TO_GUI` hint, and no `UI_OPERATION` flags has
+/// nothing to merge — emitting an `Adjusted_*.json` byte-identical to
+/// the input would only confuse the harness's diff-based pass/fail
+/// signal.
+pub fn should_skip_adjusted(parse: &ParseResult) -> bool {
+    parse.is_empty()
+}
 
 pub struct StopOptions {
     pub log_dir: Option<PathBuf>,
     pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     pub adjusted_config_path: Option<PathBuf>,
-    /// When set, skip `wpr -stop` and treat the supplied .etl as the
-    /// captured trace. Useful for re-processing a previously captured
-    /// trace without an active WPR session.
+    /// When set, skip `wpr -stop` and parse the supplied .etl directly.
+    /// Useful for re-processing a previously captured trace without an
+    /// active WPR session.
     pub trace_file: Option<PathBuf>,
     pub verbose: bool,
 }
@@ -89,22 +99,19 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
                 e
             );
             // Prefer the raw operator-supplied path over silently
-            // substituting exe_dir; that would drop operator intent.
+            // substituting exe_dir; the previous behavior swallowed
+            // operator intent entirely.
             (raw.to_path_buf(), Some(warning))
         }
     }
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
-    // Including PID + sub-second component avoids collisions when
-    // parallel PLM tasks finish in the same second.
+    // $LogDir defaults to "<exe dir>\logs\<timestamp>". The sub-second
+    // component makes parallel PLM runs finishing in the same second
+    // land in distinct directories.
     let log_dir = opts.log_dir.unwrap_or_else(|| {
-        let stamp = format!(
-            "{}_pid{}",
-            Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
-            std::process::id()
-        );
+        let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
         exe_dir.join("logs").join(stamp)
     });
     std::fs::create_dir_all(&log_dir)
@@ -180,10 +187,10 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     std::fs::copy(config_path, &dest_config)
         .with_context(|| format!("failed to copy {}", config_path.display()))?;
 
-    if parse.is_empty() {
-        // Nothing mergeable -- skip producing an Adjusted_*.json (which
-        // would be byte-identical to the input and confuse the harness's
-        // diff-based pass/fail signal).
+    // Skip the adjusted config only when the trace yielded nothing
+    // mergeable. Bailing on file/capability emptiness alone would
+    // silently drop UI-only traces.
+    if should_skip_adjusted(&parse) {
         return Ok(());
     }
 
@@ -225,6 +232,68 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_event::LearningModeAccessEvent;
+    use std::collections::HashSet;
+
+    fn empty_parse() -> ParseResult {
+        ParseResult {
+            valid_access_events: Vec::new(),
+            requested_capabilities: HashSet::new(),
+            need_ui: false,
+            ui_event_count: 0,
+            ui_events: Vec::new(),
+            ui_operation_flags: 0,
+        }
+    }
+
+    fn dummy_event() -> LearningModeAccessEvent {
+        LearningModeAccessEvent {
+            time_created: chrono::Utc::now(),
+            process_id: 0,
+            thread_id: 0,
+            learning_mode: String::new(),
+            resource_type: String::new(),
+            file_path: "C:\\foo".into(),
+            app_path: String::new(),
+            access_mask: 0,
+        }
+    }
+
+    // Pin the "skip adjusted config" predicate against each
+    // single-signal ParseResult plus the all-empty case.
+
+    #[test]
+    fn should_skip_when_completely_empty() {
+        assert!(should_skip_adjusted(&empty_parse()));
+    }
+
+    #[test]
+    fn should_not_skip_when_access_events_present() {
+        let mut p = empty_parse();
+        p.valid_access_events.push(dummy_event());
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_requested_capability_present() {
+        let mut p = empty_parse();
+        p.requested_capabilities.insert("internetClient".into());
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_need_ui_set() {
+        let mut p = empty_parse();
+        p.need_ui = true;
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_ui_operation_flag_set() {
+        let mut p = empty_parse();
+        p.ui_operation_flags = 0x004; // JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+        assert!(!should_skip_adjusted(&p));
+    }
 
     // ---- resolve_bin_path -----------------------------------------------
 
