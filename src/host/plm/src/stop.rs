@@ -145,14 +145,20 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         None => return Ok(()),
     };
 
-    // Copy original config alongside the trace unconditionally so
-    // operators always have a snapshot of the exact input that
+    // Load the source config into memory FIRST, before any disk
+    // side effect touches the log directory. If the source is
+    // unreadable or malformed we want to bail before we've
+    // produced a half-populated log_dir (bare trace.etl + no
+    // config, no adjusted).
+    let base_config = load_config(config_path)?;
+
+    // Copy the original config alongside the trace unconditionally
+    // so operators always have a snapshot of the exact input that
     // produced this run's `trace.etl`, even when the parse yielded
-    // nothing mergeable. Previously this copy sat below the
-    // `parse.is_empty()` bail, so an empty parse silently produced
-    // a bare `trace.etl` with no accompanying input config —
-    // leaving operators unable to correlate the trace with what
-    // was run.
+    // nothing mergeable. The copy MUST land on disk before we
+    // attempt any edit-and-save cycle below: it's the operator's
+    // only record of the pre-edit state, and losing it turns an
+    // Adjusted_*.json into an un-auditable delta.
     let leaf = config_path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -168,7 +174,11 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let mut config = load_config(&dest_config)?;
+    // Edit the pre-loaded copy of the config in memory rather than
+    // re-reading `dest_config` — this avoids a read-after-write on
+    // Windows where an AV filter can occasionally serve a stale or
+    // empty buffer for a file that `std::fs::copy` just wrote.
+    let mut config = base_config;
     initialize_filesystem(&mut config)?;
     let deny = deny_file_set(&config);
 
