@@ -10,7 +10,11 @@ permissions:
   contents: read
   issues: read
   copilot-requests: write
+tools:
+  github:
+    min-integrity: unapproved
 safe-outputs:
+  report-failure-as-issue: false
   add-labels:
     allowed:
       - OS-Linux
