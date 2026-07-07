@@ -86,7 +86,7 @@ impl MxcError {
 
     pub fn to_envelope(&self) -> ErrorEnvelope {
         ErrorEnvelope {
-            code: self.code.as_str().to_string(),
+            code: self.code,
             message: self.message.clone(),
             details: self.details.clone(),
         }
@@ -133,11 +133,12 @@ impl MxcError {
     }
 }
 
-/// Wire shape of the `error` arm. `code` is a snake_case string from
-/// `MxcErrorCode::as_str`; `details` is omitted from JSON when absent.
+/// Wire shape of the `error` arm. `code` is a closed `MxcErrorCode` that
+/// serialises to its snake_case wire string; `details` is omitted from JSON
+/// when absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorEnvelope {
-    pub code: String,
+    pub code: MxcErrorCode,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub details: Option<Value>,
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn error_envelope_round_trips_via_json() {
         let env = ErrorEnvelope {
-            code: "stale_id".into(),
+            code: MxcErrorCode::StaleId,
             message: "session expired".into(),
             details: Some(json!({"k": "v"})),
         };
@@ -277,7 +278,7 @@ mod tests {
     #[test]
     fn error_envelope_omits_details_when_none() {
         let env = ErrorEnvelope {
-            code: "stale_id".into(),
+            code: MxcErrorCode::StaleId,
             message: "x".into(),
             details: None,
         };
@@ -295,7 +296,7 @@ mod tests {
     #[test]
     fn response_envelope_error_serialises_with_error_key() {
         let inner = ErrorEnvelope {
-            code: "stale_id".into(),
+            code: MxcErrorCode::StaleId,
             message: "x".into(),
             details: None,
         };
@@ -307,7 +308,7 @@ mod tests {
     #[test]
     fn response_envelope_round_trips_via_json() {
         let inner = ErrorEnvelope {
-            code: "backend_error".into(),
+            code: MxcErrorCode::BackendError,
             message: "boom".into(),
             details: Some(json!({"x": 1})),
         };

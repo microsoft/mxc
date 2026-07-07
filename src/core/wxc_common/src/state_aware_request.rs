@@ -109,7 +109,9 @@ impl ParsedStateAwareRequest {
         let Some(phase_value) = backend_obj.get(phase_name) else {
             return Ok(None);
         };
-        serde_json::from_value::<C>(phase_value.clone())
+        // Deserialize directly from the borrowed `&Value` — no need to clone
+        // the (potentially large) backend config subtree first.
+        <C as serde::Deserialize>::deserialize(phase_value)
             .map(Some)
             .map_err(|e| {
                 MxcError::malformed_request(format!(
