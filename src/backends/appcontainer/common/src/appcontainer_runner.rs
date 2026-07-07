@@ -173,82 +173,93 @@ fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::mod
     entries.push(("HTTPS_PROXY".to_string(), proxy_url));
 }
 
-/// Owned capability SID derived from a capability name via
-/// [`get_capability_sid_from_name`]. Frees the underlying `LocalAlloc`'d SID
-/// with `LocalFree` on drop, so callers don't have to track and free the raw
-/// pointer themselves.
-struct OwnedCapabilitySid(PSID);
+/// Owned capability SID derived from a capability name. Frees the underlying
+/// `LocalAlloc`'d SID with `LocalFree` on drop, so callers don't have to track
+/// and free the raw pointer themselves.
+struct OwnedCapabilitySid {
+    sid: PSID,
+}
 
 impl OwnedCapabilitySid {
+    fn new(sid: PSID) -> Self {
+        Self { sid }
+    }
+
+    /// Derive the capability SID for a given capability name. Capability SIDs
+    /// are an AppContainer concept, so this helper lives in the AppContainer
+    /// backend rather than the shared foundation crate.
+    fn from_capability_name(name: &str) -> Result<Self, WxcError> {
+        let wide_name = string_util::to_wide(name);
+        let pcwstr = PCWSTR(wide_name.as_ptr());
+
+        let mut capability_sids: *mut PSID = std::ptr::null_mut();
+        let mut capability_sid_count: u32 = 0;
+        let mut group_sids: *mut PSID = std::ptr::null_mut();
+        let mut group_sid_count: u32 = 0;
+
+        // SAFETY: the Windows API writes LocalAlloc-compatible SID arrays and
+        // counts. We read only within those counts, free each returned pointer
+        // or array once, and transfer one capability SID into OwnedCapabilitySid.
+        unsafe {
+            DeriveCapabilitySidsFromName(
+                pcwstr,
+                &mut group_sids,
+                &mut group_sid_count,
+                &mut capability_sids,
+                &mut capability_sid_count,
+            )
+            .map_err(|e| {
+                WxcError::Process(format!("DeriveCapabilitySidsFromName({name}) failed: {e}"))
+            })?;
+
+            // Free group SIDs
+            for i in 0..group_sid_count {
+                let sid = *group_sids.add(i as usize);
+                let _ = LocalFree(Some(HLOCAL(sid.0)));
+            }
+            let _ = LocalFree(Some(HLOCAL(group_sids as *mut _)));
+
+            if capability_sid_count == 0 {
+                let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
+                return Err(WxcError::Process(format!(
+                    "No capability SID returned for {}",
+                    name
+                )));
+            }
+
+            // Take the first capability SID
+            let result_sid = *capability_sids;
+
+            // Free remaining capability SIDs (index 1+)
+            for i in 1..capability_sid_count {
+                let sid = *capability_sids.add(i as usize);
+                let _ = LocalFree(Some(HLOCAL(sid.0)));
+            }
+            let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
+
+            Ok(Self::new(result_sid))
+        }
+    }
+
     /// Borrow the raw `PSID` for building a `SID_AND_ATTRIBUTES` array. The
     /// pointer is valid only while `self` is alive — keep the owner around
     /// until the process-creation call has returned.
     fn as_psid(&self) -> PSID {
-        self.0
+        self.sid
     }
 }
 
 impl Drop for OwnedCapabilitySid {
     fn drop(&mut self) {
-        if !self.0 .0.is_null() {
+        let ptr = self.sid.0;
+
+        if !ptr.is_null() {
+            // SAFETY: `OwnedCapabilitySid` owns this SID pointer and frees it
+            // exactly once using the allocator required by the Windows API.
             unsafe {
-                let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+                let _ = LocalFree(Some(HLOCAL(ptr)));
             }
         }
-    }
-}
-
-/// Derive the capability SID for a given capability name, returning an owned
-/// handle that frees the SID on drop. Capability SIDs are an AppContainer
-/// concept, so this helper lives in the AppContainer backend rather than the
-/// shared foundation crate.
-fn get_capability_sid_from_name(name: &str) -> Result<OwnedCapabilitySid, WxcError> {
-    let wide_name = string_util::to_wide(name);
-    let pcwstr = PCWSTR(wide_name.as_ptr());
-
-    let mut capability_sids: *mut PSID = std::ptr::null_mut();
-    let mut capability_sid_count: u32 = 0;
-    let mut group_sids: *mut PSID = std::ptr::null_mut();
-    let mut group_sid_count: u32 = 0;
-
-    unsafe {
-        DeriveCapabilitySidsFromName(
-            pcwstr,
-            &mut group_sids,
-            &mut group_sid_count,
-            &mut capability_sids,
-            &mut capability_sid_count,
-        )
-        .map_err(|e| {
-            WxcError::Process(format!("DeriveCapabilitySidsFromName({name}) failed: {e}"))
-        })?;
-
-        // Free group SIDs
-        for i in 0..group_sid_count {
-            let sid = *group_sids.add(i as usize);
-            let _ = LocalFree(Some(HLOCAL(sid.0)));
-        }
-        let _ = LocalFree(Some(HLOCAL(group_sids as *mut _)));
-
-        if capability_sid_count == 0 {
-            let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
-            return Err(WxcError::Process(format!(
-                "No capability SID returned for {}",
-                name
-            )));
-        }
-
-        // Take the first capability SID
-        let result_sid = *capability_sids;
-
-        // Free remaining capability SIDs (index 1+)
-        for i in 1..capability_sid_count {
-            let sid = *capability_sids.add(i as usize);
-            let _ = LocalFree(Some(HLOCAL(sid.0)));
-        }
-        let _ = LocalFree(Some(HLOCAL(capability_sids as *mut _)));
-
-        Ok(OwnedCapabilitySid(result_sid))
     }
 }
 
@@ -538,7 +549,7 @@ impl AppContainerScriptRunner {
         let mut sid_attrs: Vec<SidAndAttributes> = Vec::new();
 
         for cap_name in &capabilities_to_add {
-            match get_capability_sid_from_name(cap_name) {
+            match OwnedCapabilitySid::from_capability_name(cap_name) {
                 Ok(sid) => {
                     sid_attrs.push(SidAndAttributes {
                         sid: sid.as_psid(),
