@@ -32,13 +32,30 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HANDLE, WAIT_FAILED};
-use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HANDLE, WAIT_FAILED, WAIT_TIMEOUT};
+use windows::Win32::System::Threading::{
+    GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
+};
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 /// `SW_SHOWNORMAL` from `Win32_UI_WindowsAndMessaging`. Copied as a
 /// literal to avoid pulling in that whole feature for one constant.
 const SW_SHOWNORMAL: i32 = 1;
+
+/// Maximum time to wait for an elevated `plm.exe` child to exit
+/// before giving up and returning an error. Chosen to be well beyond
+/// the wall-clock cost of `plm start` / `plm stop` (which are
+/// dominated by `wpr.exe` invocations that complete in a few seconds)
+/// while still avoiding an unbounded hang if the child wedges (e.g.
+/// waiting on a stuck WPR kernel session).
+///
+/// Note: 30 s may be too short if `plm stop` has to merge a
+/// multi-GB ETL. PLM is intended to be run against a single
+/// end-to-end flow or unit test at a time, so traces should stay
+/// well under that bound in the supported usage. If a real-world
+/// workload trips this timeout, revisit the bound (or switch to a
+/// Ctrl-C-driven cancel) rather than raising it blindly.
+const PLM_ELEVATED_WAIT_MS: u32 = 30_000;
 
 /// Result of an elevated `plm.exe` invocation.
 pub struct ElevatedRun {
@@ -198,13 +215,30 @@ pub fn run_plm_elevated(
         return Err("ShellExecuteExW returned no process handle".to_string());
     }
 
-    let wait = unsafe { WaitForSingleObject(proc_handle, INFINITE) };
+    let wait = unsafe { WaitForSingleObject(proc_handle, PLM_ELEVATED_WAIT_MS) };
     if wait == WAIT_FAILED {
         unsafe {
             let _ = CloseHandle(proc_handle);
         }
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err("WaitForSingleObject failed on elevated plm child".to_string());
+    }
+    if wait == WAIT_TIMEOUT {
+        // Kill the orphaned elevated child so it can't finish
+        // `wpr -start` (or -stop) behind our back and leave the WPR
+        // kernel logger session alive with nothing tracking it.
+        // `TerminateProcess` is best-effort; the handle carries
+        // PROCESS_TERMINATE from `ShellExecuteExW`, but we ignore
+        // the result either way so cleanup continues.
+        unsafe {
+            let _ = TerminateProcess(proc_handle, 1);
+            let _ = CloseHandle(proc_handle);
+        }
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(format!(
+            "elevated plm child did not exit within {}s",
+            PLM_ELEVATED_WAIT_MS / 1000
+        ));
     }
     let mut exit_code: u32 = 0;
     let rc = unsafe { GetExitCodeProcess(proc_handle, &mut exit_code) };

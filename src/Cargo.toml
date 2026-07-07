@@ -83,8 +83,6 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
     "Win32_System_JobObjects",
-    "Win32_Security_WinTrust",
-    "Win32_Security_Cryptography",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }

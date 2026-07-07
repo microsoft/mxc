@@ -177,11 +177,12 @@ pub fn mark_audit_active() {
 /// Invokes `wpr.exe` by absolute path (`%SystemRoot%\System32\wpr.exe`)
 /// rather than as a bare name so `CreateProcessW`'s implicit CWD-first
 /// search order can't be abused to substitute a planted binary.
-/// `wxc-exec --audit` is typically launched from an elevated
-/// (administrator) context because starting a WPR kernel session
-/// requires it, so a CWD-search hit here would give an attacker
-/// elevated-equivalent code execution — hence the absolute System32
-/// path.
+/// `wxc-exec` itself runs unelevated; the privileged `wpr -start` /
+/// `wpr -stop` calls are delegated to the elevated `plm.exe` child
+/// (see [`crate::plm_launch::run_plm_elevated`]). We still resolve
+/// wpr by absolute path here for the best-effort panic / ctrl-c
+/// cleanup so behavior is consistent with the plm.exe side, which
+/// applies the same hardening in its own resolver.
 pub fn cancel_active_audit_trace() {
     if AUDIT_ACTIVE.swap(false, Ordering::SeqCst) {
         let wpr = resolve_system32_wpr();
@@ -228,9 +229,12 @@ impl Drop for AuditTraceGuard {
 /// mode. Two concurrent `wxc-exec --audit` runs would share a single
 /// NT Kernel Logger session, so the second one's `wpr -start` would
 /// either steal the first's session or fail and silently corrupt the
-/// first run's findings. We acquire a named mutex (`Global\\` so it's
-/// machine-wide; admins have SeCreateGlobalPrivilege so this works)
-/// and refuse to start if another wxc-exec audit is already running.
+/// first run's findings. `wxc-exec` (unelevated) acquires the named
+/// mutex (`Global\\` so it's machine-wide across sessions) and
+/// refuses to start if another wxc-exec audit is already running.
+/// The elevated `plm.exe` child skips its own acquisition of the
+/// same mutex via the `--wxc-singleton-held-by-parent` flag so the
+/// parent's handle remains the sole owner for the trace lifetime.
 ///
 /// The handle is stashed in a static atomic (not just the stack guard)
 /// so the explicit cleanup before `process::exit` — which skips
