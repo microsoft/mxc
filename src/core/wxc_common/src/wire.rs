@@ -385,6 +385,18 @@ pub struct Experimental {
     /// Seatbelt backend config (pre-promotion alias).
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
+    /// Telemetry configuration.
+    pub telemetry: Option<Telemetry>,
+}
+
+/// Telemetry configuration (`experimental.telemetry`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Telemetry {
+    /// Explicit telemetry override. `true` = force on, `false` = force off,
+    /// omitted = disabled (default off).
+    pub enabled: Option<bool>,
 }
 
 /// Placeholder experimental feature.

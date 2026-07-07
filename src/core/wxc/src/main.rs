@@ -32,6 +32,7 @@ use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
 use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use wxc_common::telemetry;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -706,6 +707,18 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
+    // ── Telemetry init (experimental) ───────────────────────────────
+    let telemetry_active = if request.experimental_enabled {
+        request
+            .experimental
+            .telemetry
+            .as_ref()
+            .map(|c| telemetry::init(c, &mut logger))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
     let command_override = match command_override_from_cli(
@@ -716,6 +729,11 @@ fn main() {
         Err(e) => {
             eprintln!("Request error\ninvalid CLI command override: {e}");
             eprint!("{}", logger.get_buffer());
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::ConfigError,
+            );
             process::exit(1);
         }
     };
@@ -728,6 +746,11 @@ fn main() {
             "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
         );
         eprint!("{}", logger.get_buffer());
+        telemetry::emit_early_exit(
+            telemetry_active,
+            &request.containment,
+            telemetry::FailureReason::ConfigError,
+        );
         process::exit(1);
     }
 
@@ -857,6 +880,11 @@ fn main() {
                             }
                         }
                         eprint!("{}", logger.get_buffer());
+                        telemetry::emit_early_exit(
+                            telemetry_active,
+                            &request.containment,
+                            telemetry::FailureReason::InitError,
+                        );
                         process::exit(1);
                     }
                 }
@@ -885,23 +913,48 @@ fn main() {
             #[cfg(not(feature = "wslc"))]
             {
                 eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
         ContainmentBackend::Lxc => {
             eprintln!("Error: LXC backend not available on Windows");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::Bubblewrap => {
             eprintln!("Error: Bubblewrap backend not available on Windows");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::Seatbelt => {
             eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::Vm => {
             eprintln!("Error: VM backend not yet implemented");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::MicroVm => {
@@ -916,6 +969,11 @@ fn main() {
             #[cfg(not(feature = "microvm"))]
             {
                 eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -935,6 +993,11 @@ fn main() {
             {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
+                );
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
                 );
                 process::exit(1);
             }
@@ -970,6 +1033,11 @@ fn main() {
                 eprintln!(
                     "Error: IsolationSession backend not compiled. Rebuild with --features isolation_session."
                 );
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -995,6 +1063,14 @@ fn main() {
     }
 
     display_script_results(&response, &mut logger);
+
+    // ── Telemetry emit (experimental) ───────────────────────────────
+    telemetry::emit_completion(
+        telemetry_active,
+        &request.containment,
+        &response,
+        run_elapsed,
+    );
 
     // Close diagnostic pipe.
     logger.close_diagnostics();
