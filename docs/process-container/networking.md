@@ -16,7 +16,7 @@ Each model is a specific combination of container network capabilities and enfor
 - **Capabilities:** internetClient, plus a loopback exemption for same-container connections; no other network capability.
 - **Enforcement:** WFP allow/block rules; no proxy.
 
-```json
+```jsonc
 {
   "network": {
     "egress": {
@@ -38,7 +38,7 @@ Each model is a specific combination of container network capabilities and enfor
 - **Capabilities:** no AppContainer networking capabilities. A loopback exemption for inter-container (to the proxy container) and intra-container communication.
 - **Enforcement:** The per-container WinHTTP proxy. With no internetClient, the only reachable egress is the loopback proxy; the system drops everything else. MXC resolves the proxy container's SID at launch to scope the loopback exemption.
 
-```json
+```jsonc
 {
   "network": {
     "ingress": { "hostLoopback": "deny" }
@@ -65,7 +65,7 @@ The proxy endpoint (e.g., 127.0.0.1:8080) is a config parameter for the process 
 
 Since deny-all is the default, model 3 is also the result of providing no network policy at all: the explicit form, an omitted network block, and an empty `"network": {}` are equivalent:
 
-```json
+```jsonc
 // explicit (canonical blocked: direct egress, default deny, no allow rules)
 {
   "network": {
