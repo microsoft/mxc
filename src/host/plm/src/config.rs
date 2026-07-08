@@ -386,13 +386,13 @@ pub fn update_from_access_events(
             }
         };
 
-        // Self-access filter: events whose path equals the wxc-exec
-        // binary (in any spelling — raw, verbatim, lower/upper case)
-        // are noise and skipped. The verbatim-prefixed variant matters
-        // because `stop.rs` canonicalises bin_path via `canonicalize()`,
-        // which on Windows returns the `\\?\C:\…` form while ETW
-        // reports the plain `C:\…` form; comparing only the raw strings
-        // let the binary path leak into the output
+        // Self-access filter: events whose path equals the audited
+        // application's binary (in any spelling — raw, verbatim,
+        // lower/upper case) are noise and skipped. The verbatim-prefixed
+        // variant matters because `stop.rs` canonicalises bin_path via
+        // `canonicalize()`, which on Windows returns the `\\?\C:\…` form
+        // while ETW reports the plain `C:\…` form; comparing only the
+        // raw strings let the binary path leak into the output
         // config as a readonly entry.
         let is_self_event = ev.file_path.eq_ignore_ascii_case(bin_path)
             || bin_path_norm
@@ -426,7 +426,10 @@ pub fn update_from_access_events(
                 Some(p) => p,
                 None => {
                     if verbose {
-                        println!("Only files and directories are currently supported");
+                        println!(
+                            "Path {} has no final component, skipping event.",
+                            ev.file_path
+                        );
                     }
                     continue;
                 }
