@@ -61,9 +61,10 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
 }
 
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
-/// to its canonical form. Later PRs feed this into the self-access
-/// filter; this PR exposes it so the canonicalize fallback chain is
-/// pinned by tests from day one.
+/// to its canonical form. Consumed by `update_from_access_events` as
+/// the self-access filter: events referencing this path are dropped
+/// from the adjusted config so the container never grants itself
+/// broad access to its own binary directory.
 ///
 /// Fallback chain:
 ///   1. `canonicalize(opt.bin_path)` if `Some`

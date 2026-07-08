@@ -244,14 +244,25 @@ enum Cmd {
         /// Directory for trace.etl, copied input config, and Adjusted_*.json.
         #[arg(long)]
         log_dir: Option<PathBuf>,
+        /// Path treated as the application binary's location. Defaults
+        /// to the directory containing the plm executable. Used as the
+        /// self-access filter root in the adjusted config.
+        #[arg(long)]
+        bin_path: Option<PathBuf>,
         /// Path to the MXC container config (JSON) to update.
         #[arg(long)]
         config_path: Option<PathBuf>,
+        /// Override for the adjusted config output path.
+        #[arg(long)]
+        adjusted_config_path: Option<PathBuf>,
         /// Re-process a previously captured .etl instead of stopping a
         /// live WPR session. When set, `wpr -stop` is skipped and the
         /// supplied file is parsed as-is.
         #[arg(long)]
         trace_file: Option<PathBuf>,
+        /// Emit per-event/per-ACE diagnostic output.
+        #[arg(long)]
+        verbose_logging: bool,
     },
     /// Interactive: press Enter to start logging, press Enter again to stop.
     Log {
@@ -403,15 +414,21 @@ fn main() -> Result<()> {
         }
         Cmd::Stop {
             log_dir,
+            bin_path,
             config_path,
+            adjusted_config_path,
             trace_file,
+            verbose_logging,
         } => {
             let _singleton = acquire_singleton_if_needed()?;
             stop::run(
                 stop::StopOptions {
                     log_dir,
+                    bin_path,
                     config_path,
+                    adjusted_config_path,
                     trace_file,
+                    verbose: verbose_logging,
                 },
                 &exe,
             )

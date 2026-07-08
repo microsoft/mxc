@@ -1,8 +1,8 @@
 //! Port of the config-update logic from `stop_plm_logging.ps1`.
 //!
-//! Reads an MXC container config (JSON), merges discovered file-access
-//! paths and capabilities into it, and writes an `Adjusted_*.json` next
-//! to it.
+//! Reads an MXC container config (JSON) and merges discovered
+//! file-access paths into it. Capability-merge and the Adjusted_*.json
+//! writer arrive in the config-generation PR.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};

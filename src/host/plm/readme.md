@@ -54,7 +54,7 @@ plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
              [--verbose-logging]
 ```
 
-`--config-path` / `--adjusted-config-path` are accepted today so `wxc-exec --audit` can pass them through; the merge that consumes them arrives in subsequent PRs.
+`--config-path` drives an in-memory filesystem merge against the input config; the `Adjusted_*.json` writer that persists it arrives in the config-generation PR. `--adjusted-config-path` is accepted today so `wxc-exec --audit` can pass it through.
 
 ### `plm log`
 
