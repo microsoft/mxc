@@ -387,7 +387,7 @@ pub struct Experimental {
     pub seatbelt: Option<Seatbelt>,
     /// Telemetry configuration.
     pub telemetry: Option<Telemetry>,
-    /// Agentic-workload marker. When true, MXC mints a per-workload agent-id
+    /// Agentic-workload marker. When true, MXC generates a per-workload agent-id
     /// GUID and passes it through to the OS sandbox.
     pub is_agentic: Option<bool>,
 }

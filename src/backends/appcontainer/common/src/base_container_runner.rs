@@ -416,7 +416,7 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
-        // For agentic callers, mint a fresh GUID identifying the unique agentic
+        // For agentic callers, generate a fresh GUID identifying the unique agentic
         // workload and carry it across as agent_id. Gated behind the
         // experimental flag; when not agentic the field is left unset (absent
         // from the buffer).
