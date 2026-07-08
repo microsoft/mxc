@@ -130,10 +130,6 @@ plm.exe stop --trace-file C:\temp\trace.etl `
 
 `--trace-file` bypasses `wpr -stop`, so it works whether or not a WPR session is live.
 
-### Generate violations for a known UI limit
-
-The companion crate [`testing/plm_tester`](../../testing/plm_tester) builds a `PLMTester.exe` binary that deliberately trips each `JOB_OBJECT_UILIMIT_*` flag (clipboard, handles, system parameters, display settings, IME, injection, etc.). Useful for exercising the `apply_ui_operation_flags` mapping table without writing a real workload.
-
 ## Building
 
 PLM is part of the MXC workspace but excluded from `default-members` because it's Windows-only. Build it explicitly:
