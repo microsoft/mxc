@@ -7,6 +7,8 @@
 //! arguments without spawning any processes, so it compiles and can be
 //! unit-tested on every host (Windows, macOS, Linux).
 
+use std::collections::HashSet;
+
 use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
 
@@ -97,6 +99,19 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/mnt/wsl/resolv.conf",
 ];
 
+/// Build the complete `bwrap` argument list, masking **every** denied path as a
+/// directory (`--tmpfs`).
+///
+/// This is the pure, classification-free entry point: it performs no filesystem
+/// I/O and so stays unit-testable on every host. Unit tests and any caller that
+/// has not stat'd the denied paths use it. The Bubblewrap runner uses
+/// [`build_args_classified`] instead, passing the set of denied paths it has
+/// determined to be files so those are masked with `--ro-bind /dev/null` (a
+/// `--tmpfs` over a file would replace it with an empty directory).
+pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> Vec<String> {
+    build_args_classified(request, proxy_address, &HashSet::new())
+}
+
 /// Build the complete argument list for `bwrap` from the given request.
 ///
 /// The returned vector does **not** include the `bwrap` binary name itself —
@@ -110,7 +125,18 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
 /// - strips any caller-supplied `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`
 ///   entries from `request.env`,
 /// - emits `--setenv` for those keys pointing at the proxy URL.
-pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> Vec<String> {
+///
+/// `denied_files` is the set of `deniedPaths` entries that must be masked as
+/// **files** (`--ro-bind /dev/null <path>`) rather than **directories**
+/// (`--tmpfs <path>`); any denied path not in the set is masked as a directory.
+/// The runner builds this set by `symlink_metadata`-probing each denied path, so
+/// this function itself performs no filesystem I/O and remains unit-testable on
+/// every host.
+pub fn build_args_classified(
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+    denied_files: &HashSet<String>,
+) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
     let mut args = vec![
         "--unshare-user",
@@ -182,9 +208,17 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
             FsIntent::ReadOnly => {
                 args.extend(["--ro-bind".into(), mount.path.clone(), mount.path.clone()]);
             }
-            // Denied: mask with an empty tmpfs so contents are invisible.
+            // Denied: mask so contents are invisible. A directory is masked
+            // with an empty `--tmpfs`; a file must be masked with
+            // `--ro-bind /dev/null` instead, because `--tmpfs` over a file would
+            // replace it with an empty *directory* (wrong type). `denied_files`
+            // holds the paths the runner classified as non-directories.
             FsIntent::Denied => {
-                args.extend(["--tmpfs".into(), mount.path.clone()]);
+                if denied_files.contains(&mount.path) {
+                    args.extend(["--ro-bind".into(), "/dev/null".into(), mount.path.clone()]);
+                } else {
+                    args.extend(["--tmpfs".into(), mount.path.clone()]);
+                }
             }
         }
     }
@@ -372,6 +406,74 @@ mod tests {
             "rw /data/secrets (pos {child}) must come after denied /data (pos {parent}) \
              so the deep bind is not shadowed by the mask: {args:?}"
         );
+    }
+
+    /// A denied path classified as a **directory** (not in `denied_files`) is
+    /// masked with an empty `--tmpfs`, matching the default `build_args`.
+    #[test]
+    fn denied_directory_is_masked_with_tmpfs() {
+        let mut r = base_request();
+        r.policy.denied_paths = vec!["/secrets".into()];
+        let denied_files = HashSet::new();
+        let args = build_args_classified(&r, None, &denied_files);
+
+        // tmpfs at /secrets, and no ro-bind of /dev/null onto it.
+        policy_mount_pos(&args, "--tmpfs", "/secrets");
+        assert!(
+            args.windows(3)
+                .all(|w| !(w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == "/secrets")),
+            "a directory denied path must not be masked with /dev/null: {args:?}"
+        );
+    }
+
+    /// A denied path classified as a **file** (present in `denied_files`) is
+    /// masked with `--ro-bind /dev/null`, not `--tmpfs` (which would replace the
+    /// file with an empty directory).
+    #[test]
+    fn denied_file_is_masked_with_dev_null() {
+        let mut r = base_request();
+        r.policy.denied_paths = vec!["/etc/shadow".into()];
+        let denied_files = HashSet::from(["/etc/shadow".to_string()]);
+        let args = build_args_classified(&r, None, &denied_files);
+
+        // `--ro-bind /dev/null /etc/shadow` present ...
+        let pos = args
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == "/etc/shadow");
+        assert!(
+            pos.is_some(),
+            "a file denied path must be masked with `--ro-bind /dev/null`: {args:?}"
+        );
+        // ... and it is NOT tmpfs-masked.
+        assert!(
+            args.windows(2)
+                .all(|w| !(w[0] == "--tmpfs" && w[1] == "/etc/shadow")),
+            "a file denied path must not be tmpfs-masked: {args:?}"
+        );
+    }
+
+    /// Classification is per-path: in one policy a denied file and a denied
+    /// directory get their respective masks, and the specificity ordering is
+    /// still honored (deep file mask emitted after its shallower rw ancestor).
+    #[test]
+    fn mixed_denied_file_and_dir_masks_each_correctly() {
+        let mut r = base_request();
+        r.policy.readwrite_paths = vec!["/data".into()];
+        r.policy.denied_paths = vec!["/data/secret.txt".into(), "/cache".into()];
+        let denied_files = HashSet::from(["/data/secret.txt".to_string()]);
+        let args = build_args_classified(&r, None, &denied_files);
+
+        // File → /dev/null, after the rw /data parent.
+        let parent = policy_mount_pos(&args, "--bind", "/data");
+        let file_mask = policy_mount_pos(&args, "--ro-bind", "/data/secret.txt");
+        assert!(
+            file_mask > parent,
+            "deep denied file mask (pos {file_mask}) must come after rw /data (pos {parent}): {args:?}"
+        );
+        assert_eq!(args[file_mask + 1], "/dev/null");
+
+        // Dir → tmpfs.
+        policy_mount_pos(&args, "--tmpfs", "/cache");
     }
 
     #[test]

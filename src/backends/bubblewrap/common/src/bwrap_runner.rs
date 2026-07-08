@@ -25,6 +25,7 @@
 //! the runner uses `--unshare-net` for zero-overhead full isolation
 //! without root.
 
+use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -164,15 +165,35 @@ impl BubblewrapScriptRunner {
             }
         }
 
-        // 2. Build the bwrap argument vector.
-        let args = bwrap_command::build_args(request, proxy.address());
+        // 2. Classify denied paths so files are masked correctly. A `--tmpfs`
+        //    over a file would replace it with an empty directory; denied files
+        //    must instead be masked with `--ro-bind /dev/null`. Classify with
+        //    `symlink_metadata`, which does not follow symlinks, so each path is
+        //    judged by its own type: a denied symlink is therefore treated as a
+        //    non-directory and masked with `/dev/null`, rather than following
+        //    the link to classify (and mask) its target. Directories, and paths
+        //    that cannot be stat'd (missing/unreadable), fall back to `--tmpfs`.
+        let denied_files: HashSet<String> = request
+            .policy
+            .denied_paths
+            .iter()
+            .filter(|p| {
+                std::fs::symlink_metadata(p)
+                    .map(|md| !md.file_type().is_dir())
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        // 3. Build the bwrap argument vector.
+        let args = bwrap_command::build_args_classified(request, proxy.address(), &denied_files);
         let _ = writeln!(
             logger,
             "Bubblewrap: spawning bwrap with {} args",
             args.len()
         );
 
-        // 3. Determine whether iptables network rules are needed. When the
+        // 4. Determine whether iptables network rules are needed. When the
         //    cooperative proxy is active we skip iptables entirely (host
         //    enforcement happens at the proxy layer).
         let needs_iptables = needs_iptables_rules(request) && !proxy.is_active();
@@ -209,7 +230,7 @@ impl BubblewrapScriptRunner {
             None
         };
 
-        // 4. Spawn `bwrap`.
+        // 5. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
         match stdio {
