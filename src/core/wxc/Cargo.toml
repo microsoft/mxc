@@ -26,6 +26,10 @@ nanvix_runner = { workspace = true, optional = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
+# Shared PLM dep for the singleton env-var name and `wait_until_cleared`
+# helper — single source of truth so the two crates can't drift.
+plm = { path = "../../host/plm" }
+tempfile.workspace = true
 
 [build-dependencies]
 mxc_build_common.workspace = true

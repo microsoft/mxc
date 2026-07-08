@@ -1,9 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[cfg(target_os = "windows")]
+mod audit;
+#[cfg(target_os = "windows")]
+mod plm_launch;
+
 use std::fmt::Write;
 use std::fs;
 use std::process;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -32,6 +38,7 @@ use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
 use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use wxc_common::telemetry;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -115,6 +122,27 @@ struct Cli {
     /// Run the fallback detector and emit JSON, without spawning a sandbox.
     #[arg(long)]
     probe: bool,
+
+    /// Audit mode: inject the `permissiveLearningMode` capability into the
+    /// AppContainer policy so denied operations are logged but allowed.
+    /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
+    /// `request.audit` consumer (AppContainer) have no cross-platform
+    /// counterpart, so accepting the flag elsewhere would print a misleading
+    /// "restrictions will NOT be enforced" warning while the bubblewrap/
+    /// seatbelt backends silently ignore both the flag and the injected
+    /// capability.
+    #[cfg(target_os = "windows")]
+    #[arg(long)]
+    audit: bool,
+
+    /// Surface the PLM lifecycle diagnostics (spawn banner, plm.exe stderr
+    /// lines, non-zero-exit / spawn-failure reasons) on wxc-exec's stderr in
+    /// addition to the log buffer. Off by default so `--audit` doesn't pollute
+    /// the wrapped workload's stdout/stderr; opt in when debugging the audit
+    /// pipeline itself.
+    #[cfg(target_os = "windows")]
+    #[arg(long)]
+    audit_verbose: bool,
 
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
@@ -300,6 +328,31 @@ fn config_input(cli: &Cli) -> Option<(String, bool)> {
     }
 }
 
+/// Resolve the on-disk config path passed to `wxc-exec`, if any. Returns
+/// `None` when the config was supplied as `--config-base64` (no file path)
+/// or not at all. Used by `--audit` to thread `plm stop --config-path` so
+/// findings can be merged back into the source policy.
+#[cfg(target_os = "windows")]
+fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
+    if cli.config_base64.is_some() {
+        return None;
+    }
+    cli.config
+        .as_ref()
+        .or(cli.config_path.as_ref())
+        .map(std::path::PathBuf::from)
+}
+
+/// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
+/// same install directory. Returns `None` when the current exe path
+/// can't be resolved.
+#[cfg(target_os = "windows")]
+use audit::{
+    cancel_active_audit_trace, mark_audit_active, release_audit_singleton, run_plm_command,
+    try_acquire_audit_singleton, AuditSingletonGuard, AuditTraceGuard, AUDIT_ACTIVE,
+    AUDIT_START_IN_FLIGHT,
+};
+
 // ---------------------------------------------------------------------------
 // Graceful-exit DACL cleanup
 // ---------------------------------------------------------------------------
@@ -392,23 +445,28 @@ impl Drop for ParkedDaclGuard {
 /// Returns `FALSE` so the default handler still runs (which terminates
 /// the process).
 ///
-/// Acquires the slot with a bounded wait (≤5s), not `try_lock`. If the
-/// main thread is mid-`Drop` on the same manager — which can be doing a
-/// `SetNamedSecurityInfoW` — returning FALSE immediately lets the
-/// default handler call `ExitProcess`, terminating that drop mid-Win32
-/// and leaving the host DACL in an inconsistent state. The bounded
-/// wait blocks the default handler until either main finishes (lock
-/// released) or 5s elapses — whichever comes first. On timeout we
-/// proceed anyway; the recovery scan on the next `wxc-exec` startup
-/// reaps anything left behind.
+/// Acquires the slot with a bounded wait
+/// (`plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`), not `try_lock`.
+/// If the main thread is mid-`Drop` on the same manager — which can be
+/// doing a `SetNamedSecurityInfoW` — returning FALSE immediately lets
+/// the default handler call `ExitProcess`, terminating that drop mid-
+/// Win32 and leaving the host DACL in an inconsistent state. The
+/// bounded wait blocks the default handler until either main finishes
+/// (lock released) or the shared timeout elapses — whichever comes
+/// first. On timeout we proceed anyway; the recovery scan on the next
+/// `wxc-exec` startup reaps anything left behind.
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     if let Some(slot) = DACL_CLEANUP_SLOT.get() {
         use std::time::{Duration, Instant};
-        // 5s mirrors the WaitForSingleObject pattern recommended for
-        // graceful-shutdown handlers; tuned to be longer than a worst-
-        // case `SetNamedSecurityInfoW` on a deep tree but well under
-        // the Windows default 10s shutdown-handler budget.
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // The handler runs TWO bounded waits (this one + the
+        // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
+        // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
+        // ~5s OS-imposed kill budget. The per-wait budget is sourced
+        // from the shared `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`
+        // so `wxc-exec` and `plm.exe`'s `plm_ctrl_handler` cannot
+        // drift apart, and the budget invariant is pinned by a unit
+        // test (`ctrl_handler_drain_timeout_respects_os_budget`).
+        let deadline = Instant::now() + plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
         loop {
             if let Ok(mut guard) = slot.try_lock() {
                 // Either main already took the manager (guard is None)
@@ -427,6 +485,32 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
     }
     // FALSE = "I did not fully handle this; run the next handler in the
     // chain (i.e. the default handler that calls ExitProcess)".
+    //
+    // if `plm start` is still in
+    // flight when Ctrl+C arrives, wait briefly for it to complete
+    // before deciding whether to issue `wpr -cancel`. Without this
+    // wait, a cancel that races a not-yet-engaged session is a no-op
+    // and the session leaks past wxc-exec exit. On timeout we proceed
+    // anyway — the next-startup `recover_orphaned_state` scan plus a
+    // manual `wpr -cancel` would catch any residue.
+    //
+    // the wait loop is
+    // implemented by `plm::coordination::wait_until_cleared`, the
+    // same tested helper `plm.exe`'s console-control handler uses.
+    //
+    // the per-wait
+    // timeout is sourced from the shared
+    // `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` const so the
+    // wxc-exec and plm.exe handlers cannot drift apart. The const's
+    // docs (and the
+    // `ctrl_handler_drain_timeout_respects_os_budget` unit test)
+    // pin the ~5s OS kill-budget invariant.
+    let _ = plm::coordination::wait_until_cleared(
+        &AUDIT_START_IN_FLIGHT,
+        plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT,
+        std::time::Duration::from_millis(50),
+    );
+    cancel_active_audit_trace();
     windows::core::BOOL(0)
 }
 
@@ -705,6 +789,22 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
+    #[cfg(target_os = "windows")]
+    {
+        request.audit = cli.audit;
+    }
+
+    // ── Telemetry init (experimental) ───────────────────────────────
+    let telemetry_active = if request.experimental_enabled {
+        request
+            .experimental
+            .telemetry
+            .as_ref()
+            .map(|c| telemetry::init(c, &mut logger))
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
@@ -716,10 +816,46 @@ fn main() {
         Err(e) => {
             eprintln!("Request error\ninvalid CLI command override: {e}");
             eprint!("{}", logger.get_buffer());
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::ConfigError,
+            );
             process::exit(1);
         }
     };
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
+
+    // --audit injects permissiveLearningMode so denied operations are logged
+    // but allowed. Works in both debug and release builds; in release the
+    // runner-side rejection is relaxed because request.audit is set.
+    // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
+    //
+    // Downstream capability lookups are case-sensitive (the AppContainer
+    // runner does exact string matches against the JSON capability name),
+    // so the "already present?" check here matches case-sensitively too.
+    // An operator who explicitly wrote a mis-cased spelling in the config
+    // gets a second, correctly-cased entry appended rather than silently
+    // relying on the mis-cased one that downstream lookups will ignore.
+    #[cfg(target_os = "windows")]
+    if cli.audit
+        && !request
+            .policy
+            .capabilities
+            .iter()
+            .any(|c| c == "permissiveLearningMode")
+    {
+        request
+            .policy
+            .capabilities
+            .push("permissiveLearningMode".to_string());
+        logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
+        if cli.audit_verbose {
+            eprintln!(
+                "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
+            );
+        }
+    }
 
     // Final validation: a command line must come from somewhere. If neither
     // the policy nor the CLI supplied one we cannot proceed.
@@ -728,6 +864,11 @@ fn main() {
             "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
         );
         eprint!("{}", logger.get_buffer());
+        telemetry::emit_early_exit(
+            telemetry_active,
+            &request.containment,
+            telemetry::FailureReason::ConfigError,
+        );
         process::exit(1);
     }
 
@@ -857,6 +998,11 @@ fn main() {
                             }
                         }
                         eprint!("{}", logger.get_buffer());
+                        telemetry::emit_early_exit(
+                            telemetry_active,
+                            &request.containment,
+                            telemetry::FailureReason::InitError,
+                        );
                         process::exit(1);
                     }
                 }
@@ -885,23 +1031,48 @@ fn main() {
             #[cfg(not(feature = "wslc"))]
             {
                 eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
         ContainmentBackend::Lxc => {
             eprintln!("Error: LXC backend not available on Windows");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::Bubblewrap => {
             eprintln!("Error: Bubblewrap backend not available on Windows");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::Seatbelt => {
             eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::Vm => {
             eprintln!("Error: VM backend not yet implemented");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
             process::exit(1);
         }
         ContainmentBackend::MicroVm => {
@@ -916,6 +1087,11 @@ fn main() {
             #[cfg(not(feature = "microvm"))]
             {
                 eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
@@ -935,6 +1111,11 @@ fn main() {
             {
                 eprintln!(
                     "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
+                );
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
                 );
                 process::exit(1);
             }
@@ -970,15 +1151,139 @@ fn main() {
                 eprintln!(
                     "Error: IsolationSession backend not compiled. Rebuild with --features isolation_session."
                 );
+                telemetry::emit_early_exit(
+                    telemetry_active,
+                    &request.containment,
+                    telemetry::FailureReason::InitError,
+                );
                 process::exit(1);
             }
         }
+    };
+
+    // --audit: start the PLM (permissive learning mode) WPR trace before
+    // the runner spawns the container so we capture access-denied events
+    // for the lifetime of the workload. The matching `plm stop` below
+    // tears the trace down and (when the policy came from a file)
+    // merges findings back into it. Both calls are best-effort.
+    //
+    // Bracket the live-trace window with `AUDIT_ACTIVE` + a stack guard
+    // so Ctrl-C / panic / process::exit between start and stop don't
+    // leak the kernel ETW session.
+    //
+    // declaration order matters. Rust
+    // drops locals in REVERSE declaration order, and on the cleanup
+    // path we want the trace guard (`AuditTraceGuard`, which calls
+    // `wpr -cancel`) to run BEFORE the singleton handle is released —
+    // otherwise a concurrent wxc-exec could acquire the freed mutex
+    // and start its own trace, only to have our stale `wpr -cancel`
+    // tear it down. Declare the singleton first so it drops last.
+    #[cfg(target_os = "windows")]
+    let _audit_singleton: Option<AuditSingletonGuard>;
+    #[cfg(target_os = "windows")]
+    let _audit_guard: Option<AuditTraceGuard>;
+    #[cfg(target_os = "windows")]
+    let audit_config_file = if cli.audit {
+        // refuse to start a second concurrent
+        // audit. We acquire the host-wide named mutex BEFORE marking
+        // AUDIT_ACTIVE so a failure here doesn't engage the cleanup
+        // path that would cancel someone else's running trace.
+        match try_acquire_audit_singleton() {
+            Ok(g) => _audit_singleton = Some(g),
+            Err(msg) => {
+                let _ = writeln!(logger, "[audit] {msg}");
+                eprintln!("error: {msg}");
+                _audit_singleton = None;
+                _audit_guard = None;
+                std::process::exit(1);
+            }
+        }
+        mark_audit_active();
+        _audit_guard = Some(AuditTraceGuard);
+        // previously this was
+        // `let _ = run_plm_command(...)`, which discarded the failure
+        // status. If plm start failed (missing plm.exe, wpr session
+        // conflict not resolved, etc.), the workload ran with
+        // `permissiveLearningMode` injected into the sandbox policy
+        // but with zero WPR recording — an empty Adjusted_*.json
+        // looked like "no denials." Bail explicitly on start failure
+        // so the operator sees the error and the policy isn't
+        // silently relaxed.
+        //
+        // bracket the spawn with
+        // AUDIT_START_IN_FLIGHT so the console-control handler waits
+        // for it to drain before deciding whether to issue `wpr
+        // -cancel` (closes the Ctrl+C race where cancel arrives
+        // before `plm.exe`'s child `wpr -start` has engaged the
+        // kernel session).
+        AUDIT_START_IN_FLIGHT.store(true, Ordering::SeqCst);
+        let start_ok = run_plm_command(
+            &[std::ffi::OsStr::new("start")],
+            &mut logger,
+            cli.audit_verbose,
+        );
+        AUDIT_START_IN_FLIGHT.store(false, Ordering::SeqCst);
+        if !start_ok {
+            let _ = writeln!(
+                logger,
+                "[audit] plm start failed; refusing to run the workload with \
+                 permissiveLearningMode but no WPR recording"
+            );
+            eprintln!(
+                "error: plm start failed; refusing to run --audit without an \
+                 active trace. See logs for details."
+            );
+            // cancel_active_audit_trace is idempotent and safe to call
+            // even if start never began a session — it inspects the
+            // AUDIT_ACTIVE flag and only invokes wpr -cancel if set.
+            cancel_active_audit_trace();
+            std::process::exit(1);
+        }
+        config_file_path(&cli)
+    } else {
+        _audit_guard = None;
+        _audit_singleton = None;
+        None
     };
 
     let run_start = Instant::now();
     let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    // Tear down the PLM trace after the container exits, regardless of
+    // its exit code. Done before the runner is dropped so the trace
+    // tooling sees a fully-quiesced workload.
+    //
+    // only clear `AUDIT_ACTIVE` when `plm stop` actually
+    // succeeded. Previously the flag was cleared unconditionally,
+    // which silently leaked the kernel ETW session whenever stop
+    // failed (missing plm.exe, spawn fail, wpr -stop non-zero) and
+    // simultaneously turned `AuditTraceGuard::drop` and the Ctrl-C
+    // handler into no-ops. On failure we now leave the flag set so
+    // the stack guard's `Drop` runs `wpr -cancel` for us.
+    #[cfg(target_os = "windows")]
+    if cli.audit {
+        let mut stop_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from("stop")];
+        if let Some(cfg) = audit_config_file.as_ref() {
+            stop_args.push(std::ffi::OsString::from("--config-path"));
+            stop_args.push(cfg.clone().into_os_string());
+        }
+        let borrowed: Vec<&std::ffi::OsStr> = stop_args
+            .iter()
+            .map(std::ffi::OsString::as_os_str)
+            .collect();
+        let stop_ok = run_plm_command(&borrowed, &mut logger, cli.audit_verbose);
+        if stop_ok {
+            AUDIT_ACTIVE.store(false, Ordering::SeqCst);
+        } else {
+            let _ = writeln!(
+                logger,
+                "[audit] plm stop failed; leaving AUDIT_ACTIVE set so cleanup guards \
+                 will run wpr -cancel on exit"
+            );
+        }
+    }
 
     // Explicitly drop the runner before retrieving the parked DACL
     // manager so any runner-internal resources holding child handles
@@ -990,11 +1295,33 @@ fn main() {
     drop(runner);
     drop(take_parked_dacl());
 
+    // the `process::exit` below skips destructors, so
+    // `AuditTraceGuard::drop` (which calls `cancel_active_audit_trace`)
+    // and `AuditSingletonGuard::drop` (which releases the host-wide
+    // named mutex) never run on the normal path. Leaving `AUDIT_ACTIVE`
+    // set so cleanup guards run `wpr -cancel` on stop failure is only
+    // true on the panic-unwind / Ctrl-C path, not here. Manually
+    // invoke the cleanups so a stop-failure path actually tears the
+    // kernel ETW session down and frees the singleton.
+    #[cfg(target_os = "windows")]
+    {
+        cancel_active_audit_trace();
+        release_audit_singleton();
+    }
+
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
     }
 
     display_script_results(&response, &mut logger);
+
+    // ── Telemetry emit (experimental) ───────────────────────────────
+    telemetry::emit_completion(
+        telemetry_active,
+        &request.containment,
+        &response,
+        run_elapsed,
+    );
 
     // Close diagnostic pipe.
     logger.close_diagnostics();

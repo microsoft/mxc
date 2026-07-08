@@ -1627,6 +1627,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc_telemetry"
+version = "0.7.0"
+dependencies = [
+ "tracelogging",
+ "uuid",
+]
+
+[[package]]
 name = "nanvix_binaries"
 version = "0.7.0"
 dependencies = [
@@ -1812,6 +1820,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "plm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "embed-manifest",
+ "mxc_build_common",
+ "roxmltree",
+ "serde_json",
+ "tempfile",
+ "windows",
+ "wxc_common",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1960,6 +1984,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rust-embed"
@@ -2466,6 +2496,21 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "tracelogging"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0015caf14cad7613b7bbbb9ee44399ad9a694307be545d8af4e2711178e547e"
+dependencies = [
+ "tracelogging_macros",
+]
+
+[[package]]
+name = "tracelogging_macros"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95e2d891464ff33bc1814c4cbbb251bae7800458b1efdb6ac8b7c01ee6382563"
 
 [[package]]
 name = "tracing"
@@ -3160,7 +3205,9 @@ dependencies = [
  "nanvix_binaries",
  "nanvix_build_common",
  "nanvix_runner",
+ "plm",
  "serde_json",
+ "tempfile",
  "windows",
  "windows_sandbox_common",
  "wslc_common",
@@ -3174,6 +3221,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "libc",
+ "mxc_telemetry",
  "nanvix_common",
  "schemars",
  "semver",

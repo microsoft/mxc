@@ -10,8 +10,8 @@ use crate::logger::Logger;
 use crate::models::{
     ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
     IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
-    PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TestFeatureConfig, UiPolicy,
-    WindowsSandboxConfig, WslcConfig,
+    PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig, TestFeatureConfig,
+    UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -719,6 +719,12 @@ enforced; access denials are recorded for diagnostics.\n",
         // tool that relaxes enforcement, so the runner surfaces a security
         // warning for it rather than stripping it here.
         if let Some(caps) = ac.capabilities {
+            #[cfg(debug_assertions)]
+            if caps.iter().any(|c| c == "permissiveLearningMode") {
+                eprintln!(
+                    "[mxc] permissiveLearningMode present in policy capabilities - AppContainer restrictions are NOT enforced"
+                );
+            }
             policy.capabilities.extend(caps);
         }
 
@@ -962,11 +968,15 @@ enforced; access denials are recorded for diagnostics.\n",
             logger.log_line(&msg);
             return Err(WxcError::ConfigParse(msg));
         }
+        let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
+            enabled: raw_t.enabled,
+        });
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
+            telemetry,
         }
     } else {
         ExperimentalConfig::default()
@@ -1002,6 +1012,7 @@ enforced; access denials are recorded for diagnostics.\n",
         testing_features_enabled: false,
         experimental,
         dry_run: false,
+        audit: false,
     })
 }
 
@@ -3862,5 +3873,46 @@ mod tests {
         let mut logger = test_logger();
 
         load_request(&encoded, &mut logger, true).unwrap();
+    }
+
+    // ── Telemetry ────────────────────────────────────────────────────
+
+    #[test]
+    fn telemetry_not_set() {
+        let json = r#"{"process":{"commandLine":"echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.telemetry.is_none());
+    }
+
+    #[test]
+    fn telemetry_enabled_true() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        assert_eq!(telem.enabled, Some(true));
+    }
+
+    #[test]
+    fn telemetry_enabled_false() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":false}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        assert_eq!(telem.enabled, Some(false));
+    }
+
+    #[test]
+    fn telemetry_empty_object() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let telem = req.experimental.telemetry.expect("telemetry should be set");
+        assert_eq!(telem.enabled, None);
     }
 }

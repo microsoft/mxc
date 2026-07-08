@@ -7,6 +7,7 @@ members = [
     "core/mxc-sdk",
     "core/mxc_pty",
     "core/mxc_build_common",
+    "host/plm",
     "core/generated/base_container_specification",
     "backends/appcontainer/common",
     "backends/windows_sandbox/daemon",
@@ -32,6 +33,7 @@ members = [
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
+    "mxc_telemetry",
 ]
 exclude = ["testing/fuzz"]
 resolver = "3"
@@ -52,6 +54,10 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+# Pure-Rust ETW TraceLogging provider used by `mxc_telemetry` (Windows-only;
+# the crate compiles to no-ops on other targets). Pinned at the workspace
+# level so every consumer resolves the same version.
+tracelogging = "1.2"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -90,6 +96,8 @@ thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+roxmltree = "0.20"
 wxc_common = { path = "core/wxc_common" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
@@ -109,6 +117,7 @@ isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 mxc_pty = { path = "core/mxc_pty" }
 flatbuffers = "25"
 sandbox_spec = { path = "core/generated/base_container_specification" }
+mxc_telemetry = { path = "mxc_telemetry" }
 widestring = "1"
 url = "2"
 winreg = "0.55"

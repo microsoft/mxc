@@ -654,6 +654,17 @@ pub struct ExperimentalConfig {
     /// Isolation Session backend (experimental).
     #[serde(rename = "isolation_session")]
     pub isolation_session: Option<IsolationSessionConfig>,
+    /// Telemetry configuration (experimental).
+    pub telemetry: Option<TelemetryConfig>,
+}
+
+/// Telemetry configuration parsed from the JSON config `experimental.telemetry` section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Explicit telemetry override.
+    /// `Some(true)` = force on, `Some(false)` = force off, `None` = disabled (default off).
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -691,6 +702,9 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
+    /// Audit mode: when true, `permissiveLearningMode` is permitted even in
+    /// release builds (with a security warning). Set by the `--audit` CLI flag.
+    pub audit: bool,
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)

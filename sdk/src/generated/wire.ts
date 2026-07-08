@@ -60,6 +60,10 @@ export interface Experimental {
    */
   seatbelt?: Seatbelt | null;
   /**
+   * Telemetry configuration.
+   */
+  telemetry?: Telemetry | null;
+  /**
    * Placeholder feature for testing experimental infrastructure.
    */
   test?: TestFeature | null;
@@ -355,6 +359,17 @@ export interface Seatbelt {
    * Replace the generated profile entirely (advanced/testing escape hatch).
    */
   profileOverride?: string | null;
+}
+
+/**
+ * Telemetry configuration (`experimental.telemetry`).
+ */
+export interface Telemetry {
+  /**
+   * Explicit telemetry override. `true` = force on, `false` = force off, omitted = disabled (default off).
+   */
+  enabled?: boolean | null;
+  [k: string]: unknown;
 }
 
 /**
