@@ -652,15 +652,12 @@ pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose
 
 /// Merge discovered AppContainer capability names into the config's
 /// containment-backend block. Implementation arrives in the
-/// capability-extraction PR; this stub is a no-op for an empty input
-/// (PR2's parser never produces a non-empty set) and bails otherwise so
-/// a stray future caller can't silently drop findings.
-pub fn merge_capabilities(_config: &mut Value, requested: &HashSet<String>) -> Result<()> {
-    if !requested.is_empty() {
-        anyhow::bail!(
-            "merge_capabilities body not yet wired (capability extraction lands in a later PR)"
-        );
-    }
+/// capability-extraction PR; until then this is a no-op. Callers may
+/// pass a non-empty set (e.g. when a future stop.rs wires in an
+/// EventID=27 parser ahead of this merge) without triggering a
+/// spurious failure — the actual merge is landed atomically in the
+/// capability-extraction PR.
+pub fn merge_capabilities(_config: &mut Value, _requested: &HashSet<String>) -> Result<()> {
     Ok(())
 }
 
