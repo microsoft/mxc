@@ -38,7 +38,7 @@ jobs:
           - language: rust
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            build-mode: manual
+            build-mode: none
 
     steps:
       - uses: actions/checkout@v4
@@ -49,9 +49,13 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
-      # ---- Rust: build manually so CodeQL observes a real compilation. ----
-      # autobuild does not know about the MxcDependencies feed or the pinned
-      # toolchain, so mirror the Lint job's setup.
+      # ---- Rust: CodeQL's Rust extractor is buildless (build-mode: none). It
+      # does not compile the workspace; instead it runs `cargo metadata` to
+      # resolve the crate graph and extracts straight from source. We still
+      # surface the pinned toolchain and the MxcDependencies feed so that
+      # dependency resolution succeeds (the private feed 401s otherwise). No
+      # `cargo build` is run, so the feature-gated backends' build workarounds
+      # (hyperlight/microvm/windows_sandbox) are irrelevant here.
       - name: Surface toolchain file at repo root
         if: matrix.language == 'rust'
         shell: bash
@@ -69,15 +73,6 @@ jobs:
       - name: Point cargo at the MxcDependencies feed
         if: matrix.language == 'rust'
         uses: ./.github/actions/setup-cargo-feed
-
-      - name: Build Rust workspace
-        if: matrix.language == 'rust'
-        working-directory: src
-        # Default features only: this keeps the CodeQL build off the
-        # feature-gated backends (hyperlight/microvm/windows_sandbox) that need
-        # extra CI workarounds. Trade-off: those backends are not covered by
-        # this scan. Expand --features here if that coverage becomes needed.
-        run: cargo build --locked --target ${{ matrix.target }}
 
       # ---- JS/TS: no build required; CodeQL extracts the source directly. ----
 
