@@ -1,0 +1,15 @@
+{
+  "version": "0.5.0-alpha",
+  "containerId": "CLI-Experimental-Agentic",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c echo agentic sandbox test",
+    "timeout": 30000
+  },
+  "experimental": {
+    "is_agentic": true
+  },
+  "ui": {
+    "disable": false
+  }
+}
