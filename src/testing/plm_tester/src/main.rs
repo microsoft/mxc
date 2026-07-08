@@ -36,8 +36,8 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "windows")]
 use clipboard::{
-    clipboard_get, clipboard_get_in_scope, clipboard_set, dump_environment, resolve_hwnd,
-    HwndSource,
+    clipboard_get, clipboard_get_locked, clipboard_set, clipboard_set_locked, dump_environment,
+    resolve_hwnd, ClipboardGuard, HwndSource,
 };
 #[cfg(target_os = "windows")]
 use display_settings::DisplaySettingsArgs;
@@ -172,13 +172,12 @@ fn main() -> Result<()> {
                     h.0, hwnd, reopen
                 );
 
-                eprintln!("[step] === phase 1: SET ===");
-                clipboard_set(h, &value)?;
-                eprintln!("[ok]   clipboard set ({} chars)", value.chars().count());
-
                 let read_back = if reopen {
                     // Default: drop the SET clipboard scope before reading.
                     // This mirrors what two separate process invocations do.
+                    eprintln!("[step] === phase 1: SET ===");
+                    clipboard_set(h, &value)?;
+                    eprintln!("[ok]   clipboard set ({} chars)", value.chars().count());
                     eprintln!("[step] === phase 2: GET (fresh OpenClipboard) ===");
                     match clipboard_get(h)? {
                         Some(s) => s,
@@ -192,11 +191,28 @@ fn main() -> Result<()> {
                         }
                     }
                 } else {
-                    // --reopen=false: hold a separate scope and read inside
-                    // it. Tells you whether the in-clipboard HGLOBAL is
-                    // readable at all from this token.
+                    // --reopen=false: hold a single ClipboardGuard across
+                    // both SET and GET, so the read sees the exact scope
+                    // the SET published under. Tells you whether the
+                    // in-clipboard HGLOBAL is readable at all from this
+                    // token without an intervening CloseClipboard.
+                    eprintln!("[step] === opening single ClipboardGuard for SET+GET ===");
+                    let guard = ClipboardGuard::open(h)?;
+                    eprintln!("[step] === phase 1: SET (locked) ===");
+                    clipboard_set_locked(&guard, &value)?;
+                    eprintln!("[ok]   clipboard set ({} chars)", value.chars().count());
                     eprintln!("[step] === phase 2: GET (same OpenClipboard scope) ===");
-                    clipboard_get_in_scope(h)?
+                    match clipboard_get_locked(&guard)? {
+                        Some(s) => s,
+                        None => {
+                            eprintln!(
+                                "[fail] roundtrip: clipboard has no CF_UNICODETEXT in the same \
+                                 open scope. This is the AppContainer / clipboard-isolation \
+                                 signature (same-scope read)."
+                            );
+                            std::process::exit(2);
+                        }
+                    }
                 };
 
                 let ok = read_back == value;

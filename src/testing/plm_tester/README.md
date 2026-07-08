@@ -47,8 +47,6 @@ Subcommands:
 | `clipboard set`     | `OpenClipboard` + `SetClipboardData(CF_UNICODETEXT)` write path. |
 | `clipboard get`     | `OpenClipboard` + `GetClipboardData(CF_UNICODETEXT)` read path. |
 | `clipboard roundtrip` | Set then get in one process — isolates clipboard isolation from owner-HWND / UIPI bugs. |
-| `tasklist32`        | `CreateToolhelp32Snapshot` + `Process32NextW` process enumeration. |
-| `tasklist`          | Same, via the `tasklist` crate, which additionally calls `QueryFullProcessImageNameW` / token APIs per process. |
 | `screenshot`        | WinRT `GraphicsCapturePicker` — the user-consent screen-capture path (requires the `graphicsCapture` AppContainer capability, not `graphicsCaptureProgrammatic`). |
 | `screenshot-simple` | GDI `BitBlt` against the primary monitor DC. |
 | `system-param`      | `SystemParametersInfoW` — read/write USER preferences. |
@@ -116,27 +114,6 @@ the same process. If `set` and `get` separately succeed but
 
 ---
 
-## `tasklist32 [TASKNAME]`
-
-Enumerates processes via `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)`
-+ `Process32FirstW` / `Process32NextW`. Tests the toolhelp snapshot
-surface, which generally works from Low IL / AppContainer.
-
-Prints `PID / PPID / THREADS / IMAGE`. Optional `TASKNAME` is a
-case-insensitive substring filter on the image name.
-
-## `tasklist [TASKNAME]`
-
-Same enumeration, via the public `tasklist` crate, which additionally
-calls `OpenProcess` + `QueryFullProcessImageNameW` + token APIs on
-every target. Tests whether per-process attribute lookups
-(`PROCESS_QUERY_LIMITED_INFORMATION` / `PROCESS_QUERY_INFORMATION`)
-are granted by the sandbox. Protected processes get `?` for unknown
-fields rather than failing the whole enumeration.
-
-Prints `PID / PPID / IMAGE / USER / PATH`.
-
----
 
 ## `screenshot [OUTPUT]`
 
@@ -211,9 +188,10 @@ is destructive; use it deliberately.
 src/
   main.rs              CLI parser + dispatch
   clipboard.rs         Clipboard set/get/roundtrip + Win32 diagnostic helpers
-  tasklist.rs          tasklist32 (toolhelp) + tasklist (crate-based)
   screenshot.rs        WinRT GraphicsCapturePicker capture
   screenshot_simple.rs GDI BitBlt capture (win-screenshot crate)
   system_param.rs      SystemParametersInfoW probe
   display_settings.rs  ChangeDisplaySettingsW probe
+  uiisolation.rs       FindWindowW cross-process visibility probe
+  injection.rs         SendInput synthetic-input probe
 ```

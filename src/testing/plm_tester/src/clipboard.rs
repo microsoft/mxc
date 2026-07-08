@@ -366,10 +366,10 @@ pub fn resolve_hwnd(src: HwndSource) -> Result<(HWND, Option<OwnedWindow>)> {
 // Clipboard wrappers
 // --------------------------------------------------------------------------
 
-struct ClipboardGuard;
+pub struct ClipboardGuard;
 
 impl ClipboardGuard {
-    fn open(hwnd: HWND) -> Result<Self> {
+    pub fn open(hwnd: HWND) -> Result<Self> {
         eprintln!("[step] OpenClipboard(hwnd={:p})", hwnd.0);
         let r = unsafe { OpenClipboard(Some(hwnd)) };
         if r.is_err() {
@@ -403,11 +403,19 @@ impl Drop for ClipboardGuard {
 }
 
 pub fn clipboard_set(hwnd: HWND, value: &str) -> Result<()> {
+    let guard = ClipboardGuard::open(hwnd)?;
+    clipboard_set_locked(&guard, value)
+}
+
+/// Write `value` under a caller-held clipboard scope. Empties the
+/// clipboard, allocates an HGLOBAL, and publishes it as
+/// CF_UNICODETEXT. The caller must hold `_guard` for the entire
+/// operation; drop it (or continue holding it) after.
+pub fn clipboard_set_locked(_guard: &ClipboardGuard, value: &str) -> Result<()> {
     let mut wide: Vec<u16> = value.encode_utf16().collect();
     wide.push(0);
     let bytes = wide.len() * std::mem::size_of::<u16>();
 
-    let _guard = ClipboardGuard::open(hwnd)?;
     unsafe {
         EmptyClipboard().context("EmptyClipboard failed")?;
     }
@@ -442,7 +450,13 @@ pub fn clipboard_set(hwnd: HWND, value: &str) -> Result<()> {
 }
 
 pub fn clipboard_get(hwnd: HWND) -> Result<Option<String>> {
-    let _guard = ClipboardGuard::open(hwnd)?;
+    let guard = ClipboardGuard::open(hwnd)?;
+    clipboard_get_locked(&guard)
+}
+
+/// Read CF_UNICODETEXT under a caller-held clipboard scope. Returns
+/// `Ok(None)` if the clipboard has no CF_UNICODETEXT entry.
+pub fn clipboard_get_locked(_guard: &ClipboardGuard) -> Result<Option<String>> {
     eprintln!("[step] GetClipboardData(CF_UNICODETEXT)");
     let handle =
         unsafe { GetClipboardData(CF_UNICODETEXT.0 as u32) }.context("GetClipboardData failed")?;
@@ -471,31 +485,4 @@ pub fn clipboard_get(hwnd: HWND) -> Result<Option<String>> {
         s
     };
     Ok(Some(text))
-}
-
-/// Read the clipboard inside an already-open scope (no fresh
-/// OpenClipboard). Used by `roundtrip --reopen=false` to test whether
-/// the HGLOBAL we just published is even readable to this token.
-pub fn clipboard_get_in_scope(hwnd: HWND) -> Result<String> {
-    let _g = ClipboardGuard::open(hwnd)?;
-    let handle = unsafe { GetClipboardData(CF_UNICODETEXT.0 as u32) }
-        .context("GetClipboardData failed (same-scope read)")?;
-    eprintln!(
-        "[info] GetClipboardData -> HANDLE={:p} is_invalid={}",
-        handle.0,
-        handle.is_invalid()
-    );
-    let hmem = HGLOBAL(handle.0);
-    let size = unsafe { GlobalSize(hmem) };
-    eprintln!("[info] GlobalSize = {size} bytes");
-    let read_back = unsafe {
-        let ptr = GlobalLock(hmem) as *const u16;
-        if ptr.is_null() {
-            return Err(anyhow!("GlobalLock returned null"));
-        }
-        let s = PCWSTR(ptr).to_string()?;
-        let _ = GlobalUnlock(hmem);
-        s
-    };
-    Ok(read_back)
 }
