@@ -2,7 +2,7 @@
 
 `plm.exe` is the Windows-only trace driver for permissive learning mode. Long-form, it captures the access-denied events emitted by Windows' permissive sandbox layer, decodes them into structured findings, and merges those findings back into an MXC container config so the next enforcing run succeeds.
 
-This PR introduces **config generation**: discovered file paths are written to a copy of the input config as `Adjusted_<name>.json` next to the captured trace, and the operator sees a per-path / per-mask detection summary. Capability extraction and UI relaxation arrive in subsequent PRs.
+This PR introduces **config generation**: discovered file paths are written to a copy of the input config as `Adjusted_<name>.json` next to the captured trace, and the operator sees a per-path / per-mask detection summary. The summary also emits a "Detected capabilities" line, but until the capability-extraction PR wires up the `EventID=14` DACL ACE-blob decoder that populates it, it will always report zero. UI relaxation arrives in a subsequent PR as well.
 
 PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mode-permissive-learning-mode); the standalone CLI documented here is for capturing traces, interactive iteration, and debugging the parser itself.
 
