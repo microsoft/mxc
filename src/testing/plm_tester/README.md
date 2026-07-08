@@ -49,10 +49,12 @@ Subcommands:
 | `clipboard roundtrip` | Set then get in one process — isolates clipboard isolation from owner-HWND / UIPI bugs. |
 | `tasklist32`        | `CreateToolhelp32Snapshot` + `Process32NextW` process enumeration. |
 | `tasklist`          | Same, via the `tasklist` crate, which additionally calls `QueryFullProcessImageNameW` / token APIs per process. |
-| `screenshot`        | WinRT `GraphicsCapturePicker` — the user-consent screen-capture path. |
+| `screenshot`        | WinRT `GraphicsCapturePicker` — the user-consent screen-capture path (requires the `graphicsCapture` AppContainer capability, not `graphicsCaptureProgrammatic`). |
 | `screenshot-simple` | GDI `BitBlt` against the primary monitor DC. |
 | `system-param`      | `SystemParametersInfoW` — read/write USER preferences. |
 | `display-settings`  | `ChangeDisplaySettingsW` — primary display mode change. |
+| `ui-isolation`      | `FindWindowW` probes against foreign top-level windows — tests the `processContainer.ui.isolation` gate. |
+| `injection`         | `SendInput` through the full `CreateMessageWindow → ConsoleControl(ConsoleSetForeground) → SetForegroundWindow → SendInput` flow — tests the `ui.injection` gate. |
 
 Every run prints an `[info] PLMTester environment:` block first
 showing the caller's integrity level, window station, desktop, and

@@ -173,7 +173,7 @@ $AutomaticTests = @(
 # Tests that require human input (e.g. WinRT pickers). Only run when
 # -Capability is passed.
 $ManualTests = @(
-    @{ Name = 'cap_screenshot'; Expect = @('processcontainer = {"capabilities":["graphicsCapture"]}') }
+    @{ Name = 'cap_screenshot'; Expect = @('processContainer.capabilities[] += "graphicsCapture"') }
 )
 
 # Guard against orphan configs. Every JSON under plm_configs/ MUST be
