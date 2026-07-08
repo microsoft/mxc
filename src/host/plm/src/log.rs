@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::coordination::PLM_LOG_START_IN_FLIGHT;
 use crate::start;
-use crate::wpr_path::wpr_command;
+use crate::stop::{stop_plm_trace_with, WprExeStopper};
 use std::sync::atomic::Ordering;
 
 fn prompt_enter(message: &str) -> Result<()> {
@@ -27,23 +27,6 @@ fn prompt_enter(message: &str) -> Result<()> {
         .lock()
         .read_line(&mut line)
         .context("failed to read from stdin")?;
-    Ok(())
-}
-
-fn stop_wpr_trace(trace_file: &Path) -> Result<()> {
-    // Capture stdio rather than inheriting so `wpr -stop`'s progress
-    // bar (`100% [>>>>>>>>>]`) and other chatter don't leak into any
-    // wrapping tool's stdout. On non-zero exit we replay the captured
-    // streams via the shared `replay_wpr_output` helper so operators
-    // can still see wpr's own diagnostic.
-    let output = wpr_command()
-        .args(["-stop", &trace_file.to_string_lossy()])
-        .output()
-        .context("failed to spawn wpr -stop")?;
-    if !output.status.success() {
-        crate::start::replay_wpr_output("stop", &output);
-        anyhow::bail!("wpr -stop exited with {}", output.status);
-    }
     Ok(())
 }
 
@@ -75,7 +58,7 @@ pub fn run(
     // parallel `plm log` invocations from colliding on the same .etl.
     let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
     let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
-    stop_wpr_trace(&trace_file)?;
+    stop_plm_trace_with(&mut WprExeStopper, &trace_file)?;
     // Kernel session is torn down; safe to clear the active flag so
     // any subsequent Ctrl+C doesn't issue a stale `wpr -cancel`.
     on_trace_stopped();

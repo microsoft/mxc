@@ -79,5 +79,5 @@ The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`); on
 
 ## See also
 
-- [`docs/base-process-container/guide.md`](../../../docs/base-process-container/guide.md) — process-container backend overview
+- [`docs/process-container/guide.md`](../../../docs/process-container/guide.md) — process-container backend overview
 - [README → Debugging → Audit Mode](../../../README.md#audit-mode-permissive-learning-mode) — `wxc-exec --audit` integration
