@@ -152,7 +152,7 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
     // to the returned u16 count on the SUCCESS path so callers reusing
     // `render_buf` across events never observe uninitialized u16s.
     //
-    // `set_len(0)` runs BEFORE the reserve so that `Vec::reserve` —
+    // `clear()` runs BEFORE the reserve so that `Vec::reserve` —
     // which guarantees `capacity ≥ len + additional`, not
     // `capacity ≥ additional` — actually reaches the
     // `INITIAL_GUESS_U16` target on the first call where `len` had
@@ -165,9 +165,7 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
     // BYTE counts, so multiply/divide by `size_of::<u16>()` at the
     // Win32 boundary.
     const INITIAL_GUESS_U16: usize = 4 * 1024;
-    unsafe {
-        buf.set_len(0);
-    }
+    buf.clear();
     if buf.capacity() < INITIAL_GUESS_U16 {
         buf.reserve(INITIAL_GUESS_U16);
     }
@@ -203,7 +201,10 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
         }
         let needed_u16 = (needed as usize).div_ceil(std::mem::size_of::<u16>());
         if buf.capacity() < needed_u16 {
-            buf.reserve(needed_u16 - buf.capacity());
+            // `Vec::reserve(additional)` measures from `len`, not
+            // `capacity` — since `buf` is empty (cleared above),
+            // `additional == needed_u16` gets us `capacity ≥ needed_u16`.
+            buf.reserve(needed_u16);
         }
         let new_cap_u16 = buf.capacity();
         let new_cap_bytes = new_cap_u16 * std::mem::size_of::<u16>();
