@@ -9,6 +9,7 @@ pub mod encoding;
 pub mod error;
 pub mod filesystem_access;
 pub mod filesystem_object;
+pub mod filesystem_resolve;
 pub mod id;
 pub mod log_symbols;
 pub mod logger;
