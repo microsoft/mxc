@@ -23,6 +23,7 @@ getrandom = { workspace = true }
 windows = { workspace = true }
 windows-core = { workspace = true }
 flatbuffers = { workspace = true }
+uuid = { workspace = true }
 sandbox_spec = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }

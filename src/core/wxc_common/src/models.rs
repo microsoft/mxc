@@ -656,6 +656,9 @@ pub struct ExperimentalConfig {
     pub isolation_session: Option<IsolationSessionConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
+    /// Agentic-workload marker (experimental). When true (and `--experimental`
+    /// is set), MXC mints a per-workload agent-id GUID for the sandbox spec.
+    pub is_agentic: bool,
 }
 
 /// Telemetry configuration parsed from the JSON config `experimental.telemetry` section.

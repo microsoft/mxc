@@ -991,6 +991,7 @@ fn convert_wire_config(
             wslc,
             isolation_session,
             telemetry,
+            is_agentic: raw_exp.is_agentic.unwrap_or(false),
         }
     } else {
         ExperimentalConfig::default()
