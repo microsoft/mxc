@@ -23,7 +23,7 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 {
-    "version": "0.4.0-alpha",              // Schema version (semver). Current stable: "0.4.0-alpha". Also accepts "0.5.0-alpha".
+    "version": "0.7.0-alpha",              // Schema version (semver). Current stable: "0.7.0-alpha". Accepts "0.4.0-alpha" through "0.8.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -170,12 +170,14 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.4, <=0.5 | Accepted (assumed compatible) |
-| `"0.3.0-alpha"` | >=0.4, <=0.5 | **Rejected** — "older than supported" |
-| `"0.4.0-alpha"` | >=0.4, <=0.5 | Accepted (0.4 in range) |
-| `"0.5.0-alpha"` | >=0.4, <=0.5 | Accepted (0.5 in range) |
-| `"0.6.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
+| absent | >=0.4, <=0.8 | Accepted (assumed compatible) |
+| `"0.3.0-alpha"` | >=0.4, <=0.8 | **Rejected** — "older than supported" |
+| `"0.4.0-alpha"` | >=0.4, <=0.8 | Accepted (0.4 — minimum supported) |
+| `"0.6.0-alpha"` | >=0.4, <=0.8 | Accepted (0.6 — state-aware lifecycle) |
+| `"0.7.0-alpha"` | >=0.4, <=0.8 | Accepted (0.7 — latest stable) |
+| `"0.8.0-alpha"` | >=0.4, <=0.8 | Accepted (0.8 — in-development dev line) |
+| `"0.9.0"` | >=0.4, <=0.8 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.4, <=0.8 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

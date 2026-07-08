@@ -16,6 +16,12 @@ pub enum FailureReason {
     ProcessError,
     Timeout,
     InitError,
+    /// An MXC-internal defect (e.g. a panic caught by the global panic hook),
+    /// as opposed to an expected operational failure of a sandboxed run.
+    InternalError,
+    /// Execution was interrupted by the operator (Ctrl-C, console close, or a
+    /// system shutdown/logoff) via the console control handler.
+    Cancelled,
     Unknown,
 }
 
@@ -27,6 +33,8 @@ impl FailureReason {
             Self::ProcessError => "process_error",
             Self::Timeout => "timeout",
             Self::InitError => "init_error",
+            Self::InternalError => "internal_error",
+            Self::Cancelled => "cancelled",
             Self::Unknown => "unknown",
         }
     }
@@ -45,6 +53,10 @@ pub struct ExecutionEvent<'a> {
     pub outcome: &'a str,
     pub duration_ms: u64,
     pub failure_reason: Option<FailureReason>,
+    /// State-aware lifecycle phase that produced this event — one of
+    /// `provision|start|exec|stop|deprovision`. Empty (`""`) for one-shot
+    /// (non-state-aware) executions, which have no lifecycle phase.
+    pub phase: &'a str,
 }
 
 /// Log an MXC.Execution ETW event.
@@ -60,6 +72,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
         event.outcome,
         event.duration_ms,
         failure_str,
+        event.phase,
     );
 }
 
@@ -67,10 +80,10 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
 ///
 /// To avoid leaking PII (paths, usernames, credentials embedded in error
 /// strings), MXC deliberately does **not** emit the free-form error message.
-/// The event carries only the bounded `error_type` category and the process
-/// `exit_code`.
-pub fn log_error(backend: &str, error_type: FailureReason, exit_code: i32) {
-    mxc_telemetry::log_error(backend, error_type.as_str(), exit_code);
+/// The event carries only the bounded `error_type` category, the process
+/// `exit_code`, and the state-aware lifecycle `phase` (empty for one-shot).
+pub fn log_error(backend: &str, error_type: FailureReason, exit_code: i32, phase: &str) {
+    mxc_telemetry::log_error(backend, error_type.as_str(), exit_code, phase);
 }
 
 #[cfg(test)]
@@ -84,6 +97,8 @@ mod tests {
         assert_eq!(FailureReason::ProcessError.as_str(), "process_error");
         assert_eq!(FailureReason::Timeout.as_str(), "timeout");
         assert_eq!(FailureReason::InitError.as_str(), "init_error");
+        assert_eq!(FailureReason::InternalError.as_str(), "internal_error");
+        assert_eq!(FailureReason::Cancelled.as_str(), "cancelled");
         assert_eq!(FailureReason::Unknown.as_str(), "unknown");
     }
 }

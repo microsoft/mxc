@@ -260,8 +260,59 @@ fn apply_command_override(
 /// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
 /// regardless of mode (per design §7.3 stream protocol — stdout reserved
 /// for the response envelope).
-fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
+fn run_state_aware_main(
+    parsed: ParsedStateAwareRequest,
+    dry_run: bool,
+    experimental: bool,
+    logger: &mut Logger,
+) -> ! {
+    // Resolve attribution (phase + backend) and telemetry enablement BEFORE
+    // dispatch consumes `parsed`. State-aware telemetry is gated on
+    // `--experimental` exactly like the one-shot path, and reads the same typed
+    // `experimental.telemetry` field — the state-aware parser populates it while
+    // keeping the per-backend `experimental_raw` block for dispatch. A malformed
+    // telemetry block is rejected at parse time (as a state-aware envelope), so
+    // no client-error handling is needed here.
+    let phase = parsed.phase.as_str();
+    let resolved_backend = resolve_backend(&parsed).ok();
+    let backend = resolved_backend
+        .as_ref()
+        .map(|b| b.wire_name())
+        .unwrap_or("unknown");
+    let telemetry_active = if experimental {
+        parsed
+            .request
+            .experimental
+            .telemetry
+            .as_ref()
+            .map(|c| telemetry::init(c, logger))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // Attribute out-of-band emit paths (the console-control handler installed in
+    // `main`, and the panic hook installed just below) to the resolved backend
+    // and the lifecycle phase, and install a crash-telemetry panic hook for this
+    // dispatch — mirroring the one-shot path, which this `-> !` entry point
+    // bypasses. The shared hook chains the previous hook (default stderr
+    // backtrace still prints) and is panic-free.
+    if telemetry_active {
+        if let Some(containment) = resolved_backend.as_ref() {
+            telemetry::set_process_context(containment);
+        }
+        telemetry::set_process_phase(phase);
+        telemetry::install_panic_hook();
+    }
+
+    let started = Instant::now();
     let outcome = dispatch_state_aware_request(parsed, dry_run);
+    let elapsed = started.elapsed();
+
+    // Emit lifecycle telemetry (and shut the provider down) before flushing the
+    // diagnostic buffer / envelope. Terminal path — safe to shutdown here.
+    telemetry::emit_state_aware(telemetry_active, backend, phase, &outcome, elapsed);
+
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();
@@ -456,6 +507,11 @@ impl Drop for ParkedDaclGuard {
 /// first. On timeout we proceed anyway; the recovery scan on the next
 /// `wxc-exec` startup reaps anything left behind.
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
+    // Best-effort cancellation telemetry FIRST, before the up-to-5s DACL cleanup
+    // loop below can consume the OS shutdown-handler budget. No-op unless
+    // telemetry is active; emits no message text and does not shut the provider
+    // down (the OS reclaims it at process exit).
+    telemetry::emit_cancellation();
     if let Some(slot) = DACL_CLEANUP_SLOT.get() {
         use std::time::{Duration, Instant};
         // The handler runs TWO bounded waits (this one + the
@@ -772,7 +828,7 @@ fn main() {
                 command_override.as_deref(),
                 &mut logger,
             );
-            run_state_aware_main(parsed, cli.dry_run, &mut logger)
+            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
         }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -805,6 +861,15 @@ fn main() {
     } else {
         false
     };
+
+    // Install a crash-telemetry panic hook once telemetry is active, chaining
+    // the previously-installed hook so the default stderr backtrace still
+    // prints (also satisfying the "always emit a diagnostic" contract for the
+    // panic case). The hook body is panic-free and emits no message text.
+    if telemetry_active {
+        telemetry::set_process_context(&request.containment);
+        telemetry::install_panic_hook();
+    }
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
@@ -1339,21 +1404,7 @@ fn main() {
     // when the runner produced an error message (one-shot flows only).
     // In PTY mode stderr is merged into the PTY output stream, so the envelope
     // appears inline -- callers (e.g. copilot) can parse it from the output.
-    if response.exit_code != 0 && !response.error_message.is_empty() {
-        let mut envelope = serde_json::json!({
-            "error": {
-                "code": "backend_error",
-                "message": response.error_message,
-            }
-        });
-        if !response.extended_error.is_empty() {
-            envelope["error"]["extended_error"] =
-                serde_json::Value::String(response.extended_error.clone());
-        }
-        if let Ok(json) = serde_json::to_string(&envelope) {
-            eprintln!("{json}");
-        }
-    }
+    wxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }

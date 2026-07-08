@@ -1041,6 +1041,21 @@ fn convert_wire_state_aware(
         .as_object_mut()
         .and_then(|map| map.remove("experimental"));
 
+    // Peeling `experimental` off above also removes it from the typed
+    // deserialize, so a non-object value (e.g. `"experimental": 42`) would slip
+    // through unchecked here and be silently ignored — unlike the one-shot path,
+    // where `experimental` is a typed `Option<Experimental>` and a non-object is
+    // a hard parse error. Reject a present, non-null, non-object value up front
+    // so both paths fail malformed configs consistently. (`null` maps to "absent"
+    // on both paths and is accepted.)
+    if let Some(exp) = experimental_raw.as_ref() {
+        if !exp.is_null() && !exp.is_object() {
+            let msg = "invalid `experimental`: expected an object".to_string();
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    }
+
     let mut cfg: wire::MxcConfig = serde_json::from_value(value).map_err(|e| {
         logger.log_line("Error parsing JSON");
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
@@ -1125,7 +1140,27 @@ fn convert_wire_state_aware(
     cfg.lifecycle = None;
 
     let require_process = phase == Phase::Exec;
-    let request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+
+    // Populate the typed `experimental.telemetry` field from the raw block that
+    // was peeled off above. The rest of `experimental` is typed per-backend at
+    // dispatch time (from `experimental_raw`), but telemetry is a cross-cutting,
+    // backend-independent setting consumed the same way as the one-shot path —
+    // so it belongs on the typed request, not in a parallel raw-JSON reader. A
+    // present-but-malformed `telemetry` object is a client error (rejected here,
+    // exactly like the one-shot parser), not a silent disable.
+    if let Some(telemetry_val) = experimental_raw
+        .as_ref()
+        .and_then(|exp| exp.get("telemetry"))
+    {
+        let telemetry: TelemetryConfig =
+            serde_json::from_value(telemetry_val.clone()).map_err(|e| {
+                let msg = format!("invalid experimental.telemetry: {e}");
+                logger.log_line(&msg);
+                WxcError::ConfigParse(msg)
+            })?;
+        request.experimental.telemetry = Some(telemetry);
+    }
 
     Ok(ParsedStateAwareRequest {
         request,
@@ -1284,6 +1319,89 @@ mod tests {
                     })
                 );
             }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_telemetry_populates_typed_field() {
+        // Telemetry is a cross-cutting setting: the state-aware parser must
+        // populate the typed `experimental.telemetry` field (consumed the same
+        // way as one-shot) while leaving the per-backend `experimental_raw`
+        // block intact for dispatch.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": {"enabled": true}}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                let telem = p
+                    .request
+                    .experimental
+                    .telemetry
+                    .expect("telemetry should be populated");
+                assert_eq!(telem.enabled, Some(true));
+                // The raw block is still available for per-backend dispatch.
+                assert!(p.experimental_raw.is_some());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_without_telemetry_leaves_typed_field_unset() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_malformed_telemetry_is_rejected() {
+        // A present-but-malformed telemetry block is a client error rejected at
+        // parse time (surfaced as a state-aware envelope), not a silent disable.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": 42}
+        }"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_non_object_experimental_is_rejected() {
+        // A non-object `experimental` (here a bare number) is a hard parse error
+        // on the one-shot path (typed `Option<Experimental>`); the state-aware
+        // path peels `experimental` off before typed deserialize, so it must
+        // reject a non-object value explicitly to stay consistent rather than
+        // silently ignoring it.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": 42
+        }"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_null_experimental_is_accepted() {
+        // `null` maps to "absent" on both the one-shot and state-aware paths, so
+        // it is accepted (leaving telemetry unset), unlike a non-object value.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": null
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }

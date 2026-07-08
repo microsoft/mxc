@@ -133,6 +133,31 @@ fn main() {
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     use seatbelt_common::seatbelt_runner::SeatbeltScriptRunner;
     use wxc_common::sandbox_process::Runner;
+    use wxc_common::telemetry;
+
+    // ── Telemetry init (experimental) ───────────────────────────────
+    // Mirrors lxc-exec / wxc-exec. The ETW provider has no macOS backend today,
+    // so `init` returns false and every emit below is a no-op; wiring it anyway
+    // keeps the three executors structurally identical and ready the moment
+    // telemetry gains a macOS sink.
+    let telemetry_active = if request.experimental_enabled {
+        request
+            .experimental
+            .telemetry
+            .as_ref()
+            .map(|c| telemetry::init(c, logger))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // Install a crash-telemetry panic hook once telemetry is active, chaining
+    // the previously-installed hook so the default stderr backtrace still
+    // prints. The hook body is panic-free and emits no message text.
+    if telemetry_active {
+        telemetry::set_process_context(&request.containment);
+        telemetry::install_panic_hook();
+    }
 
     let mut runner = Runner::new(SeatbeltScriptRunner::new());
     let run_start = Instant::now();
@@ -146,8 +171,23 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
 
     display_script_results(&response, logger);
 
+    // ── Telemetry emit (experimental) ───────────────────────────────
+    telemetry::emit_completion(
+        telemetry_active,
+        &request.containment,
+        &response,
+        run_elapsed,
+    );
+
     print!("{}", response.standard_out);
     eprint!("{}", response.standard_err);
+
+    // Never exit non-zero on an infrastructure failure without a diagnostic:
+    // `display_script_results` only writes the error into the (buffered,
+    // non-debug-suppressed) logger, so surface it on stderr here for parity
+    // with lxc-exec / wxc-exec (issue #564).
+    wxc_common::script_runner::emit_backend_error_envelope(&response);
+
     process::exit(response.exit_code);
 }
 
