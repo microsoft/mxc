@@ -41,7 +41,8 @@ impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
         let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        cmd.args(["-stop", &trace_file.to_string_lossy()])
+        cmd.arg("-stop")
+            .arg(trace_file)
             .status()
             .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
     }

@@ -92,7 +92,7 @@ where
 
     // Reusable scratch buffer for `render_event_xml` so we don't
     // allocate a fresh Vec<u8> per event.
-    let mut render_buf: Vec<u8> = Vec::new();
+    let mut render_buf: Vec<u16> = Vec::new();
     let mut rendered_count: usize = 0;
     const BATCH: usize = 256;
     loop {
@@ -144,27 +144,35 @@ where
 }
 
 #[cfg(target_os = "windows")]
-fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
+fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
     use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER};
 
     // Keep `buf` at `len == 0` while `EvtRender` writes through the raw
-    // pointer using the explicit size argument; only extend `len` to
-    // `needed` on the SUCCESS path so callers reusing `render_buf`
-    // across events never observe uninitialized bytes.
+    // pointer using the explicit byte-size argument; only extend `len`
+    // to the returned u16 count on the SUCCESS path so callers reusing
+    // `render_buf` across events never observe uninitialized u16s.
     //
     // `set_len(0)` runs BEFORE the reserve so that `Vec::reserve` —
     // which guarantees `capacity ≥ len + additional`, not
     // `capacity ≥ additional` — actually reaches the
-    // `INITIAL_GUESS_BYTES` target on the first call where `len` had
+    // `INITIAL_GUESS_U16` target on the first call where `len` had
     // been left non-zero by the previous event.
-    const INITIAL_GUESS_BYTES: usize = 8 * 1024;
+    //
+    // `EvtRender` writes UTF-16, so the backing buffer is `Vec<u16>`
+    // to guarantee 2-byte alignment (`Vec<u8>` is only 1-byte-aligned
+    // and casting `.as_ptr()` to `*const u16` would be UB even on x86).
+    // Note: `EvtRender`'s `BufferSize` / `BufferUsed` parameters are
+    // BYTE counts, so multiply/divide by `size_of::<u16>()` at the
+    // Win32 boundary.
+    const INITIAL_GUESS_U16: usize = 4 * 1024;
     unsafe {
         buf.set_len(0);
     }
-    if buf.capacity() < INITIAL_GUESS_BYTES {
-        buf.reserve(INITIAL_GUESS_BYTES);
+    if buf.capacity() < INITIAL_GUESS_U16 {
+        buf.reserve(INITIAL_GUESS_U16);
     }
-    let cap = buf.capacity();
+    let cap_u16 = buf.capacity();
+    let cap_bytes = cap_u16 * std::mem::size_of::<u16>();
 
     let mut needed: u32 = 0;
     let mut count: u32 = 0;
@@ -173,7 +181,7 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
             None,
             event,
             EvtRenderEventXml.0,
-            cap as u32,
+            cap_bytes as u32,
             Some(buf.as_mut_ptr() as *mut _),
             &mut needed as *mut _,
             &mut count as *mut _,
@@ -181,8 +189,8 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
     };
 
     if first.is_err() {
-        // ERROR_INSUFFICIENT_BUFFER means `needed` is now valid; grow
-        // and retry once. Any other error is fatal.
+        // ERROR_INSUFFICIENT_BUFFER means `needed` is now valid (in
+        // bytes); grow and retry once. Any other error is fatal.
         let win_err = unsafe { GetLastError() };
         if win_err != ERROR_INSUFFICIENT_BUFFER {
             return Err(anyhow::anyhow!(
@@ -193,36 +201,36 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u8>) -> Result<String> {
         if needed == 0 {
             return Err(anyhow::anyhow!("EvtRender returned zero size"));
         }
-        if buf.capacity() < needed as usize {
-            buf.reserve(needed as usize - buf.capacity());
+        let needed_u16 = (needed as usize).div_ceil(std::mem::size_of::<u16>());
+        if buf.capacity() < needed_u16 {
+            buf.reserve(needed_u16 - buf.capacity());
         }
-        let new_cap = buf.capacity();
+        let new_cap_u16 = buf.capacity();
+        let new_cap_bytes = new_cap_u16 * std::mem::size_of::<u16>();
         let second = unsafe {
             EvtRender(
                 None,
                 event,
                 EvtRenderEventXml.0,
-                new_cap as u32,
+                new_cap_bytes as u32,
                 Some(buf.as_mut_ptr() as *mut _),
                 &mut needed as *mut _,
                 &mut count as *mut _,
             )
         };
         // Propagate any error AFTER ensuring `buf` is still at len=0
-        // (no uninit bytes exposed to the reused-buffer caller path).
+        // (no uninit u16s exposed to the reused-buffer caller path).
         second?;
     }
 
-    let init_bytes = (needed as usize).min(buf.capacity());
+    // `needed` is bytes written including the terminating NUL.
+    let init_u16 = (needed as usize / std::mem::size_of::<u16>()).min(buf.capacity());
     unsafe {
-        buf.set_len(init_bytes);
+        buf.set_len(init_u16);
     }
-    let u16_count = init_bytes / 2;
-    let u16_slice: &[u16] =
-        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, u16_count) };
-    let trimmed = match u16_slice.iter().position(|&c| c == 0) {
-        Some(n) => &u16_slice[..n],
-        None => u16_slice,
+    let trimmed = match buf.iter().position(|&c| c == 0) {
+        Some(n) => &buf[..n],
+        None => &buf[..],
     };
     Ok(String::from_utf16_lossy(trimmed))
 }
