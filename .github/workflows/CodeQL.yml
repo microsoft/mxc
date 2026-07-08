@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   analyze:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id
     name: Analyze (${{ matrix.language }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -76,7 +77,7 @@ jobs:
         # feature-gated backends (hyperlight/microvm/windows_sandbox) that need
         # extra CI workarounds. Trade-off: those backends are not covered by
         # this scan. Expand --features here if that coverage becomes needed.
-        run: cargo build --target ${{ matrix.target }}
+        run: cargo build --locked --target ${{ matrix.target }}
 
       # ---- JS/TS: no build required; CodeQL extracts the source directly. ----
 
