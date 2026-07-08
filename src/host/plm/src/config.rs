@@ -653,9 +653,9 @@ pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose
 /// Merge discovered AppContainer capability names into the config's
 /// containment-backend block. Implementation arrives in the
 /// capability-extraction PR; until then this is a no-op. Callers may
-/// pass a non-empty set (e.g. when a future stop.rs wires in an
-/// EventID=27 parser ahead of this merge) without triggering a
-/// spurious failure — the actual merge is landed atomically in the
+/// pass a non-empty set (e.g. when a future stop.rs wires in the
+/// EventID=14 ACE-blob parser ahead of this merge) without triggering
+/// a spurious failure — the actual merge is landed atomically in the
 /// capability-extraction PR.
 pub fn merge_capabilities(_config: &mut Value, _requested: &HashSet<String>) -> Result<()> {
     Ok(())
