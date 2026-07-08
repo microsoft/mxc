@@ -525,6 +525,27 @@ fn install_dacl_ctrl_handler() {
 }
 
 fn main() {
+    // Debug aid: when MXC_ATTACH_WAIT is set, print this process's PID and
+    // block until a debugger is attached (or the timeout elapses), so a
+    // native debugger can attach and load processmodel.dll symbols before
+    // CreateProcessInSandbox runs. Optionally set MXC_ATTACH_WAIT_SECS to
+    // override the default wait. Unset in normal runs = zero overhead.
+    if std::env::var_os("MXC_ATTACH_WAIT").is_some() {
+        use std::io::Write;
+        let secs = std::env::var("MXC_ATTACH_WAIT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        let pid = std::process::id();
+        let _ = writeln!(
+            std::io::stderr(),
+            "[attach-wait] PID {pid}: attach a debugger now; waiting up to {secs}s..."
+        );
+        let _ = std::io::stderr().flush();
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        let _ = writeln!(std::io::stderr(), "[attach-wait] resuming");
+    }
+
     let cli = Cli::parse().normalize_named_config_command();
 
     // Best-effort: reap any orphaned DACL state files left behind by
