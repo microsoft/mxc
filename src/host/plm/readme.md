@@ -55,7 +55,15 @@ plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
              [--verbose-logging]
 ```
 
-`--config-path` / `--adjusted-config-path` are accepted today so `wxc-exec --audit` can pass them through; the merge that consumes them arrives in subsequent PRs.
+`--config-path` drives an in-memory merge of discovered file paths and capabilities against the input config, and — when `--adjusted-config-path` is set (or by default, next to the input) — writes the result as `Adjusted_<name>.json`.
+
+### `plm extract-caps`
+
+Decode a raw hex-encoded DACL ACE buffer into a sorted list of AppContainer capability names. Useful for debugging the ACE decoder against ETW payloads dumped by other tools.
+
+```powershell
+plm.exe extract-caps --hex-bytes <hex> [--verbose-logging]
+```
 
 ### `plm log`
 
@@ -81,9 +89,9 @@ The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`); on
 ## Limitations
 
 - **Windows-only.** Uses `wpr.exe` and Job-Object UI-limit semantics that have no portable equivalent.
-- **No capability or UI extraction yet.** `plm stop` writes `Adjusted_<name>.json` with the discovered file paths only. Capability extraction (`EventID=14` DACL ACE blobs) and UI-policy extraction (`EventID=27`) arrive in subsequent PRs.
+- **No UI extraction yet.** `plm stop` writes `Adjusted_<name>.json` with the discovered file paths and AppContainer capabilities. UI-policy extraction (`EventID=27`) arrives in a subsequent PR.
 
 ## See also
 
-- [`docs/base-process-container/guide.md`](../../../docs/base-process-container/guide.md) — process-container backend overview
+- [`docs/process-container/guide.md`](../../../docs/process-container/guide.md) — process-container backend overview
 - [README → Debugging → Audit Mode](../../../README.md#audit-mode-permissive-learning-mode) — `wxc-exec --audit` integration
