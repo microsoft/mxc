@@ -25,7 +25,7 @@
 //! the runner uses `--unshare-net` for zero-overhead full isolation
 //! without root.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, PathKind, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
     take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
@@ -142,6 +142,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             Some(denied_paths) => {
                 let mut policy = request.policy.clone();
                 policy.denied_paths = denied_paths;
+                policy.denied_path_kinds = plan.kinds;
                 resolved = ExecutionRequest {
                     policy,
                     ..request.clone()
@@ -188,7 +189,14 @@ impl BubblewrapScriptRunner {
             }
         }
 
-        // 2. Build the bwrap argument vector. `denied_files` is the file-mask
+        // 2. Warn when a declared `type` contradicts an existing host path (host
+        //    reality wins so the mount stays valid), and record missing denied
+        //    paths under a read-write parent whose host stubs we must reclaim
+        //    once the sandbox tears down. Symlinks are already resolved above.
+        warn_denied_kind_mismatches(&request.policy, logger);
+        let stub_candidates = missing_denied_stub_candidates(&request.policy);
+
+        // 3. Build the bwrap argument vector. `denied_files` is the file-mask
         //    subset classified during symlink resolution (see
         //    [`resolve_denied_paths`]).
         let args = bwrap_command::build_args_classified(request, proxy.address(), denied_files);
@@ -198,7 +206,7 @@ impl BubblewrapScriptRunner {
             args.len()
         );
 
-        // 3. Determine whether iptables network rules are needed. When the
+        // 4. Determine whether iptables network rules are needed. When the
         //    cooperative proxy is active we skip iptables entirely (host
         //    enforcement happens at the proxy layer).
         let needs_iptables = needs_iptables_rules(request) && !proxy.is_active();
@@ -235,7 +243,7 @@ impl BubblewrapScriptRunner {
             None
         };
 
-        // 4. Spawn `bwrap`.
+        // 5. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
         match stdio {
@@ -321,6 +329,7 @@ impl BubblewrapScriptRunner {
             proxy,
             fw_manager,
             timeout,
+            stub_candidates,
         })
     }
 }
@@ -343,14 +352,20 @@ struct BwrapChild {
     proxy: LinuxProxyCoordinator,
     fw_manager: Option<NetworkIptablesManager>,
     timeout: Option<Duration>,
+    /// Missing denied paths under a read-write parent whose empty host stubs
+    /// bwrap materializes as mount points; reclaimed in [`BwrapChild::cleanup`]
+    /// once the sandbox has exited (see [`missing_denied_stub_candidates`]).
+    stub_candidates: Vec<String>,
 }
 
 impl BwrapChild {
-    /// Tear down per-run network state (iptables rules + proxy). Idempotent at
-    /// the manager level.
+    /// Tear down per-run state: iptables rules + proxy, then reclaim any empty
+    /// host stubs bwrap left behind for missing denied paths. Idempotent at the
+    /// manager level; stub removal is best-effort.
     fn cleanup(&mut self, logger: &mut Logger) {
         cleanup_iptables(&mut self.fw_manager, logger);
         self.proxy.stop(logger);
+        cleanup_denied_stubs(&self.stub_candidates, logger);
     }
 }
 
@@ -518,6 +533,10 @@ struct DeniedPlan {
     /// from the input (a symlink was resolved to its real target), so the caller
     /// can skip cloning the request in the common no-symlink case.
     paths: Option<Vec<String>>,
+    /// `denied_path_kinds` re-keyed to match the resolved `paths` (a symlink
+    /// entry's declared `type` moves to its real path). Applied to the policy
+    /// alongside `paths` whenever `paths` is `Some`.
+    kinds: HashMap<String, PathKind>,
     /// Subset of the (final) denied paths that must be masked as files with
     /// `--ro-bind /dev/null`; every other denied path is masked with `--tmpfs`.
     files: HashSet<String>,
@@ -538,6 +557,10 @@ struct DeniedPlan {
 /// arg pipeline can't represent it faithfully, and a lossy replacement would mask
 /// the wrong path and leave the target exposed.
 ///
+/// Any `denied_path_kinds` entry is re-keyed from the original path to its
+/// resolved path so the map stays keyed by the path as it now appears in
+/// `denied_paths` (its documented invariant).
+///
 /// An entry still a symlink after resolution (dangling/unresolvable) is kept and
 /// file-masked with `/dev/null` — nothing resolvable is behind it to leak, and
 /// bwrap tolerates `/dev/null` over a symlink node (whereas `--tmpfs` aborts).
@@ -547,6 +570,7 @@ fn resolve_denied_paths(
 ) -> Result<DeniedPlan, String> {
     let mut changed = false;
     let mut out = Vec::with_capacity(policy.denied_paths.len());
+    let mut kinds = policy.denied_path_kinds.clone();
     let mut files = HashSet::new();
     for p in &policy.denied_paths {
         if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
@@ -562,7 +586,11 @@ fn resolve_denied_paths(
                     "Bubblewrap: deniedPaths entry '{p}' resolves through a symlink; masking \
                      its real path '{resolved}' instead."
                 );
-                if is_file_mask_target(resolved) {
+                // Keep denied_path_kinds keyed by the path as it now appears.
+                if let Some(kind) = kinds.remove(p) {
+                    kinds.insert(resolved.to_owned(), kind);
+                }
+                if denied_masks_as_file(resolved, kinds.get(resolved)) {
                     files.insert(resolved.to_owned());
                 }
                 out.push(resolved.to_owned());
@@ -571,25 +599,124 @@ fn resolve_denied_paths(
             }
         }
         // Not rewritten: a real path, a rooted not-yet-existing path, or a
-        // dangling symlink. Classify by stat'ing the entry itself.
-        if is_file_mask_target(p) {
+        // dangling symlink. Classify by declared kind + host stat of the entry.
+        if denied_masks_as_file(p, kinds.get(p)) {
             files.insert(p.clone());
         }
         out.push(p.clone());
     }
     Ok(DeniedPlan {
         paths: changed.then_some(out),
+        kinds,
         files,
     })
 }
 
-/// Classify a denied path for masking: `true` = `--ro-bind /dev/null` (file),
-/// `false` = `--tmpfs` (directory). A real directory and any path that cannot be
-/// stat'd are directory-masked; regular files and symlink nodes are file-masked.
-fn is_file_mask_target(path: &str) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|md| !md.file_type().is_dir())
-        .unwrap_or(false)
+/// Decide whether one denied path must be masked as a **file**
+/// (`--ro-bind /dev/null`) rather than a directory (`--tmpfs`).
+///
+/// Host reality is authoritative whenever the path **exists**: a declared kind
+/// that contradicts an existing path cannot be honored, because bwrap can
+/// neither bind `/dev/null` over a real directory nor mount a `--tmpfs` over a
+/// real file — either produces a hard mount failure that aborts the whole
+/// sandbox. The declared kind (`denied_path_kinds`) is therefore consulted only
+/// when the host path is **absent or unreadable** — exactly the case the
+/// runtime probe cannot classify — so masking is deterministic for not-yet-
+/// present paths while staying valid for existing ones. `symlink_metadata` does
+/// not follow symlinks, so a denied symlink is judged by its own type (a
+/// non-directory, masked with `/dev/null`). Missing/unreadable paths with no
+/// declared kind fall back to a directory (`--tmpfs`).
+fn denied_masks_as_file(path: &str, declared: Option<&PathKind>) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) => !md.file_type().is_dir(),
+        Err(_) => matches!(declared, Some(PathKind::File)),
+    }
+}
+
+/// Log a warning for each denied path whose declared `type` contradicts the
+/// actual host type. The host type wins (so the bwrap mount stays valid — see
+/// [`denied_masks_as_file`]), but the mismatch usually signals a misconfigured
+/// policy worth surfacing to the caller.
+fn warn_denied_kind_mismatches(policy: &wxc_common::models::ContainerPolicy, logger: &mut Logger) {
+    for (path, declared) in &policy.denied_path_kinds {
+        let Ok(md) = std::fs::symlink_metadata(path) else {
+            continue; // missing/unreadable: the declared kind is honored, no conflict
+        };
+        let host_is_dir = md.file_type().is_dir();
+        let declared_is_dir = matches!(declared, PathKind::Directory);
+        if host_is_dir != declared_is_dir {
+            let (declared_name, host_name) = if declared_is_dir {
+                ("directory", "non-directory")
+            } else {
+                ("file", "directory")
+            };
+            let _ = writeln!(
+                logger,
+                "Bubblewrap: deniedPaths entry {path:?} declared type \"{declared_name}\" but \
+                 the host path is a {host_name}; masking it as the host type so the bwrap mount \
+                 stays valid."
+            );
+        }
+    }
+}
+
+/// Denied paths that do **not** exist on the host and live under a
+/// `readwritePaths` bind. To mount a mask, bwrap must first materialize a mount
+/// point (an empty file for `--ro-bind /dev/null`, an empty directory for
+/// `--tmpfs`); because the parent is a writable bind of a real host directory,
+/// that mount point is created on the host and left behind as an empty stub
+/// once the sandbox tears down. These are the paths [`cleanup_denied_stubs`]
+/// removes post-run to keep the host free of side effects.
+fn missing_denied_stub_candidates(policy: &wxc_common::models::ContainerPolicy) -> Vec<String> {
+    policy
+        .denied_paths
+        .iter()
+        .filter(|p| std::fs::symlink_metadata(p).is_err())
+        .filter(|p| path_is_within_any(p, &policy.readwrite_paths))
+        .cloned()
+        .collect()
+}
+
+/// `true` when `path` is equal to or nested under any of `parents`, compared
+/// component-wise (so `/a/bc` is not considered "within" `/a/b`).
+fn path_is_within_any(path: &str, parents: &[String]) -> bool {
+    let child = std::path::Path::new(path);
+    parents
+        .iter()
+        .any(|parent| child.starts_with(std::path::Path::new(parent)))
+}
+
+/// Best-effort removal of the empty host stubs bwrap created for missing denied
+/// paths (see [`missing_denied_stub_candidates`]). Only empty regular files and
+/// empty directories are removed, and symlinks are never followed, so a path
+/// that gained real content — or was swapped for a symlink — after the run is
+/// left untouched. The mask (`/dev/null` / tmpfs) was mounted *over* each stub
+/// during the run, so the sandbox's writes never reached the underlying node:
+/// it is still empty and safe to reclaim.
+fn cleanup_denied_stubs(paths: &[String], logger: &mut Logger) {
+    for path in paths {
+        let Ok(md) = std::fs::symlink_metadata(path) else {
+            continue; // already gone / unreadable
+        };
+        let ft = md.file_type();
+        let removed = if ft.is_symlink() {
+            // A symlink is not the empty node we created; never follow or delete it.
+            false
+        } else if ft.is_file() {
+            md.len() == 0 && std::fs::remove_file(path).is_ok()
+        } else if ft.is_dir() {
+            // `remove_dir` (atomic rmdir) only succeeds on an empty directory.
+            std::fs::remove_dir(path).is_ok()
+        } else {
+            false
+        };
+        if removed {
+            let _ = writeln!(
+                logger,
+                "Bubblewrap: removed leftover denied-path stub {path:?}"
+            );
+        }
+    }
 }
 
 /// Resolve every symlink in `path` (leaf and ancestors) to a real filesystem
@@ -636,6 +763,15 @@ mod tests {
             script_code: "echo hi".into(),
             ..Default::default()
         }
+    }
+
+    /// Test shim: the file-mask classification is folded into [`resolve_denied_paths`]
+    /// (as [`DeniedPlan::files`]); these tests exercise that classification directly.
+    fn classify_denied_files(policy: &wxc_common::models::ContainerPolicy) -> HashSet<String> {
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+        resolve_denied_paths(policy, &mut logger)
+            .expect("must not fail closed")
+            .files
     }
 
     #[test]
@@ -788,6 +924,43 @@ mod tests {
         );
     }
 
+    /// When a denied symlink carries an explicit `type`, resolution re-keys the
+    /// `denied_path_kinds` entry from the link path to its target so the map
+    /// stays keyed by the path as it now appears in `denied_paths`.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_denied_symlinks_rekeys_declared_kind_to_target() {
+        use wxc_common::logger::{Logger, Mode};
+        use wxc_common::models::PathKind;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real_dir");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link_to_dir");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let link_str = link.to_string_lossy().into_owned();
+        let target_str = std::fs::canonicalize(&target)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let mut kinds = std::collections::HashMap::new();
+        kinds.insert(link_str.clone(), PathKind::Directory);
+        let policy = wxc_common::models::ContainerPolicy {
+            denied_paths: vec![link_str.clone()],
+            denied_path_kinds: kinds,
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let plan = resolve_denied_paths(&policy, &mut logger).expect("must not fail closed");
+        let out = plan.paths.expect("symlink must be rewritten");
+        let kinds = plan.kinds;
+        assert_eq!(out, vec![target_str.clone()]);
+        // Kind moved from the link key to the target key.
+        assert!(!kinds.contains_key(&link_str));
+        assert_eq!(kinds.get(&target_str), Some(&PathKind::Directory));
+    }
+
     /// Regular files, directories, and missing paths with no symlink anywhere in
     /// the path are a no-op for rewriting (`paths` is `None`, avoiding an
     /// unnecessary clone), but are still classified: the file → `/dev/null`, the
@@ -846,5 +1019,200 @@ mod tests {
         assert!(plan.paths.is_none());
         // The dangling link is still masked, as a file.
         assert!(plan.files.contains(&link.to_string_lossy().into_owned()));
+    }
+
+    // --- classify_denied_files (masking primitive selection) ---
+
+    #[test]
+    fn explicit_file_kind_masks_as_file_even_when_missing() {
+        // The headline win: a denied path declared `file` is masked with
+        // /dev/null even if it does not exist on the host (the runtime probe
+        // alone would fall back to tmpfs/dir).
+        let mut req = base_request();
+        let p = "/nonexistent/secret.txt".to_string();
+        req.policy.denied_paths = vec![p.clone()];
+        req.policy
+            .denied_path_kinds
+            .insert(p.clone(), PathKind::File);
+
+        let files = classify_denied_files(&req.policy);
+        assert!(files.contains(&p), "explicit file kind must mask as a file");
+    }
+
+    #[test]
+    fn explicit_directory_kind_masks_as_directory_even_when_missing() {
+        let mut req = base_request();
+        let p = "/nonexistent/vault".to_string();
+        req.policy.denied_paths = vec![p.clone()];
+        req.policy
+            .denied_path_kinds
+            .insert(p.clone(), PathKind::Directory);
+
+        let files = classify_denied_files(&req.policy);
+        assert!(
+            !files.contains(&p),
+            "explicit directory kind must mask as a directory (tmpfs)"
+        );
+    }
+
+    #[test]
+    fn declared_file_reconciles_to_existing_host_directory() {
+        // Fix ③: when the host path exists and is a directory, its real type
+        // wins over a contradictory declared `file` kind — otherwise bwrap would
+        // hard-fail trying to bind /dev/null over a directory. The path is still
+        // denied, just masked with the valid primitive (tmpfs).
+        let dir = std::env::temp_dir();
+        let p = dir.to_string_lossy().into_owned();
+        let mut req = base_request();
+        req.policy.denied_paths = vec![p.clone()];
+        req.policy
+            .denied_path_kinds
+            .insert(p.clone(), PathKind::File);
+
+        let files = classify_denied_files(&req.policy);
+        assert!(
+            !files.contains(&p),
+            "an existing host directory must mask as a directory even when declared file"
+        );
+    }
+
+    #[test]
+    fn declared_directory_reconciles_to_existing_host_file() {
+        // Fix ③, reverse direction: an existing host *file* declared `directory`
+        // must mask as a file (/dev/null), not tmpfs — a tmpfs over a real file
+        // is an equally impossible mount.
+        let mut p = std::env::temp_dir();
+        p.push(format!("mxc_bwrap_recon_{}", std::process::id()));
+        std::fs::write(&p, b"secret").expect("create temp file");
+        let path = p.to_string_lossy().into_owned();
+
+        let mut req = base_request();
+        req.policy.denied_paths = vec![path.clone()];
+        req.policy
+            .denied_path_kinds
+            .insert(path.clone(), PathKind::Directory);
+
+        let files = classify_denied_files(&req.policy);
+        let is_file = files.contains(&path);
+        let _ = std::fs::remove_file(&p);
+        assert!(
+            is_file,
+            "an existing host file must mask as a file even when declared directory"
+        );
+    }
+
+    #[test]
+    fn no_kind_probes_host_directory_as_directory() {
+        // Without a declared kind, an existing host directory falls back to
+        // tmpfs masking (not in the file set).
+        let dir = std::env::temp_dir();
+        let p = dir.to_string_lossy().into_owned();
+        let mut req = base_request();
+        req.policy.denied_paths = vec![p.clone()];
+
+        let files = classify_denied_files(&req.policy);
+        assert!(
+            !files.contains(&p),
+            "an undeclared host directory must probe as a directory"
+        );
+    }
+
+    #[test]
+    fn no_kind_missing_path_falls_back_to_directory() {
+        // Without a declared kind, a missing path cannot be probed and falls
+        // back to tmpfs (directory) masking.
+        let mut req = base_request();
+        let p = "/nonexistent/whatever".to_string();
+        req.policy.denied_paths = vec![p.clone()];
+
+        let files = classify_denied_files(&req.policy);
+        assert!(
+            !files.contains(&p),
+            "an undeclared missing path must fall back to directory masking"
+        );
+    }
+
+    // --- missing-denied-path host-stub cleanup (fix ②) ---
+
+    #[test]
+    fn path_is_within_any_is_component_wise() {
+        let parents = vec!["/a/b".to_string()];
+        assert!(path_is_within_any("/a/b", &parents), "equal path is within");
+        assert!(
+            path_is_within_any("/a/b/c", &parents),
+            "nested path is within"
+        );
+        assert!(
+            !path_is_within_any("/a/bc", &parents),
+            "sibling prefix must not be treated as within"
+        );
+        assert!(
+            !path_is_within_any("/a", &parents),
+            "parent is not within child"
+        );
+    }
+
+    #[test]
+    fn stub_candidates_only_missing_paths_under_readwrite() {
+        let mut req = base_request();
+        req.policy.readwrite_paths = vec!["/mnt/work".into()];
+        req.policy.denied_paths = vec![
+            "/mnt/work/ghost".into(), // missing + under rw → candidate
+            "/etc/shadow".into(),     // outside rw → not a candidate
+            std::env::temp_dir().to_string_lossy().into_owned(), // exists → not a candidate
+        ];
+
+        let candidates = missing_denied_stub_candidates(&req.policy);
+        assert_eq!(candidates, vec!["/mnt/work/ghost".to_string()]);
+    }
+
+    #[test]
+    fn cleanup_removes_empty_stubs_but_not_populated_ones() {
+        let base = std::env::temp_dir().join(format!("mxc_bwrap_stub_{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("create test base");
+
+        let empty_file = base.join("empty_file");
+        let empty_dir = base.join("empty_dir");
+        let full_file = base.join("full_file");
+        let full_dir = base.join("full_dir");
+        std::fs::write(&empty_file, b"").expect("empty file");
+        std::fs::create_dir(&empty_dir).expect("empty dir");
+        std::fs::write(&full_file, b"data").expect("full file");
+        std::fs::create_dir(&full_dir).expect("full dir");
+        std::fs::write(full_dir.join("child"), b"x").expect("dir child");
+
+        let paths: Vec<String> = [&empty_file, &empty_dir, &full_file, &full_dir]
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        cleanup_denied_stubs(&paths, &mut logger);
+
+        assert!(!empty_file.exists(), "empty stub file must be reclaimed");
+        assert!(!empty_dir.exists(), "empty stub dir must be reclaimed");
+        assert!(full_file.exists(), "a non-empty file must be preserved");
+        assert!(full_dir.exists(), "a non-empty dir must be preserved");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cleanup_never_follows_symlink_stubs() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("mxc_bwrap_symlink_{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("create test base");
+
+        let target = base.join("real_target");
+        std::fs::write(&target, b"important").expect("target");
+        let link = base.join("stub_link");
+        symlink(&target, &link).expect("symlink");
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        cleanup_denied_stubs(&[link.to_string_lossy().into_owned()], &mut logger);
+
+        assert!(link.exists(), "a symlink stub must be left untouched");
+        assert!(target.exists(), "a symlink's target must never be deleted");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

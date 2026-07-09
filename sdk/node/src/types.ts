@@ -163,6 +163,26 @@ export interface ProcessContainerConfig {
 }
 
 /**
+ * A denied path with an explicitly declared kind.
+ *
+ * Declaring `type` lets a backend pick the correct masking primitive
+ * deterministically (host-independent) instead of inferring it from the host
+ * object at runtime. Currently honored by the Bubblewrap backend.
+ */
+export interface DeniedPathObject {
+  /** The denied path. */
+  path: string;
+  /** The declared kind of the path; when omitted, the backend infers it from the host object at runtime. */
+  type?: 'file' | 'directory';
+}
+
+/**
+ * A single `deniedPaths` entry: either a bare path string (kind inferred at
+ * runtime) or an object that additionally declares the path's `type`.
+ */
+export type DeniedPathEntry = string | DeniedPathObject;
+
+/**
  * Filesystem access configuration
  */
 export interface FilesystemConfig {
@@ -171,7 +191,7 @@ export interface FilesystemConfig {
   /** Paths the script can read but not write */
   readonlyPaths?: string[];
   /** Paths the script cannot access */
-  deniedPaths?: string[];
+  deniedPaths?: DeniedPathEntry[];
   /** Automatically remove file access policy after execution (default: true) */
   clearPolicyOnExit?: boolean;
 }
@@ -329,7 +349,7 @@ export type SandboxPolicy = {
       /** Paths that are granted read-only access */
       readonlyPaths?: string[];
       /** Paths that are explicitly denied all access */
-      deniedPaths?: string[];
+      deniedPaths?: DeniedPathEntry[];
       /** Whether to clear the filesystem policy when the shell exits. (default: true) */
       clearPolicyOnExit?: boolean;
   };

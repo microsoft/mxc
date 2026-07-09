@@ -48,6 +48,25 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
+ * A single `deniedPaths` entry: either a bare path string (kind inferred at runtime) or an object that additionally declares the path's `type`.
+ */
+export type DeniedPathEntry = string | DeniedPathObject;
+
+/**
+ * A denied path with an explicitly declared kind.
+ */
+export interface DeniedPathObject {
+  /**
+   * The denied path.
+   */
+  path: string;
+  /**
+   * The declared kind of the path; when omitted, the backend infers it from the host object at runtime.
+   */
+  type?: PathKind | null;
+}
+
+/**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
  */
 export interface Experimental {
@@ -93,9 +112,9 @@ export interface Fallback {
  */
 export interface Filesystem {
   /**
-   * Paths explicitly denied (override broader allow rules).
+   * Paths explicitly denied (override broader allow rules). Each entry is either a bare path string, or an object that additionally declares the path's `type` so masking is deterministic regardless of host state.
    */
-  deniedPaths?: string[] | null;
+  deniedPaths?: DeniedPathEntry[] | null;
   /**
    * Paths the process can read but not write.
    */
@@ -244,6 +263,11 @@ export type NetworkEnforcement = "capabilities" | "firewall" | "both";
  * Default network policy.
  */
 export type NetworkPolicy = "allow" | "block";
+
+/**
+ * The declared kind of a denied path. Lets a `deniedPaths` entry choose the correct masking primitive deterministically; when omitted, the backend infers the kind from the host object at runtime.
+ */
+export type PathKind = "file" | "directory";
 
 /**
  * State-aware lifecycle phase.

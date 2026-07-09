@@ -179,7 +179,7 @@ type SandboxPolicy = {
   filesystem?: {
     readwritePaths?: string[];
     readonlyPaths?: string[];
-    deniedPaths?: string[];
+    deniedPaths?: (string | { path: string; type?: "file" | "directory" })[];
     tempDir?: "shared" | "isolated";
   };
   network?: {
@@ -204,7 +204,7 @@ type SandboxPolicy = {
 |------------------|------------------------------------------------------------------------------|
 | `readwritePaths` | Paths the sandbox can read and write.                                        |
 | `readonlyPaths`  | Paths the sandbox can read but not write.                                    |
-| `deniedPaths`    | Paths the sandbox cannot access at all.                                      |
+| `deniedPaths`    | Paths the sandbox cannot access at all. Each entry is a path string, or an object `{ path, type? }` where `type` (`"file"`/`"directory"`) declares the kind for deterministic masking (honored by the Bubblewrap backend; ignored elsewhere). |
 | `tempDir`        | `"shared"`: host temp dir. `"isolated"`: private temp dir (`TEMP`/`TMPDIR`). |
 
 Omitted = no filesystem access beyond the default sandbox root.

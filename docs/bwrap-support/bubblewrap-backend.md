@@ -121,14 +121,20 @@ backend-specific config block is needed.
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <path> <path>` | Read-write bind mount (overrides base RO) |
 | `readonlyPaths` | `--ro-bind <path> <path>` | Explicit read-only bind mount |
-| `deniedPaths` (directory) | `--tmpfs <path>` | Masked with an empty tmpfs |
-| `deniedPaths` (file) | `--ro-bind /dev/null <path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
+| `deniedPaths` | `--tmpfs <path>` (directory) / `--ro-bind /dev/null <path>` (file) | Masked according to the path's kind (see below) |
 
-A denied path is classified by its own on-disk type (via `symlink_metadata`,
-no symlink-follow): a directory is masked with an empty `--tmpfs`, while a
-regular file is masked by binding `/dev/null` over it (masking a file with a
-tmpfs would replace it with an empty *directory*, changing its type). Paths that
-cannot be stat'd (missing/unreadable) fall back to `--tmpfs`.
+#### Denied-path masking
+
+A denied **directory** is masked with an empty `--tmpfs`. A denied **file**
+must instead be masked with a read-only bind of `/dev/null`: masking a file
+with `--tmpfs` would replace it with an empty *directory* (bwrap creates the
+mount point as a directory), changing its type and breaking tools that expect
+a regular file.
+
+By default the backend classifies each denied path at runtime with
+`symlink_metadata` (which does not follow symlinks). This probe is
+host-dependent: a path that does not exist on the host cannot be stat'd and
+falls back to `--tmpfs` (directory) masking.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point
@@ -143,10 +149,42 @@ components — so the mask lands on the real object and its file/directory type 
 classified from that target. Fully unresolvable paths are left as-is — there is
 nothing behind them to leak.
 
+To make masking **deterministic** (independent of host state), a `deniedPaths`
+entry may be given as an object that declares the path's kind:
+
+```json
+"deniedPaths": [
+  "/secrets",
+  { "path": "/etc/token", "type": "file" },
+  { "path": "/var/cache", "type": "directory" }
+]
+```
+
+- A bare string entry (`"/secrets"`) keeps the runtime probe behavior.
+- `"type": "file"` forces `--ro-bind /dev/null` masking when the host path is
+  **missing or unreadable** — the case the runtime probe cannot classify.
+- `"type": "directory"` forces `--tmpfs` masking under the same condition.
+
+The declared `type` makes masking deterministic for **not-yet-present** paths,
+so a caller can mask a not-yet-created secret file as a non-directory
+regardless of host state. When the host path **already exists**, its real type
+is authoritative and wins over a contradicting `type`: bwrap can neither bind
+`/dev/null` over a real directory nor mount a `--tmpfs` over a real file, so
+honoring a mismatched `type` would abort the whole sandbox. In that case the
+path is still denied — masked with the valid primitive for its actual type —
+and the runner logs a warning that the declared `type` was overridden.
+
+> **Host side effects.** When a missing denied path lies under a
+> `readwritePaths` parent, bwrap materializes an empty mount point (a file for
+> `/dev/null`, a directory for `--tmpfs`) inside the writable host bind. The
+> runner reclaims these empty stubs after the sandbox exits (best-effort: only
+> empty files/directories are removed and symlinks are never followed), so a
+> successful run leaves the host filesystem unchanged.
+
 Example:
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.8.0-alpha",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "cat /data/input.txt && echo result > /workspace/output.txt"
@@ -154,7 +192,7 @@ Example:
   "filesystem": {
     "readonlyPaths": ["/data"],
     "readwritePaths": ["/workspace"],
-    "deniedPaths": ["/secrets"]
+    "deniedPaths": ["/secrets", { "path": "/etc/token", "type": "file" }]
   }
 }
 ```

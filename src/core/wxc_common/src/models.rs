@@ -532,6 +532,25 @@ impl Default for FallbackPolicy {
     }
 }
 
+/// The declared kind of a denied path, used to pick the correct masking
+/// primitive on Linux backends without probing the host filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathKind {
+    /// A regular file (or any non-directory object).
+    File,
+    /// A directory.
+    Directory,
+}
+
+impl From<crate::wire::PathKind> for PathKind {
+    fn from(k: crate::wire::PathKind) -> Self {
+        match k {
+            crate::wire::PathKind::File => Self::File,
+            crate::wire::PathKind::Directory => Self::Directory,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContainerPolicy {
@@ -540,6 +559,11 @@ pub struct ContainerPolicy {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
+    /// Explicit kind for denied paths that declared one on the wire. Keyed by
+    /// the path exactly as it appears in `denied_paths`. Paths absent from this
+    /// map fall back to runtime inference. Additive to `denied_paths` so every
+    /// existing consumer that only needs the path list is unaffected.
+    pub denied_path_kinds: std::collections::HashMap<String, PathKind>,
     pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,

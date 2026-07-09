@@ -35,6 +35,8 @@ export {
   ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,
+  DeniedPathEntry,
+  DeniedPathObject,
   PlatformSupport,
   UiCapabilitySupport,
 } from './types.js';

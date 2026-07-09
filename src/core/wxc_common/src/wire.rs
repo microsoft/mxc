@@ -234,6 +234,44 @@ pub struct Lxc {
     pub release: Option<String>,
 }
 
+/// The declared kind of a denied path. Lets a `deniedPaths` entry choose the
+/// correct masking primitive deterministically; when omitted, the backend
+/// infers the kind from the host object at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum PathKind {
+    /// A regular file (or any non-directory object).
+    File,
+    /// A directory.
+    Directory,
+}
+
+/// A denied path with an explicitly declared kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeniedPathObject {
+    /// The denied path.
+    pub path: String,
+    /// The declared kind of the path; when omitted, the backend infers it from
+    /// the host object at runtime.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PathKind>,
+}
+
+/// A single `deniedPaths` entry: either a bare path string (kind inferred at
+/// runtime) or an object that additionally declares the path's `type`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum DeniedPathEntry {
+    /// A bare path; its kind is inferred from the host object at runtime.
+    Plain(String),
+    /// A path with an explicitly declared kind.
+    Object(DeniedPathObject),
+}
+
 /// Filesystem access policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -243,8 +281,10 @@ pub struct Filesystem {
     pub readwrite_paths: Option<Vec<String>>,
     /// Paths the process can read but not write.
     pub readonly_paths: Option<Vec<String>>,
-    /// Paths explicitly denied (override broader allow rules).
-    pub denied_paths: Option<Vec<String>>,
+    /// Paths explicitly denied (override broader allow rules). Each entry is
+    /// either a bare path string, or an object that additionally declares the
+    /// path's `type` so masking is deterministic regardless of host state.
+    pub denied_paths: Option<Vec<DeniedPathEntry>>,
 }
 
 /// AppContainer DACL-mutation fallback policy.

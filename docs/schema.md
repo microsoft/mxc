@@ -101,7 +101,16 @@ The `filesystem` section defines path access policy shared across backends:
 |-------|------|---------|-------------|
 | `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
-| `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
+| `deniedPaths` | (string \| object)[] | `[]` | Paths the process cannot access at all. Each entry is either a bare path string or an object `{ "path": string, "type"?: "file" \| "directory" }` that declares the path's kind. |
+
+Each `deniedPaths` entry may be a bare string or an object that declares the
+path's kind: `{ "path": "/etc/token", "type": "file" }`. The optional `type`
+(`"file"` or `"directory"`) lets a backend choose the correct masking primitive
+deterministically instead of inferring it from the host object at runtime; when
+omitted the backend infers the kind. The `type` discriminator is currently
+honored by the **Bubblewrap** backend (see
+[Bubblewrap backend — denied-path masking](bwrap-support/bubblewrap-backend.md#denied-path-masking));
+other backends accept but ignore it.
 
 On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
 containment tier selected at runtime:

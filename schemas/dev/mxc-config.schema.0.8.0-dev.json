@@ -136,6 +136,48 @@
         }
       ]
     },
+    "DeniedPathEntry": {
+      "anyOf": [
+        {
+          "description": "A bare path; its kind is inferred from the host object at runtime.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DeniedPathObject"
+            }
+          ],
+          "description": "A path with an explicitly declared kind."
+        }
+      ],
+      "description": "A single `deniedPaths` entry: either a bare path string (kind inferred at runtime) or an object that additionally declares the path's `type`."
+    },
+    "DeniedPathObject": {
+      "additionalProperties": false,
+      "description": "A denied path with an explicitly declared kind.",
+      "properties": {
+        "path": {
+          "description": "The denied path.",
+          "type": "string"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PathKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The declared kind of the path; when omitted, the backend infers it from the host object at runtime."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
@@ -227,9 +269,9 @@
       "description": "Filesystem access policy.",
       "properties": {
         "deniedPaths": {
-          "description": "Paths explicitly denied (override broader allow rules).",
+          "description": "Paths explicitly denied (override broader allow rules). Each entry is either a bare path string, or an object that additionally declares the path's `type` so masking is deterministic regardless of host state.",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/DeniedPathEntry"
           },
           "type": [
             "array",
@@ -548,6 +590,25 @@
         "block"
       ],
       "type": "string"
+    },
+    "PathKind": {
+      "description": "The declared kind of a denied path. Lets a `deniedPaths` entry choose the correct masking primitive deterministically; when omitted, the backend infers the kind from the host object at runtime.",
+      "oneOf": [
+        {
+          "description": "A regular file (or any non-directory object).",
+          "enum": [
+            "file"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A directory.",
+          "enum": [
+            "directory"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "Phase": {
       "description": "State-aware lifecycle phase.",

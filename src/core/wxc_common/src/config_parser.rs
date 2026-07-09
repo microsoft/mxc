@@ -740,7 +740,19 @@ fn convert_wire_config(
     // Filesystem section
     if let Some(fscfg) = cfg.filesystem {
         if let Some(v) = fscfg.denied_paths {
-            policy.denied_paths = v;
+            let mut paths = Vec::with_capacity(v.len());
+            for entry in v {
+                match entry {
+                    crate::wire::DeniedPathEntry::Plain(p) => paths.push(p),
+                    crate::wire::DeniedPathEntry::Object(o) => {
+                        if let Some(kind) = o.kind {
+                            policy.denied_path_kinds.insert(o.path.clone(), kind.into());
+                        }
+                        paths.push(o.path);
+                    }
+                }
+            }
+            policy.denied_paths = paths;
         }
         if let Some(v) = fscfg.readwrite_paths {
             policy.readwrite_paths = v;
@@ -3820,6 +3832,82 @@ mod tests {
         let mut logger = test_logger();
 
         load_request(&encoded, &mut logger, true).unwrap();
+    }
+
+    // --- Typed deniedPaths entries (kind discriminator) ---
+
+    #[test]
+    fn plain_denied_entries_have_no_kind() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"deniedPaths": ["C:\\a", "C:\\b"]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.denied_paths, vec!["C:\\a", "C:\\b"]);
+        assert!(
+            req.policy.denied_path_kinds.is_empty(),
+            "bare string entries must not populate denied_path_kinds"
+        );
+    }
+
+    #[test]
+    fn typed_denied_entries_populate_kinds() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"deniedPaths": [{"path": "C:\\secret.txt", "type": "file"}, {"path": "C:\\vault", "type": "directory"}]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.denied_paths, vec!["C:\\secret.txt", "C:\\vault"]);
+        assert_eq!(
+            req.policy.denied_path_kinds.get("C:\\secret.txt"),
+            Some(&crate::models::PathKind::File)
+        );
+        assert_eq!(
+            req.policy.denied_path_kinds.get("C:\\vault"),
+            Some(&crate::models::PathKind::Directory)
+        );
+    }
+
+    #[test]
+    fn mixed_plain_and_typed_denied_entries() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"deniedPaths": ["C:\\plain", {"path": "C:\\typed", "type": "file"}, {"path": "C:\\untyped"}]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(
+            req.policy.denied_paths,
+            vec!["C:\\plain", "C:\\typed", "C:\\untyped"]
+        );
+        assert_eq!(req.policy.denied_path_kinds.len(), 1);
+        assert_eq!(
+            req.policy.denied_path_kinds.get("C:\\typed"),
+            Some(&crate::models::PathKind::File)
+        );
+        assert!(
+            !req.policy.denied_path_kinds.contains_key("C:\\untyped"),
+            "an object entry without a `type` must not populate denied_path_kinds"
+        );
+    }
+
+    #[test]
+    fn typed_denied_entry_with_unknown_field_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"deniedPaths": [{"path": "C:\\x", "kind": "file"}]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true)
+            .expect_err("an object entry with an unknown field must be rejected");
+    }
+
+    #[test]
+    fn typed_denied_entry_with_invalid_type_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"deniedPaths": [{"path": "C:\\x", "type": "socket"}]}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true)
+            .expect_err("an object entry with an invalid `type` value must be rejected");
     }
 
     // ── Telemetry ────────────────────────────────────────────────────

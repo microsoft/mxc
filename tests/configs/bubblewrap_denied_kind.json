@@ -1,0 +1,15 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Denied-Kind",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "B=/mnt/kindtest; if cat \"$B/visible.txt\" 2>/dev/null | grep -q VISIBLE_SECRET; then echo VISIBLE_OK; else echo VISIBLE_MISSING; fi; if [ -c \"$B/ghost_file.txt\" ]; then echo FILE_IS_DEVNULL_OK; else echo FILE_NOT_DEVNULL_BUG; fi; if [ -s \"$B/ghost_file.txt\" ]; then echo FILE_NONEMPTY_BUG; else echo FILE_EMPTY_OK; fi; if [ -d \"$B/ghost_dir\" ]; then echo DIR_IS_DIR_OK; else echo DIR_NOT_DIR_BUG; fi"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/kindtest"],
+    "deniedPaths": [
+      { "path": "/mnt/kindtest/ghost_file.txt", "type": "file" },
+      { "path": "/mnt/kindtest/ghost_dir", "type": "directory" }
+    ]
+  }
+}

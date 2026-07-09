@@ -83,6 +83,36 @@ fn emit_definition(out: &mut String, name: &str, def: &Value) {
         return;
     }
 
+    // An untagged union (e.g. `string | Object`) is emitted by schemars as an
+    // `anyOf` of alternative schemas. Emit it as a TypeScript union type alias,
+    // joining every non-null alternative (and appending `| null` if one branch
+    // is the null schema).
+    if let Some(Value::Array(any_of)) = obj.get("anyOf") {
+        push_doc(out, obj.get("description"));
+        let mut parts: Vec<String> = Vec::new();
+        let mut nullable = false;
+        for branch in any_of {
+            if is_null_schema(branch) {
+                nullable = true;
+            } else {
+                let (t, _) = ts_type(branch);
+                if !parts.contains(&t) {
+                    parts.push(t);
+                }
+            }
+        }
+        if nullable {
+            parts.push("null".to_string());
+        }
+        let union = if parts.is_empty() {
+            "unknown".to_string()
+        } else {
+            parts.join(" | ")
+        };
+        out.push_str(&format!("export type {name} = {union};\n\n"));
+        return;
+    }
+
     emit_object(out, name, obj_as_map(def));
 }
 
@@ -161,6 +191,14 @@ fn ts_type(prop: &Value) -> (String, bool) {
 
     if let Some(r) = obj.get("$ref").and_then(|v| v.as_str()) {
         return (ref_name(r), false);
+    }
+
+    // schemars wraps a `$ref` in a single-element `allOf` when it needs to
+    // attach a sibling `description`; resolve to the wrapped schema's type.
+    if let Some(Value::Array(all_of)) = obj.get("allOf") {
+        if let Some(first) = all_of.iter().find(|b| !is_null_schema(b)) {
+            return ts_type(first);
+        }
     }
 
     if let Some(Value::Array(any_of)) = obj.get("anyOf") {
