@@ -342,6 +342,7 @@ cross-platform fields mapped from Policy.
   },
   "network": {
     "defaultPolicy": "outbound",
+    "allowLocalNetwork": false,
     "allowedHosts": [],
     "blockedHosts": []
   },
