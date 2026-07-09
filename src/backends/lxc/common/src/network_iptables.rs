@@ -150,9 +150,25 @@ impl NetworkIptablesManager {
         // Create custom chain
         Self::run_iptables(&["-N", &self.chain_name], logger)?;
 
-        // Always allow loopback and established connections
+        let accept_packet_verb = "ACCEPT";
+        let drop_packet_verb = "DROP";
+
+        // ACCEPT/DROP loopback and established connections
+        let allow_local_network_verb = if policy.allow_local_network {
+            accept_packet_verb
+        } else {
+            drop_packet_verb
+        };
+
         Self::run_iptables(
-            &["-A", &self.chain_name, "-i", "lo", "-j", "ACCEPT"],
+            &[
+                "-A",
+                &self.chain_name,
+                "-i",
+                "lo",
+                "-j",
+                allow_local_network_verb,
+            ],
             logger,
         )?;
         Self::run_iptables(
@@ -164,7 +180,7 @@ impl NetworkIptablesManager {
                 "--state",
                 "ESTABLISHED,RELATED",
                 "-j",
-                "ACCEPT",
+                accept_packet_verb,
             ],
             logger,
         )?;
@@ -179,7 +195,7 @@ impl NetworkIptablesManager {
                 "--dport",
                 "53",
                 "-j",
-                "ACCEPT",
+                accept_packet_verb,
             ],
             logger,
         )?;
@@ -192,7 +208,7 @@ impl NetworkIptablesManager {
                 "--dport",
                 "53",
                 "-j",
-                "ACCEPT",
+                accept_packet_verb,
             ],
             logger,
         )?;
@@ -206,7 +222,10 @@ impl NetworkIptablesManager {
             }
             for ip in &ips {
                 logger.log_line(&format!("Allowing host: {} ({})", host, ip));
-                Self::run_iptables(&["-A", &self.chain_name, "-d", ip, "-j", "ACCEPT"], logger)?;
+                Self::run_iptables(
+                    &["-A", &self.chain_name, "-d", ip, "-j", accept_packet_verb],
+                    logger,
+                )?;
             }
         }
 
@@ -219,14 +238,17 @@ impl NetworkIptablesManager {
             }
             for ip in &ips {
                 logger.log_line(&format!("Blocking host: {} ({})", host, ip));
-                Self::run_iptables(&["-A", &self.chain_name, "-d", ip, "-j", "DROP"], logger)?;
+                Self::run_iptables(
+                    &["-A", &self.chain_name, "-d", ip, "-j", drop_packet_verb],
+                    logger,
+                )?;
             }
         }
 
         // Append default policy at end of chain
         let default_action = match policy.default_network_policy {
-            NetworkPolicy::Block => "DROP",
-            NetworkPolicy::Allow => "ACCEPT",
+            NetworkPolicy::Block => drop_packet_verb,
+            NetworkPolicy::Allow => accept_packet_verb,
         };
         logger.log_line(&format!("Default network policy: {}", default_action));
         Self::run_iptables(&["-A", &self.chain_name, "-j", default_action], logger)?;
