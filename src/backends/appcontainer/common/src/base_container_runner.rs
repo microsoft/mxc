@@ -416,15 +416,9 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
-        // For agentic callers, generate a fresh GUID identifying the unique agentic
-        // workload and carry it across as agent_id. Gated behind the
-        // experimental flag; when not agentic the field is left unset (absent
-        // from the buffer).
-        let agent_id = if request.experimental_enabled && request.experimental.is_agentic {
-            Some(builder.create_string(&uuid::Uuid::new_v4().to_string()))
-        } else {
-            None
-        };
+        // Marks an agentic caller so the OS generates a per-workload agent id.
+        // Gated behind the experimental flag; false for non-agentic callers.
+        let is_agentic = request.experimental_enabled && request.experimental.is_agentic;
 
         let spec = SandboxSpec::create(
             &mut builder,
@@ -439,7 +433,7 @@ impl BaseContainerRunner {
                 fs_read_only,
                 fs_deny,
                 network_policy,
-                agent_id,
+                is_agentic,
                 ..Default::default()
             },
         );
@@ -496,13 +490,10 @@ impl BaseContainerRunner {
 
         // Agent
         let _ = writeln!(logger, "[agent]");
-        match spec.agent_id() {
-            Some(id) => {
-                let _ = writeln!(logger, "  agent_id:        {} {}", EMOJI_WARNING, id);
-            }
-            None => {
-                let _ = writeln!(logger, "  agent_id:        {} <unset>", EMOJI_NEUTRAL);
-            }
+        if spec.is_agentic() {
+            let _ = writeln!(logger, "  is_agentic:      {} true", EMOJI_WARNING);
+        } else {
+            let _ = writeln!(logger, "  is_agentic:      {} false", EMOJI_NEUTRAL);
         }
 
         // Network
@@ -1625,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn build_sandbox_spec_agentic_emits_agent_id() {
+    fn build_sandbox_spec_agentic_sets_is_agentic() {
         let mut request = ExecutionRequest::default();
         request.experimental_enabled = true;
         request.experimental.is_agentic = true;
@@ -1634,16 +1625,16 @@ mod tests {
         let spec = base_container_layout::root_as_sandbox_spec(&bytes)
             .expect("should be a valid SandboxSpec");
 
-        let agent_id = spec
-            .agent_id()
-            .expect("agent_id should be set for agentic workloads");
-        assert!(!agent_id.is_empty(), "agent_id should carry a value");
+        assert!(
+            spec.is_agentic(),
+            "is_agentic should be true for agentic workloads"
+        );
     }
 
     #[test]
-    fn build_sandbox_spec_omits_agent_id_unless_experimental_and_agentic() {
-        // The agent_id is emitted only when BOTH the experimental gate and the
-        // is_agentic flag are set. Verify all three "off" combinations.
+    fn build_sandbox_spec_clears_is_agentic_unless_experimental_and_agentic() {
+        // is_agentic is set only when BOTH the experimental gate and the
+        // is_agentic flag are on. Verify all three "off" combinations.
         let cases = [(false, false), (true, false), (false, true)];
         for (experimental_enabled, is_agentic) in cases {
             let mut request = ExecutionRequest::default();
@@ -1653,8 +1644,8 @@ mod tests {
             let bytes = BaseContainerRunner::build_sandbox_spec(&request);
             let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
             assert!(
-                spec.agent_id().is_none(),
-                "agent_id must be absent when experimental_enabled={experimental_enabled}, is_agentic={is_agentic}"
+                !spec.is_agentic(),
+                "is_agentic must be false when experimental_enabled={experimental_enabled}, is_agentic={is_agentic}"
             );
         }
     }
