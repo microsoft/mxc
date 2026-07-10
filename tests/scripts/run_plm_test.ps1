@@ -34,8 +34,13 @@ param(
     [switch]$Fs,
     [switch]$Capability,
     [switch]$KeepLogs,
+    # `--audit` typically completes in 10-20 seconds; the 5-minute
+    # ceiling here is a generous buffer for complex flows (large
+    # workloads, first-run ETW session startup on cold hosts, or
+    # transient WPR contention) rather than the expected duration.
     [int]$AuditTimeoutSec = 300
 )
+
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -101,9 +106,11 @@ $AutomaticTests = @(
     @{
         # PLM filesystem promotion: the config pre-seeds
         # C:\plm_fs_test\readonly in readonlyPaths and then the
-        # workload writes a file into that directory. PLM should observe
-        # the write and add the parent to readwritePaths so the policy
-        # widens from read-only to read+write.
+        # workload writes a file into that directory. PLM should
+        # observe the write and add the file to readwritePaths so
+        # the policy widens from read-only to read+write on that
+        # exact file (writes are granted at file scope, not the
+        # containing directory).
         Name   = 'fs_promoted'
         Setup  = {
             New-Item -ItemType Directory -Path 'C:\plm_fs_test\readonly' -Force | Out-Null
@@ -112,7 +119,7 @@ $AutomaticTests = @(
             Remove-Item -Recurse -Force 'C:\plm_fs_test' -ErrorAction SilentlyContinue
         }
         Expect = @(
-            'filesystem.readwritePaths[] += "C:\\plm_fs_test\\readonly"'
+            'filesystem.readwritePaths[] += "C:\\plm_fs_test\\readonly\\out.txt"'
         )
     },
     @{
@@ -135,8 +142,9 @@ $AutomaticTests = @(
     @{
         # PLM filesystem add (read+write): the config has no filesystem
         # section; the workload writes a new file under
-        # C:\plm_fs_test\dst\. PLM should add the parent
-        # directory to readwritePaths (write events emit the parent).
+        # C:\plm_fs_test\dst\. PLM should add the exact file path to
+        # readwritePaths (writes are granted at file scope; we no
+        # longer widen to the containing directory).
         Name   = 'fs_add_readwrite'
         Setup  = {
             New-Item -ItemType Directory -Path 'C:\plm_fs_test\dst' -Force | Out-Null
@@ -145,7 +153,7 @@ $AutomaticTests = @(
             Remove-Item -Recurse -Force 'C:\plm_fs_test' -ErrorAction SilentlyContinue
         }
         Expect = @(
-            'filesystem.readwritePaths[] += "C:\\plm_fs_test\\dst"'
+            'filesystem.readwritePaths[] += "C:\\plm_fs_test\\dst\\out.txt"'
         )
     },
     @{
