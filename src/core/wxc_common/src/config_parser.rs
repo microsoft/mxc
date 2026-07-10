@@ -787,9 +787,16 @@ fn convert_wire_config(
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
+                && containment != ContainmentBackend::Lxc
             {
-                let msg = "Network proxy is only supported with the 'processcontainer' \
-                           or 'bubblewrap' containment backends";
+                let msg = "Network proxy is only supported with the 'processcontainer', \
+                           'bubblewrap', or 'lxc' containment backends";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+            if containment == ContainmentBackend::Lxc && proxy_config.builtin_test_server {
+                let msg = "LXC: network.proxy.builtinTestServer is not supported; \
+                           use network.proxy.localhost or network.proxy.url";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -2105,13 +2112,17 @@ mod tests {
     }
 
     #[test]
-    fn proxy_rejected_with_non_processcontainer() {
+    fn proxy_accepted_with_lxc() {
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(
+            req.policy.network_proxy.address.as_ref().unwrap().port(),
+            8080
+        );
     }
 
     #[test]
@@ -2184,14 +2195,15 @@ mod tests {
     }
 
     #[test]
-    fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
-        // lxc is not allowed -- proxy is gated to processcontainer + bubblewrap.
+    fn proxy_builtin_test_server_rejected_with_lxc() {
+        // LXC enforces a configured proxy address with iptables; it does not
+        // launch the builtin testing proxy.
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(format!("{}", err).contains("builtinTestServer is not supported"));
     }
 
     #[test]
