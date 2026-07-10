@@ -3,15 +3,16 @@
 
 use std::fmt::Write;
 use std::fs;
+use std::net::IpAddr;
 
 use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
+    ContainerPolicy, ContainmentBackend, EgressRule, ExecutionRequest, ExperimentalConfig,
     IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
-    PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig, TestFeatureConfig,
-    UiPolicy, WindowsSandboxConfig, WslcConfig,
+    PortMapping, Protocol, ProxyAddress, ProxyConfig, RuleAction, SeatbeltConfig, TelemetryConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -378,13 +379,14 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
 // ---------- Conversion from wire model to domain model ----------
 
 /// Convert a typed `wire::Proxy` block into the validated domain `ProxyConfig`.
-/// Exactly one of `builtinTestServer` / `localhost` / `url` may be set.
+/// Exactly one of `builtinTestServer` / `localhost` / `url` / `http` may be set.
 fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     // Destructure (no `..`) so a new wire field fails to compile until handled.
     let wire::Proxy {
         builtin_test_server,
         localhost,
         url,
+        http,
     } = proxy;
     let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
 
@@ -394,7 +396,7 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
                 "network.proxy.builtinTestServer must be true when present".to_string(),
             ));
         }
-        if localhost.is_some() || url.is_some() {
+        if localhost.is_some() || url.is_some() || http.is_some() {
             return Err(WxcError::ConfigParse(
                 "When builtinTestServer is true, no other proxy options may be set".to_string(),
             ));
@@ -411,6 +413,12 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
                 "network.proxy.localhost must be a port between 1 and 65535".to_string(),
             ));
         }
+        if url.is_some() || http.is_some() {
+            return Err(WxcError::ConfigParse(
+                "network.proxy must specify exactly one of builtinTestServer, localhost, url, or http"
+                    .to_string(),
+            ));
+        }
         proxy_addr.port = port;
         return Ok(ProxyConfig {
             address: Some(proxy_addr),
@@ -418,33 +426,153 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         });
     }
 
+    if url.is_some() && http.is_some() {
+        return Err(WxcError::ConfigParse(
+            "network.proxy must specify exactly one of builtinTestServer, localhost, url, or http"
+                .to_string(),
+        ));
+    }
+
     if let Some(url_str) = url {
-        let parsed = url::Url::parse(&url_str)
-            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+        return parse_proxy_url("network.proxy.url", url_str);
+    }
 
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| {
-                WxcError::ConfigParse(format!(
-                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
-                ))
-            })?
-            .to_string();
-        let port = parsed.port().ok_or_else(|| {
-            WxcError::ConfigParse(format!(
-                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
-            ))
-        })?;
-
-        return Ok(ProxyConfig {
-            address: Some(ProxyAddress::from_url(&url_str, host, port)),
-            builtin_test_server: false,
-        });
+    if let Some(http_str) = http {
+        return parse_proxy_url("network.proxy.http", http_str);
     }
 
     Err(WxcError::ConfigParse(
-        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
+        "network.proxy must specify builtinTestServer, localhost, url, or http".to_string(),
     ))
+}
+
+fn parse_proxy_url(field: &str, url_str: String) -> Result<ProxyConfig, WxcError> {
+    let parsed = url::Url::parse(&url_str)
+        .map_err(|e| WxcError::ConfigParse(format!("{field} is invalid: {e}")))?;
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| {
+            WxcError::ConfigParse(format!(
+                "{field} must include a host (e.g., http://localhost:8080), got: {url_str}"
+            ))
+        })?
+        .to_string();
+    let port = parsed.port().ok_or_else(|| {
+        WxcError::ConfigParse(format!(
+            "{field} must include a port (e.g., http://localhost:8080), got: {url_str}"
+        ))
+    })?;
+
+    Ok(ProxyConfig {
+        address: Some(ProxyAddress::from_url(&url_str, host, port)),
+        builtin_test_server: false,
+    })
+}
+
+fn convert_wire_egress(egress: wire::NetworkEgress) -> Result<Vec<EgressRule>, WxcError> {
+    let mut rules = Vec::new();
+    convert_wire_egress_rules(
+        egress.allow,
+        RuleAction::Allow,
+        "network.egress.allow",
+        &mut rules,
+    )?;
+    convert_wire_egress_rules(
+        egress.deny,
+        RuleAction::Deny,
+        "network.egress.deny",
+        &mut rules,
+    )?;
+    Ok(rules)
+}
+
+fn convert_wire_egress_rules(
+    rules: Vec<wire::EgressRuleWire>,
+    action: RuleAction,
+    path: &str,
+    out: &mut Vec<EgressRule>,
+) -> Result<(), WxcError> {
+    for (rule_index, rule) in rules.into_iter().enumerate() {
+        if rule.to.is_empty() {
+            return Err(WxcError::ConfigParse(format!(
+                "{path}[{rule_index}].to must include at least one cidr entry"
+            )));
+        }
+        if rule.ports.is_empty() {
+            return Err(WxcError::ConfigParse(format!(
+                "{path}[{rule_index}].ports must include at least one protocol/port entry"
+            )));
+        }
+
+        let mut destinations = Vec::with_capacity(rule.to.len());
+        for (dest_index, dest) in rule.to.into_iter().enumerate() {
+            validate_network_cidr(
+                &dest.cidr,
+                &format!("{path}[{rule_index}].to[{dest_index}].cidr"),
+            )?;
+            destinations.push(dest.cidr);
+        }
+
+        let mut ports = Vec::with_capacity(rule.ports.len());
+        let mut protocols = Vec::with_capacity(rule.ports.len());
+        for (port_index, port) in rule.ports.into_iter().enumerate() {
+            if port.port == 0 {
+                return Err(WxcError::ConfigParse(format!(
+                    "{path}[{rule_index}].ports[{port_index}].port must be between 1 and 65535"
+                )));
+            }
+            ports.push(port.port);
+            protocols.push(match port.protocol {
+                wire::NetworkProtocol::Tcp => Protocol::Tcp,
+                wire::NetworkProtocol::Udp => Protocol::Udp,
+                wire::NetworkProtocol::Icmp => Protocol::Icmp,
+            });
+        }
+
+        out.push(EgressRule {
+            destinations,
+            ports,
+            protocols,
+            action: action.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_network_cidr(value: &str, field: &str) -> Result<(), WxcError> {
+    let (addr, prefix) = match value.split_once('/') {
+        Some((addr, prefix)) => (addr, Some(prefix)),
+        None => (value, None),
+    };
+
+    let ip: IpAddr = addr.parse().map_err(|_| {
+        WxcError::ConfigParse(format!(
+            "{field} must be an IPv4/IPv6 address or CIDR prefix; DNS hostnames are not allowed: {value}"
+        ))
+    })?;
+
+    if let Some(prefix) = prefix {
+        if prefix.is_empty() || prefix.contains('/') {
+            return Err(WxcError::ConfigParse(format!(
+                "{field} has invalid CIDR prefix '{prefix}' in '{value}'"
+            )));
+        }
+        let prefix: u8 = prefix.parse().map_err(|_| {
+            WxcError::ConfigParse(format!(
+                "{field} has invalid CIDR prefix '{prefix}' in '{value}'"
+            ))
+        })?;
+        let max = if ip.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return Err(WxcError::ConfigParse(format!(
+                "{field} prefix length {prefix} exceeds {max} for {ip}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
@@ -782,7 +910,18 @@ fn convert_wire_config(
 
     // Network section
     if let Some(net) = cfg.network {
-        if let Some(proxy) = net.proxy {
+        let wire::Network {
+            default_policy,
+            enforcement_mode,
+            allow_local_network,
+            allowed_hosts,
+            blocked_hosts,
+            egress,
+            ingress,
+            proxy,
+        } = net;
+
+        if let Some(proxy) = proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
@@ -796,23 +935,41 @@ fn convert_wire_config(
             policy.network_proxy = proxy_config;
         }
 
-        if let Some(p) = net.default_policy {
-            policy.default_network_policy = p.into();
-        }
-
-        if let Some(m) = net.enforcement_mode {
+        if let Some(m) = enforcement_mode {
             policy.network_enforcement_mode = m.into();
         }
 
-        if let Some(v) = net.allow_local_network {
+        if let Some(v) = allow_local_network {
             policy.allow_local_network = v;
         }
 
-        if let Some(v) = net.allowed_hosts {
-            policy.allowed_hosts = v;
+        if let Some(ingress) = ingress {
+            if let Some(host_loopback) = ingress.host_loopback {
+                policy.allow_local_network =
+                    matches!(host_loopback, wire::HostLoopbackPolicy::Allow);
+            }
         }
-        if let Some(v) = net.blocked_hosts {
-            policy.blocked_hosts = v;
+
+        if let Some(egress) = egress {
+            // GA egress is the authoritative outbound policy when present. Ignore
+            // legacy allowedHosts/blockedHosts/defaultPolicy to avoid enforcing two
+            // independent schemas with conflicting precedence.
+            if default_policy.is_some() || allowed_hosts.is_some() || blocked_hosts.is_some() {
+                logger.log_line(
+                    "network.egress is present; ignoring legacy defaultPolicy/allowedHosts/blockedHosts",
+                );
+            }
+            policy.egress_rules = convert_wire_egress(egress)?;
+        } else {
+            if let Some(p) = default_policy {
+                policy.default_network_policy = p.into();
+            }
+            if let Some(v) = allowed_hosts {
+                policy.allowed_hosts = v;
+            }
+            if let Some(v) = blocked_hosts {
+                policy.blocked_hosts = v;
+            }
         }
 
         // Bubblewrap is unprivileged by design; iptables-based enforcement
@@ -842,10 +999,11 @@ fn convert_wire_config(
             && !policy.network_proxy.builtin_test_server
             && (!policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty()
+                || !policy.egress_rules.is_empty()
                 || policy.default_network_policy == NetworkPolicy::Block)
         {
-            let msg = "Bubblewrap: an external network.proxy (url/localhost) cannot be \
-                       combined with allowedHosts, blockedHosts, or defaultPolicy='block'. \
+            let msg = "Bubblewrap: an external network.proxy (url/localhost/http) cannot be \
+                       combined with allowedHosts, blockedHosts, network.egress, or defaultPolicy='block'. \
                        The external proxy is expected to enforce its own host policy; \
                        MXC does not forward host lists to it. Use \
                        'network.proxy.builtinTestServer: true' (testing only) for \
@@ -862,6 +1020,7 @@ fn convert_wire_config(
             && policy.default_network_policy == NetworkPolicy::Block
             && policy.allowed_hosts.is_empty()
             && policy.blocked_hosts.is_empty()
+            && policy.egress_rules.is_empty()
         {
             logger.log_line(
                 "WARNING: Bubblewrap network.proxy with defaultPolicy='block' is \
@@ -1703,6 +1862,212 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn ga_egress_allow_and_deny_parse_to_internal_rules() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "egress": {
+                    "allow": [{
+                        "to": [{ "cidr": "140.82.112.0/20" }],
+                        "ports": [{ "protocol": "tcp", "port": 443 }]
+                    }],
+                    "deny": [{
+                        "to": [{ "cidr": "10.0.0.0/8" }],
+                        "ports": [{ "protocol": "udp", "port": 53 }]
+                    }]
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.egress_rules.len(), 2);
+        assert_eq!(
+            req.policy.egress_rules[0].destinations,
+            vec!["140.82.112.0/20"]
+        );
+        assert_eq!(req.policy.egress_rules[0].ports, vec![443]);
+        assert_eq!(req.policy.egress_rules[0].protocols, vec![Protocol::Tcp]);
+        assert_eq!(req.policy.egress_rules[0].action, RuleAction::Allow);
+        assert_eq!(req.policy.egress_rules[1].destinations, vec!["10.0.0.0/8"]);
+        assert_eq!(req.policy.egress_rules[1].ports, vec![53]);
+        assert_eq!(req.policy.egress_rules[1].protocols, vec![Protocol::Udp]);
+        assert_eq!(req.policy.egress_rules[1].action, RuleAction::Deny);
+    }
+
+    #[test]
+    fn ga_egress_accepts_ipv4_ipv6_cidr_and_bare_ip() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "egress": {
+                    "allow": [{
+                        "to": [
+                            { "cidr": "192.0.2.10" },
+                            { "cidr": "2606:50c0:8000::/48" }
+                        ],
+                        "ports": [{ "protocol": "icmp", "port": 8 }]
+                    }]
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.egress_rules.len(), 1);
+        assert_eq!(
+            req.policy.egress_rules[0].destinations,
+            vec!["192.0.2.10", "2606:50c0:8000::/48"]
+        );
+        assert_eq!(req.policy.egress_rules[0].protocols, vec![Protocol::Icmp]);
+    }
+
+    #[test]
+    fn ga_egress_rejects_dns_hostname_cidr() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "egress": {
+                    "allow": [{
+                        "to": [{ "cidr": "api.github.com" }],
+                        "ports": [{ "protocol": "tcp", "port": 443 }]
+                    }]
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("DNS hostnames are not allowed"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("network.egress.allow[0].to[0].cidr"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn ga_ingress_host_loopback_overrides_legacy_allow_local_network() {
+        for (host_loopback, expected) in [("allow", true), ("deny", false)] {
+            let json = format!(
+                r#"{{
+                    "process": {{"commandLine": "print('test')"}},
+                    "network": {{
+                        "allowLocalNetwork": {},
+                        "ingress": {{ "hostLoopback": "{}" }}
+                    }}
+                }}"#,
+                !expected, host_loopback
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let req = load_request(&encoded, &mut logger, true).unwrap();
+            assert_eq!(req.policy.allow_local_network, expected);
+        }
+    }
+
+    #[test]
+    fn ga_proxy_http_parses_to_network_proxy() {
+        let json = r#"{
+            "process": {"commandLine": "echo test"},
+            "containment": "processcontainer",
+            "network": { "proxy": { "http": "http://127.0.0.1:8080" } }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert_eq!(addr.host(), "127.0.0.1");
+        assert_eq!(addr.port(), 8080);
+        assert_eq!(addr.to_url(), "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn legacy_network_schema_still_parses_when_egress_absent() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true,
+                "allowedHosts": ["example.com"],
+                "blockedHosts": ["blocked.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+        assert!(req.policy.allow_local_network);
+        assert_eq!(req.policy.allowed_hosts, vec!["example.com"]);
+        assert_eq!(req.policy.blocked_hosts, vec!["blocked.example"]);
+        assert!(req.policy.egress_rules.is_empty());
+    }
+
+    #[test]
+    fn ga_egress_takes_precedence_over_legacy_outbound_fields() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowedHosts": ["legacy.example"],
+                "blockedHosts": ["legacy-block.example"],
+                "egress": {
+                    "allow": [{
+                        "to": [{ "cidr": "203.0.113.0/24" }],
+                        "ports": [{ "protocol": "tcp", "port": 443 }]
+                    }]
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        assert!(req.policy.allowed_hosts.is_empty());
+        assert!(req.policy.blocked_hosts.is_empty());
+        assert_eq!(req.policy.egress_rules.len(), 1);
+        assert!(logger
+            .get_buffer()
+            .contains("network.egress is present; ignoring legacy"));
+    }
+
+    #[test]
+    fn ga_egress_rejects_malformed_protocol_port_and_cidr() {
+        for (json, expected) in [
+            (
+                r#"{"process":{"commandLine":"x"},"network":{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}],"ports":[{"protocol":"ftp","port":21}]}]}}}"#,
+                "unknown variant",
+            ),
+            (
+                r#"{"process":{"commandLine":"x"},"network":{"egress":{"allow":[{"to":[{"cidr":"192.0.2.0/24"}],"ports":[{"protocol":"tcp","port":0}]}]}}}"#,
+                "port must be between 1 and 65535",
+            ),
+            (
+                r#"{"process":{"commandLine":"x"},"network":{"egress":{"allow":[{"to":[{}],"ports":[{"protocol":"tcp","port":443}]}]}}}"#,
+                "missing field `cidr`",
+            ),
+        ] {
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains(expected), "expected {expected:?}, got: {msg}");
+        }
     }
 
     #[test]

@@ -207,11 +207,66 @@ export interface NetworkConfig {
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+  /**
+   * GA outbound (egress) policy: allow/deny rules matched on destination
+   * CIDR range plus port and protocol. DNS hostnames are not permitted here
+   * (use `allowedHosts` for hostname-based rules); the parser rejects them.
+   */
+  egress?: NetworkEgress;
+  /** GA inbound (ingress) policy. */
+  ingress?: NetworkIngress;
 }
 
 /**
- * WSLC SDK configuration for Linux containers from Windows
- */
+* GA outbound (egress) policy rule set. Rules are evaluated to allow or deny
+* outbound connections based on destination CIDR, port, and protocol.
+*/
+export interface NetworkEgress {
+ /** Rules that allow matching outbound connections. */
+ allow?: EgressRule[];
+ /** Rules that deny matching outbound connections. */
+ deny?: EgressRule[];
+}
+
+/**
+* A single GA egress rule: a set of destinations combined with a set of
+* port/protocol selectors. A connection matches when it targets one of the
+* destinations on one of the listed ports/protocols.
+*/
+export interface EgressRule {
+ /** Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected. */
+ to: EgressDestination[];
+ /** Destination ports and protocols. */
+ ports: EgressPort[];
+}
+
+/** A GA egress destination: an IPv4/IPv6 CIDR range or a bare IP address. */
+export interface EgressDestination {
+ /** IPv4/IPv6 CIDR range, or a bare IP address. */
+ cidr: string;
+}
+
+/** A GA egress port selector. */
+export interface EgressPort {
+ /** Transport protocol. */
+ protocol: 'tcp' | 'udp' | 'icmp';
+ /** Destination port. */
+ port: number;
+}
+
+/**
+* GA inbound (ingress) policy.
+*/
+export interface NetworkIngress {
+ /**
+  * Whether host loopback can connect inbound to the sandbox (default: "deny").
+  */
+ hostLoopback?: 'allow' | 'deny';
+}
+
+/**
+* WSLC SDK configuration for Linux containers from Windows
+*/
 export interface WslcConfig {
   /** OCI container image name (default: "alpine:latest") */
   image?: string;

@@ -434,19 +434,21 @@ pub struct FilesystemSection {
 }
 
 /// Network proxy configuration, mirroring the SDK union type
-/// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
+/// `{ builtinTestServer: true } | { localhost: number } | { url: string } | { http: string }`.
 #[derive(Debug, Clone)]
 pub enum ProxySpec {
     /// Route through the built-in test proxy server.
     BuiltinTestServer,
     /// Route through `127.0.0.1:<port>`.
     Localhost(u16),
-    /// Route through an explicit proxy URL.
+    /// Route through an explicit legacy proxy URL.
     Url(String),
+    /// Route through a GA HTTP proxy URL.
+    Http(String),
 }
 
 // Custom `Deserialize` matching the SDK's object union
-// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
+// `{ builtinTestServer: true } | { localhost: number } | { url: string } | { http: string }`.
 // serde's default derive can't express it, and an untagged enum would silently
 // keep the first matching variant when several conflicting keys are present, so
 // we parse all recognised modes and require exactly one — rejecting conflicts
@@ -465,23 +467,82 @@ impl<'de> serde::Deserialize<'de> for ProxySpec {
             localhost: Option<u16>,
             #[serde(default)]
             url: Option<String>,
+            #[serde(default)]
+            http: Option<String>,
         }
         let raw = Raw::deserialize(deserializer)?;
-        match (raw.builtin_test_server, raw.localhost, raw.url) {
-            (Some(true), None, None) => Ok(ProxySpec::BuiltinTestServer),
+        match (raw.builtin_test_server, raw.localhost, raw.url, raw.http) {
+            (Some(true), None, None, None) => Ok(ProxySpec::BuiltinTestServer),
             // The SDK union type is `{ builtinTestServer: true }`, so an explicit
             // `false` is malformed. Reject it rather than silently selecting the
             // (experimental, deliberately-permissive) built-in proxy — fail closed.
-            (Some(false), None, None) => Err(serde::de::Error::custom(
+            (Some(false), None, None, None) => Err(serde::de::Error::custom(
                 "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
             )),
-            (None, Some(port), None) => Ok(ProxySpec::Localhost(port)),
-            (None, None, Some(url)) => Ok(ProxySpec::Url(url)),
+            (None, Some(port), None, None) => Ok(ProxySpec::Localhost(port)),
+            (None, None, Some(url), None) => Ok(ProxySpec::Url(url)),
+            (None, None, None, Some(http)) => Ok(ProxySpec::Http(http)),
             _ => Err(serde::de::Error::custom(
-                "network.proxy must set exactly one of builtinTestServer, localhost, or url",
+                "network.proxy must set exactly one of builtinTestServer, localhost, url, or http",
             )),
         }
     }
+}
+
+/// GA outbound transport protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+/// GA outbound destination CIDR or bare IP.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EgressDestination {
+    pub cidr: String,
+}
+
+/// GA outbound protocol/port selector.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EgressPort {
+    pub protocol: NetworkProtocol,
+    pub port: u16,
+}
+
+/// GA outbound allow/deny rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EgressRule {
+    pub to: Vec<EgressDestination>,
+    pub ports: Vec<EgressPort>,
+}
+
+/// GA outbound egress policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NetworkEgress {
+    pub allow: Vec<EgressRule>,
+    pub deny: Vec<EgressRule>,
+}
+
+/// GA host-loopback ingress policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostLoopbackPolicy {
+    Allow,
+    Deny,
+}
+
+/// GA inbound ingress policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NetworkIngress {
+    #[serde(rename = "hostLoopback")]
+    pub host_loopback: Option<HostLoopbackPolicy>,
 }
 
 /// Network section of a [`SandboxPolicy`]. All flags default to deny.
@@ -492,6 +553,8 @@ pub struct NetworkSection {
     pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
+    pub egress: Option<NetworkEgress>,
+    pub ingress: Option<NetworkIngress>,
     pub proxy: Option<ProxySpec>,
 }
 
@@ -698,12 +761,19 @@ fn build_wire_config(
             ));
         }
 
-        let mut network = json!({
-            "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
-            "allowLocalNetwork": net.allow_local_network,
-            "allowedHosts": net.allowed_hosts,
-            "blockedHosts": net.blocked_hosts,
-        });
+        let mut network = json!({});
+        if let Some(egress) = &net.egress {
+            network["egress"] = json!(egress);
+        } else {
+            network["defaultPolicy"] = json!(if net.allow_outbound { "allow" } else { "block" });
+            network["allowedHosts"] = json!(net.allowed_hosts);
+            network["blockedHosts"] = json!(net.blocked_hosts);
+        }
+        if let Some(ingress) = &net.ingress {
+            network["ingress"] = json!(ingress);
+        } else {
+            network["allowLocalNetwork"] = json!(net.allow_local_network);
+        }
         if let Some(proxy) = &net.proxy {
             network["proxy"] = proxy_to_wire(proxy);
         }
@@ -722,6 +792,7 @@ fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
         ProxySpec::BuiltinTestServer => json!({ "builtinTestServer": true }),
         ProxySpec::Localhost(port) => json!({ "localhost": port }),
         ProxySpec::Url(url) => json!({ "url": url }),
+        ProxySpec::Http(http) => json!({ "http": http }),
     }
 }
 
@@ -799,7 +870,15 @@ fn has_host_rules(network: &serde_json::Value) -> bool {
             .and_then(|v| v.as_array())
             .is_some_and(|a| !a.is_empty())
     };
-    non_empty("allowedHosts") || non_empty("blockedHosts")
+    let has_ga_egress = network.get("egress").is_some_and(|egress| {
+        ["allow", "deny"].iter().any(|key| {
+            egress
+                .get(key)
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty())
+        })
+    });
+    non_empty("allowedHosts") || non_empty("blockedHosts") || has_ga_egress
 }
 
 /// Promote network enforcement to `firewall` when host rules are present and
@@ -855,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_localhost_and_url_still_parse() {
+    fn proxy_localhost_url_and_http_still_parse() {
         assert!(matches!(
             serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080 }"#).expect("localhost"),
             ProxySpec::Localhost(8080)
@@ -863,6 +942,11 @@ mod tests {
         assert!(matches!(
             serde_json::from_str::<ProxySpec>(r#"{ "url": "http://proxy" }"#).expect("url"),
             ProxySpec::Url(_)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ProxySpec>(r#"{ "http": "http://127.0.0.1:8080" }"#)
+                .expect("http"),
+            ProxySpec::Http(_)
         ));
     }
 
@@ -1060,6 +1144,72 @@ mod tests {
             .blocked_hosts
             .contains(&"blocked.example".to_string()));
         assert!(request.inner.policy.allow_local_network);
+    }
+
+    #[test]
+    fn build_request_maps_ga_network_schema() {
+        use wxc_common::models::{Protocol, RuleAction};
+
+        let policy = policy_with_network(NetworkSection {
+            egress: Some(super::NetworkEgress {
+                allow: vec![super::EgressRule {
+                    to: vec![super::EgressDestination {
+                        cidr: "140.82.112.0/20".to_string(),
+                    }],
+                    ports: vec![super::EgressPort {
+                        protocol: super::NetworkProtocol::Tcp,
+                        port: 443,
+                    }],
+                }],
+                deny: vec![super::EgressRule {
+                    to: vec![super::EgressDestination {
+                        cidr: "2001:db8::/32".to_string(),
+                    }],
+                    ports: vec![super::EgressPort {
+                        protocol: super::NetworkProtocol::Udp,
+                        port: 53,
+                    }],
+                }],
+            }),
+            ingress: Some(super::NetworkIngress {
+                host_loopback: Some(super::HostLoopbackPolicy::Deny),
+            }),
+            proxy: Some(ProxySpec::Http("http://127.0.0.1:8080".to_string())),
+            ..Default::default()
+        });
+
+        let request = build_request(&policy, None).expect("GA network policy should build");
+        assert_eq!(request.inner.policy.egress_rules.len(), 2);
+        assert_eq!(
+            request.inner.policy.egress_rules[0].action,
+            RuleAction::Allow
+        );
+        assert_eq!(
+            request.inner.policy.egress_rules[0].protocols,
+            vec![Protocol::Tcp]
+        );
+        assert_eq!(request.inner.policy.egress_rules[0].ports, vec![443]);
+        assert_eq!(
+            request.inner.policy.egress_rules[1].destinations,
+            vec!["2001:db8::/32"]
+        );
+        assert_eq!(
+            request.inner.policy.egress_rules[1].action,
+            RuleAction::Deny
+        );
+        assert!(!request.inner.policy.allow_local_network);
+        assert_eq!(
+            request
+                .inner
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .unwrap()
+                .to_url(),
+            "http://127.0.0.1:8080"
+        );
+        assert!(request.inner.policy.allowed_hosts.is_empty());
     }
 
     #[cfg(target_os = "macos")]

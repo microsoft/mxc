@@ -375,6 +375,30 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleAction {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressRule {
+    /// IPv4/IPv6 CIDR ranges or bare IP addresses.
+    pub destinations: Vec<String>,
+    pub ports: Vec<u16>,
+    pub protocols: Vec<Protocol>,
+    pub action: RuleAction,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProxyAddress {
     pub address: String,
@@ -547,6 +571,7 @@ pub struct ContainerPolicy {
     pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
+    pub egress_rules: Vec<EgressRule>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
     /// Cross-platform UI policy.

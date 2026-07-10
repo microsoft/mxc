@@ -48,6 +48,44 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
+ * GA outbound destination.
+ */
+export interface EgressDestinationWire {
+  /**
+   * IPv4/IPv6 CIDR range, or a bare IP address.
+   */
+  cidr: string;
+}
+
+/**
+ * GA outbound port selector.
+ */
+export interface EgressPortWire {
+  /**
+   * Destination port.
+   */
+  port: number;
+  /**
+   * Transport protocol.
+   */
+  protocol: unknown;
+}
+
+/**
+ * GA outbound policy rule.
+ */
+export interface EgressRuleWire {
+  /**
+   * Destination ports and protocols.
+   */
+  ports: EgressPortWire[];
+  /**
+   * Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
+   */
+  to: EgressDestinationWire[];
+}
+
+/**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
  */
 export interface Experimental {
@@ -105,6 +143,11 @@ export interface Filesystem {
    */
   readwritePaths?: string[] | null;
 }
+
+/**
+ * Host loopback ingress policy.
+ */
+export type HostLoopbackPolicy = "allow" | "deny";
 
 /**
  * IsolationSession sizing profile.
@@ -210,29 +253,51 @@ export interface Lxc {
  */
 export interface Network {
   /**
-   * Allow binding/listening on local IPs and accepting inbound connections.
+   * Allow binding/listening on local IPs and accepting inbound connections (legacy schema).
    */
   allowLocalNetwork?: boolean | null;
   /**
-   * Hosts explicitly allowed.
+   * Hosts explicitly allowed (legacy schema).
    */
   allowedHosts?: string[] | null;
   /**
-   * Hosts explicitly blocked.
+   * Hosts explicitly blocked (legacy schema).
    */
   blockedHosts?: string[] | null;
   /**
-   * Default outbound policy when no host rule matches.
+   * Default outbound policy when no host rule matches (legacy schema).
    */
   defaultPolicy?: NetworkPolicy | null;
+  /**
+   * GA outbound policy rules.
+   */
+  egress?: NetworkEgress | null;
   /**
    * How the policy is enforced.
    */
   enforcementMode?: NetworkEnforcement | null;
   /**
-   * Proxy configuration (one of localhost / builtinTestServer / url).
+   * GA inbound policy.
+   */
+  ingress?: NetworkIngress | null;
+  /**
+   * Proxy configuration (legacy localhost / builtinTestServer / url, or GA http).
    */
   proxy?: Proxy | null;
+}
+
+/**
+ * GA outbound policy rule set.
+ */
+export interface NetworkEgress {
+  /**
+   * Rules that allow matching outbound connections.
+   */
+  allow?: EgressRuleWire[];
+  /**
+   * Rules that deny matching outbound connections.
+   */
+  deny?: EgressRuleWire[];
 }
 
 /**
@@ -241,9 +306,24 @@ export interface Network {
 export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
+ * GA inbound policy.
+ */
+export interface NetworkIngress {
+  /**
+   * Whether host loopback can connect inbound to the sandbox.
+   */
+  hostLoopback?: HostLoopbackPolicy | null;
+}
+
+/**
  * Default network policy.
  */
 export type NetworkPolicy = "allow" | "block";
+
+/**
+ * GA outbound transport protocol.
+ */
+export type NetworkProtocol = "tcp" | "udp" | "icmp";
 
 /**
  * State-aware lifecycle phase.
@@ -321,6 +401,10 @@ export interface Proxy {
    * Have wxc launch its own built-in test proxy.
    */
   builtinTestServer?: boolean | null;
+  /**
+   * GA HTTP proxy URL (parsed into host:port).
+   */
+  http?: string | null;
   /**
    * External localhost proxy port.
    */
