@@ -117,8 +117,8 @@ Network policies are enforced via iptables/nftables rules applied to the contain
 | `defaultPolicy: "allow"` | Default ACCEPT rule on container veth |
 | `allowedHosts` | ACCEPT rules for specific IPs/CIDRs |
 | `blockedHosts` | DROP rules for specific IPs/CIDRs |
-| `allowLocalNetwork: "true"` | ACCEPT loopback packets |
-| `allowLocalNetwork: "false"` | DROP loopback packets |
+| `allowLocalNetwork: true` | ACCEPT new inbound connections to the container (enables listening servers) |
+| `allowLocalNetwork: false` | DROP new inbound connections to the container |
 
 Rules are automatically cleaned up when the container exits (if `removeRulesOnExit` is `true`).
 
