@@ -4,6 +4,7 @@
 import {
   ContainmentBackend,
   FilesystemConfig,
+  NetworkConfig,
   ProcessConfig,
 } from './types.js';
 
@@ -16,7 +17,7 @@ export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
  * Subset of `ContainmentBackend` whose backends participate in the state-aware
  * lifecycle. Extended as more backends opt in.
  */
-export type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
+export type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session' | 'lxc'>;
 
 /**
  * Branded sandbox identifier returned by `provisionSandbox` and routed back
@@ -99,12 +100,53 @@ export interface IsolationSessionDeprovisionConfig {
   version?: string;
 }
 
+export interface LxcProvisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /** Optional externally assigned LXC container name. */
+  containerId?: string;
+  /** Linux distribution for the container rootfs, e.g. "alpine" or "ubuntu". */
+  distribution: string;
+  /** Distribution release version, e.g. "3.20" or "24.04". */
+  release: string;
+}
+
+export interface LxcStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /** Filesystem mounts to apply before starting the container. */
+  filesystem?: FilesystemConfig;
+  /** iptables policy to apply after the container starts. */
+  network?: NetworkConfig;
+}
+
+export interface LxcExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+}
+
+export interface LxcStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface LxcDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
 /**
  * IsolationSession's provision-phase metadata: the per-instance agent user
  * account name minted for this sandbox.
  */
 export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
+}
+
+export interface LxcProvisionMetadata {
+  containerName: string;
+  created: boolean;
 }
 
 /**
@@ -120,6 +162,14 @@ export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
         stop: IsolationSessionStopConfig;
         deprovision: IsolationSessionDeprovisionConfig;
       }
+    : C extends 'lxc'
+      ? {
+          provision: LxcProvisionConfig;
+          start: LxcStartConfig;
+          exec: LxcExecConfig;
+          stop: LxcStopConfig;
+          deprovision: LxcDeprovisionConfig;
+        }
     : never;
 
 export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
@@ -142,7 +192,10 @@ export interface StateAwareMetadata {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
   };
-  // Future state-aware-capable backends add typed entries here.
+  lxc?: {
+    provision?: LxcProvisionMetadata;
+    // LXC returns no metadata for start, stop, or deprovision.
+  };
 }
 
 type MetadataForPhase<C extends StateAwareContainmentBackend, Phase extends string> =

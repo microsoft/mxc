@@ -217,7 +217,8 @@ const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] =
+    &["windows_sandbox", "wslc", "isolation_session", "lxc"];
 
 /// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
 ///
@@ -526,9 +527,12 @@ fn validate_experimental_backend_keys(
         return Ok(());
     };
 
-    let matching_key = containment
-        .and_then(|c| c.section_path())
-        .and_then(|path| path.strip_prefix("experimental."));
+    let matching_key = match containment {
+        Some(ContainmentBackend::Lxc) => Some("lxc"),
+        _ => containment
+            .and_then(|c| c.section_path())
+            .and_then(|path| path.strip_prefix("experimental.")),
+    };
 
     let present: Vec<&'static str> = KNOWN_EXPERIMENTAL_BACKENDS
         .iter()
@@ -3736,6 +3740,33 @@ mod tests {
             msg.contains("experimental.wslc"),
             "error did not name the foreign section: {msg}"
         );
+    }
+
+    #[test]
+    fn state_aware_lxc_experimental_backend_key_is_accepted() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "lxc",
+            "experimental": {
+                "lxc": {"provision": {"distribution": "alpine", "release": "3.20"}}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_mxc_request(&encoded, &mut logger, true)
+            .expect("state-aware lxc config should parse");
+        match req {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Provision);
+                assert_eq!(p.containment, Some(ContainmentBackend::Lxc));
+                assert!(p
+                    .experimental_raw
+                    .as_ref()
+                    .and_then(|v| v.get("lxc"))
+                    .is_some());
+            }
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
     }
 
     // ---- Abstract-intent coverage ----
