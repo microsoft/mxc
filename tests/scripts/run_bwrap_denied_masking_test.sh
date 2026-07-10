@@ -36,7 +36,10 @@ VISIBLE="$BASE/visible.txt"
 FILE="$BASE/secret_file.txt"
 DIR="$BASE/secret_dir"
 
-cleanup() { sudo rm -rf "$BASE"; }
+# Second fixture tree for the denied-symlink rejection cases below.
+SYMBASE="/mnt/symmask"
+
+cleanup() { sudo rm -rf "$BASE" "$SYMBASE"; }
 trap cleanup EXIT
 
 # Set up: a readable sibling (positive control), a denied secret file, and a
@@ -95,6 +98,49 @@ if echo "$OUTPUT" | grep -q "DIR_MASKED_OK" && ! echo "$OUTPUT" | grep -q "DIR_L
     echo "PASS: denied directory masked empty."
 else
     echo "FAIL: denied directory content leaked."
+    FAIL=1
+fi
+
+# --- Denied-symlink masking ----------------------------------------------------
+# Denying a symlink masks the object it points to: the runner rewrites a denied
+# symlink to its canonical target so the mask lands on the real file/dir (bwrap
+# cannot mount a mask over a symlink whose parent is bound, so masking the link
+# path directly would abort the sandbox). Cover both a symlink -> dir (target
+# masked with tmpfs) and a symlink -> file (target masked with /dev/null). Each
+# config also reads a non-denied sibling (control.txt) as a positive control
+# proving the parent bind is present, so masking is attributable to the deny.
+sudo rm -rf "$SYMBASE"
+sudo mkdir -p "$SYMBASE/real_dir"
+echo "CONTROL_SECRET" | sudo tee "$SYMBASE/control.txt" > /dev/null
+echo "DIR_TARGET_SECRET" | sudo tee "$SYMBASE/real_dir/inner.txt" > /dev/null
+echo "FILE_TARGET_SECRET" | sudo tee "$SYMBASE/real_file.txt" > /dev/null
+sudo ln -s "$SYMBASE/real_dir" "$SYMBASE/link_to_dir"
+sudo ln -s "$SYMBASE/real_file.txt" "$SYMBASE/link_to_file"
+
+echo "Running Bubblewrap denied-symlink -> dir masking test..."
+DIR_OUT=$("$LXC_EXEC" --experimental \
+    "$REPO_DIR/tests/configs/bubblewrap_denied_symlink_dir.json" 2>&1 || true)
+echo "$DIR_OUT"
+if echo "$DIR_OUT" | grep -q "CONTROL_OK" \
+    && echo "$DIR_OUT" | grep -q "SYMDIR_MASKED_OK" \
+    && ! echo "$DIR_OUT" | grep -q "SYMDIR_LEAK"; then
+    echo "PASS: denied symlink -> dir masked its target (parent bind present)."
+else
+    echo "FAIL: denied symlink -> dir target not masked."
+    FAIL=1
+fi
+
+echo "Running Bubblewrap denied-symlink -> file masking test..."
+FILE_OUT=$("$LXC_EXEC" --experimental \
+    "$REPO_DIR/tests/configs/bubblewrap_denied_symlink_file.json" 2>&1 || true)
+echo "$FILE_OUT"
+if echo "$FILE_OUT" | grep -q "CONTROL_OK" \
+    && echo "$FILE_OUT" | grep -q "SYMFILE_MASKED_OK" \
+    && echo "$FILE_OUT" | grep -q "SYMFILE_NOT_DIR_OK" \
+    && ! echo "$FILE_OUT" | grep -q "SYMFILE_LEAK"; then
+    echo "PASS: denied symlink -> file masked its target with /dev/null (kept non-directory)."
+else
+    echo "FAIL: denied symlink -> file target not masked correctly."
     FAIL=1
 fi
 

@@ -476,6 +476,34 @@ mod tests {
         policy_mount_pos(&args, "--tmpfs", "/cache");
     }
 
+    /// Regression for review comment: a denied **directory** and a denied
+    /// **file nested inside it** must each get the correct primitive AND be
+    /// ordered parent-first, so the deeper `/dev/null` file mask lands inside
+    /// the shallower tmpfs (most-specific-path-wins) rather than being shadowed
+    /// by it. Mirrors the empirically-verified E2E behaviour.
+    #[test]
+    fn nested_denied_dir_and_child_file_mask_each_correctly() {
+        let mut r = base_request();
+        r.policy.denied_paths = vec!["/data/secret".into(), "/data/secret/key".into()];
+        // Only the nested path is a file; the parent is a directory (tmpfs).
+        let denied_files = HashSet::from(["/data/secret/key".to_string()]);
+        let args = build_args_classified(&r, None, &denied_files);
+
+        // Parent dir → tmpfs; child file → /dev/null.
+        let parent = policy_mount_pos(&args, "--tmpfs", "/data/secret");
+        let child = policy_mount_pos(&args, "--ro-bind", "/data/secret/key");
+        assert_eq!(
+            args[child + 1],
+            "/dev/null",
+            "nested denied file must be masked with /dev/null: {args:?}"
+        );
+        assert!(
+            child > parent,
+            "child file mask (pos {child}) must come after parent tmpfs (pos {parent}) \
+             so it lands inside the masked subtree: {args:?}"
+        );
+    }
+
     #[test]
     fn environment_variables_are_set() {
         let mut r = base_request();
