@@ -6,8 +6,9 @@
 //! Subcommands:
 //! - `start`: cancel any active WPR trace and start a new one using
 //!   `plm.wprp!AccessFailureProfile`.
-//! - `stop`: stop the trace and write `trace.etl` into a log directory.
+//! - `stop`: stop the trace and process captured events.
 //! - `log`: interactive — Enter to start, Enter to stop.
+//! - `extract-caps`: standalone ACE decoder.
 //!
 //! The functional binary wraps WPR / ETW / EventLog APIs that have no
 //! cross-platform equivalent and is therefore Windows-only. On
@@ -36,7 +37,7 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 use plm::coordination::{singleton_bypass_requested, wait_until_cleared, PLM_LOG_START_IN_FLIGHT};
 #[cfg(target_os = "windows")]
-use plm::{log, profile_gen, start, stop};
+use plm::{extract_caps, log, profile_gen, start, stop};
 
 /// Raw `HANDLE` value of the named-mutex singleton acquired by
 /// `acquire_singleton_if_needed` (zero when unheld). Stashed in a
@@ -239,13 +240,14 @@ enum Cmd {
         #[arg(long)]
         wprp: Option<PathBuf>,
     },
-    /// Stop the trace and write `trace.etl` into a log directory.
+    /// Stop the trace and (optionally) merge findings into a config.
     Stop {
         /// Directory for trace.etl, copied input config, and Adjusted_*.json.
         #[arg(long)]
         log_dir: Option<PathBuf>,
         /// Path treated as the application binary's location. Defaults
-        /// to the directory containing the plm executable.
+        /// to the directory containing the plm executable. Used as the
+        /// self-access filter root in the adjusted config.
         #[arg(long)]
         bin_path: Option<PathBuf>,
         /// Path to the MXC container config (JSON) to update.
@@ -263,7 +265,18 @@ enum Cmd {
         #[arg(long)]
         verbose_logging: bool,
     },
-    /// Interactive: press Enter to start logging, press Enter again to stop.
+    /// Run extract_caps on a hex-encoded ACE blob and print matched
+    /// capability names. Mirrors the standalone usage of extract_caps.ps1.
+    ExtractCaps {
+        /// Hex-encoded ACE buffer (whitespace allowed, even length).
+        #[arg(long)]
+        hex_bytes: String,
+        /// Emit per-ACE diagnostic output.
+        #[arg(long)]
+        verbose_logging: bool,
+    },
+    /// Interactive: press Enter to start logging, press Enter again to
+    /// stop, then print the changes a blank config would receive.
     Log {
         /// Override path to plm.wprp. Defaults to <exe dir>\plm.wprp.
         #[arg(long)]
@@ -384,7 +397,8 @@ fn main() -> Result<()> {
     // env-spoofable) plus the OS TrustedInstaller ACL on that
     // directory as the trust boundary; see `wpr_path` module docs for
     // why we do not run WinVerifyTrust on the resolved binary.
-    plm::wpr_path::verify_wpr_signed().map_err(|e| anyhow::anyhow!("wpr.exe check failed: {e}"))?;
+    plm::wpr_path::verify_wpr_present()
+        .map_err(|e| anyhow::anyhow!("wpr.exe check failed: {e}"))?;
 
     // Install the Ctrl+C handler unconditionally so signals during any
     // subcommand (in particular interactive `log`) tear down the WPR
@@ -431,6 +445,18 @@ fn main() -> Result<()> {
                 },
                 &exe,
             )
+        }
+        Cmd::ExtractCaps {
+            hex_bytes,
+            verbose_logging,
+        } => {
+            let caps = extract_caps::extract_caps(&hex_bytes, verbose_logging)?;
+            let mut sorted: Vec<&String> = caps.iter().collect();
+            sorted.sort();
+            for c in sorted {
+                println!("{c}");
+            }
+            Ok(())
         }
         Cmd::Log {
             wprp,

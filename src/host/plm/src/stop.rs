@@ -9,16 +9,33 @@ use chrono::Local;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
+use crate::config::{
+    apply_ui_operation_flags, deny_file_set, initialize_filesystem, load_config,
+    merge_capabilities, resolve_adjusted_config_path, save_adjusted_config,
+    set_ui_subsystem_enabled, update_from_access_events, write_added_paths_summary,
+    write_detection_summary, write_requested_capabilities_summary,
+};
+use crate::event_parser::{parse_events, ParseResult};
 use crate::wpr_path::wpr_command;
+
+/// "Skip adjusted config" predicate extracted from the inline check
+/// in `run`. A trace that produced no access events, no capability
+/// requests, no `CONVERT_TO_GUI` hint, and no `UI_OPERATION` flags has
+/// nothing to merge — emitting an `Adjusted_*.json` byte-identical to
+/// the input would only confuse the harness's diff-based pass/fail
+/// signal.
+pub fn should_skip_adjusted(parse: &ParseResult) -> bool {
+    parse.is_empty()
+}
 
 pub struct StopOptions {
     pub log_dir: Option<PathBuf>,
     pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     pub adjusted_config_path: Option<PathBuf>,
-    /// When set, skip `wpr -stop` and treat the supplied .etl as the
-    /// captured trace. Useful for re-processing a previously captured
-    /// trace without an active WPR session.
+    /// When set, skip `wpr -stop` and parse the supplied .etl directly.
+    /// Useful for re-processing a previously captured trace without an
+    /// active WPR session.
     pub trace_file: Option<PathBuf>,
     pub verbose: bool,
 }
@@ -34,20 +51,12 @@ pub struct WprExeStopper;
 
 impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
-        // Capture stdio rather than inheriting so a successful `wpr
-        // -stop` doesn't leak wpr chatter into any wrapping tool (e.g.
-        // `wxc-exec --audit`). On non-zero exit we replay the captured
-        // streams so operators can still see wpr's own diagnostic.
         let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        let output = cmd
-            .args(["-stop", &trace_file.to_string_lossy()])
-            .output()
-            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))?;
-        if !output.status.success() {
-            crate::start::replay_wpr_output("stop", &output);
-        }
-        Ok(output.status)
+        cmd.arg("-stop")
+            .arg(trace_file)
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
     }
 }
 
@@ -65,9 +74,10 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
 }
 
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
-/// to its canonical form. Exposed even though the self-access filter
-/// consumer isn't wired here, so the canonicalize fallback chain is
-/// pinned by tests.
+/// to its canonical form. Consumed by `update_from_access_events` as
+/// the self-access filter: events referencing this path are dropped
+/// from the adjusted config so the container never grants itself
+/// broad access to its own binary directory.
 ///
 /// Fallback chain:
 ///   1. `canonicalize(opt.bin_path)` if `Some`
@@ -89,7 +99,8 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
                 e
             );
             // Prefer the raw operator-supplied path over silently
-            // substituting exe_dir; that would drop operator intent.
+            // substituting exe_dir; the previous behavior swallowed
+            // operator intent entirely.
             (raw.to_path_buf(), Some(warning))
         }
     }
@@ -106,10 +117,11 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
-    // Resolve bin_path so the operator-facing warning path is
-    // exercised and the canonical form is on disk for downstream
-    // consumers, even though the self-access filter isn't wired here.
-    let (_bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
+    // Resolve bin_path to its canonical form so the self-access filter
+    // in `config::update_from_access_events` can compare it against the
+    // verbatim-prefixed paths ETW emits. The fallback chain is in
+    // `resolve_bin_path`.
+    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
     if let Some(w) = warning {
         eprintln!("[plm] warning: {w}");
     }
@@ -127,27 +139,161 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         p
     };
 
-    println!("Trace captured at {}.", trace_file.display());
-
-    // `config_path` / `adjusted_config_path` are accepted today so the
-    // wxc-exec --audit harness can pass them through without breaking
-    // for downstream consumers.
-    if let Some(p) = opts.config_path.as_ref() {
-        let _ = p;
-    }
-    if let Some(p) = opts.adjusted_config_path.as_ref() {
-        let _ = p;
-    }
     if opts.verbose {
-        println!("verbose logging is a no-op in this build.");
+        println!("Beginning event parsing, this may take several minutes");
     }
 
+    // Current directory at parse time -- events under this path are
+    // treated as test scaffolding noise and skipped.
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
+
+    let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
+
+    write_detection_summary(
+        &parse.valid_access_events,
+        &parse.requested_capabilities,
+        parse.ui_event_count,
+        &parse.ui_events,
+        parse.ui_operation_flags,
+    );
+    write_requested_capabilities_summary(&parse.requested_capabilities, opts.verbose);
+
+    let config_path = match opts.config_path.as_ref() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    // Load the source config into memory FIRST, before any disk
+    // side effect touches the log directory. If the source is
+    // unreadable or malformed we want to bail before we've
+    // produced a half-populated log_dir (bare trace.etl + no
+    // config, no adjusted).
+    let base_config = load_config(config_path)?;
+
+    // Copy the original config alongside the trace unconditionally
+    // so operators always have a snapshot of the exact input that
+    // produced this run's `trace.etl`, even when the parse yielded
+    // nothing mergeable. The copy MUST land on disk before we
+    // attempt any edit-and-save cycle below: it's the operator's
+    // only record of the pre-edit state, and losing it turns an
+    // Adjusted_*.json into an un-auditable delta.
+    let leaf = config_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".into());
+    let dest_config = log_dir.join(&leaf);
+    std::fs::copy(config_path, &dest_config)
+        .with_context(|| format!("failed to copy {}", config_path.display()))?;
+
+    // Skip the adjusted config only when the trace yielded nothing
+    // mergeable. Bailing on file/capability emptiness alone would
+    // silently drop UI-only traces.
+    if should_skip_adjusted(&parse) {
+        return Ok(());
+    }
+
+    // Edit the pre-loaded copy of the config in memory rather than
+    // re-reading `dest_config` — this avoids a read-after-write on
+    // Windows where an AV filter can occasionally serve a stale or
+    // empty buffer for a file that `std::fs::copy` just wrote.
+    let mut config = base_config;
+    initialize_filesystem(&mut config)?;
+    let deny = deny_file_set(&config);
+
+    let bin_path_s = bin_path.to_string_lossy().into_owned();
+    let added = update_from_access_events(
+        &mut config,
+        &bin_path_s,
+        &parse.valid_access_events,
+        &deny,
+        opts.verbose,
+    )?;
+
+    if !parse.requested_capabilities.is_empty() {
+        merge_capabilities(&mut config, &parse.requested_capabilities)?;
+    }
+
+    if parse.need_ui {
+        set_ui_subsystem_enabled(&mut config)?;
+    }
+    if parse.ui_operation_flags != 0 {
+        apply_ui_operation_flags(&mut config, parse.ui_operation_flags)?;
+    }
+
+    let adjusted = resolve_adjusted_config_path(&dest_config, opts.adjusted_config_path.as_deref());
+    save_adjusted_config(&config, &adjusted)?;
+
+    write_added_paths_summary(&added);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_event::LearningModeAccessEvent;
+    use std::collections::HashSet;
+
+    fn empty_parse() -> ParseResult {
+        ParseResult {
+            valid_access_events: Vec::new(),
+            requested_capabilities: HashSet::new(),
+            need_ui: false,
+            ui_event_count: 0,
+            ui_events: Vec::new(),
+            ui_operation_flags: 0,
+        }
+    }
+
+    fn dummy_event() -> LearningModeAccessEvent {
+        LearningModeAccessEvent {
+            time_created: chrono::Utc::now(),
+            process_id: 0,
+            thread_id: 0,
+            learning_mode: String::new(),
+            resource_type: String::new(),
+            file_path: "C:\\foo".into(),
+            app_path: String::new(),
+            access_mask: 0,
+        }
+    }
+
+    // Pin the "skip adjusted config" predicate against each
+    // single-signal ParseResult plus the all-empty case.
+
+    #[test]
+    fn should_skip_when_completely_empty() {
+        assert!(should_skip_adjusted(&empty_parse()));
+    }
+
+    #[test]
+    fn should_not_skip_when_access_events_present() {
+        let mut p = empty_parse();
+        p.valid_access_events.push(dummy_event());
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_requested_capability_present() {
+        let mut p = empty_parse();
+        p.requested_capabilities.insert("internetClient".into());
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_need_ui_set() {
+        let mut p = empty_parse();
+        p.need_ui = true;
+        assert!(!should_skip_adjusted(&p));
+    }
+
+    #[test]
+    fn should_not_skip_when_ui_operation_flag_set() {
+        let mut p = empty_parse();
+        p.ui_operation_flags = 0x004; // JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+        assert!(!should_skip_adjusted(&p));
+    }
 
     // ---- resolve_bin_path -----------------------------------------------
 
