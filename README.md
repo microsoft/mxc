@@ -12,7 +12,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 - **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
-    - **Network Policy**: Proxy support (not supported on macOS); allow/block outbound and host filtering (not yet supported on Windows)
+    - **Network Policy**: Proxy support (cooperative on Linux/macOS), allow/block outbound, and backend-dependent host filtering
     - **UI Policy**: Clipboard, display, and GUI access controls
 - **State-aware Lifecycle**: Multi-step sandbox lifecycle (provision → start → exec → stop → deprovision) for session sandboxes
 - **TypeScript SDK**: [`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk) npm package with one-shot and state-aware APIs

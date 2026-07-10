@@ -287,27 +287,17 @@ export function createConfigFromPolicy(
                 );
             }
         }
-        // macOS: Seatbelt supports network.proxy via the same cooperative
-        // env-var model as Bubblewrap (HTTP_PROXY/HTTPS_PROXY injected into the
-        // sandbox; well-behaved HTTP clients honor it, raw-socket clients
-        // bypass it). Abstract `'process'` on macOS resolves to Seatbelt.
-
-        // WSLC supports block + allowedHosts via iptables (Bridged networking
-        // with per-host filtering). macOS sandbox supports it natively via
-        // per-host Seatbelt rules. Bubblewrap and LXC support it via iptables.
-        // Abstract `'process'` on Linux resolves to Bubblewrap server-side, and
-        // on macOS resolves to Seatbelt, so treat both the same as their
-        // explicit backend counterparts here.
-        // Other backends require allowOutbound for host filtering since it
-        // maps to AppContainer capabilities.
-        const resolvesToHostFilteringBackend =
+        // Unix backends accept host lists without allowOutbound. Bubblewrap,
+        // LXC, and WSLC enforce them; Seatbelt accepts them for SDK compatibility
+        // and leaves its limitations to native validation.
+        const acceptsHostRulesWithoutOutbound =
             containment === 'wslc' ||
             containment === 'seatbelt' ||
             containment === 'bubblewrap' ||
             containment === 'lxc' ||
             (containment === 'process' && platform === 'linux') ||
             (containment === 'process' && platform === 'darwin');
-        if (!resolvesToHostFilteringBackend) {
+        if (!acceptsHostRulesWithoutOutbound) {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }

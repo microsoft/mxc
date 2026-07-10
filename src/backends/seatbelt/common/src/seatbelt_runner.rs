@@ -134,12 +134,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
                     error_response(format!("Seatbelt: failed to start network proxy: {err}"))
                 })?;
         }
-        let proxy_address = proxy.address().cloned();
-
         // Build the Seatbelt profile now that the proxy address is resolved, so
         // the reachability rule can be scoped to the proxy's exact host + port.
-        let profile =
-            build_profile_with_proxy(request, proxy_address.as_ref()).map_err(error_response)?;
+        let profile = build_profile_with_proxy(request, proxy.address()).map_err(error_response)?;
 
         // Determine launch method + GUI access from the seatbelt config.
         let launch_method = request
@@ -154,23 +151,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .unwrap_or(false);
 
         match launch_method {
-            LaunchMethod::Exec => spawn_exec(
-                &profile,
-                request,
-                gui_access,
-                stdio,
-                logger,
-                proxy,
-                proxy_address.as_ref(),
-            ),
-            LaunchMethod::Open => spawn_open(
-                &profile,
-                request,
-                stdio,
-                logger,
-                proxy,
-                proxy_address.as_ref(),
-            ),
+            LaunchMethod::Exec => spawn_exec(&profile, request, gui_access, stdio, logger, proxy),
+            LaunchMethod::Open => spawn_open(&profile, request, stdio, logger, proxy),
         }
     }
 }
@@ -188,7 +170,6 @@ fn spawn_exec(
     stdio: StdioMode,
     logger: &mut Logger,
     proxy: UnixProxyCoordinator,
-    proxy_address: Option<&ProxyAddress>,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
     if gui_access && stdio == StdioMode::Pipes {
         return Err(error_response(
@@ -218,7 +199,7 @@ fn spawn_exec(
     // Always start from a cleared environment so untrusted sandboxed code never
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
     // vars are injected here (and caller-supplied proxy vars stripped).
-    apply_clean_environment(&mut command, request, proxy_address);
+    apply_clean_environment(&mut command, request, proxy.address());
 
     // Working directory. Also export `PWD` so the child's `getcwd()` uses its
     // fast `$PWD` path (a single stat) instead of walking parent directories
@@ -299,7 +280,6 @@ fn spawn_open(
     stdio: StdioMode,
     logger: &mut Logger,
     proxy: UnixProxyCoordinator,
-    proxy_address: Option<&ProxyAddress>,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
     if stdio == StdioMode::Pipes {
         return Err(error_response(
@@ -323,7 +303,7 @@ fn spawn_open(
     //    active its HTTP_PROXY/HTTPS_PROXY vars are injected and caller-supplied
     //    proxy vars stripped (see `resolve_environment`).
     let mut env_exports = String::new();
-    for (key, value) in resolve_environment(request, proxy_address) {
+    for (key, value) in resolve_environment(request, proxy.address()) {
         // Validate key is a safe shell identifier to prevent injection.
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || key.is_empty()
@@ -748,7 +728,7 @@ fn resolve_environment(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
 ) -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pairs = Vec::new();
     for kv in &request.env {
         if let Some((key, value)) = kv.split_once('=') {
             if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {

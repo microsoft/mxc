@@ -29,25 +29,9 @@ use std::fmt::Write as _;
 
 use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress};
 
-/// Build a complete sandbox profile string from the given request.
-///
-/// If `request.seatbelt.profile_override` is set, that
-/// string is returned verbatim and policy fields are ignored. This is the
-/// escape hatch for advanced/testing scenarios that need to hand-author a
-/// profile.
-pub fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
-    // Use the statically-known proxy address (localhost:<port> / url). For
-    // `builtinTestServer` the real port is only assigned at runtime, so the
-    // Seatbelt runner calls `build_profile_with_proxy` with the *resolved*
-    // address instead of going through this convenience wrapper.
-    build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
-}
-
-/// Like [`build_profile`], but scopes the cooperative proxy reachability rule
-/// to the proxy's *resolved* address (host + runtime-assigned port). The
-/// Seatbelt runner calls this with the address returned by the proxy
-/// coordinator after it binds; plain [`build_profile`] passes `None`.
-pub fn build_profile_with_proxy(
+/// Build a complete sandbox profile, scoping cooperative proxy reachability to
+/// the resolved address supplied by the runner.
+pub(crate) fn build_profile_with_proxy(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
 ) -> Result<String, String> {
@@ -209,15 +193,15 @@ fn write_network_rules(
     let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
     let has_allowed_hosts = !policy.allowed_hosts.is_empty();
 
-    // Whether the rules below already open outbound to any host.
-    let outbound_open = allow_outbound || has_allowed_hosts;
-
     // blocked_hosts is rejected at the runner level before reaching the
     // profile builder, so it isn't handled here.
     match (allow_outbound, has_allowed_hosts) {
         (false, false) => {
             // Pure deny — implicit from `(deny default)`.
             out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
+            if let Some(address) = proxy_address {
+                write_proxy_reachability_rules(out, address);
+            }
         }
         (true, false) => {
             out.push_str(";; --- network: outbound allowed (any host) ---\n");
@@ -232,17 +216,6 @@ fn write_network_rules(
             );
             out.push_str(";;     allowing all outbound as best-effort ---\n");
             write_outbound_allow_rules(out);
-        }
-    }
-
-    // When a cooperative proxy is active, the sandbox must be able to reach it
-    // even under a default-deny outbound policy — otherwise the injected
-    // HTTP_PROXY/HTTPS_PROXY env vars point at an unreachable endpoint. If
-    // outbound is not already open, allow just enough to reach the proxy's
-    // resolved address (exact host + port, not all of loopback).
-    if let Some(addr) = proxy_address {
-        if !outbound_open {
-            write_proxy_reachability_rules(out, addr);
         }
     }
 
@@ -266,7 +239,7 @@ fn write_outbound_allow_rules(out: &mut String) {
 /// filter by DNS name, so we fall back to allowing all outbound as a
 /// best-effort; the proxy itself enforces host policy for cooperating clients.
 fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress) {
-    if is_loopback_host(proxy_address.host()) {
+    if matches!(proxy_address.host(), "127.0.0.1" | "::1" | "localhost") {
         let _ = writeln!(
             out,
             ";; --- network: proxy configured — allow reaching the loopback proxy on port {} ---",
@@ -284,12 +257,6 @@ fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress
         out.push_str(";;     allowing all outbound as best-effort (proxy enforces policy) ---\n");
         write_outbound_allow_rules(out);
     }
-}
-
-/// `true` for loopback proxy hosts (`127.0.0.1`, `::1`, `localhost`), which
-/// Seatbelt matches via the `localhost` token in `(remote ip …)` filters.
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 /// Emit the `network-inbound` rule that lets the sandboxed process accept
@@ -533,6 +500,10 @@ fn escape_for_quotes(s: &str) -> String {
 mod tests {
     use super::*;
     use wxc_common::models::{SeatbeltConfig, UiPolicy};
+
+    fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
+        build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
+    }
 
     fn req() -> ExecutionRequest {
         ExecutionRequest {

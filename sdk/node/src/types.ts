@@ -349,11 +349,12 @@ export type SandboxPolicy = {
        * Proxy configuration. Routes cooperating HTTP traffic through this proxy.
        * Supported on Windows ProcessContainer, Linux Bubblewrap, and macOS
        * Seatbelt. On Bubblewrap/Seatbelt it is a cooperative env-var proxy
-       * (HTTP_PROXY/HTTPS_PROXY) — raw-socket clients can bypass it. Cannot be
-       * combined with other network flags. `builtinTestServer` selects a
-       * bundled, testing-only proxy; the SDK rejects it unless
-       * `allowTestingFeatures: true` is set in SandboxSpawnOptions (which maps
-       * to the native `--allow-testing-features` flag).
+       * (HTTP_PROXY/HTTPS_PROXY) — raw-socket clients can bypass it. Native
+       * validation enforces backend-specific combination rules.
+       * `builtinTestServer` selects a bundled, testing-only proxy; the SDK
+       * rejects it unless `allowTestingFeatures: true` is set in
+       * SandboxSpawnOptions (which maps to the native
+       * `--allow-testing-features` flag).
        */
       proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   };
