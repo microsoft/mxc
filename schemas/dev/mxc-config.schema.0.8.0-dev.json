@@ -136,6 +136,48 @@
         }
       ]
     },
+    "DeniedPath": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/DeniedPathObject"
+        }
+      ],
+      "description": "A denied filesystem path, accepted as either a legacy string or an object with explicit mask intent."
+    },
+    "DeniedPathKind": {
+      "description": "Mask type for a denied filesystem path.",
+      "enum": [
+        "file",
+        "dir"
+      ],
+      "type": "string"
+    },
+    "DeniedPathObject": {
+      "additionalProperties": false,
+      "description": "Object form for a denied filesystem path.",
+      "properties": {
+        "path": {
+          "description": "Path to deny.",
+          "type": "string"
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DeniedPathKind"
+            }
+          ],
+          "description": "Whether to mask the path as a file or directory."
+        }
+      },
+      "required": [
+        "path",
+        "type"
+      ],
+      "type": "object"
+    },
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
@@ -227,9 +269,9 @@
       "description": "Filesystem access policy.",
       "properties": {
         "deniedPaths": {
-          "description": "Paths explicitly denied (override broader allow rules).",
+          "description": "Paths explicitly denied (override broader allow rules). Entries may be bare strings for backwards compatibility or objects with an explicit file/dir mask type.",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/DeniedPath"
           },
           "type": [
             "array",

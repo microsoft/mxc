@@ -83,6 +83,14 @@ fn emit_definition(out: &mut String, name: &str, def: &Value) {
         return;
     }
 
+    if obj.contains_key("anyOf") || obj.contains_key("allOf") {
+        push_doc(out, obj.get("description"));
+        let (ty, nullable) = ts_type(def);
+        let nul = if nullable { " | null" } else { "" };
+        out.push_str(&format!("export type {name} = {ty}{nul};\n\n"));
+        return;
+    }
+
     emit_object(out, name, obj_as_map(def));
 }
 
@@ -163,19 +171,34 @@ fn ts_type(prop: &Value) -> (String, bool) {
         return (ref_name(r), false);
     }
 
+    if let Some(Value::Array(all_of)) = obj.get("allOf") {
+        let mut nullable = false;
+        let mut types = Vec::new();
+        for branch in all_of {
+            let (t, n) = ts_type(branch);
+            nullable = nullable || n;
+            if !types.contains(&t) {
+                types.push(t);
+            }
+        }
+        return (join_types(types, " & "), nullable);
+    }
+
     if let Some(Value::Array(any_of)) = obj.get("anyOf") {
         let mut nullable = false;
-        let mut ty = "unknown".to_string();
+        let mut types = Vec::new();
         for branch in any_of {
             if is_null_schema(branch) {
                 nullable = true;
             } else {
                 let (t, n) = ts_type(branch);
-                ty = t;
                 nullable = nullable || n;
+                if !types.contains(&t) {
+                    types.push(t);
+                }
             }
         }
-        return (ty, nullable);
+        return (join_types(types, " | "), nullable);
     }
 
     match obj.get("type") {
@@ -193,6 +216,14 @@ fn ts_type(prop: &Value) -> (String, bool) {
             (base, nullable)
         }
         _ => ("unknown".to_string(), false),
+    }
+}
+
+fn join_types(types: Vec<String>, separator: &str) -> String {
+    if types.is_empty() {
+        "unknown".to_string()
+    } else {
+        types.join(separator)
     }
 }
 
@@ -332,6 +363,43 @@ mod tests {
         assert!(ts.contains("tags?: string[] | null;"), "{ts}");
         // Optional ref made nullable by the anyOf null branch.
         assert!(ts.contains("child?: Thing | null;"), "{ts}");
+    }
+
+    #[test]
+    fn emits_anyof_union_and_allof_ref_wrapper() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "Kind": {
+                    "enum": ["file", "dir"],
+                    "type": "string"
+                },
+                "ObjectEntry": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["type"],
+                    "properties": {
+                        "type": {
+                            "allOf": [{ "$ref": "#/definitions/Kind" }]
+                        }
+                    }
+                },
+                "Entry": {
+                    "anyOf": [
+                        { "type": "string" },
+                        { "$ref": "#/definitions/ObjectEntry" }
+                    ]
+                }
+            }
+        });
+        let ts = emit_ts(&schema);
+        assert!(
+            ts.contains("export type Entry = string | ObjectEntry;"),
+            "{ts}"
+        );
+        assert!(ts.contains("type: Kind;"), "{ts}");
     }
 
     #[test]

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Selects which containment backend to use for script execution.
@@ -538,6 +540,8 @@ pub struct ContainerPolicy {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub denied_path_kinds: HashMap<String, MaskKind>,
     pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
@@ -553,6 +557,15 @@ pub struct ContainerPolicy {
     pub ui: UiPolicy,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+}
+
+/// How a denied filesystem path should be masked when the backend must choose
+/// between file and directory mount primitives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaskKind {
+    File,
+    Dir,
 }
 
 /// Port mapping for host↔container port forwarding.

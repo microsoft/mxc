@@ -17,6 +17,7 @@ pub mod logger;
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
+pub mod path_specificity;
 pub mod sandbox_process;
 pub mod script_runner;
 pub mod state_aware_backend;
