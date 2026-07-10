@@ -23,6 +23,9 @@ provides:
 - **Network isolation** via `(allow network-outbound)` rules with
   per-host `(remote tcp …)` filters when `allowedHosts` is set, and
   `(deny network-outbound …)` for `blockedHosts`.
+- **Cooperative HTTP proxy** via `network.proxy`: `HTTP_PROXY` /
+  `HTTPS_PROXY` are injected into the sandbox so well-behaved clients route
+  through the configured proxy (raw-socket clients can bypass it).
 - **UI isolation** by denying mach-lookup of `com.apple.windowserver`,
   pasteboard, and HID iokit user clients when `ui.disable` /
   `ui.clipboard=none` / `ui.injection=false`.
@@ -195,9 +198,19 @@ independently of the profile.
 | `defaultPolicy: "allow"` (no host list) | `(allow network-outbound)` plus `(allow network-bind (local ip))` and `(allow system-socket)`. |
 | `allowedHosts` | `(allow network-outbound (remote tcp "host:*") (remote udp "host:*"))` per host. Apple's Seatbelt does not perform DNS — host filtering is best-effort and applied at connect time. |
 | `blockedHosts` | `(deny network-outbound …)` emitted last so explicit blocks override allows. |
+| `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, `(allow network-outbound (remote ip "localhost:*"))` — the sandbox can reach the loopback proxy but nothing else (raw-socket clients can't reach the wider network). Under `allow`, the existing allow-all covers it. |
+| `proxy` (remote `url`) | Allows all outbound as best-effort — Seatbelt cannot filter by DNS name, so the proxy itself enforces host policy. |
 
-Proxy configuration (`network.proxy`) is **not supported** on macOS — the
-SDK rejects it with a clear error, mirroring the Linux behavior.
+Proxy configuration (`network.proxy`) is supported via the **cooperative
+env-var model** (the same as the Bubblewrap backend): the runner launches or
+points at an HTTP proxy and injects `HTTP_PROXY` / `HTTPS_PROXY` (and their
+lowercase forms) into the sandbox environment, stripping any caller-supplied
+proxy vars so sandboxed code can't override them. Well-behaved HTTP clients
+(curl, requests, fetch, …) honor it; clients that open raw sockets and ignore
+the env vars bypass it. `builtinTestServer` launches a bundled, testing-only
+proxy (`unix-test-proxy`) and requires `--allow-testing-features`. macOS has no
+per-process WinHTTP-style OS proxy policy, so unlike Windows the proxy is
+cooperative rather than kernel-enforced.
 
 ### UI policy
 
@@ -297,7 +310,12 @@ environment.
 
 ## Limitations and caveats
 
-- **No proxy support.** The macOS sandbox cannot interpose at the TLS layer.
+- **Proxy support is cooperative, not enforced.** `network.proxy` injects
+  `HTTP_PROXY` / `HTTPS_PROXY` into the sandbox (see [Network policy](#network-policy)).
+  Clients that honor those env vars route through the proxy; clients that open
+  raw sockets and ignore them bypass it. The macOS sandbox cannot interpose at
+  the TLS/socket layer per process, so this matches the Bubblewrap backend
+  rather than Windows' kernel-enforced WinHTTP policy.
 - **Per-host network filtering (`blockedHosts`) is not supported.** Apple's
   Seatbelt profile language has no mechanism for selectively blocking individual
   hostnames while allowing all other traffic. The `blockedHosts` config field is
@@ -343,4 +361,4 @@ environment.
 | Network | Windows Firewall | iptables/nftables | Profile `network-*` rules |
 | Privileges | Optional admin | Root (or unprivileged LXC) | None — `sandbox_init` is unprivileged |
 | Container lifecycle | Yes (named) | Yes (named) | No (per-process) |
-| Proxy support | Yes | No | No |
+| Proxy support | Yes (WinHTTP, kernel-enforced) | No | Cooperative (env-var) |

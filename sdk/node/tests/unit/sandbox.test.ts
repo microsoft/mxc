@@ -775,16 +775,14 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
-    it('should reject proxy configuration on macOS', () => {
+    it('should accept proxy configuration on macOS (Seatbelt)', () => {
       mockDarwin();
       try {
-        assert.throws(
-          () => createConfigFromPolicy({
-            version: '0.6.0-alpha',
-            network: { proxy: { builtinTestServer: true } },
-          }),
-          { message: /not supported on macOS/ },
-        );
+        const config = createConfigFromPolicy({
+          version: '0.5.0-alpha',
+          network: { proxy: { url: 'http://127.0.0.1:8080' } },
+        });
+        assert.deepStrictEqual(config.network!.proxy, { url: 'http://127.0.0.1:8080' });
       } finally {
         restore();
       }

@@ -766,9 +766,10 @@ fn convert_wire_config(
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
+                && containment != ContainmentBackend::Seatbelt
             {
-                let msg = "Network proxy is only supported with the 'processcontainer' \
-                           or 'bubblewrap' containment backends";
+                let msg = "Network proxy is only supported with the 'processcontainer', \
+                           'bubblewrap', or 'seatbelt' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -2187,6 +2188,40 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_accepted_with_seatbelt() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_url_accepted_with_seatbelt() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://127.0.0.1:8080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
     }
 
     #[test]

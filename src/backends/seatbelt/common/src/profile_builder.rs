@@ -27,7 +27,7 @@
 
 use std::fmt::Write as _;
 
-use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy};
+use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress};
 
 /// Build a complete sandbox profile string from the given request.
 ///
@@ -36,6 +36,21 @@ use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy};
 /// escape hatch for advanced/testing scenarios that need to hand-author a
 /// profile.
 pub fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
+    // Use the statically-known proxy address (localhost:<port> / url). For
+    // `builtinTestServer` the real port is only assigned at runtime, so the
+    // Seatbelt runner calls `build_profile_with_proxy` with the *resolved*
+    // address instead of going through this convenience wrapper.
+    build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
+}
+
+/// Like [`build_profile`], but scopes the cooperative proxy reachability rule
+/// to the proxy's *resolved* address (host + runtime-assigned port). The
+/// Seatbelt runner calls this with the address returned by the proxy
+/// coordinator after it binds; plain [`build_profile`] passes `None`.
+pub fn build_profile_with_proxy(
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+) -> Result<String, String> {
     if let Some(override_profile) = request
         .seatbelt
         .as_ref()
@@ -68,7 +83,7 @@ pub fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
 
     // Policy-derived allow rules.
     write_filesystem_allow(&mut out, request)?;
-    write_network_rules(&mut out, request);
+    write_network_rules(&mut out, request, proxy_address);
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request)?;
     write_extra_seatbelt_rules(&mut out, request);
@@ -185,10 +200,17 @@ fn write_filesystem_deny(out: &mut String, request: &ExecutionRequest) -> Result
     Ok(())
 }
 
-fn write_network_rules(out: &mut String, request: &ExecutionRequest) {
+fn write_network_rules(
+    out: &mut String,
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+) {
     let policy = &request.policy;
     let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
     let has_allowed_hosts = !policy.allowed_hosts.is_empty();
+
+    // Whether the rules below already open outbound to any host.
+    let outbound_open = allow_outbound || has_allowed_hosts;
 
     // blocked_hosts is rejected at the runner level before reaching the
     // profile builder, so it isn't handled here.
@@ -213,6 +235,17 @@ fn write_network_rules(out: &mut String, request: &ExecutionRequest) {
         }
     }
 
+    // When a cooperative proxy is active, the sandbox must be able to reach it
+    // even under a default-deny outbound policy — otherwise the injected
+    // HTTP_PROXY/HTTPS_PROXY env vars point at an unreachable endpoint. If
+    // outbound is not already open, allow just enough to reach the proxy's
+    // resolved address (exact host + port, not all of loopback).
+    if let Some(addr) = proxy_address {
+        if !outbound_open {
+            write_proxy_reachability_rules(out, addr);
+        }
+    }
+
     write_local_network_rules(out, policy.allow_local_network);
 }
 
@@ -220,6 +253,43 @@ fn write_outbound_allow_rules(out: &mut String) {
     out.push_str("(allow network-outbound)\n");
     out.push_str("(allow network-bind (local ip))\n");
     out.push_str("(allow system-socket)\n");
+}
+
+/// Emit the minimal outbound rules that let a sandboxed process reach the
+/// resolved cooperative proxy while the default outbound policy stays deny.
+///
+/// For a loopback proxy — the common `localhost` / `builtinTestServer` case —
+/// this scopes outbound to the proxy's exact `localhost:<port>`, so raw-socket
+/// clients that ignore `HTTP_PROXY` can reach neither the wider network nor
+/// other host-local services — only the proxy itself (a tighter guarantee than
+/// Bubblewrap, which shares the host netns). For a remote proxy Seatbelt cannot
+/// filter by DNS name, so we fall back to allowing all outbound as a
+/// best-effort; the proxy itself enforces host policy for cooperating clients.
+fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress) {
+    if is_loopback_host(proxy_address.host()) {
+        let _ = writeln!(
+            out,
+            ";; --- network: proxy configured — allow reaching the loopback proxy on port {} ---",
+            proxy_address.port()
+        );
+        let _ = writeln!(
+            out,
+            "(allow network-outbound (remote ip \"localhost:{}\"))",
+            proxy_address.port()
+        );
+    } else {
+        out.push_str(
+            ";; --- network: remote proxy configured but Seatbelt cannot filter by host;\n",
+        );
+        out.push_str(";;     allowing all outbound as best-effort (proxy enforces policy) ---\n");
+        write_outbound_allow_rules(out);
+    }
+}
+
+/// `true` for loopback proxy hosts (`127.0.0.1`, `::1`, `localhost`), which
+/// Seatbelt matches via the `localhost` token in `(remote ip …)` filters.
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 /// Emit the `network-inbound` rule that lets the sandboxed process accept
@@ -571,6 +641,80 @@ mod tests {
         r.policy.blocked_hosts = vec!["evil.example.com".into()];
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("(deny network-outbound"));
+    }
+
+    #[test]
+    fn loopback_proxy_under_default_deny_scopes_outbound_to_proxy_port() {
+        // A cooperative loopback proxy must be reachable even though outbound
+        // is default-deny — but only the proxy's exact port, not all of
+        // loopback and not the whole network.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:8080\"))"));
+        // Must NOT open outbound to all loopback ports or the whole network.
+        assert!(!p.contains("localhost:*"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn builtin_test_proxy_under_default_deny_scopes_outbound_to_proxy_port() {
+        // builtinTestServer binds a loopback port at runtime; the runner passes
+        // that *resolved* address here, so the rule is scoped to the real port
+        // just like an explicit loopback proxy.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let addr = ProxyAddress::new("127.0.0.1".into(), 54321);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:54321\"))"));
+        assert!(!p.contains("localhost:*"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn remote_proxy_under_default_deny_allows_all_outbound_best_effort() {
+        // Seatbelt cannot filter a remote proxy by DNS name, so reachability
+        // degrades to allow-all outbound (the proxy enforces host policy).
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let addr = ProxyAddress::from_url(
+            "http://proxy.example.com:8080",
+            "proxy.example.com".into(),
+            8080,
+        );
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("remote proxy configured"));
+        assert!(p.contains("(allow network-outbound)\n"));
+        assert!(!p.contains("localhost:"));
+    }
+
+    #[test]
+    fn proxy_under_default_allow_does_not_add_scoped_rule() {
+        // When outbound is already open (defaultPolicy allow), the proxy
+        // reachability rule is redundant and must not be emitted.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound)\n"));
+        assert!(!p.contains("localhost:"));
+    }
+
+    #[test]
+    fn build_profile_wrapper_scopes_static_localhost_proxy() {
+        // The convenience `build_profile` wrapper must honor a statically
+        // configured proxy address (localhost:<port>), scoping the reachability
+        // rule to that exact port under default-deny — not silently dropping it.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.network_proxy = wxc_common::models::ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 9091)),
+            builtin_test_server: false,
+        };
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:9091\"))"));
+        assert!(!p.contains("localhost:*"));
     }
 
     #[test]

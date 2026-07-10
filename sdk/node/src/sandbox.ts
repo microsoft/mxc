@@ -287,9 +287,10 @@ export function createConfigFromPolicy(
                 );
             }
         }
-        if (policy.network.proxy && platform === 'darwin') {
-            throw new Error('Proxy configuration is not supported on macOS');
-        }
+        // macOS: Seatbelt supports network.proxy via the same cooperative
+        // env-var model as Bubblewrap (HTTP_PROXY/HTTPS_PROXY injected into the
+        // sandbox; well-behaved HTTP clients honor it, raw-socket clients
+        // bypass it). Abstract `'process'` on macOS resolves to Seatbelt.
 
         // WSLC supports block + allowedHosts via iptables (Bridged networking
         // with per-host filtering). macOS sandbox supports it natively via
