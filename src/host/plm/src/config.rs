@@ -271,11 +271,11 @@ fn trim_trailing_separators(s: &str) -> &str {
 /// True iff `path` denotes a drive root like `C:\` (or `C:` / `C:/` or
 /// the verbatim/device variants `\\?\C:\` / `\\.\C:\`).
 ///
-/// We refuse to widen the policy to a bare drive root in
-/// `parent_for_write` because that would grant the entire volume.
-/// Accepting only the bare `[A-Za-z]:` form would let `\\?\C:\hiberfil.sys`
-/// (the form ETW emits when an audited process called `NtCreateFile`
-/// with a verbatim path) bypass the guard.
+/// We refuse to emit a bare drive root into `filesystem.readwritePaths`
+/// because that would grant the entire volume. Accepting only the
+/// bare `[A-Za-z]:` form would let `\\?\C:\` (the form ETW emits when
+/// an audited process called `NtCreateFile` with a verbatim path)
+/// bypass the guard.
 fn is_drive_root(path: &str) -> bool {
     let stripped = match strip_verbatim_or_device_prefix(path) {
         Some(s) => s,
@@ -295,42 +295,6 @@ fn json_array_strings(v: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Derive the writable-policy entry for `file_path` purely from the path
-/// string -- the trace may reference paths that do not exist on the host
-/// (sandbox-only paths, deleted files, paths under a virtual mount), so
-/// querying the live filesystem with `Path::is_file()` / `is_dir()` would
-/// silently drop those write findings.
-///
-/// Heuristic: if the final path segment contains a `.` it is treated as a
-/// file and the parent directory is returned (so the directory becomes
-/// writable). Otherwise the path itself is treated as a directory and
-/// returned as-is. This matches the original PowerShell `extract_paths`
-/// behavior and over-grants in the rare directory-with-a-dot case, which
-/// is the safer side to err on.
-///
-/// One bound: if the computed parent is a bare drive root (e.g. `C:\`)
-/// we refuse to widen the policy to the entire volume and fall back to
-/// the file path itself. Without this, a single write to a dotted file at
-/// a drive root (`C:\hiberfil.sys`, `C:\.git`, ...) would grant write
-/// access to every directory under `C:`.
-fn parent_for_write(file_path: &str) -> Option<String> {
-    let p = Path::new(file_path);
-    let file_name = p.file_name()?.to_string_lossy();
-    let candidate = if file_name.contains('.') {
-        p.parent()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| file_path.to_string())
-    } else {
-        file_path.to_string()
-    };
-    if is_drive_root(&candidate) {
-        // Promoting to "C:\" would grant the entire volume; keep the
-        // grant scoped to the original file path instead.
-        return Some(file_path.to_string());
-    }
-    Some(candidate)
 }
 
 pub fn update_from_access_events(
@@ -422,41 +386,20 @@ pub fn update_from_access_events(
 
         // Process Write Requests
         if (ev.access_mask & WRITE_MASK) != 0 {
-            let parent = match parent_for_write(&ev.file_path) {
-                Some(p) => p,
-                None => {
-                    if verbose {
-                        println!(
-                            "Path {} has no final component, skipping event.",
-                            ev.file_path
-                        );
-                    }
-                    continue;
-                }
-            };
-            let parent_norm = match normalize_path(&parent) {
-                Some(n) => n,
-                None => continue,
-            };
-            // The deny check above only covered the raw `ev.file_path`.
-            // `parent_for_write` may widen to the parent directory, which
-            // could equal-or-contain a denied entry; re-check (using
-            // normalized forms on both sides this time) before pushing so
-            // a non-denied sibling write inside a directory that holds a
-            // denied file does not silently grant write to the denied
-            // file.
-            if deny_set_norm.contains(parent_norm.as_str())
-                || path_starts_with_any_norm(&parent_norm, &deny_norm)
-                || deny_norm
-                    .iter()
-                    .any(|d| path_starts_with_any_norm(d, std::iter::once(parent_norm.as_str())))
-            {
+            // Emit a file-scope grant for the exact path the audited
+            // process wrote to. The policy schema accepts individual
+            // file entries in `filesystem.readwritePaths`, so there is
+            // no need to widen the grant to the containing directory
+            // (which would over-grant to unrelated siblings).
+            //
+            // Refuse to emit a bare drive root — that would grant the
+            // entire volume. Legitimate write events target specific
+            // files under a drive root, so a raw `C:\` event is either
+            // a metadata operation we don't need to authorize or a
+            // path we can't safely widen; either way, skip it.
+            if is_drive_root(&ev.file_path) {
                 if verbose {
-                    println!(
-                        "Refusing to widen `{}` to `{}` because the parent equals or \
-                         contains a deniedPaths entry",
-                        ev.file_path, parent
-                    );
+                    println!("Skipping write event at bare drive root: {}", ev.file_path);
                 }
                 continue;
             }
@@ -465,12 +408,12 @@ pub fn update_from_access_events(
                 .ok_or_else(|| {
                     anyhow::anyhow!("`filesystem.readwritePaths` must be a JSON array")
                 })?;
-            arr.push(Value::String(parent.clone()));
-            if rw_existing_set.insert(parent_norm.clone()) {
-                rw_existing_norm.push(parent_norm.clone());
+            arr.push(Value::String(ev.file_path.clone()));
+            if rw_existing_set.insert(ev_norm.clone()) {
+                rw_existing_norm.push(ev_norm.clone());
             }
-            if seen_rw.insert(parent_norm) {
-                added_rw.push(parent);
+            if seen_rw.insert(ev_norm) {
+                added_rw.push(ev.file_path.clone());
             }
             continue;
         }
