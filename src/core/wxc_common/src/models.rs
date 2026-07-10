@@ -10,8 +10,10 @@ pub enum ContainmentBackend {
     #[default]
     /// Windows process-level containment. Resolves at runtime to either
     /// AppContainer (legacy OS API) or BaseContainer (newer Windows
-    /// sandbox API exposed via `Experimental_CreateProcessInSandbox`),
-    /// based on `--experimental` and the schema version of the request.
+    /// sandbox API exposed via `Experimental_CreateProcessInSandbox`)
+    /// based purely on host capability — BaseContainer is preferred when
+    /// the OS supports it, AppContainer is the downlevel fallback. The
+    /// schema version does not influence this choice.
     /// Selected on the wire as `"processcontainer"`.
     ProcessContainer,
     /// Linux container via WSL Container SDK (WSLC SDK).

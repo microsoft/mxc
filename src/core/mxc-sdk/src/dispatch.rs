@@ -148,35 +148,37 @@ fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use appcontainer_common::appcontainer_runner::AppContainerScriptRunner;
-    use wxc_common::config_parser::is_base_container_version;
+    use appcontainer_common::appcontainer_runner::{AppContainerScriptRunner, FilesystemMode};
+    use appcontainer_common::fallback_detector::is_base_container_usable;
     use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
-    // The AppContainer fast path vs the native BaseContainer (OS sandbox API):
-    // unlike the executor binaries' run-to-completion fallback, streaming does
-    // NOT route through `dispatch_with_fallback` — there is no AppContainer-BFS
-    // / AppContainer-DACL fallback for streaming.
+    // ProcessContainer resolves to a concrete backend purely by host
+    // capability: prefer the native BaseContainer (OS sandbox API) when usable,
+    // otherwise AppContainer. The schema version does not influence this choice.
     //
-    // Why: `dispatch_with_fallback` yields a run-to-completion
-    // `Box<dyn ScriptRunner>` plus a `DaclManager` guard, neither of which
-    // fits the streaming handle (the DACL tier would require the returned
-    // `SandboxProcess` to own the guard so ACE restore outlives the child).
-    //
-    // Consequence (intentional, fail-closed): an experimental / newer-schema
-    // config on a host that lacks the native BaseContainer API fails here with
-    // a clear "BaseContainer API unavailable" error from
-    // `BaseContainerRunner`'s validation, whereas the binaries' fallback would
-    // drop to an AppContainer tier. Streaming therefore requires the native
-    // BaseContainer API for those configs.
-    let version_implies_base_container = is_base_container_version(&request.schema_version);
-    if request.experimental_enabled || version_implies_base_container {
+    // Unlike the executor binaries' run-to-completion path, streaming does NOT
+    // route through `dispatch_with_fallback` — that yields a run-to-completion
+    // `Box<dyn ScriptRunner>` plus a `DaclManager` guard, neither of which fits
+    // the streaming handle (the DACL tier would require the returned
+    // `SandboxProcess` to own the guard so ACE restore outlives the child). So
+    // streaming offers only two of the dispatcher's tiers: BaseContainer when
+    // the API is usable, otherwise AppContainer in BFS mode (equivalent to the
+    // dispatcher's Tier 2 AppContainer-BFS path, which still requires
+    // `bfscfg.exe`). The Tier 3 AppContainer-DACL fallback is not available on
+    // the streaming path. The BaseContainer-vs-AppContainer choice uses the same
+    // `is_base_container_usable()` probe as the dispatcher's Tier 1 selection, so
+    // the two paths agree on that decision.
+    if is_base_container_usable() {
         let mut runner = appcontainer_common::base_container_runner::BaseContainerRunner::new();
         return runner
             .spawn(request, logger, StdioMode::Pipes)
             .map_err(map_spawn_error);
     }
 
-    let mut runner = AppContainerScriptRunner::new();
+    // Select BFS mode explicitly so this does not silently change if
+    // `AppContainerScriptRunner::new()`'s default filesystem mode is ever
+    // altered.
+    let mut runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs);
     runner
         .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)

@@ -39,7 +39,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
 }
 
 /// A Windows ProcessContainer request exposing `C:\Windows\Temp` read-write.
-/// The policy `version` selects the tier (>= 0.5 implies BaseContainer).
+/// `version` is the schema version stamped on the policy, not a backend selector.
 #[cfg(target_os = "windows")]
 fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> SandboxRequest {
     let policy = SandboxPolicy {
@@ -240,9 +240,11 @@ fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
 // ---------------------------------------------------------------------------
 // Windows ProcessContainer (AppContainer + BaseContainer) — integration tests.
 //
-// These exercise the capture and timeout paths that regressed as review items
-// #1 (BaseContainer ran with an already-closed process handle) and #2
-// (AppContainer timeout killed only the direct child, so it never fired).
+// These exercise two capture/timeout regressions: the process handle being
+// closed before the wait completed, and a finite timeout killing only the
+// direct child so it never fired. ProcessContainer resolves to BaseContainer or
+// AppContainer by host capability; these guards hold for whichever backend the
+// host selects.
 // They run a real sandbox, so they require an elevated, host-prepped Windows
 // host (see docs/host-prep.md) and are therefore `#[ignore]`d — run them with
 // `cargo test -p mxc-sdk -- --ignored` on such a host.
@@ -251,19 +253,18 @@ fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
-fn base_container_captures_stdout() {
-    // Schema >= 0.5 implies the BaseContainer fallback. Regression guard for
-    // #1: a valid exit code and captured stdout prove the process handle was
-    // not closed out from under the wait.
+fn process_container_captures_stdout() {
+    // Regression guard: a valid exit code and captured stdout prove the
+    // process handle was not closed out from under the wait.
     let result = spawn_and_wait(process_container_request(
         "0.7.0-alpha",
-        "cmd /c echo hello-base-container",
+        "cmd /c echo hello-process-container",
         30000,
     ))
-    .expect("BaseContainer run should succeed");
+    .expect("ProcessContainer run should succeed");
     assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
     assert!(
-        result.standard_out.contains("hello-base-container"),
+        result.standard_out.contains("hello-process-container"),
         "stdout should be captured, got: {:?}",
         result.standard_out
     );
@@ -272,36 +273,17 @@ fn base_container_captures_stdout() {
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
-fn appcontainer_captures_stdout() {
-    // Schema 0.4 keeps us on the AppContainer fast path (no BaseContainer).
-    let result = spawn_and_wait(process_container_request(
-        "0.4.0-alpha",
-        "cmd /c echo hello-appcontainer",
-        30000,
-    ))
-    .expect("AppContainer run should succeed");
-    assert_eq!(result.exit_code, 0, "stderr: {}", result.standard_err);
-    assert!(
-        result.standard_out.contains("hello-appcontainer"),
-        "stdout should be captured, got: {:?}",
-        result.standard_out
-    );
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
-fn appcontainer_finite_timeout_fires() {
-    // Regression guard for #2: a finite timeout must fire even when the command
+fn process_container_finite_timeout_fires() {
+    // Regression guard: a finite timeout must fire even when the command
     // spawns a descendant that keeps the inherited stdout write-end open. If
     // the timeout only killed the direct child, the capture reader would block
     // forever and this test would hang past the bounded wall-clock below.
     let result = spawn_and_wait(process_container_request(
-        "0.4.0-alpha",
+        "0.7.0-alpha",
         "cmd /c start /b ping -n 60 127.0.0.1 >nul & ping -n 60 127.0.0.1 >nul",
         2000,
     ))
-    .expect("AppContainer run should return a response");
+    .expect("ProcessContainer run should return a response");
     assert!(result.timed_out, "a timed-out run must report a timeout");
     // The bounded wait is enforced by the test harness; a hang here is the
     // failure mode the regression guards against.

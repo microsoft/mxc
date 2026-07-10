@@ -13,9 +13,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::{
-    delete_app_container_profile, AppContainerScriptRunner,
-};
+use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
 #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 use hyperlight_common::HyperlightScriptRunner;
@@ -26,13 +24,12 @@ use nanvix_runner::NanVixScriptRunner;
 use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
-    is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
+    load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
-use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 use wxc_common::state_aware_dispatch::dispatch_state_aware;
@@ -950,64 +947,50 @@ fn main() {
     // slot returns `None` if no DACL augmentation was required.
 
     // Run script in selected containment backend.
-    // BaseContainer is used when --experimental is passed or schema version >= 0.5.
-    // Sandbox and MicroVM require --experimental flag.
+    // ProcessContainer resolves to BaseContainer or AppContainer by host
+    // capability (see below). Sandbox and MicroVM require --experimental flag.
     let mut runner: Box<dyn ScriptRunner> = match request.containment {
         ContainmentBackend::ProcessContainer => {
-            // Compute fallback eligibility on the ProcessContainer arm
-            // only — every other `ContainmentBackend` variant is
-            // unaffected by `use_base_container` and does not need to
-            // pay the (trivial) semver parse cost.
-            let version_implies_base_container = is_base_container_version(&request.schema_version);
-            let use_base_container = request.experimental_enabled || version_implies_base_container;
-
-            if use_base_container {
-                let reason = if version_implies_base_container {
-                    format!("schema version {}", request.schema_version)
-                } else {
-                    "--experimental".to_string()
-                };
-                let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
-
-                match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
-                    Ok(dispatched) => {
-                        for w in &dispatched.warnings {
-                            let _ = writeln!(logger, "warning: {w}");
-                        }
-                        let _ = writeln!(
-                            logger,
-                            "selected isolation tier: {}",
-                            dispatched.tier.as_str()
-                        );
-
-                        let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
-                        if let Some(mgr) = dacl_manager {
-                            park_dacl_for_cleanup(mgr);
-                        }
-                        dispatched_runner
+            // ProcessContainer resolves to a concrete Windows backend purely by
+            // host capability: `dispatch_with_fallback` prefers the native
+            // BaseContainer (OS sandbox API) when usable and otherwise falls
+            // back to AppContainer tiers (BFS / DACL). The schema version no
+            // longer influences this choice.
+            match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
+                Ok(dispatched) => {
+                    for w in &dispatched.warnings {
+                        let _ = writeln!(logger, "warning: {w}");
                     }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        if let appcontainer_common::dispatcher::DispatchError::Dacl {
-                            warnings,
-                            ..
-                        } = &e
-                        {
-                            for w in warnings {
-                                eprintln!("  dacl warning: {w}");
-                            }
-                        }
-                        eprint!("{}", logger.get_buffer());
-                        telemetry::emit_early_exit(
-                            telemetry_active,
-                            &request.containment,
-                            telemetry::FailureReason::InitError,
-                        );
-                        process::exit(1);
+                    let _ = writeln!(
+                        logger,
+                        "selected isolation tier: {}",
+                        dispatched.tier.as_str()
+                    );
+
+                    let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
+                    if let Some(mgr) = dacl_manager {
+                        park_dacl_for_cleanup(mgr);
                     }
+                    dispatched_runner
                 }
-            } else {
-                Box::new(Runner::new(AppContainerScriptRunner::new()))
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    if let appcontainer_common::dispatcher::DispatchError::Dacl {
+                        warnings, ..
+                    } = &e
+                    {
+                        for w in warnings {
+                            eprintln!("  dacl warning: {w}");
+                        }
+                    }
+                    eprint!("{}", logger.get_buffer());
+                    telemetry::emit_early_exit(
+                        telemetry_active,
+                        &request.containment,
+                        telemetry::FailureReason::InitError,
+                    );
+                    process::exit(1);
+                }
             }
         }
         ContainmentBackend::Wslc => {

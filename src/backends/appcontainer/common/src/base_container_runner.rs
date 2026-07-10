@@ -1234,22 +1234,13 @@ impl SandboxBackend for BaseContainerRunner {
             ));
         }
         Self::is_base_container_api_present().map_err(|e| {
-            let hint = if !request.experimental_enabled {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: Config schema version '{}' requires the BaseContainer backend, \
-                     but this OS build does not support it. \
-                     Use schema version '0.4.0-alpha' to fall back to AppContainer.",
-                    request.schema_version
-                )
-            } else {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: --experimental requested BaseContainer, but this OS build \
-                     does not support it. Remove --experimental to use the AppContainer \
-                     backend, or use an OS build with BaseContainer support."
-                )
-            };
+            let hint = format!(
+                "BaseContainer API unavailable: {e}\n\
+                 Hint: this OS build does not support the BaseContainer backend. \
+                 MXC selects BaseContainer automatically when the host supports it \
+                 and otherwise uses AppContainer; use an OS build with BaseContainer \
+                 support if you require it."
+            );
             ScriptResponse {
                 // Symbol absent: report BackendUnavailable, not a hard error.
                 failure_phase: FailurePhase::BackendUnavailable,
