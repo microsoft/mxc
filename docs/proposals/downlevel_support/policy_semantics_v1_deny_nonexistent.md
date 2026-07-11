@@ -1,7 +1,7 @@
 # MXC FS-policy semantics — deny on non-existent paths
 
-**Status**: draft adjunct, resolves OQ-S3 under round-2 semantics
-**Owner**: gudgmi (with Copilot CLI as pair)
+**Status**: accepted adjunct, resolves OQ-S3 under round-2 semantics
+**Owner**: gudge (with Copilot CLI as pair)
 **Branch**: `user/gudge/downlevel-fs-projection-plan`
 **Canonical spec**:
 [`policy_semantics_v1.md`](./policy_semantics_v1.md)
@@ -10,12 +10,16 @@
 **Related variant**:
 [`policy_semantics_v1_variants/v1_d_access_denied.md`](./policy_semantics_v1_variants/v1_d_access_denied.md)
 
-This adjunct answers the deferred OQ-S3 question from the canonical
-round-2 spec: may a `deny` (`D`) entry name a host path that does not
-currently exist?
+This adjunct records the decision that resolves OQ-S3 from the
+canonical round-2 spec: a `deny` (`D`) entry may name a host path
+that does not currently exist.
 
-The answer proposed here is **yes, for `D` only**. `RO` and `RW`
+The answer is **yes, for `D` only**, and **only as an enforceable
+requirement on backends that can mediate names**. `RO` and `RW`
 entries still must name extant host objects at policy-load time.
+Backends such as BaseContainer/BFS or overlay/name-mediating tiers
+can enforce future-path deny; object-bound DACL-only tiers cannot
+and must refuse the policy or report explicit degradation.
 
 ## Scope
 
@@ -494,7 +498,8 @@ cannot reach.
 
 - Canonical round-2 spec:
   [`policy_semantics_v1.md`](./policy_semantics_v1.md)
-  - F2: original existence requirement and OQ-S3 deferral
+  - F2: refined existence requirement (`RO`/`RW` extant; `D` may
+    be future-path when enforceable)
   - F4: Position 3 delegation and static validation
   - F6/F7: most-specific-wins and same-object conflicts
   - F8: lexical canonicalization plus object resolution

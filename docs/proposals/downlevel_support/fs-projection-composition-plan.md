@@ -1,7 +1,7 @@
 # Downlevel FS projection — composition plan
 
 **Status**: draft / pre-spike
-**Owner**: gudgmi (with Copilot CLI as pair)
+**Owner**: gudge (with Copilot CLI as pair)
 **Branch**: `user/gudge/downlevel-fs-projection-plan`
 **Floor**: Windows 11 23H2 (`NTDDI_WIN10_CU`)
 
@@ -41,7 +41,10 @@ hand it to a fresh session as context and pick up from the
     custom paths) — the BFS replacement primitive, scoped tightly.
   - Plus tiny owner-side **DACL grant ACEs** on the writable roots
     (paths the user already owns) and a deny ACE on any in-RW
-    deny path.
+    deny path. Non-existent deny is enforced only by tiers with
+    name mediation (BaseContainer/BFS or the ProjFS/overlay path);
+    DACL-only fallback cannot enforce it and must refuse or report
+    degradation.
 - This composition is one rung on a capability-driven decision model
   (see `## Selection model`), not a fixed tier. Other compositions
   remain available for hosts without ProjFS, callers who refuse
@@ -136,7 +139,8 @@ For one container run, the runtime does:
      binds, not by ProjFS.
    - Honors a small allowlist/denylist passed at start (e.g.
      refuse `C:\temp\logs` materialization to enforce a deny on
-     a non-existent path).
+     a non-existent path). This is the mechanism for the v1
+     future-path `D` rule on overlay-capable hosts.
 5. **Install bindflt mappings**, per-Job, in priority order
    (more-specific wins):
    - **R/W identity binds** for each R/W subtree:

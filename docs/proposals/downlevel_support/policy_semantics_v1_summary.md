@@ -1,7 +1,7 @@
 # MXC FS-policy semantics — review summary (round 2)
 
 **Status**: high-level summary for review
-**Owner**: gudgmi
+**Owner**: gudge
 **Branch**: `user/gudge/downlevel-fs-projection-plan`
 **Full spec**:
 [`policy_semantics_v1.md`](./policy_semantics_v1.md)
@@ -10,8 +10,10 @@
 
 ## What's new since round 1
 
-Reviewer feedback prompted three potential changes to the spec.
-After consideration, **two were accepted and one was reverted**:
+Reviewer feedback prompted three potential round-2 changes to the
+spec. After consideration, **two were accepted and one was
+reverted**. A later pass also resolved the earlier non-existent
+`D` deferral:
 
 - **Accepted: no leaf marker.** v1 entries are subtree-implicit on
   directories. Adding `[L]` back later is a strictly-additive
@@ -28,6 +30,11 @@ After consideration, **two were accepted and one was reverted**:
   sub-path inside an allow region; a more-specific allow exposes a
   sub-path inside a `D` region (with a validator warning on the
   latter case).
+- **Resolved after round 2: non-existent `D`.** We revisited the
+  earlier deferral and now support future-path denies where the
+  selected backend can enforce them, such as BaseContainer/BFS or
+  overlay/name-mediating tiers. DACL-only tiers cannot enforce this
+  rule and must refuse or report degradation.
 
 This document summarises the v1 language under these round-2
 decisions. For the full specification — every rule, every interaction
@@ -51,8 +58,9 @@ Windows primitives is the subject of
 - Paths in the policy are **host paths**; the contained code sees
   the same path strings (identity projection — no separate
   "container namespace").
-- Paths must **exist** at policy-load time. (Deny on non-existent
-  paths is deferred separately.)
+- `RO`/`RW` paths must **exist** at policy-load time. `D` may name
+  a non-existent path; creation/materialization under that path is
+  denied where the backend has name-mediation support.
 - The language defaults to **deny**. Unlisted paths are inaccessible.
 - **Includes**: shipped, versioned policy fragments (e.g.
   `windows-dev-readonly-defaults`) carry the bulk of system-path
@@ -67,7 +75,7 @@ Windows primitives is the subject of
 - **`D` produces `ACCESS_DENIED`, not "hidden".** The agent can see
   that a denied path exists; it just can't do anything to it.
 
-## Eight headline decisions
+## Nine headline decisions
 
 These are the load-bearing choices a reviewer might want to push
 back on.
@@ -194,6 +202,22 @@ resolution traversal to those descendants.
 Adding `[L]` back later is a strictly-additive change: existing v1
 policies continue to mean what they mean (subtree); new policies can
 opt into a marker when needed.
+
+### D9 — Non-existent `D` is supported where enforceable
+
+A `D` entry may name a path that does not exist at policy-load time.
+While the path is absent, existence probes return the host's natural
+not-found result, but attempts to create, rename into, or otherwise
+materialize the named path or any descendant fail with
+`ACCESS_DENIED`.
+
+This is a capability-dependent rule. Backends that mediate names
+before filesystem objects are opened — for example BaseContainer/BFS
+or overlay/ProjFS-style tiers — can enforce it. Object-bound DACL
+tiers cannot attach a deny ACE to a future object and cannot express
+"create any child except this name" on the parent directory, so they
+must refuse or surface an explicit degradation for policies that rely
+on future-path deny.
 
 ## Selected non-obvious examples
 
@@ -347,11 +371,6 @@ deferred.
   DACL-write," "RW but root-immutable." Out of scope; v1's `RW` is
   full write authority. Future capabilities, if needed, ship as
   separate intents.
-- **Deny on non-existent paths.** v1 requires explicit entries to
-  reference extant host objects. The case is conceptually simpler
-  under access-denied semantics ("attempts to create at the path
-  fail with `ACCESS_DENIED`"); worth re-opening separately as a
-  follow-up.
 - **Namespace mapping policy.** Hiding paths, presenting alternate
   names, restricting enumeration. Reserved for a future iteration,
   distinct from this FS access policy.
@@ -366,8 +385,9 @@ deferred.
 
 ## Runtime risk register
 
-All five enforcement risks identified during round 1 are now either
-resolved or no longer applicable:
+The original enforcement risks identified during round 1 are now
+either resolved or no longer applicable; future-path deny adds one
+capability-dependent selector requirement:
 
 | Risk | Status under round 2 |
 |---|---|
@@ -376,12 +396,14 @@ resolved or no longer applicable:
 | R4 — hidden returning ACCESS_DENIED instead of not-found | Not applicable (`ACCESS_DENIED` is the spec'd behavior) |
 | R5 — enumeration filtering for deny inside RW | Not applicable (denied paths are visible in enumeration) |
 | R5b — create-then-invisible at default-deny under writable parent | Doesn't arise (no leaf marker) |
+| R6 — non-existent `D` / future-object deny | Enforceable only on name-mediating tiers; DACL-only must refuse/degrade |
 
 The composition's enforcement is meaningfully simpler under
-round-2 decisions: bindflt and ProjFS don't need hiding callbacks
-or denylist machinery; `ACCESS_DENIED` from the AppContainer SID's
-natural denial path (or from a deny ACE on the RW root where
-needed) is what the language asks for.
+round-2 decisions: bindflt and ProjFS don't need hiding callbacks,
+and existing-object deny is `ACCESS_DENIED` from the AppContainer
+SID's natural denial path (or from a deny ACE on the RW root where
+needed). Future-path deny still needs a name-mediating tier such as
+BaseContainer/BFS or overlay/ProjFS.
 
 ## Pointers
 
