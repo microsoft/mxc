@@ -716,9 +716,19 @@ pub enum FailurePhase {
     /// No failure (process exited successfully, or has not been evaluated yet).
     #[default]
     None,
-    /// The CreateProcess (or equivalent) API call itself failed.
+    /// The launch attempt failed: the CreateProcess (or equivalent) API call,
+    /// the VM/sandbox bring-up, or a transient resource contention (e.g. a
+    /// single-instance backend already running). Generally worth retrying.
     LaunchFailed,
-    /// The process was created but exited with a non-zero code.
+    /// The request cannot be honored and will not succeed on a blind retry
+    /// without changing the input or host: a policy rejection, or a missing
+    /// host prerequisite (backend/runtime not installed).
+    Rejected,
+    /// The launch command succeeded but the guest/sandbox infrastructure failed
+    /// before or while running user code (agent rendezvous, channel connect, or
+    /// the execution relay) — i.e. the process never ran to a clean exit.
+    PostLaunchFailed,
+    /// The process was created and ran, but exited with a non-zero code.
     ProcessExited,
     /// The process was force-terminated because it exceeded `scriptTimeout`.
     /// Distinct from [`ProcessExited`] (it did not exit on its own) so callers
@@ -791,6 +801,25 @@ mod tests {
         // An omitted failure_phase still defaults to None.
         let defaulted: ScriptResponse = serde_json::from_str("{}").unwrap();
         assert_eq!(defaulted.failure_phase, FailurePhase::None);
+    }
+
+    #[test]
+    fn failure_phase_serde_round_trips_all_variants() {
+        let cases = [
+            (FailurePhase::None, "\"None\""),
+            (FailurePhase::LaunchFailed, "\"LaunchFailed\""),
+            (FailurePhase::Rejected, "\"Rejected\""),
+            (FailurePhase::PostLaunchFailed, "\"PostLaunchFailed\""),
+            (FailurePhase::ProcessExited, "\"ProcessExited\""),
+            (FailurePhase::Timeout, "\"Timeout\""),
+            (FailurePhase::BackendUnavailable, "\"BackendUnavailable\""),
+        ];
+        for (variant, wire) in cases {
+            let s = serde_json::to_string(&variant).unwrap();
+            assert_eq!(s, wire, "serialize {variant:?}");
+            let back: FailurePhase = serde_json::from_str(wire).unwrap();
+            assert_eq!(back, variant, "round-trip {wire}");
+        }
     }
 
     #[test]
