@@ -15,13 +15,6 @@ use std::time::Instant;
 
 use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
-#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-use hyperlight_common::HyperlightScriptRunner;
-#[cfg(feature = "isolation_session")]
-use isolation_session_common::IsolationSessionRunner;
-#[cfg(feature = "microvm")]
-use nanvix_runner::NanVixScriptRunner;
-use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
     load_mxc_request_with_options, load_request, LoadOptions, ParseError,
@@ -941,206 +934,32 @@ fn main() {
         wxc_common::diagnostic::redacted_request_json(&request)
     );
 
-    // DaclManager parking for the BaseContainer/fallback path. Parked
-    // into a global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler
-    // can drop it on signal as well as the normal-exit path below. The
-    // slot returns `None` if no DACL augmentation was required.
-
-    // Run script in selected containment backend.
-    // ProcessContainer resolves to BaseContainer or AppContainer by host
-    // capability (see below). Sandbox and MicroVM require --experimental flag.
-    let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::ProcessContainer => {
-            // ProcessContainer resolves to a concrete Windows backend purely by
-            // host capability: `dispatch_with_fallback` prefers the native
-            // BaseContainer (OS sandbox API) when usable and otherwise falls
-            // back to AppContainer tiers (BFS / DACL). The schema version no
-            // longer influences this choice.
-            match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
-                Ok(dispatched) => {
-                    for w in &dispatched.warnings {
-                        let _ = writeln!(logger, "warning: {w}");
-                    }
-                    let _ = writeln!(
-                        logger,
-                        "selected isolation tier: {}",
-                        dispatched.tier.as_str()
-                    );
-
-                    let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
-                    if let Some(mgr) = dacl_manager {
-                        park_dacl_for_cleanup(mgr);
-                    }
-                    dispatched_runner
-                }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    if let appcontainer_common::dispatcher::DispatchError::Dacl {
-                        warnings, ..
-                    } = &e
-                    {
-                        for w in warnings {
-                            eprintln!("  dacl warning: {w}");
-                        }
-                    }
-                    eprint!("{}", logger.get_buffer());
-                    telemetry::emit_early_exit(
-                        telemetry_active,
-                        &request.containment,
-                        telemetry::FailureReason::InitError,
-                    );
-                    process::exit(1);
-                }
+    // Run script in the selected containment backend. Backend selection and
+    // runner construction — including the ProcessContainer BaseContainer /
+    // AppContainer (BFS / DACL) fallback tiers and every experimental backend —
+    // live in `mxc_engine::resolve_runner`, the single home for one-shot backend
+    // dispatch. The DACL guard it returns for the fallback tiers is parked into
+    // the global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler can drop
+    // it on signal as well as the normal-exit path below; it is `None` when no
+    // DACL augmentation was required. Tier-selection warnings and the selected
+    // tier are logged to `logger` by the engine.
+    let mut runner: Box<dyn ScriptRunner> = match mxc_engine::resolve_runner(&request, &mut logger)
+    {
+        Ok(resolved) => {
+            if let Some(mgr) = resolved.dacl_manager {
+                park_dacl_for_cleanup(mgr);
             }
+            resolved.runner
         }
-        ContainmentBackend::Wslc => {
-            #[cfg(feature = "wslc")]
-            {
-                if !request.experimental_enabled {
-                    eprintln!("Error: WSLC is an experimental feature. Use --experimental flag.");
-                    process::exit(1);
-                }
-                let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
-                let wslc_config = request
-                    .experimental
-                    .wslc
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_default();
-                Box::new(wslc_common::wsl_container_runner::WSLContainerRunner::new(
-                    &wslc_config,
-                ))
-            }
-            #[cfg(not(feature = "wslc"))]
-            {
-                eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Lxc => {
-            eprintln!("Error: LXC backend not available on Windows");
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            eprint!("{}", logger.get_buffer());
             telemetry::emit_early_exit(
                 telemetry_active,
                 &request.containment,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
-        }
-        ContainmentBackend::Bubblewrap => {
-            eprintln!("Error: Bubblewrap backend not available on Windows");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::Seatbelt => {
-            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::Vm => {
-            eprintln!("Error: VM backend not yet implemented");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
-                process::exit(1);
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Box::new(NanVixScriptRunner::new())
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Hyperlight => {
-            #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-            {
-                if !request.experimental_enabled {
-                    eprintln!(
-                        "Error: Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
-                         Use --experimental flag."
-                    );
-                    process::exit(1);
-                }
-                Box::new(HyperlightScriptRunner::new())
-            }
-            #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
-            {
-                eprintln!(
-                    "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
-                );
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::WindowsSandbox => {
-            if !request.experimental_enabled {
-                eprintln!(
-                    "Error: Windows Sandbox is an experimental feature. Use --experimental flag."
-                );
-                process::exit(1);
-            }
-            let sandbox_config = request
-                .experimental
-                .windows_sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
-            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
-        }
-        ContainmentBackend::IsolationSession => {
-            #[cfg(feature = "isolation_session")]
-            {
-                if !request.experimental_enabled {
-                    eprintln!(
-                        "Error: Isolation Session is an experimental feature. Use --experimental flag."
-                    );
-                    process::exit(1);
-                }
-                Box::new(IsolationSessionRunner::new())
-            }
-            #[cfg(not(feature = "isolation_session"))]
-            {
-                eprintln!(
-                    "Error: IsolationSession backend not compiled. Rebuild with --features isolation_session."
-                );
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
         }
     };
 

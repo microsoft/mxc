@@ -43,24 +43,24 @@
 //! The child's stdio is always wired to ordinary pipes — the library never
 //! allocates a pty. Stream the handle's `take_stdout`/`take_stderr`, or let
 //! [`wait`](Sandbox::wait) drain and discard any untaken stream.
+//!
+//! ## Relationship to `mxc_engine`
+//!
+//! This crate is a thin, streaming-focused public facade. Backend dispatch,
+//! host probing, and config building live in the internal `mxc_engine` crate;
+//! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
+//! handle in [`Sandbox`].
 
-mod dispatch;
-mod error;
-mod platform;
-pub mod policy;
 mod sandbox;
 
-use dispatch::spawn_runner;
-pub use platform::{platform_support, PlatformSupport};
-pub use policy::{
-    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
+pub use mxc_engine::policy;
+pub use mxc_engine::{
+    available_tools_policy, build_request, platform_support, temporary_files_policy,
+    user_profile_policy, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport, SandboxPolicy,
+    SandboxRequest,
 };
 
-pub use error::{Error, ErrorCode};
 pub use sandbox::{Output, Sandbox, StreamCloser, WaitOutcome};
-
-use wxc_common::logger::{Logger, Mode};
 
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
 /// the command, and any working directory / env, filled in).
@@ -69,8 +69,5 @@ use wxc_common::logger::{Logger, Mode};
 /// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
 /// drained and discarded by [`wait`](Sandbox::wait).
 pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
-    let mut logger = Logger::new(Mode::Buffer);
-    spawn_runner(&request.inner, &mut logger)
-        .map(Sandbox::new)
-        .map_err(Error::from)
+    mxc_engine::spawn(&request).map(Sandbox::new)
 }

@@ -527,7 +527,7 @@ pub struct SandboxPolicy {
 /// [`build_request`]. Fill in the command with
 /// [`set_script`](Self::set_script) — and optionally a working
 /// directory or environment — then hand it to
-/// [`spawn_sandbox`](crate::spawn_sandbox).
+/// [`spawn`](crate::spawn).
 ///
 /// This is the SDK's own request type; the internal execution model it maps to
 /// is an implementation detail callers don't depend on.
@@ -614,7 +614,7 @@ impl SandboxRequest {
 ///
 /// The returned request has an empty command line; set the command with
 /// [`SandboxRequest::set_script`] (and any working directory / env) before
-/// streaming it via [`crate::spawn_sandbox`].
+/// streaming it via [`crate::spawn`].
 ///
 /// Mirrors the SDK field mapping and validation (network proxy/host-filtering
 /// constraints) for the supported backends. Internally it builds the same

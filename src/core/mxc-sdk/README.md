@@ -144,9 +144,13 @@ pty, Seatbelt/Bubblewrap/AppContainer by inheriting the executor's stdio
 directly — a TTY when the executor has one). Output the caller doesn't
 take is drained and discarded by `wait()`.
 
-## Relationship to the executor binaries
+## Relationship to `mxc_engine` and the executor binaries
 
-The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not depend on this
-crate. It reuses the same backend crates they do, but selects between them
-directly (no BFS/DACL `dispatch_with_fallback`) and spawns its own streaming
-handles.
+Backend dispatch, host probing, and config building live in the internal
+`mxc_engine` crate; this crate is a thin streaming facade that re-exports the
+curated engine surface and wraps the engine's streaming handle in [`Sandbox`].
+
+The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not (yet) depend on
+this crate. The engine reuses the same backend crates they do, but the
+streaming path selects between them directly (no BFS/DACL
+`dispatch_with_fallback`) and spawns its own streaming handles.

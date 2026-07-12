@@ -8,9 +8,9 @@
 //! backends are available. This lets callers stop depending on the TypeScript
 //! SDK for platform discovery.
 //!
-//! **Provisional.** Like the backend dispatch in `dispatch.rs`, this host
-//! probing is a temporary home; it moves to the future `mxc` engine crate that
-//! both `mxc-sdk` and the executor binaries will share.
+//! This host probing lives in the engine alongside the backend dispatch in
+//! `dispatch.rs`, so both the public SDK and the executor binaries can share a
+//! single implementation.
 
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.

@@ -1572,12 +1572,8 @@ dependencies = [
 name = "mxc-sdk"
 version = "0.7.0"
 dependencies = [
- "appcontainer_common",
- "bwrap_common",
  "libc",
- "seatbelt_common",
- "serde",
- "serde_json",
+ "mxc_engine",
  "wxc_common",
 ]
 
@@ -1608,6 +1604,24 @@ dependencies = [
  "serde_json",
  "windows",
  "windows-core",
+ "wxc_common",
+]
+
+[[package]]
+name = "mxc_engine"
+version = "0.7.0"
+dependencies = [
+ "appcontainer_common",
+ "bwrap_common",
+ "hyperlight_common",
+ "isolation_session_bindings",
+ "isolation_session_common",
+ "nanvix_runner",
+ "seatbelt_common",
+ "serde",
+ "serde_json",
+ "windows_sandbox_common",
+ "wslc_common",
  "wxc_common",
 ]
 
@@ -3202,14 +3216,13 @@ dependencies = [
  "isolation_session_bindings",
  "isolation_session_common",
  "mxc_build_common",
+ "mxc_engine",
  "nanvix_binaries",
  "nanvix_build_common",
- "nanvix_runner",
  "plm",
  "serde_json",
  "tempfile",
  "windows",
- "windows_sandbox_common",
  "wslc_common",
  "wxc_common",
 ]
