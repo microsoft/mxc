@@ -21,6 +21,7 @@
 //! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
 //! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
+//! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
 //! - [`platform_support`] / [`PlatformSupport`] — host support detection.
 //! - [`Error`] / [`ErrorCode`] — the crate-owned error facade over
 //!   `wxc_common`'s internal error type.
@@ -31,6 +32,7 @@ mod platform;
 pub mod policy;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
+mod state_aware;
 
 pub use error::{Error, ErrorCode};
 pub use platform::{platform_support, PlatformSupport};
@@ -40,6 +42,7 @@ pub use policy::{
 };
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
+pub use state_aware::run_state_aware;
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::sandbox_process::SandboxProcess;

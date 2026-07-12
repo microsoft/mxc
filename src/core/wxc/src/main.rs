@@ -24,9 +24,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
-use wxc_common::state_aware_dispatch::dispatch_state_aware;
-use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
+use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use wxc_common::telemetry;
 
@@ -251,7 +249,7 @@ fn apply_command_override(
 /// regardless of mode (per design §7.3 stream protocol — stdout reserved
 /// for the response envelope).
 fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
-    let outcome = dispatch_state_aware_request(parsed, dry_run);
+    let outcome = mxc_engine::run_state_aware(parsed, dry_run);
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();
@@ -268,28 +266,6 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
             print_error_envelope(&e);
             process::exit(1);
         }
-    }
-}
-
-/// Per-backend dispatch for state-aware requests. Resolves the requested
-/// backend and constructs its `StatefulSandboxBackend` impl from the
-/// owning backend crate (which depends on `wxc_common`, so the
-/// construction can't live inside `wxc_common` without a cycle). Falls
-/// back to `wxc_common::state_aware_dispatch::run_state_aware` for
-/// backends that have no state-aware impl, which surfaces the
-/// `unsupported_phase` envelope.
-fn dispatch_state_aware_request(
-    parsed: ParsedStateAwareRequest,
-    dry_run: bool,
-) -> Result<DispatchOutcome, MxcError> {
-    let backend = resolve_backend(&parsed)?;
-    match backend {
-        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        wxc_common::models::ContainmentBackend::IsolationSession => {
-            let mut runner = isolation_session_common::IsolationSessionRunner::new();
-            dispatch_state_aware(&mut runner, parsed, dry_run)
-        }
-        _ => run_state_aware(parsed, dry_run),
     }
 }
 

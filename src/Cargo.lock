@@ -3212,8 +3212,6 @@ dependencies = [
  "appcontainer_common",
  "clap",
  "hyperlight_common",
- "isolation_session_bindings",
- "isolation_session_common",
  "mxc_build_common",
  "mxc_engine",
  "nanvix_binaries",
