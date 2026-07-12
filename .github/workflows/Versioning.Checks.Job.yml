@@ -7,8 +7,18 @@ jobs:
   versioning-checks:
     name: Versioning Checks
     runs-on: ubuntu-latest
+    env:
+      MXC_VERSIONING_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD^' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
 
       - uses: actions/setup-node@v4
         with:
@@ -23,6 +33,10 @@ jobs:
       - name: Install tooling deps
         working-directory: scripts/versioning
         run: npm ci
+
+      - name: Test versioning gate logic
+        working-directory: scripts/versioning
+        run: npm test
 
       - name: Check schema version sync
         run: node scripts/versioning/check-schema-versions.js
@@ -41,6 +55,9 @@ jobs:
 
       - name: Check the dev schema can be frozen to a valid stable schema
         run: node scripts/versioning/freeze-stable-schema.js --check
+
+      - name: Check released stable-schema history
+        run: node scripts/versioning/check-stable-schema-history.js
 
       - name: Check no breaking stable-schema change without a version bump
         run: node scripts/versioning/check-breaking-change.js

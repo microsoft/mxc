@@ -15,8 +15,11 @@
 //   node scripts/versioning/check-config-stability.js
 
 const { readFileSync } = require("fs");
-const { execFileSync } = require("child_process");
 const { join } = require("path");
+const {
+  readFileAtCommit,
+  resolveBaseCommit,
+} = require("./lib/git-base");
 
 const repoRoot = join(__dirname, "..", "..");
 const errors = [];
@@ -41,22 +44,23 @@ function minorGreater(a, b) {
   return pa[0] > pb[0] || (pa[0] === pb[0] && pa[1] > pb[1]);
 }
 
-// Read the manifest as it stood at a base ref (the promotion-history baseline).
-// Falls back gracefully when there is no committed predecessor (first add).
 function baseManifest() {
-  for (const ref of ["origin/main", "HEAD~1"]) {
-    try {
-      const txt = execFileSync(
-        "git",
-        ["show", `${ref}:schemas/config-stability.json`],
-        { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
-      );
-      return JSON.parse(txt);
-    } catch {
-      /* ref or file absent; try next */
-    }
+  let base;
+  try {
+    base = resolveBaseCommit(repoRoot);
+  } catch (error) {
+    errors.push(error.message);
+    return { manifest: null, base: null };
   }
-  return null;
+  const content = readFileAtCommit(
+    repoRoot,
+    base.commit,
+    "schemas/config-stability.json"
+  );
+  return {
+    manifest: content === null ? null : JSON.parse(content),
+    base,
+  };
 }
 
 const manifest = JSON.parse(read("schemas", "config-stability.json"));
@@ -119,6 +123,10 @@ for (const [k, atMinor] of Object.entries(manifest.movedToStable || {})) {
   }
   if (!/^\d+\.\d+$/.test(atMinor)) {
     errors.push(`movedToStable["${k}"] = "${atMinor}" must be a major.minor string.`);
+  } else if (minorGreater(atMinor, manifest.schemaMinor)) {
+    errors.push(
+      `movedToStable["${k}"] = "${atMinor}" is newer than schemaMinor ${manifest.schemaMinor}.`
+    );
   }
 }
 
@@ -128,7 +136,7 @@ for (const [k, atMinor] of Object.entries(manifest.movedToStable || {})) {
 //    AND the schema minor MUST have advanced. A key that simply vanished (delete
 //    + promote) is therefore caught even though nothing top-level references its
 //    experimental past.
-const base = baseManifest();
+const { manifest: base, base: baseInfo } = baseManifest();
 if (base) {
   const baseActive = new Set(base.experimental || []);
   const baseTombstones = new Set(Object.keys(base.movedToStable || {}));
@@ -144,13 +152,26 @@ if (base) {
         `"${k}" was promoted to stable but schemaMinor did not advance ` +
           `(base ${base.schemaMinor} -> now ${manifest.schemaMinor}). Promotion requires a minor bump.`
       );
+    } else if (manifest.movedToStable[k] !== manifest.schemaMinor) {
+      errors.push(
+        `"${k}" was promoted in schema minor ${manifest.schemaMinor}, so its tombstone must record that exact minor.`
+      );
     }
   }
   for (const k of baseTombstones) {
     if (!tombstones.has(k)) {
       errors.push(`"${k}" was a tombstone at base but is gone now; tombstones are permanent.`);
+    } else if (manifest.movedToStable[k] !== base.movedToStable[k]) {
+      errors.push(
+        `tombstone "${k}" changed its recorded promotion minor ` +
+          `${base.movedToStable[k]} -> ${manifest.movedToStable[k]}; tombstone metadata is immutable.`
+      );
     }
   }
+} else if (baseInfo) {
+  console.log(
+    `Config stability history: no manifest at ${baseInfo.ref} (${baseInfo.commit.slice(0, 8)}); treating this as the initial introduction.`
+  );
 }
 
 if (errors.length) {

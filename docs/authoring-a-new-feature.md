@@ -366,6 +366,13 @@ schema can still be frozen cleanly (valid, no dangling `$ref`s, experimental
 surface fully removed). The legacy hand-authored stables (0.4–0.7) stay frozen as
 historical artifacts and are never regenerated.
 
+Keep the release freeze separate from opening the next dev line: the release
+change may add one stable schema and update `stableLatest`, but must not also
+change `maxSupported`, `devSchemaFile`, the dev schema, or
+`config-stability.json`. `check-stable-schema-history.js` enforces that every
+older stable file is byte-for-byte immutable and that the newly added file
+exactly matches `freeze-stable-schema.js --check-release <version>`.
+
 ## Checklist
 
 - [ ] Schema updated in `schemas/dev/mxc-config.schema.X.Y.Z-dev.json`

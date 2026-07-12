@@ -16,6 +16,7 @@
 // Usage (from anywhere):
 //   node scripts/versioning/freeze-stable-schema.js --check
 //   node scripts/versioning/freeze-stable-schema.js --write <version>   # e.g. 0.8.0-alpha
+//   node scripts/versioning/freeze-stable-schema.js --check-release <version>
 //
 // The generated stable schema intentionally does NOT reproduce the legacy
 // hand-authored stables' shape or their top-level allOf cross-field rules (the
@@ -23,9 +24,10 @@
 // Legacy stable files (0.4-0.7) stay frozen as historical artifacts and are
 // never diffed against generated stables.
 
-const { readFileSync, writeFileSync } = require("fs");
+const { existsSync, readFileSync, writeFileSync } = require("fs");
 const { join, resolve } = require("path");
 const Ajv = require("ajv");
+const { parseVersion } = require("./lib/version");
 
 const repoRoot = resolve(__dirname, "..", "..");
 const readJson = (...p) => JSON.parse(readFileSync(join(repoRoot, ...p), "utf8"));
@@ -268,6 +270,7 @@ if (mode === "--check") {
 } else if (mode === "--write") {
   const version = args[1];
   if (!version) fail("--write requires a <version>, e.g. 0.8.0-alpha");
+  if (!parseVersion(version)) fail(`--write version "${version}" is not valid semver`);
   const result = generateStable(version);
   const errors = validateStable(result);
   if (errors.length) {
@@ -278,6 +281,34 @@ if (mode === "--check") {
   const rel = join("schemas", "stable", `mxc-config.schema.${version}.json`);
   writeFileSync(join(repoRoot, rel), JSON.stringify(result.out, null, 2) + "\n");
   console.log(`Wrote stable schema ${rel}. Remember to update schemas/schema-version.json stableLatest and the docs.`);
+} else if (mode === "--check-release") {
+  const version = args[1];
+  if (!version) fail("--check-release requires a <version>");
+  if (!parseVersion(version)) {
+    fail(`--check-release version "${version}" is not valid semver`);
+  }
+  const result = generateStable(version);
+  const errors = validateStable(result);
+  if (errors.length) {
+    console.error("Freeze stable schema FAILED (--check-release):");
+    for (const e of errors) console.error("  - " + e);
+    process.exit(1);
+  }
+  const rel = join("schemas", "stable", `mxc-config.schema.${version}.json`);
+  const abs = join(repoRoot, rel);
+  if (!existsSync(abs)) fail(`release schema does not exist: ${rel}`);
+  const normalize = (value) => value.replace(/\r\n/g, "\n");
+  const expected = JSON.stringify(result.out, null, 2) + "\n";
+  const actual = readFileSync(abs, "utf8");
+  if (normalize(actual) !== normalize(expected)) {
+    fail(
+      `${rel} does not match the freeze generator. Recreate it with ` +
+        `node scripts/versioning/freeze-stable-schema.js --write ${version}`
+    );
+  }
+  console.log(`Freeze release check OK: ${rel} matches the generated stable schema.`);
 } else {
-  fail("usage: freeze-stable-schema.js --check | --write <version>");
+  fail(
+    "usage: freeze-stable-schema.js --check | --write <version> | --check-release <version>"
+  );
 }
