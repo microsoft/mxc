@@ -4,10 +4,12 @@
   "private": true,
   "description": "Repository tooling: version-sync and config schema validation gates. Not published.",
   "scripts": {
+    "test": "node --test tests/*.test.js",
     "check-schema-versions": "node check-schema-versions.js",
     "check-codegen": "node check-codegen.js",
     "check-schema-conformance": "node check-schema-conformance.js",
-    "check-config-stability": "node check-config-stability.js"
+    "check-config-stability": "node check-config-stability.js",
+    "check-stable-schema-history": "node check-stable-schema-history.js"
   },
   "dependencies": {
     "ajv": "^8.17.1"

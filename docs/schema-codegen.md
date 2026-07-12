@@ -42,14 +42,23 @@ standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
 - **`check-schema-versions.js`** / **`check-version-sync.js`** — version-constant
   and product-version sync.
 - **`check-config-stability.js`** — promotion guard (experimental surface +
-  tombstones + minor-bump-on-promotion).
+  tombstones + minor-bump-on-promotion), compared against the actual PR base.
 - **`freeze-stable-schema.js --check`** — proves the dev schema can be frozen to
   a valid stable schema; `--write <ver>` generates the stable release file.
+- **`check-stable-schema-history.js`** — rejects edits or deletion of every
+  released stable schema. A release change may add one new schema, must advance
+  `stableLatest` to it, and verifies the file exactly matches the freeze
+  generator. The dev schema and stability manifest advance in separate changes.
 - **`check-breaking-change.js`** — when `stableLatest` changes, fails if a
   breaking schema change ships without an adequate version bump (pre-1.0:
   breaking needs ≥ minor; ≥1.0: needs major). Detection runs only for
   same-major.minor transitions, so legacy↔generated shape differences (always a
   ≥minor gap) are never diffed.
+
+The history-aware gates receive the pull request base explicitly in CI and fail
+closed if it is unavailable. The checkout fetches history and the base branch;
+the scripts compare against the merge-base so they remain correct for either a
+pull-request merge checkout or a head checkout.
 
 ## What the generated schema does NOT contain
 
