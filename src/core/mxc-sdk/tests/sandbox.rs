@@ -288,3 +288,50 @@ fn process_container_finite_timeout_fires() {
     // The bounded wait is enforced by the test harness; a hang here is the
     // failure mode the regression guards against.
 }
+
+// ---------------------------------------------------------------------------
+// `run` — the run-to-completion convenience (spawn + wait_with_output).
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+#[test]
+fn run_captures_stdout_seatbelt() {
+    // `run` spawns, waits, and returns captured stdout/stderr in one call.
+    let output = mxc_sdk::run(seatbelt_request("echo hello-run", 10000))
+        .expect("seatbelt run should succeed");
+    assert_eq!(output.outcome, WaitOutcome::Exited(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("hello-run"),
+        "stdout should be captured, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn run_reports_timeout_seatbelt() {
+    // A finite scriptTimeout shorter than the command must surface as
+    // `WaitOutcome::TimedOut` rather than an error.
+    let output =
+        mxc_sdk::run(seatbelt_request("sleep 30", 1000)).expect("run should return an outcome");
+    assert_eq!(output.outcome, WaitOutcome::TimedOut);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+fn run_captures_stdout_process_container() {
+    // `run` spawns, waits, and returns captured stdout/stderr in one call.
+    let output = mxc_sdk::run(process_container_request(
+        "0.7.0-alpha",
+        "cmd /c echo hello-run",
+        30000,
+    ))
+    .expect("ProcessContainer run should succeed");
+    assert_eq!(output.outcome, WaitOutcome::Exited(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("hello-run"),
+        "stdout should be captured, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
