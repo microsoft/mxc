@@ -146,6 +146,15 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             )
         )
     )
+
+    :: Copy the C# SDK's native library (mxc_ffi) into its runtime assets so a
+    :: NuGet pack picks it up as runtimes/<rid>/native/mxc_ffi.dll.
+    if "%%T"=="x86_64-pc-windows-msvc" (set "RID=win-x64") else (set "RID=win-arm64")
+    if exist "!BIN_DIR!\mxc_ffi.dll" (
+        if not exist "csharp\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "csharp\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
+        copy /Y "!BIN_DIR!\mxc_ffi.dll" "csharp\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
+        echo   Copied !RID!\native\mxc_ffi.dll
+    )
 )
 
 :: Build npm packages

@@ -1,0 +1,7 @@
+# C# build artifacts
+bin/
+obj/
+
+# Native libraries staged by build.bat / build.sh / build-mac.sh for packaging
+# (rebuilt from src/ffi/mxc_ffi; not source).
+runtimes/

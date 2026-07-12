@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Microsoft.Mxc.Sdk</RootNamespace>
+    <AssemblyName>Microsoft.Mxc.Sdk</AssemblyName>
+    <Version>0.7.0</Version>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Description>C# SDK for MXC (Microsoft eXecution Container), binding the native mxc_ffi library.</Description>
+  </PropertyGroup>
+
+  <!-- Native mxc_ffi libraries (populated by build.bat/build.sh/build-mac.sh)
+       are packed as NuGet runtime assets. For local dev/test the native lib is
+       instead located by NativeLibraryResolver from the Cargo target dir. -->
+  <ItemGroup>
+    <None Include="runtimes/**/*" Pack="true" PackagePath="runtimes/" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

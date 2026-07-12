@@ -36,4 +36,24 @@ if (cargoVersion !== npmVersion) {
   process.exit(1);
 }
 
+// The C# SDK version must also track the workspace version.
+const csproj = readFileSync(
+  join(repoRoot, "csharp", "Microsoft.Mxc.Sdk", "Microsoft.Mxc.Sdk.csproj"),
+  "utf8"
+);
+const csharpMatch = csproj.match(/<Version>([^<]+)<\/Version>/);
+if (!csharpMatch) {
+  console.error(
+    "ERROR: Could not find <Version> in csharp/Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj"
+  );
+  process.exit(1);
+}
+const csharpVersion = csharpMatch[1].trim();
+if (cargoVersion !== csharpVersion) {
+  console.error(
+    `ERROR: Version mismatch — src/Cargo.toml has "${cargoVersion}" but the C# SDK csproj has "${csharpVersion}"`
+  );
+  process.exit(1);
+}
+
 console.log(`Version sync OK: ${cargoVersion}`);
