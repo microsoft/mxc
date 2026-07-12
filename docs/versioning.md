@@ -73,6 +73,18 @@ reasons:
   config runs the same way regardless of which (in-range) schema version it
   declares.
 
+The range is a compatibility promise, not version-specific dispatch. MXC
+currently has one current wire model and parser for every accepted line; it
+does not select a historical parser from `config.version`. Consequently, a
+generated stable release may keep an older line above `min` only while the new
+schema remains backward compatible with that line. If a release breaks it,
+`min` must advance to the new release's major.minor line. The first generated
+stable release (`0.8`) also advances the floor because structural equivalence
+with the legacy hand-authored schemas cannot be established safely. Once a
+schema line is retired, `min` is monotonic and cannot move backward to
+re-advertise it later. Until `0.8` is frozen, the dev ceiling remains on the
+`0.8` line so that the immutable generated floor cannot be skipped.
+
 ## Schema Shipping Model
 
 ```
@@ -89,6 +101,12 @@ mxc/schemas/
 Retired stable schema files are **kept as immutable historical artifacts** — the
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
+
+`generatedStableFloor` in `schemas/schema-version.json` records the first
+stable schema produced by the freeze generator. Generated-to-generated
+releases are structurally compared. The legacy-to-generated boundary is handled
+conservatively by retiring the legacy lines when the first generated release is
+cut.
 
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
 section structure so that editors can validate experimental configs.

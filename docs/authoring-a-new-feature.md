@@ -373,6 +373,15 @@ change `maxSupported`, `devSchemaFile`, the dev schema, or
 older stable file is byte-for-byte immutable and that the newly added file
 exactly matches `freeze-stable-schema.js --check-release <version>`.
 
+MXC currently has one wire parser for the entire supported range. The first
+generated stable release (`generatedStableFloor` in
+`schemas/schema-version.json`) must therefore advance `min` to that release
+line; structural compatibility with the legacy hand-authored schemas is not
+claimed. For later generated releases, `check-supported-range.js` allows an
+older floor only when the new stable schema remains backward compatible. A
+breaking release must update `min` (and every mirrored parser/SDK constant) to
+its own major.minor line in the same release change.
+
 ## Checklist
 
 - [ ] Schema updated in `schemas/dev/mxc-config.schema.X.Y.Z-dev.json`

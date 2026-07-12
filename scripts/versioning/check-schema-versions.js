@@ -12,8 +12,17 @@
 //
 //   node scripts/versioning/check-schema-versions.js
 
-const { readFileSync, existsSync } = require("fs");
+const { readFileSync, existsSync, readdirSync } = require("fs");
 const { join } = require("path");
+const {
+  compareMajorMinor,
+  compareVersions,
+  majorMinor,
+  parseVersion,
+} = require("./lib/version");
+const {
+  validatePreFloorDevLine,
+} = require("./lib/supported-range-contract");
 
 const repoRoot = join(__dirname, "..", "..");
 const errors = [];
@@ -26,13 +35,14 @@ function read(...parts) {
 // Schema version constants vs canonical source
 // ---------------------------------------------------------------------------
 const schemaVer = JSON.parse(read("schemas", "schema-version.json"));
-const { min, maxSupported, stateAware, stableLatest, devSchemaFile } = schemaVer;
-
-// major.minor of a semver-ish "X.Y.Z[-pre]" string.
-function majorMinor(v) {
-  const m = /^(\d+)\.(\d+)\./.exec(v);
-  return m ? `${m[1]}.${m[2]}` : null;
-}
+const {
+  min,
+  maxSupported,
+  stateAware,
+  stableLatest,
+  generatedStableFloor,
+  devSchemaFile,
+} = schemaVer;
 
 // Assert a regex captures exactly `expected` in `text`.
 function expectConst(file, text, label, regex, expected) {
@@ -114,6 +124,86 @@ if (!existsSync(join(repoRoot, stablePath))) {
 const devPath = join("schemas", "dev", `mxc-config.schema.${devSchemaFile}.json`);
 if (!existsSync(join(repoRoot, devPath))) {
   errors.push(`Missing dev schema file for devSchemaFile "${devSchemaFile}": ${devPath}`);
+}
+
+// -- Semantic ordering of the canonical version fields --
+const parsed = {
+  min: parseVersion(min),
+  maxSupported: parseVersion(maxSupported),
+  stateAware: parseVersion(stateAware),
+  stableLatest: parseVersion(stableLatest),
+  generatedStableFloor: parseVersion(generatedStableFloor),
+  devSchemaFile: parseVersion(devSchemaFile),
+};
+for (const [name, value] of Object.entries(parsed)) {
+  if (!value) errors.push(`schema-version.json ${name} is not valid semver`);
+}
+if (Object.values(parsed).every(Boolean)) {
+  errors.push(
+    ...validatePreFloorDevLine(
+      stableLatest,
+      maxSupported,
+      generatedStableFloor
+    )
+  );
+  if (compareVersions(parsed.min, parsed.stableLatest) > 0) {
+    errors.push(`schema-version.json min ${min} is newer than stableLatest ${stableLatest}`);
+  }
+  if (compareVersions(parsed.stableLatest, parsed.maxSupported) > 0) {
+    errors.push(
+      `schema-version.json stableLatest ${stableLatest} is newer than maxSupported ${maxSupported}`
+    );
+  }
+  if (
+    compareVersions(parsed.stateAware, parsed.min) < 0 ||
+    compareVersions(parsed.stateAware, parsed.maxSupported) > 0
+  ) {
+    errors.push(
+      `schema-version.json stateAware ${stateAware} must be within [${min}, ${maxSupported}]`
+    );
+  }
+  if (compareVersions(parsed.generatedStableFloor, parsed.maxSupported) > 0) {
+    errors.push(
+      `schema-version.json generatedStableFloor ${generatedStableFloor} is newer than maxSupported ${maxSupported}`
+    );
+  }
+  if (
+    compareVersions(parsed.stableLatest, parsed.generatedStableFloor) >= 0
+  ) {
+    const generatedFloorPath = join(
+      "schemas",
+      "stable",
+      `mxc-config.schema.${generatedStableFloor}.json`
+    );
+    if (!existsSync(join(repoRoot, generatedFloorPath))) {
+      errors.push(
+        `Missing first generated stable schema "${generatedStableFloor}": ${generatedFloorPath}`
+      );
+    }
+    if (compareMajorMinor(parsed.min, parsed.generatedStableFloor) < 0) {
+      errors.push(
+        `schema-version.json min ${min} cannot remain below generatedStableFloor ${generatedStableFloor} once that release exists`
+      );
+    }
+  }
+  if (majorMinor(parsed.devSchemaFile) !== majorMinor(parsed.maxSupported)) {
+    errors.push(
+      `devSchemaFile ${devSchemaFile} must share maxSupported's ${majorMinor(parsed.maxSupported)} line`
+    );
+  }
+}
+
+const stableVersions = readdirSync(join(repoRoot, "schemas", "stable"))
+  .map((file) => /^mxc-config\.schema\.(.+)\.json$/.exec(file))
+  .filter(Boolean)
+  .map((match) => parseVersion(match[1]))
+  .filter(Boolean)
+  .sort(compareVersions);
+const highestStable = stableVersions[stableVersions.length - 1];
+if (highestStable && highestStable.raw !== stableLatest) {
+  errors.push(
+    `stableLatest ${stableLatest} is not the highest stable schema file (${highestStable.raw})`
+  );
 }
 
 // ---------------------------------------------------------------------------
