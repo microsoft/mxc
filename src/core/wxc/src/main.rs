@@ -21,7 +21,7 @@ use wxc_common::config_parser::{
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
@@ -183,22 +183,6 @@ fn has_cli_command(cli: &Cli) -> bool {
     !cli.command.is_empty()
 }
 
-fn command_line_context_for_backend(backend: &ContainmentBackend) -> CommandLineContext {
-    match backend {
-        ContainmentBackend::IsolationSession | ContainmentBackend::WindowsSandbox => {
-            CommandLineContext::WindowsCommandProcessor
-        }
-        ContainmentBackend::Wslc
-        | ContainmentBackend::Lxc
-        | ContainmentBackend::Seatbelt
-        | ContainmentBackend::Bubblewrap => CommandLineContext::PosixShell,
-        ContainmentBackend::ProcessContainer
-        | ContainmentBackend::Vm
-        | ContainmentBackend::MicroVm
-        | ContainmentBackend::Hyperlight => CommandLineContext::WindowsCreateProcess,
-    }
-}
-
 fn command_override_from_cli(
     cli: &Cli,
     context: CommandLineContext,
@@ -222,7 +206,7 @@ fn command_override_context_for_state_aware(
             "CLI command override is only supported for state-aware exec requests",
         ));
     }
-    resolve_backend(parsed).map(|backend| Some(command_line_context_for_backend(&backend)))
+    resolve_backend(parsed).map(|backend| Some(CommandLineContext::for_backend(&backend)))
 }
 
 fn apply_command_override(
@@ -776,7 +760,7 @@ fn main() {
     // exec is handled above before dispatch.
     let command_override = match command_override_from_cli(
         &cli,
-        command_line_context_for_backend(&request.containment),
+        CommandLineContext::for_backend(&request.containment),
     ) {
         Ok(command_override) => command_override,
         Err(e) => {
@@ -1143,6 +1127,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use wxc_common::encoding::base64_encode;
     use wxc_common::logger::Mode;
+    use wxc_common::models::ContainmentBackend;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::MxcRequest;
 
@@ -1304,7 +1289,7 @@ mod tests {
     #[test]
     fn windows_sandbox_cli_command_uses_cmd_context() {
         assert_eq!(
-            command_line_context_for_backend(&ContainmentBackend::WindowsSandbox),
+            CommandLineContext::for_backend(&ContainmentBackend::WindowsSandbox),
             CommandLineContext::WindowsCommandProcessor
         );
     }
