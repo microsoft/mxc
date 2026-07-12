@@ -3,6 +3,7 @@
   "schemaMinor": "0.8",
   "experimental": [
     "isolation_session",
+    "telemetry",
     "test",
     "windows_sandbox",
     "wslc"
