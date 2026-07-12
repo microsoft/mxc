@@ -13,6 +13,9 @@ path = "src/lib.rs"
 wxc_common.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
+# MicroVM runner — used by the Windows and Linux run-to-completion bodies under
+# the `microvm` feature. Never built on hosts/features that don't select it.
+nanvix_runner = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight_common = { workspace = true, optional = true }
@@ -22,11 +25,11 @@ appcontainer_common = { workspace = true }
 windows_sandbox_common = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
-nanvix_runner = { workspace = true, optional = true }
 wslc_common = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bwrap_common = { workspace = true }
+lxc_common = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 seatbelt_common = { workspace = true }

@@ -15,7 +15,7 @@ use std::process;
 use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest};
+use wxc_common::models::ExecutionRequest;
 
 #[cfg(target_os = "macos")]
 use std::time::Instant;
@@ -23,7 +23,7 @@ use std::time::Instant;
 use wxc_common::models::ScriptResponse;
 
 #[cfg(target_os = "macos")]
-use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::script_runner::handle_dry_run_exit;
 
 #[derive(Parser)]
 #[command(name = "mxc-exec-mac", about = "macOS sandbox executor for MXC")]
@@ -120,23 +120,23 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // The SDK should always select Seatbelt on darwin. Be lenient and
-    // log a note instead of failing — same behaviour as `lxc-exec`.
-    if request.containment != ContainmentBackend::Seatbelt {
-        logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
-    }
-
     run_seatbelt(&request, &mut logger);
 }
 
 #[cfg(target_os = "macos")]
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
-    use seatbelt_common::seatbelt_runner::SeatbeltScriptRunner;
-    use wxc_common::sandbox_process::Runner;
-
-    let mut runner = Runner::new(SeatbeltScriptRunner::new());
+    // Backend selection lives in `mxc_engine::run`, the single home for one-shot
+    // dispatch. On macOS it always resolves to Seatbelt (logging a note if the
+    // request asked for a different backend) and runs it to completion.
     let run_start = Instant::now();
-    let response = runner.run(request, logger);
+    let response = match mxc_engine::run(request, logger) {
+        Ok(response) => response,
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            eprint!("{}", logger.get_buffer());
+            process::exit(1);
+        }
+    };
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 

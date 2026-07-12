@@ -1453,14 +1453,12 @@ name = "lxc"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "bwrap_common",
  "clap",
- "hyperlight_common",
  "lxc_common",
  "mxc_build_common",
+ "mxc_engine",
  "nanvix_binaries",
  "nanvix_build_common",
- "nanvix_runner",
  "wxc_common",
 ]
 
@@ -1590,7 +1588,7 @@ version = "0.7.0"
 dependencies = [
  "clap",
  "mxc_build_common",
- "seatbelt_common",
+ "mxc_engine",
  "wxc_common",
 ]
 
@@ -1616,6 +1614,7 @@ dependencies = [
  "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
+ "lxc_common",
  "nanvix_runner",
  "seatbelt_common",
  "serde",

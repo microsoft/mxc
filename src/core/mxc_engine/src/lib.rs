@@ -29,7 +29,7 @@ mod dispatch;
 mod error;
 mod platform;
 pub mod policy;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 
 pub use error::{Error, ErrorCode};
@@ -38,7 +38,7 @@ pub use policy::{
     available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
     FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
 };
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
 
 use wxc_common::logger::{Logger, Mode};

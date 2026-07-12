@@ -1,0 +1,55 @@
+{
+  "commit": "local",
+  "timestamp": "1783890659",
+  "results": [
+    {
+      "test": "microvm_hello.json",
+      "description": "Hello world",
+      "wall_time_ms": 84,
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "test": "microvm_exit_code.json",
+      "description": "Exit code propagation",
+      "wall_time_ms": 72,
+      "exit_code": 42,
+      "status": "PASS"
+    },
+    {
+      "test": "microvm_multiline.json",
+      "description": "Multi-line script (fibonacci)",
+      "wall_time_ms": 72,
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "test": "microvm_stdlib.json",
+      "description": "Stdlib (json, math, hashlib)",
+      "wall_time_ms": 101,
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "test": "microvm_large_output.json",
+      "description": "Large stdout (1000 lines)",
+      "wall_time_ms": 135,
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "test": "microvm_error.json",
+      "description": "Python exception",
+      "wall_time_ms": 82,
+      "exit_code": 1,
+      "status": "PASS"
+    },
+    {
+      "test": "microvm_timeout.json",
+      "description": "Timeout kills VM",
+      "wall_time_ms": 65044,
+      "exit_code": -1,
+      "status": "PASS"
+    }
+  ]
+}
