@@ -9,7 +9,8 @@
     "check-codegen": "node check-codegen.js",
     "check-schema-conformance": "node check-schema-conformance.js",
     "check-config-stability": "node check-config-stability.js",
-    "check-stable-schema-history": "node check-stable-schema-history.js"
+    "check-stable-schema-history": "node check-stable-schema-history.js",
+    "check-supported-range": "node check-supported-range.js"
   },
   "dependencies": {
     "ajv": "^8.17.1"

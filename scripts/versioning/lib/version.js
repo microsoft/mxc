@@ -2,13 +2,28 @@
 // Licensed under the MIT License.
 
 function parseVersion(value) {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(value || "");
+  if (typeof value !== "string" || value.length > 256) return null;
+  const match =
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(
+      value || ""
+    );
   if (!match) return null;
+  const core = match.slice(1, 4).map(Number);
+  if (core.some((part) => !Number.isSafeInteger(part))) return null;
+  const prerelease = match[4] || "";
+  if (
+    prerelease
+      .split(".")
+      .some((identifier) => /^\d+$/.test(identifier) && identifier.length > 1 && identifier[0] === "0")
+  ) {
+    return null;
+  }
   return {
-    major: Number(match[1]),
-    minor: Number(match[2]),
-    patch: Number(match[3]),
-    prerelease: match[4] || "",
+    major: core[0],
+    minor: core[1],
+    patch: core[2],
+    prerelease,
+    build: match[5] || "",
     raw: value,
   };
 }
@@ -51,7 +66,7 @@ function majorMinor(value) {
 }
 
 function parseMajorMinor(value) {
-  const match = /^(\d+)\.(\d+)$/.exec(value || "");
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value || "");
   return match ? { major: Number(match[1]), minor: Number(match[2]), raw: value } : null;
 }
 

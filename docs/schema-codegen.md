@@ -54,6 +54,13 @@ standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
   breaking needs ≥ minor; ≥1.0: needs major). Detection runs only for
   same-major.minor transitions, so legacy↔generated shape differences (always a
   ≥minor gap) are never diffed.
+- **`check-supported-range.js`** — enforces the runtime implication of MXC's
+  single current wire parser. The first generated stable release advances the
+  floor past the legacy hand-authored schemas; after that, a generated schema
+  may retain older lines only while structural compatibility is preserved.
+  Breaking releases must advance `min` to their own major.minor line.
+  The supported floor is monotonic: a retired line cannot be advertised again
+  by lowering `min` in a later change.
 
 The history-aware gates receive the pull request base explicitly in CI and fail
 closed if it is unavailable. The checkout fetches history and the base branch;

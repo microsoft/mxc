@@ -221,7 +221,8 @@ Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`
 MXC config files include an optional `version` field using
 [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH). The parser uses
 this to detect incompatible configs and provide clear upgrade guidance. If
-`version` is absent, the config is assumed compatible with the current version.
+`version` is absent, the config opts into the current parser shape and has no
+cross-release compatibility guarantee.
 
 Versions with a pre-release suffix (e.g., `-alpha`) indicate the schema is not
 yet stable — breaking changes may occur in any release. Once the schema is
@@ -247,12 +248,15 @@ The parser compares the config's major.minor against its supported version
 |---|---|---|
 | Backward-compatible bug fix | **Patch** (0.4.0 → 0.4.1) | Fix default value |
 | New optional field or functionality | **Minor** (0.4.0 → 0.5.0) | Adding `resources` section |
-| Remove a field / breaking change | **Major** (0.x → 1.0.0) | Dropping legacy fields |
+| Remove a field / breaking change | **Minor before 1.0; major after 1.0** (0.7.0 → 0.8.0) | Dropping legacy fields |
 
 **Rule of thumb:** Follow [semver](https://semver.org/). While in `0.x` (initial
 development), any release may include breaking changes per
 [semver §4](https://semver.org/#spec-item-4). Once `1.0.0` is reached, breaking
-changes require a major bump.
+changes require a major bump. Because MXC currently uses one current parser for
+every accepted schema line, a breaking release must also advance the supported
+floor (`min`) to that release's major.minor line; otherwise the advertised range
+would claim compatibility the parser no longer provides.
 
 #### Migration process for breaking changes
 
