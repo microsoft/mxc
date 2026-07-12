@@ -1,0 +1,20 @@
+[package]
+name = "mxc_ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI over the MXC public Rust SDK (mxc-sdk) for language bindings (e.g. the C# SDK)."
+
+[lib]
+name = "mxc_ffi"
+# cdylib: the shared library language bindings load (mxc_ffi.dll / libmxc_ffi.so
+# / libmxc_ffi.dylib). staticlib: for consumers that link statically. lib: so
+# Rust integration tests can call the `extern "C"` entry points directly.
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+mxc-sdk = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+csbindgen = "1"

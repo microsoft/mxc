@@ -507,6 +507,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "csbindgen"
+version = "1.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "950f59b281d7e20f050b4efd56d7c36c0deb853bf9ea1f20b985a75ae5b03b34"
+dependencies = [
+ "regex",
+ "syn",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1622,6 +1632,15 @@ dependencies = [
  "windows_sandbox_common",
  "wslc_common",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_ffi"
+version = "0.7.0"
+dependencies = [
+ "csbindgen",
+ "mxc-sdk",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,35 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Generates the C# P/Invoke layer for the C# SDK from this crate's `extern
+//! "C"` surface, using csbindgen. The generated file is checked in (a CI drift
+//! gate regenerates and diffs it); regenerating on build keeps it in lockstep
+//! with the Rust FFI.
+
+use std::path::Path;
+
+fn main() {
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=build.rs");
+
+    // Repo-root `csharp/` project (this crate lives at `src/ffi/mxc_ffi`).
+    let out_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../csharp/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs");
+
+    if let Some(parent) = out_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            println!("cargo:warning=mxc_ffi: could not create {parent:?}: {e}");
+            return;
+        }
+    }
+
+    if let Err(e) = csbindgen::Builder::default()
+        .input_extern_file("src/lib.rs")
+        .csharp_dll_name("mxc_ffi")
+        .csharp_namespace("Microsoft.Mxc.Sdk.Native")
+        .csharp_class_name("NativeMethods")
+        .generate_csharp_file(&out_path)
+    {
+        println!("cargo:warning=mxc_ffi: csbindgen generation failed: {e}");
+    }
+}
