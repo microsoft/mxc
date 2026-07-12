@@ -17,10 +17,29 @@
 //!   (which frees a whole [`MxcRunResult`]) or [`mxc_string_free`]. The pointer
 //!   returned by [`mxc_version`] is static and must **not** be freed.
 //! - **Never unwinds**: every entry point wraps its body in
-//!   [`catch_unwind`](std::panic::catch_unwind); a panic becomes a status code
+//!   [`std::panic::catch_unwind`]; a panic becomes a status code
 //!   ([`MXC_STATUS_PANIC`]), never an unwind across the boundary.
 //! - **Data contract**: JSON in, captured bytes + status out. The status codes
 //!   mirror `mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
+//!
+//! ## ABI stability
+//!
+//! **This C ABI is not (yet) a stable external contract.** The native library
+//! and every binding that loads it (currently the C# SDK) are built and
+//! versioned **together** from this repository at the same workspace version,
+//! and the C# P/Invoke layer is *generated* from this surface by csbindgen (a
+//! CI drift gate keeps the two in lockstep). Because both halves always ship
+//! together, this surface is free to evolve — entry points may be added, and
+//! the layout of `#[repr(C)]` types such as [`MxcRunResult`] may change —
+//! between releases **without** a compatibility shim, so long as the generated
+//! binding is regenerated in the same change. Do not treat `mxc_ffi` as a
+//! frozen ABI to link third-party consumers against; consume MXC through a
+//! versioned binding (the C# SDK) matched to the same release.
+//!
+//! Planned additions (streaming stdio + process control, and the state-aware
+//! lifecycle) will extend this surface with new entry points and types; the
+//! [`MXC_STATUS_*`](MXC_STATUS_SUCCESS) space already reserves the codes those
+//! paths need, so they will not perturb the existing one.
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::catch_unwind;

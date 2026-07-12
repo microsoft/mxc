@@ -65,6 +65,19 @@ over the backends the public Rust SDK supports (Windows ProcessContainer, Linux
 Bubblewrap, macOS Seatbelt). Streaming stdio, process control, and the
 state-aware lifecycle are planned follow-ups.
 
+## ABI stability
+
+The native `mxc_ffi` C ABI is **not a stable external contract**. This C# SDK
+and the native library are built and versioned **together** from this
+repository at the same version, and the P/Invoke layer is generated from the
+native surface (see below). Because both halves always ship together, the
+native surface is free to evolve between releases without a compatibility shim.
+
+The practical rule: **always run this managed SDK against the `mxc_ffi` built
+from the same commit/release** — don't mix a managed assembly with a native
+library from a different version. Consume MXC through this versioned SDK rather
+than linking third-party code directly against `mxc_ffi`.
+
 ## Generated code & CI gates
 
 - `Native/NativeMethods.g.cs` is generated from the Rust FFI by csbindgen
