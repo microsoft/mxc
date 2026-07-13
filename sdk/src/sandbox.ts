@@ -419,6 +419,17 @@ export interface SandboxSpawnOptions {
   allowTestingFeatures?: boolean;
 
   /**
+   * State-aware lifecycle only: the correlation vector (MS-CV) returned by
+   * {@link provisionSandbox} as `correlationVector`. Relay it verbatim on every
+   * later phase (`start` / `exec` / `stop` / `deprovision`) so all phases of one
+   * lifecycle share a telemetry base prefix. The client relays it unchanged; the
+   * executor derives each phase's own vector from it (spinning a mutable base or
+   * reseeding a missing/malformed value). Ignored by one-shot spawns and by
+   * `provision` (which seeds its own).
+   */
+  correlationVector?: string;
+
+  /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
    * When set, the SDK uses this path directly instead of searching.
    * Useful for packaged apps (e.g., Electron) where the binary

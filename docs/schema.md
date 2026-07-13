@@ -93,6 +93,21 @@ production configs and the dev schema when working on experimental features:
 }
 ```
 
+> **State-aware fields.** The `phase` top-level field is the **state-aware
+> discriminator**: a request that includes it is parsed as a state-aware
+> lifecycle request (see below), *not* the one-shot config above. The `sandboxId`
+> and `correlationVector` top-level fields are state-aware-only — a one-shot
+> request carrying either is rejected with a parse error. `correlationVector` is
+> the Microsoft Correlation Vector (MS-CV) seeded at `provision` and relayed by
+> the client onto later phases (emitted under the TraceLogging `__TlgCV__` field
+> when experimental telemetry is enabled). The client relays the value verbatim;
+> the executor validates it on each non-`provision` phase and *spins* a fresh
+> child element off a mutable base, passes an already-frozen vector through
+> unchanged, and reseeds a new base if the relayed value is missing or malformed.
+> See
+> [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
+> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md#correlating-a-lifecycle).
+
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:

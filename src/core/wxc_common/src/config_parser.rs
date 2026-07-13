@@ -618,6 +618,11 @@ fn convert_wire_config(
         logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
+    if cfg.correlation_vector.is_some() {
+        let msg = "'correlationVector' is only valid on state-aware lifecycle requests".to_string();
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
 
     // Backend sections present in the config (captured before fields move out).
     let present_backend_sections = present_backend_sections(&cfg);
@@ -1099,6 +1104,7 @@ fn convert_wire_state_aware(
     validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref(), logger)?;
 
     let sandbox_id = cfg.sandbox_id.clone();
+    let correlation_vector = cfg.correlation_vector.clone();
 
     // State-aware requests carry only cross-cutting fields (process /
     // filesystem / network / ui) plus the experimental backend block. One-shot-
@@ -1133,6 +1139,7 @@ fn convert_wire_state_aware(
     // now-validated-absent stable sections so the shared one-shot converter
     // sees a clean surrogate and its `phase`/`sandboxId` guard passes.
     cfg.sandbox_id = None;
+    cfg.correlation_vector = None;
     cfg.experimental = None;
     cfg.seatbelt = None;
     cfg.process_container = None;
@@ -1167,6 +1174,7 @@ fn convert_wire_state_aware(
         phase,
         containment,
         sandbox_id,
+        correlation_vector,
         experimental_raw,
     })
 }
@@ -2752,6 +2760,22 @@ mod tests {
         assert!(
             msg.contains("sandboxId") && msg.contains("state-aware"),
             "one-shot path should reject 'sandboxId', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn one_shot_rejects_correlation_vector_field() {
+        // `correlationVector` is a state-aware-only relay field; a one-shot
+        // payload carrying it must be rejected, mirroring `phase`/`sandboxId`.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("correlationVector") && msg.contains("state-aware"),
+            "one-shot path should reject 'correlationVector', got: {msg}"
         );
     }
 

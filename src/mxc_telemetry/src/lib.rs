@@ -135,6 +135,15 @@ mod provider {
     /// `phase` is the state-aware lifecycle phase that produced this event —
     /// one of `provision|start|exec|stop|deprovision`. It is empty for one-shot
     /// (non-state-aware) executions, which have no lifecycle phase.
+    ///
+    /// `correlation_vector` is the Microsoft Correlation Vector (MS-CV) for this
+    /// event, emitted under the reserved TraceLogging field name `__TlgCV__` (the
+    /// same field WIL TraceLogging uses). It is seeded from random bytes at
+    /// `provision` and spun per phase, so `provision`→…→`deprovision` events can
+    /// be joined across the separate `wxc-exec` processes that emit them (join on
+    /// the shared base prefix). Carries no `sandbox_id` / UPN or other caller
+    /// identity — privacy-safe by construction. Empty for one-shot executions
+    /// (which are a single process already correlated by `AppSessionGuid`).
     pub fn log_execution(
         backend: &str,
         exit_code: i32,
@@ -142,6 +151,7 @@ mod provider {
         duration_ms: u64,
         failure_reason: &str,
         phase: &str,
+        correlation_vector: &str,
     ) {
         let state = match STATE.get() {
             Some(s) => s,
@@ -176,6 +186,12 @@ mod provider {
             // State-aware lifecycle phase (provision|start|exec|stop|
             // deprovision); empty for one-shot executions.
             str8("mxc.phase", phase),
+            // Microsoft Correlation Vector (MS-CV), under WIL TraceLogging's
+            // reserved `__TlgCV__` field. Seeded at provision and spun per phase;
+            // share a base prefix across all phases of one state-aware lifecycle.
+            // Empty for one-shot executions. Join on the base prefix to
+            // reconstruct a full provision→…→deprovision timeline.
+            str8("__TlgCV__", correlation_vector),
         );
     }
 
@@ -188,7 +204,16 @@ mod provider {
     ///
     /// `phase` is the state-aware lifecycle phase that produced this event
     /// (`provision|start|exec|stop|deprovision`); empty for one-shot executions.
-    pub fn log_error(backend: &str, error_type: &str, exit_code: i32, phase: &str) {
+    ///
+    /// `correlation_vector` is the Microsoft Correlation Vector (MS-CV), emitted
+    /// under `__TlgCV__` (see [`log_execution`]); empty for one-shot executions.
+    pub fn log_error(
+        backend: &str,
+        error_type: &str,
+        exit_code: i32,
+        phase: &str,
+        correlation_vector: &str,
+    ) {
         let state = match STATE.get() {
             Some(s) => s,
             None => return,
@@ -220,6 +245,8 @@ mod provider {
             // State-aware lifecycle phase (provision|start|exec|stop|
             // deprovision); empty for one-shot executions.
             str8("mxc.phase", phase),
+            // MS-CV under `__TlgCV__` (see MXC.Execution); empty for one-shot.
+            str8("__TlgCV__", correlation_vector),
         );
     }
 }
@@ -247,10 +274,18 @@ mod provider {
         _duration_ms: u64,
         _failure_reason: &str,
         _phase: &str,
+        _correlation_vector: &str,
     ) {
     }
 
-    pub fn log_error(_backend: &str, _error_type: &str, _exit_code: i32, _phase: &str) {}
+    pub fn log_error(
+        _backend: &str,
+        _error_type: &str,
+        _exit_code: i32,
+        _phase: &str,
+        _correlation_vector: &str,
+    ) {
+    }
 }
 
 pub use provider::*;
@@ -309,7 +344,15 @@ mod tests {
     fn log_execution_after_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
-        log_execution("test_backend", 0, "success", 100, "", "provision");
+        log_execution(
+            "test_backend",
+            0,
+            "success",
+            100,
+            "",
+            "provision",
+            "iso:wxc-abcd",
+        );
         shutdown();
     }
 
@@ -317,15 +360,21 @@ mod tests {
     fn log_error_after_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
-        log_error("test_backend", "config_error", 1, "provision");
+        log_error(
+            "test_backend",
+            "config_error",
+            1,
+            "provision",
+            "iso:wxc-abcd",
+        );
         shutdown();
     }
 
     #[test]
     fn log_without_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        log_execution("test_backend", 0, "success", 50, "none", "");
-        log_error("test_backend", "unknown", 1, "");
+        log_execution("test_backend", 0, "success", 50, "none", "", "");
+        log_error("test_backend", "unknown", 1, "", "");
     }
 
     #[test]
@@ -333,16 +382,24 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
         shutdown();
-        log_execution("test_backend", 1, "failure", 200, "timeout", "exec");
-        log_error("test_backend", "process_error", 1, "exec");
+        log_execution(
+            "test_backend",
+            1,
+            "failure",
+            200,
+            "timeout",
+            "exec",
+            "iso:wxc-abcd",
+        );
+        log_error("test_backend", "process_error", 1, "exec", "iso:wxc-abcd");
     }
 
     #[test]
     fn handles_empty_strings() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("", "");
-        log_execution("", 0, "", 0, "", "");
-        log_error("", "", 0, "");
+        log_execution("", 0, "", 0, "", "", "");
+        log_error("", "", 0, "", "");
         shutdown();
     }
 }

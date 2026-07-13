@@ -234,15 +234,17 @@ import {
   stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
 
-const { sandboxId } = await provisionSandbox('isolation_session');
-await startSandbox(sandboxId);
+const { sandboxId, correlationVector } = await provisionSandbox('isolation_session');
+await startSandbox(sandboxId, undefined, { correlationVector });
 
-const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } });
-const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } });
+const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, { correlationVector });
+const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, { correlationVector });
 
-await stopSandbox(sandboxId);
-await deprovisionSandbox(sandboxId);
+await stopSandbox(sandboxId, undefined, { correlationVector });
+await deprovisionSandbox(sandboxId, undefined, { correlationVector });
 ```
+
+> **Correlating telemetry across phases:** when experimental telemetry is enabled, `provisionSandbox` returns a `correlationVector` (a Microsoft Correlation Vector). Relay it verbatim as `options.correlationVector` on every later phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The client relays the value unchanged; the executor validates it on each phase and derives that phase's own vector from it (spinning a fresh child element off a mutable base, or reseeding if it is missing or malformed). It is `undefined` when telemetry is off, and safe to omit otherwise.
 
 Full design and API: [`docs/state-aware-lifecycle/`](https://github.com/microsoft/mxc/tree/main/docs/state-aware-lifecycle/).
 
