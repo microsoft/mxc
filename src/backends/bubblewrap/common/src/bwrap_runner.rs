@@ -28,6 +28,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
 
@@ -128,12 +129,13 @@ impl SandboxBackend for BubblewrapScriptRunner {
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
             return Err(ScriptResponse::error(&msg));
         }
-        // Resolve any denied *symlink* to its canonical target so the mask is
-        // applied to the real object rather than the link. bwrap cannot create a
-        // mount point over a symlink whose parent is bound into the sandbox (it
-        // aborts with ENOENT); masking the resolved target both avoids that and
-        // correctly hides the object the link points to. Only clones the request
-        // when a symlink actually needs rewriting (the common case is none).
+        // Resolve any denied path that traverses a symlink (leaf or ancestor) to
+        // its real filesystem path, so the mask is applied where bwrap can create
+        // the mount point. bwrap aborts with ENOENT if any component of a mask
+        // destination is a host symlink whose parent is bound into the sandbox;
+        // resolving to the real path avoids that and still hides the intended
+        // object. Only clones the request when a path actually needs rewriting
+        // (the common case is none). See docs/bwrap-support/bubblewrap-backend.md.
         let resolved;
         let request = match resolve_denied_symlinks(&request.policy, logger) {
             Some(denied_paths) => {
@@ -184,14 +186,10 @@ impl BubblewrapScriptRunner {
             }
         }
 
-        // 2. Classify denied paths so files are masked correctly. A `--tmpfs`
-        //    over a file would replace it with an empty directory; denied files
-        //    must instead be masked with `--ro-bind /dev/null`. Classify with
-        //    `symlink_metadata`: by this point any denied *symlink* has already
-        //    been rewritten to its canonical target by `resolve_denied_symlinks`,
-        //    so each entry is a real file or directory judged by its own type.
-        //    Directories, and paths that cannot be stat'd (missing/unreadable),
-        //    fall back to `--tmpfs`.
+        // 2. Classify each denied path as file or directory by probing its own
+        //    type with `symlink_metadata` (symlinks are already resolved above; a
+        //    path that cannot be stat'd falls back to `--tmpfs`). See
+        //    docs/bwrap-support/bubblewrap-backend.md for how denied paths are masked.
         let denied_files: HashSet<String> = request
             .policy
             .denied_paths
@@ -526,21 +524,26 @@ fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut L
     }
 }
 
-/// Rewrite any `deniedPaths` entry that is a symlink to its canonical target so
-/// the mask lands on the real object rather than the link.
+/// Rewrite any `deniedPaths` entry that resolves through a symlink — the leaf
+/// itself **or any ancestor directory** — to its real filesystem path, so the
+/// mask lands where bwrap can actually create the mount point.
 ///
 /// bwrap creates a mask by mounting over the destination path (`--tmpfs DEST`
-/// for a directory, `--ro-bind /dev/null DEST` for a file). When `DEST`'s final
-/// component is a symlink *and its parent is bound into the sandbox*, bwrap
-/// resolves the destination through the real host symlink, cannot create the
-/// mount point, and aborts the entire sandbox with an opaque `ENOENT`. Masking
-/// the symlink's resolved target instead sidesteps this and correctly hides the
-/// object the link points to (the intent of denying the path).
+/// for a directory, `--ro-bind /dev/null DEST` for a file). If **any** component
+/// of `DEST` is a pre-existing host symlink whose parent is bound into the
+/// sandbox, bwrap resolves through the real host symlink, cannot create the
+/// mount point, and aborts the entire sandbox with an opaque `ENOENT`. This
+/// applies to both a symlinked leaf (`/a/link`) and a symlinked ancestor
+/// (`/a/link/secret`). Masking the fully-resolved real path sidesteps this and
+/// still hides the intended object.
 ///
-/// Uses `symlink_metadata` to detect the link (no follow) and `canonicalize` to
-/// resolve it. Returns `Some(new_denied)` when at least one entry was rewritten,
-/// else `None` (so the caller avoids an unnecessary clone). Dangling/unresolvable
-/// symlinks are left as-is — there is nothing behind them to leak.
+/// Resolution is done by [`resolve_through_symlinks`], which canonicalizes the
+/// deepest existing ancestor (following symlinks at every level) and re-appends
+/// any trailing components that do not yet exist on the host — so not-yet-created
+/// denied paths under a symlinked ancestor are covered too. Returns
+/// `Some(new_denied)` when at least one entry was rewritten, else `None` (so the
+/// caller avoids an unnecessary clone). Fully unresolvable paths are left as-is —
+/// there is nothing behind them to leak.
 fn resolve_denied_symlinks(
     policy: &wxc_common::models::ContainerPolicy,
     logger: &mut Logger,
@@ -548,18 +551,15 @@ fn resolve_denied_symlinks(
     let mut changed = false;
     let mut out = Vec::with_capacity(policy.denied_paths.len());
     for p in &policy.denied_paths {
-        let is_symlink = std::fs::symlink_metadata(p)
-            .map(|md| md.file_type().is_symlink())
-            .unwrap_or(false);
-        if is_symlink {
-            if let Ok(target) = std::fs::canonicalize(p) {
-                let target = target.to_string_lossy().into_owned();
+        if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
+            let resolved = resolved.to_string_lossy().into_owned();
+            if resolved != *p {
                 let _ = writeln!(
                     logger,
-                    "Bubblewrap: deniedPaths entry '{p}' is a symlink; masking its target \
-                     '{target}' instead."
+                    "Bubblewrap: deniedPaths entry '{p}' resolves through a symlink; masking \
+                     its real path '{resolved}' instead."
                 );
-                out.push(target);
+                out.push(resolved);
                 changed = true;
                 continue;
             }
@@ -567,6 +567,40 @@ fn resolve_denied_symlinks(
         out.push(p.clone());
     }
     changed.then_some(out)
+}
+
+/// Resolve every symlink in `path` (leaf and ancestors) to a real filesystem
+/// path, tolerating trailing components that do not exist yet.
+///
+/// `std::fs::canonicalize` resolves symlinks at every level but requires the
+/// **whole** path to exist. To also cover not-yet-created denied paths under a
+/// symlinked ancestor, this walks up to the deepest existing ancestor,
+/// canonicalizes it, then re-appends the non-existent tail. Returns `None` only
+/// when no ancestor can be canonicalized (e.g. a relative path with no existing
+/// root).
+fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
+    // Fast path: the whole path exists, so canonicalize resolves every component.
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return Some(real);
+    }
+    // Otherwise find the deepest existing ancestor, canonicalize it, and
+    // re-append the components below it that do not exist on the host yet.
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur = path;
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            tail.push(name);
+        }
+        if let Ok(real_parent) = std::fs::canonicalize(parent) {
+            let mut result = real_parent;
+            for name in tail.iter().rev() {
+                result.push(name);
+            }
+            return Some(result);
+        }
+        cur = parent;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -659,18 +693,82 @@ mod tests {
         assert_eq!(out, vec![canonical.to_string_lossy().into_owned()]);
     }
 
-    /// Regular files, directories, and missing paths are not symlinks, so
-    /// resolution is a no-op (returns `None`, avoiding an unnecessary clone).
+    /// A denied path whose **ancestor** directory is a symlink (not the leaf) is
+    /// also rewritten to its real path — bwrap aborts on an ancestor symlink just
+    /// as it does on a leaf symlink.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_denied_symlinks_rewrites_ancestor_symlink() {
+        use wxc_common::logger::{Logger, Mode};
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(real.join("secret")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Deny .../link/secret — the leaf `secret` is a real dir, `link` is the
+        // symlinked ancestor.
+        let denied = link.join("secret");
+        let policy = wxc_common::models::ContainerPolicy {
+            denied_paths: vec![denied.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let out = resolve_denied_symlinks(&policy, &mut logger)
+            .expect("ancestor symlink must be rewritten");
+        assert_eq!(
+            out,
+            vec![real.join("secret").to_string_lossy().into_owned()]
+        );
+    }
+
+    /// An ancestor symlink with a **not-yet-created** leaf is resolved by
+    /// canonicalizing the deepest existing ancestor and re-appending the missing
+    /// tail (bwrap aborts here too, and `canonicalize` alone cannot resolve it).
+    #[cfg(unix)]
+    #[test]
+    fn resolve_denied_symlinks_rewrites_ancestor_symlink_missing_leaf() {
+        use wxc_common::logger::{Logger, Mode};
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let real = base.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Deny .../link/newfile — `newfile` does not exist yet.
+        let denied = link.join("newfile");
+        let policy = wxc_common::models::ContainerPolicy {
+            denied_paths: vec![denied.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let out = resolve_denied_symlinks(&policy, &mut logger)
+            .expect("ancestor symlink must be rewritten even with a missing leaf");
+        assert_eq!(
+            out,
+            vec![real.join("newfile").to_string_lossy().into_owned()]
+        );
+    }
+
+    /// Regular files, directories, and missing paths with no symlink anywhere in
+    /// the path are a no-op (returns `None`, avoiding an unnecessary clone).
     #[cfg(unix)]
     #[test]
     fn resolve_denied_symlinks_noop_for_non_symlinks() {
         use wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("f.txt");
+        // Canonicalize up front so a symlinked tempdir root (e.g. via TMPDIR)
+        // doesn't spuriously trigger a rewrite — we are testing symlink-free paths.
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let file = base.join("f.txt");
         std::fs::write(&file, b"x").unwrap();
-        let subdir = dir.path().join("d");
+        let subdir = base.join("d");
         std::fs::create_dir(&subdir).unwrap();
-        let missing = dir.path().join("does_not_exist");
+        let missing = base.join("does_not_exist");
 
         let policy = wxc_common::models::ContainerPolicy {
             denied_paths: vec![

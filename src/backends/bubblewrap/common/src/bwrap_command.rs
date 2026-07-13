@@ -105,9 +105,8 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
 /// This is the pure, classification-free entry point: it performs no filesystem
 /// I/O and so stays unit-testable on every host. Unit tests and any caller that
 /// has not stat'd the denied paths use it. The Bubblewrap runner uses
-/// [`build_args_classified`] instead, passing the set of denied paths it has
-/// determined to be files so those are masked with `--ro-bind /dev/null` (a
-/// `--tmpfs` over a file would replace it with an empty directory).
+/// [`build_args_classified`] instead. See
+/// docs/bwrap-support/bubblewrap-backend.md for how denied paths are masked.
 pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> Vec<String> {
     build_args_classified(request, proxy_address, &HashSet::new())
 }
@@ -126,12 +125,10 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
 ///   entries from `request.env`,
 /// - emits `--setenv` for those keys pointing at the proxy URL.
 ///
-/// `denied_files` is the set of `deniedPaths` entries that must be masked as
-/// **files** (`--ro-bind /dev/null <path>`) rather than **directories**
-/// (`--tmpfs <path>`); any denied path not in the set is masked as a directory.
-/// The runner builds this set by `symlink_metadata`-probing each denied path, so
-/// this function itself performs no filesystem I/O and remains unit-testable on
-/// every host.
+/// `denied_files` is the set of `deniedPaths` entries the runner classified as
+/// files (built by `symlink_metadata`-probing each denied path, so this function
+/// performs no filesystem I/O and stays unit-testable on every host). See
+/// docs/bwrap-support/bubblewrap-backend.md for how denied paths are masked.
 pub fn build_args_classified(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
@@ -208,11 +205,6 @@ pub fn build_args_classified(
             FsIntent::ReadOnly => {
                 args.extend(["--ro-bind".into(), mount.path.clone(), mount.path.clone()]);
             }
-            // Denied: mask so contents are invisible. A directory is masked
-            // with an empty `--tmpfs`; a file must be masked with
-            // `--ro-bind /dev/null` instead, because `--tmpfs` over a file would
-            // replace it with an empty *directory* (wrong type). `denied_files`
-            // holds the paths the runner classified as non-directories.
             FsIntent::Denied => {
                 if denied_files.contains(&mount.path) {
                     args.extend(["--ro-bind".into(), "/dev/null".into(), mount.path.clone()]);

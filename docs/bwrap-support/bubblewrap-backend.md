@@ -130,15 +130,18 @@ regular file is masked by binding `/dev/null` over it (masking a file with a
 tmpfs would replace it with an empty *directory*, changing its type). Paths that
 cannot be stat'd (missing/unreadable) fall back to `--tmpfs`.
 
-**Denied symlinks are masked by their target.** bwrap creates a mask by
-mounting over the destination path, and it cannot create a mount point whose
-final component is a symlink when the symlink's parent is bound into the sandbox
-(the mount then resolves through the host symlink and fails with `ENOENT`,
-aborting the sandbox). A `deniedPaths` entry that is a symlink is therefore
-rewritten to its canonical target before mounting, so the mask lands on the real
-object the link points to (and its file/directory type is classified from the
-target). Dangling/unresolvable symlinks are left as-is — there is nothing behind
-them to leak.
+**Denied paths are resolved through symlinks before masking.** bwrap creates a
+mask by mounting over the destination path, and it cannot create a mount point
+when **any** component of that path — the leaf itself *or* an ancestor directory
+— is a pre-existing host symlink whose parent is bound into the sandbox (the
+mount then resolves through the host symlink and fails with `ENOENT`, aborting
+the sandbox). So both `/a/link` (symlinked leaf) and `/a/link/secret` (symlinked
+ancestor) would abort. A `deniedPaths` entry is therefore rewritten to its real
+filesystem path before mounting — canonicalizing the deepest existing ancestor
+(following symlinks at every level) and re-appending any not-yet-created trailing
+components — so the mask lands on the real object and its file/directory type is
+classified from that target. Fully unresolvable paths are left as-is — there is
+nothing behind them to leak.
 
 Example:
 ```json
