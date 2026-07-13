@@ -833,7 +833,8 @@ mod tests {
             std::env::set_var("MXC_FORCE_DENY_PATHS", "1");
         }
         let policy = policy_with_denied();
-        let d = detect(&policy, true).expect("native deny support keeps T1");
+        let d = detect(&policy, true, FilesystemOverlayMode::Off)
+            .expect("native deny support keeps T1");
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::remove_var("MXC_FORCE_BC_USABLE");
@@ -861,7 +862,8 @@ mod tests {
             .denied_paths
             .push(dir.path().to_string_lossy().into_owned());
         policy.fallback.allow_dacl_mutation = true;
-        let d = detect(&policy, true).expect("falls through to a DACL tier");
+        let d = detect(&policy, true, FilesystemOverlayMode::Off)
+            .expect("falls through to a DACL tier");
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::remove_var("MXC_FORCE_BC_USABLE");
@@ -1034,14 +1036,16 @@ mod tests {
         // Symbol may be present, but capability disabled: detection must drop
         // to Tier 3 rather than pick a BaseContainer that cannot launch.
         let _g = BcUsableGuard::set(false);
-        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        let d = detect(&empty_policy(), true, FilesystemOverlayMode::Off)
+            .expect("detect should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
     }
 
     #[test]
     fn detect_selects_tier1_when_bc_usable() {
         let _g = BcUsableGuard::set(true);
-        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        let d = detect(&empty_policy(), true, FilesystemOverlayMode::Off)
+            .expect("detect should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
     }
 
@@ -1219,6 +1223,7 @@ mod tests {
 
     #[test]
     fn overlay_mode_off_never_selected() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Even with a rw path and projfs available, overlay_mode=Off
         // means the detector skips the overlay branch entirely.
         let policy = policy_with_rw_path();
@@ -1232,6 +1237,7 @@ mod tests {
 
     #[test]
     fn overlay_on_with_empty_policy_returns_unavailable() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // overlay_mode=On forces the tier but the policy has no rw/ro
         // paths to project — overlay must surface OverlayUnavailable.
         let policy = empty_policy();
@@ -1252,6 +1258,7 @@ mod tests {
     /// function dispatches correctly.
     #[test]
     fn overlay_on_with_rw_path_either_selects_overlay_or_reports_projfs_missing() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let policy = policy_with_rw_path();
         match detect(&policy, false, FilesystemOverlayMode::On) {
             Ok(d) => {
@@ -1272,6 +1279,7 @@ mod tests {
 
     #[test]
     fn overlay_auto_with_rw_path_either_selects_overlay_or_falls_through() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let policy = policy_with_rw_path();
         // Auto: silently falls through to BFS/DACL when projfs is
         // absent. So we accept either overlay OR a non-overlay tier

@@ -28,8 +28,6 @@
 //! B. `policy::classify` is still the Phase A.1 stub returning an
 //! empty plan — the real per-entry classifier lands in Phase C.1.
 
-#![cfg(target_os = "windows")]
-
 pub mod bindflt;
 pub mod error;
 pub mod handle;

@@ -169,6 +169,9 @@ impl std::fmt::Display for DispatchError {
                 "Could not resolve the Windows system directory while probing for bfscfg.exe \
                  ({reason}). This indicates a corrupted or unsupported OS configuration."
             ),
+            DispatchError::Fallback(FallbackError::OverlayUnavailable { reason }) => {
+                write!(f, "overlay tier forced but unavailable: {reason}")
+            }
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
         }
@@ -380,6 +383,12 @@ fn select_backend_with_fallback(
                     mgr,
                 )
             }
+        }
+        IsolationTier::AppContainerOverlay => {
+            return Err(DispatchError::Fallback(FallbackError::OverlayUnavailable {
+                reason: "AppContainerOverlay selected, but the overlay runner is not yet wired"
+                    .to_string(),
+            }));
         }
         IsolationTier::AppContainerDacl => {
             // T3 always stamps grant ACEs (for readwrite/readonly paths)

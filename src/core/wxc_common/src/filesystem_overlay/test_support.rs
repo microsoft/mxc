@@ -12,8 +12,6 @@
 //! env-var setting and recovery tests would non-deterministically
 //! see the wrong state directory.
 
-#![cfg(test)]
-
 use std::ffi::OsString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
