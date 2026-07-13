@@ -49,20 +49,22 @@ jobs:
             // owners are added. Existing assignees are preserved.
             const owners = [
               // Branden - networking / network policies + AppContainer / BaseContainer /
-              // process isolation/container (co-owner with Jeff and Martin).
-              { login: 'bbonaby',      regex: /\b(network|networking|firewall|iptables|proxy|dns|tcp\/?ip|\budp\b|\btcp\b|ipv[46]|network polic|appcontainer|base ?container|process ?isolation|process ?container)/i },
+              // process isolation/container (co-owner with Jeff and Martin) + Rust build.
+              { login: 'bbonaby',      regex: /\b(network|networking|firewall|iptables|proxy|dns|tcp\/?ip|\budp\b|\btcp\b|ipv[46]|network polic|appcontainer|base ?container|process ?isolation|process ?container|cargo|rustc|clippy|rustfmt|rust build|build\.(bat|sh))/i },
               // Soham - Linux family backends; also proxy / iptables.
               { login: 'SohamDas2021', regex: /\b(linux|wslc|wsl2?|lxc|bubblewrap|bwrap|proxy|iptables)\b/i },
               // Jeff - AppContainer / BaseContainer / process isolation
               { login: 'jsidewhite',   regex: /\b(appcontainer|base ?container|process ?isolation|process ?container)\b/i },
-              // Martin - AppContainer / BaseContainer / process isolation (co-owner with Jeff and Branden).
-              { login: 'MGudgin',      regex: /\b(appcontainer|base ?container|process ?isolation|process ?container)\b/i },
-              // Huzaifa - micro-VM backends + Windows Sandbox
-              { login: 'huzaifa-d',    regex: /\b(micro-?vm|nanvix|hyperlight|windows ?sandbox)\b/i },
+              // Martin - AppContainer / BaseContainer / process isolation (co-owner with Jeff and Branden) + SDK configuration / policy.
+              { login: 'MGudgin',      regex: /\b(appcontainer|base ?container|process ?isolation|process ?container|containerconfig|sdk configuration|sandbox ?policy|policy layer|readwritepaths|readonlypaths|deniedpaths)\b/i },
+              // Huzaifa - micro-VM backends + Windows Sandbox + SDK API / executor schema / TypeScript build.
+              { login: 'huzaifa-d',    regex: /(\b(micro-?vm|nanvix|hyperlight|windows ?sandbox|sdk api|spawnsandbox|provisionsandbox|execinsandbox|config schema|schema[- ]?version|mxc-config|tsc|typescript build|npm run build|esbuild|tsconfig)\b|c# sdk|\.net sdk|\$schema)/i },
               // Adib - session isolation
               { login: 'adpa-ms',      regex: /\b(session ?isolation|isolation ?session|isosession)\b/i },
               // Richie - macOS
               { login: 'richiemsft',   regex: /\b(macos|mac ?os|darwin|seatbelt|xcode|mxc-exec-mac)\b/i },
+              // Elliot - SDK / executor test infrastructure.
+              { login: 'theelliotm',   regex: /\b(sdk test|npm test|e2e test|executor test|wxc_e2e_tests|test driver)\b/i },
             ];
 
             const { owner, repo } = context.repo;
