@@ -12,7 +12,7 @@
  *
  * if (getPlatformSupport().isSupported) {
  *   const policy: SandboxPolicy = {
- *     version: '0.4.0-alpha',
+ *     version: '0.6.0-alpha',
  *     network: { allowOutbound: true },
  *   };
  *

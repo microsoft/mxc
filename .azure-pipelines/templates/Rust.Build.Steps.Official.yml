@@ -24,9 +24,10 @@ parameters:
 steps:
   # Must run before 1ES.Build.Rust.Setup@1 so the merged config.toml
   # exists at templateContext.rust.{authenticate,install}Options.configFile.
-  - pwsh: |
-      Add-Content -Path "$(Build.SourcesDirectory)/.cargo/config.toml" -Value ("`n" + (Get-Content -Raw "$(Build.SourcesDirectory)/.azure-pipelines/.cargo/config.toml"))
-    displayName: Setup Cargo Config (Mxc-Azure-Feed)
+  # 1ES.Build.Rust.Setup authenticates, so skip CargoAuthenticate here.
+  - template: Cargo.Setup.Private.yml@self
+    parameters:
+      authenticate: false
 
   - task: 1ES.Build.Rust.Setup@1
 

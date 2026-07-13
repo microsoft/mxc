@@ -61,17 +61,13 @@ fn get_current_user_sid() -> Option<String> {
 
     // SAFETY: GetTokenInformation succeeded with TokenUser, so buf contains a valid TOKEN_USER.
     let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
-    let sid_str = unsafe { sid_to_string(token_user.User.Sid.0, "") };
+    let sid_str = unsafe { sid_to_string(token_user.User.Sid.0) };
 
     unsafe {
         let _ = CloseHandle(token);
     }
 
-    if sid_str.is_empty() {
-        None
-    } else {
-        Some(sid_str)
-    }
+    sid_str
 }
 
 /// Maximum number of characters to include from `script_code` in diagnostic output.

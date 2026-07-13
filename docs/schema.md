@@ -23,7 +23,7 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 {
-    "version": "0.4.0-alpha",              // Schema version (semver). Current stable: "0.4.0-alpha". Also accepts "0.5.0-alpha".
+    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.7.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -85,6 +85,9 @@ production configs and the dev schema when working on experimental features:
             "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
             "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
             "keychainAccess": false        // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+        },
+        "telemetry": {                // Telemetry (experimental, Windows only)
+            "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
         }
     }
 }
@@ -99,6 +102,18 @@ The `filesystem` section defines path access policy shared across backends:
 | `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
+
+On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
+containment tier selected at runtime:
+
+- **BaseContainer (Tier 1):** enforced natively by the OS when the build advertises
+  the `SANDBOX_CAP_FS_DENY` capability. No host filesystem changes are made.
+- **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
+  the run and removed on exit. This path is gated by `allowDaclMutation`, requires
+  `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
+  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
+  runs sharing the same `containerId` can revoke each other's ACEs — use distinct
+  `containerId` values for parallel runs.
 
 ### Fallback Policy
 
@@ -155,12 +170,13 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.4, <=0.5 | Accepted (assumed compatible) |
-| `"0.3.0-alpha"` | >=0.4, <=0.5 | **Rejected** — "older than supported" |
-| `"0.4.0-alpha"` | >=0.4, <=0.5 | Accepted (0.4 in range) |
-| `"0.5.0-alpha"` | >=0.4, <=0.5 | Accepted (0.5 in range) |
-| `"0.6.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
+| absent | >=0.6, <=0.8 | Accepted (assumed compatible) |
+| `"0.5.0-alpha"` | >=0.6, <=0.8 | **Rejected** — "older than supported" |
+| `"0.6.0-alpha"` | >=0.6, <=0.8 | Accepted (0.6 in range) |
+| `"0.7.0-alpha"` | >=0.6, <=0.8 | Accepted (0.7 in range) |
+| `"0.8.0-alpha"` | >=0.6, <=0.8 | Accepted (0.8 in range) |
+| `"0.9.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

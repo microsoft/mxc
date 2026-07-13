@@ -479,15 +479,18 @@ impl WSLContainerRunner {
         let image_name = &self.config.image;
         let mut image_found = false;
         if !images.is_null() {
-            for i in 0..image_count as isize {
-                let info = &*images.offset(i);
-                let name_bytes: Vec<u8> = info
-                    .name
+            let images_slice = std::slice::from_raw_parts(images, image_count as usize);
+            for info in images_slice {
+                // `info.name` is a fixed-size, possibly-unterminated C buffer;
+                // read up to the first NUL (or the whole buffer if there is
+                // none) without allocating, matching the SDK's own truncation.
+                let name_bytes =
+                    std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
+                let end = name_bytes
                     .iter()
-                    .take_while(|&&b| b != 0)
-                    .map(|&b| b as u8)
-                    .collect();
-                if let Ok(name) = std::str::from_utf8(&name_bytes) {
+                    .position(|&b| b == 0)
+                    .unwrap_or(name_bytes.len());
+                if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
                     if name == image_name.as_str() {
                         image_found = true;
                         break;
@@ -856,6 +859,36 @@ impl WSLContainerRunner {
         logger: &mut Logger,
     ) -> ScriptResponse {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
+
+        // Object-based FS-policy normalization (D6): tighten aliases of the same
+        // host object to the strictest intent (deny > ro > rw) before mapping to
+        // volume mounts. See `wxc_common::filesystem_object`. (A path moved to
+        // `denied` is simply not mounted by WSLC — unmounted = invisible.) Only
+        // clone the request when an aliasing conflict actually needs tightening;
+        // an unresolvable path with deniedPaths present fails closed.
+        let normalized;
+        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
+            &request.policy,
+            logger,
+        ) {
+            Ok(Some(policy)) => {
+                normalized = ExecutionRequest {
+                    policy,
+                    ..request.clone()
+                };
+                &normalized
+            }
+            Ok(None) => request,
+            Err(msg) => return ScriptResponse::error(&msg),
+        };
+        // Delegation check (D3): reject any policy path the invoking user cannot
+        // access, so the sandbox never gains access the caller lacks. Runs AFTER
+        // object normalization so it is evaluated against the already-tightened
+        // intents. On Windows this covers directory readwrite paths (the common
+        // WSLC case).
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return ScriptResponse::error(&msg);
+        }
 
         // -- Init: COM + SDK + preflight --
         let sdk = match Self::init_and_load_sdk(logger) {

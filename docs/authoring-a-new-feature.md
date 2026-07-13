@@ -87,7 +87,7 @@ the OS engineer.
 > flows through all layers.
 
 For detailed OS contribution steps (FlatBuffer schema, processmodel,
-BaseContainerRunner), see [base-process-container/guide.md](base-process-container/guide.md).
+BaseContainerRunner), see [process-container/guide.md](process-container/guide.md).
 
 ## Step 3+: Implementation
 
@@ -273,7 +273,7 @@ Create a test config that exercises your feature:
 
 ```json
 {
-  "version": "0.5.0-alpha",
+  "version": "0.6.0-alpha",
   "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo gpu isolation test"

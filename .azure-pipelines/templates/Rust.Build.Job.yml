@@ -133,6 +133,15 @@ jobs:
         displayName: Build linux-test-proxy
         condition: eq('${{ item.os }}', 'linux')
 
+      # plm (Permissive Learning Mode) is functionally Windows-only, but it
+      # builds cross-platform via a no-op stub `fn main()` so it sits in the
+      # workspace default-members. Tests run on x64 only (arm64 emulation in
+      # 1ES windows-11-arm is too slow for the WPR-touching helpers).
+      - script: |
+          cargo test --release --target $(triplet) -p plm --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
+        displayName: Test plm
+        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+
       - task: EsrpCodeSigning@5
         displayName: Code Sign
         condition: and(eq(${{ parameters.isOfficialBuild }}, true), eq('${{ item.os }}', 'windows'))

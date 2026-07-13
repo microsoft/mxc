@@ -12,7 +12,7 @@
 #![cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
 
 //! `HyperlightScriptRunner` — executes Python code inside a Hyperlight + Unikraft
-//! micro-VM, driven by the `hyperlight-unikraft-host::pyhl` library.
+//! micro-VM, driven by the `hyperlight-unikraft::pyhl` library.
 //!
 //! | Property            | Value                                                     |
 //! |---------------------|-----------------------------------------------------------|
@@ -135,7 +135,7 @@ const DEFAULT_HOME_LEAF: &str = "pyhl";
 // compile-time dep on internal path constants.
 const KERNEL_FILE: &str = "kernel";
 const INITRD_FILE: &str = "initrd.cpio";
-const SNAPSHOT_FILE: &str = "snapshot.hls";
+const SNAPSHOT_DIR: &str = "snapshot";
 
 const ERR_PROXY_POLICY: &str = "network proxy is not supported by the hyperlight backend";
 const ERR_WORKDIR: &str =
@@ -200,9 +200,9 @@ pub fn setup(force: bool, logger: &mut Logger) -> Result<PathBuf, String> {
         logger.log_line(&format!(
             "hyperlight: snapshot already present at {:?}; nothing to do \
              (pass --force to rebuild)",
-            home.join(SNAPSHOT_FILE)
+            home.join(SNAPSHOT_DIR)
         ));
-        return Ok(home.join(SNAPSHOT_FILE));
+        return Ok(home.join(SNAPSHOT_DIR));
     }
 
     std::fs::create_dir_all(&home).map_err(|e| format!("create image home {home:?}: {e}"))?;
@@ -211,11 +211,12 @@ pub fn setup(force: bool, logger: &mut Logger) -> Result<PathBuf, String> {
     let opts = pyhl::InstallOptions {
         home: &home,
         source: pyhl::InstallSource::Ghcr {
-            tag: Some("v0.10.0"),
+            tag: Some("v0.12.1"),
         },
         mounts: &[],
         network: None,
         listen_ports: None,
+        max_surrogates: None,
         force,
     };
     let report = pyhl::install(&opts).map_err(|e| format!("hyperlight install: {e:#}"))?;
@@ -464,7 +465,7 @@ impl HyperlightScriptRunner {
             }
             logger.log_line(&format!(
                 "hyperlight: no snapshot at {:?}; auto-installing from kernel + initrd",
-                home.join(SNAPSHOT_FILE)
+                home.join(SNAPSHOT_DIR)
             ));
             let kernel = home.join(KERNEL_FILE);
             let initrd = home.join(INITRD_FILE);
@@ -477,6 +478,7 @@ impl HyperlightScriptRunner {
                 mounts: &preopens,
                 network: network.as_ref(),
                 listen_ports: None,
+                max_surrogates: None,
                 force: false,
             };
             let report = pyhl::install(&opts)
@@ -488,7 +490,7 @@ impl HyperlightScriptRunner {
         }
 
         logger.log_line(&format!("hyperlight: using image home {home:?}"));
-        let rt = pyhl::Runtime::new(home, &preopens, network.as_ref(), None)
+        let rt = pyhl::Runtime::new(home, &preopens, network.as_ref(), None, None)
             .map_err(|e| PyhlError::Runtime(format!("open hyperlight runtime: {e:#}")))?;
         self.runtime = Some(rt);
         self.active_home = Some(home.to_path_buf());
@@ -584,7 +586,7 @@ impl ScriptRunner for HyperlightScriptRunner {
 fn is_installed(home: &Path) -> bool {
     home.join(KERNEL_FILE).is_file()
         && home.join(INITRD_FILE).is_file()
-        && home.join(SNAPSHOT_FILE).is_file()
+        && home.join(SNAPSHOT_DIR).join("index.json").is_file()
 }
 
 /// A home has the raw inputs we need to auto-install a snapshot.

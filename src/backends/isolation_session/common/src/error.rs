@@ -61,8 +61,24 @@ const ERROR_NOT_FOUND_HRESULT: u32 = 0x80070490;
 /// Formats an `IsoSessionError` into a typed `IsolationSessionError`.
 /// Promotes `ERROR_NOT_FOUND` to `Stale`.
 pub(super) fn format_iso_error(op: &str, err: &IsoSessionError) -> IsolationSessionError {
+    // Read `Code()` first and propagate its failure honestly: it is the
+    // classification-critical field (it drives the `Stale` promotion below),
+    // so fabricating 0 on a getter failure would silently downgrade a stale
+    // sandbox to a generic lifecycle error. `Message`/`Remediation` are
+    // cosmetic and stay best-effort.
+    let code = match err.Code() {
+        Ok(c) => c.0 as u32,
+        Err(e) => {
+            // Code() is gone, but Message() may still carry signal — fold in
+            // the best-effort text so the failure is diagnosable.
+            let msg = err.Message().map(|h| h.to_string()).unwrap_or_default();
+            return IsolationSessionError::Lifecycle(format!(
+                "{} failed: {} (could not read HRESULT code: {})",
+                op, msg, e
+            ));
+        }
+    };
     let msg = err.Message().map(|h| h.to_string()).unwrap_or_default();
-    let code = err.Code().map(|h| h.0 as u32).unwrap_or(0);
     let remediation = err.Remediation().map(|h| h.to_string()).unwrap_or_default();
     let suffix = if remediation.is_empty() {
         String::new()

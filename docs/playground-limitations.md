@@ -1,12 +1,16 @@
 # MXC Playground — Known Limitations & Compatibility
 
+> For a per-release policy-support matrix (filesystem, network, and UI
+> restrictions across Windows 11 23H2 / 24H2 / 25H2 / 25H2+), see
+> [Windows OS-version policy support](./process-container/os-version-support.md).
+
 ## Platform Support
 
 | Feature | Windows 24H2 (build 26100) | Windows 25H2+ (build 26600+) | Linux |
 |---------|---------------------------|------------------------------|-------|
 | AppContainer (v0.4.0) | ✅ Works | ✅ Works | N/A |
 | BaseContainer (v0.5.0) | ❌ No processmodel.dll | ✅ Works when the BaseContainer feature is enabled; otherwise falls back to AppContainer+DACL | N/A |
-| BFS filesystem brokering | ❌ Broker helper not available | ✅ Works | N/A |
+| BFS filesystem brokering | ❌ Broker helper not available | ⚠️ Disabled (`tier2_bfs` off; `bfscfg.exe` risks host hang) | N/A |
 | Proxy (AppContainer) | ✅ Works (needs admin for shim) | ✅ Works | N/A |
 | Proxy (BaseContainer) | N/A | ⚠️ WinHTTP only, see below | N/A |
 | LXC containers | N/A | N/A | ✅ Works |
@@ -137,7 +141,8 @@ to the SDK.
 
 | Policy Version | Schema | Backend | Status |
 |---------------|--------|---------|--------|
-| 0.4.0-alpha | Stable | AppContainer via CreateProcessW | Production |
-| 0.5.0-dev | Dev | BaseContainer via CreateProcessInSandbox | Experimental (25H2+) |
+| 0.6.0-alpha | Stable (minimum supported) | ProcessContainer (BaseContainer when the host supports it, else AppContainer) | Production |
+| 0.7.0-alpha | Stable (current) | ProcessContainer (capability-resolved) | Production |
+| 0.8.0-alpha | Dev | ProcessContainer (capability-resolved) | Experimental |
 
-The SDK accepts versions 0.4.x through 0.5.x. The Rust parser accepts `>=0.4, <=0.5`.
+The SDK and Rust parser accept `>=0.6, <=0.8`. As of Phase 3a the schema version no longer selects the Windows backend — BaseContainer vs AppContainer is resolved at runtime by host capability.

@@ -141,8 +141,9 @@ Core references:
 
 Per-backend guides:
 
-- `docs/base-process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
-- `docs/base-process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
+- `docs/process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
+- `docs/process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
+- `docs/process-container/os-version-support.md` — per-Windows-release policy-support matrix (filesystem / network / UI)
 - `docs/lxc-support/lxc-backend.md` — LXC container backend (Linux)
 - `docs/macos-support/seatbelt-backend.md` — macOS Seatbelt backend
 - `docs/windows-sandbox/windows-sandbox.md` / `docs/windows-sandbox/windows-sandbox-reference.md` — Windows Sandbox backend
@@ -222,7 +223,7 @@ When changing behavior covered by existing documentation, update the relevant do
 
 ### Policy versioning
 
-The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.8.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
+The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.6.0-alpha` minimum, `0.8.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
 
 ## Creating Issues
 

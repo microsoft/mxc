@@ -1,0 +1,19 @@
+[package]
+name = "mxc_telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure Rust TraceLogging ETW telemetry for MXC"
+
+[target.'cfg(windows)'.dependencies]
+tracelogging = { workspace = true }
+
+# `uuid` is used only by the provider-GUID validation in `provider_codegen.rs`,
+# which is `include!()`'d into `build.rs` (build-dependency) and the crate's
+# `#[cfg(test)]` module (dev-dependency). It is intentionally NOT a normal
+# runtime dependency.
+[build-dependencies]
+uuid = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

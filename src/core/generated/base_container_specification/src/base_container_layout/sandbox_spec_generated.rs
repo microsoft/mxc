@@ -30,6 +30,7 @@ impl<'a> SandboxSpec<'a> {
     pub const VT_FS_READ_ONLY: ::flatbuffers::VOffsetT = 20;
     pub const VT_NETWORK_POLICY: ::flatbuffers::VOffsetT = 22;
     pub const VT_INTEGRITY: ::flatbuffers::VOffsetT = 24;
+    pub const VT_FS_DENY: ::flatbuffers::VOffsetT = 26;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -47,6 +48,9 @@ impl<'a> SandboxSpec<'a> {
     ) -> ::flatbuffers::WIPOffset<SandboxSpec<'bldr>> {
         let mut builder = SandboxSpecBuilder::new(_fbb);
         builder.add_ui_restrictions(args.ui_restrictions);
+        if let Some(x) = args.fs_deny {
+            builder.add_fs_deny(x);
+        }
         if let Some(x) = args.network_policy {
             builder.add_network_policy(x);
         }
@@ -95,6 +99,11 @@ impl<'a> SandboxSpec<'a> {
             .network_policy()
             .map(|x| alloc::boxed::Box::new(x.unpack()));
         let integrity = self.integrity();
+        let fs_deny = self.fs_deny().map(|x| {
+            x.iter()
+                .map(|s| alloc::string::ToString::to_string(s))
+                .collect()
+        });
         SandboxSpecT {
             version,
             app_container,
@@ -106,6 +115,7 @@ impl<'a> SandboxSpec<'a> {
             fs_read_only,
             network_policy,
             integrity,
+            fs_deny,
         }
     }
 
@@ -227,6 +237,19 @@ impl<'a> SandboxSpec<'a> {
                 .unwrap()
         }
     }
+    #[inline]
+    pub fn fs_deny(
+        &self,
+    ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
+            >>(SandboxSpec::VT_FS_DENY, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
@@ -262,6 +285,9 @@ impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
                 false,
             )?
             .visit_field::<IntegrityLevel>("integrity", Self::VT_INTEGRITY, false)?
+            .visit_field::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>,
+            >>("fs_deny", Self::VT_FS_DENY, false)?
             .finish();
         Ok(())
     }
@@ -285,6 +311,11 @@ pub struct SandboxSpecArgs<'a> {
     >,
     pub network_policy: Option<::flatbuffers::WIPOffset<NetworkPolicy<'a>>>,
     pub integrity: IntegrityLevel,
+    pub fs_deny: Option<
+        ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
+        >,
+    >,
 }
 impl<'a> Default for SandboxSpecArgs<'a> {
     #[inline]
@@ -300,6 +331,7 @@ impl<'a> Default for SandboxSpecArgs<'a> {
             fs_read_only: None,
             network_policy: None,
             integrity: IntegrityLevel::system_default,
+            fs_deny: None,
         }
     }
 }
@@ -388,6 +420,16 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SandboxSpecBuilder<'a, 'b, A>
         );
     }
     #[inline]
+    pub fn add_fs_deny(
+        &mut self,
+        fs_deny: ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<&'b str>>,
+        >,
+    ) {
+        self.fbb_
+            .push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_FS_DENY, fs_deny);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> SandboxSpecBuilder<'a, 'b, A> {
@@ -421,6 +463,7 @@ impl ::core::fmt::Debug for SandboxSpec<'_> {
         ds.field("fs_read_only", &self.fs_read_only());
         ds.field("network_policy", &self.network_policy());
         ds.field("integrity", &self.integrity());
+        ds.field("fs_deny", &self.fs_deny());
         ds.finish()
     }
 }
@@ -437,6 +480,7 @@ pub struct SandboxSpecT {
     pub fs_read_only: Option<alloc::vec::Vec<alloc::string::String>>,
     pub network_policy: Option<alloc::boxed::Box<NetworkPolicyT>>,
     pub integrity: IntegrityLevel,
+    pub fs_deny: Option<alloc::vec::Vec<alloc::string::String>>,
 }
 impl Default for SandboxSpecT {
     fn default() -> Self {
@@ -451,6 +495,7 @@ impl Default for SandboxSpecT {
             fs_read_only: None,
             network_policy: None,
             integrity: IntegrityLevel::system_default,
+            fs_deny: None,
         }
     }
 }
@@ -478,6 +523,10 @@ impl SandboxSpecT {
         });
         let network_policy = self.network_policy.as_ref().map(|x| x.pack(_fbb));
         let integrity = self.integrity;
+        let fs_deny = self.fs_deny.as_ref().map(|x| {
+            let w: alloc::vec::Vec<_> = x.iter().map(|s| _fbb.create_string(s)).collect();
+            _fbb.create_vector(&w)
+        });
         SandboxSpec::create(
             _fbb,
             &SandboxSpecArgs {
@@ -491,6 +540,7 @@ impl SandboxSpecT {
                 fs_read_only,
                 network_policy,
                 integrity,
+                fs_deny,
             },
         )
     }

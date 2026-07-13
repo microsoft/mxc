@@ -26,6 +26,12 @@
 // --conform verifies that every field/enum/table in the old schema still exists
 // at the same vtable slot, type, and default in the new schema. Any incompatible
 // change produces an error. Add this as a build step or PR gate to catch regressions.
+//
+//  Steps:
+//      cp SandboxSpec.fbs SandboxSpec.previous.fbs
+//      <make changes>
+//      .\flatc.exe --conform SandboxSpec.previous.fbs SandboxSpec.fbs
+//
 
 namespace SandboxTechSpecLayout;
 
@@ -68,6 +74,9 @@ table SandboxSpec {
 
     // Integrity behavior
     integrity:IntegrityLevel = system_default;
+
+    // File Paths that have been denied access
+    fs_deny:[string];
 }
 
 table proxy_info {

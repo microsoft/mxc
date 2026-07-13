@@ -7,6 +7,9 @@ pub mod cmdline;
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+pub mod filesystem_access;
+pub mod filesystem_object;
+pub mod filesystem_resolve;
 pub mod id;
 pub mod log_symbols;
 pub mod logger;
@@ -19,6 +22,7 @@ pub mod script_runner;
 pub mod state_aware_backend;
 pub mod state_aware_dispatch;
 pub mod state_aware_request;
+pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
 

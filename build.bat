@@ -40,6 +40,10 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
 :: Build flags
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
+:: plm is a standalone Windows-only binary that does not consume any of the
+:: workspace feature flags above, so it uses its own profile/target-only flags.
+set "PLM_FLAGS=--target"
+if "%BUILD_CONFIG%"=="release" set "PLM_FLAGS=--release --target"
 if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
@@ -66,11 +70,14 @@ if not errorlevel 1 (
 if "%BUILD_ALL%"=="1" (
     echo   Target: x86_64-pc-windows-msvc
     cargo build %CARGO_FLAGS% x86_64-pc-windows-msvc || goto :error
+    cargo build -p plm %PLM_FLAGS% x86_64-pc-windows-msvc || goto :error
     echo   Target: aarch64-pc-windows-msvc
     cargo build %CARGO_FLAGS% aarch64-pc-windows-msvc || goto :error
+    cargo build -p plm %PLM_FLAGS% aarch64-pc-windows-msvc || goto :error
 ) else (
     echo   Target: %BUILD_ARCH%
     cargo build %CARGO_FLAGS% %BUILD_ARCH% || goto :error
+    cargo build -p plm %PLM_FLAGS% %BUILD_ARCH% || goto :error
 )
 echo   Check formatting
 cargo fmt --all -- --check || goto :error
@@ -107,6 +114,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if exist "!BIN_DIR!\wxc-host-prep.exe" (
             copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-host-prep.exe
+        )
+        if exist "!BIN_DIR!\plm.exe" (
+            copy /Y "!BIN_DIR!\plm.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\plm.exe
         )
         if "%WITH_NANVIX%"=="1" (
             for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
@@ -147,6 +158,11 @@ popd
 echo.
 echo Building SDK integration tests...
 pushd sdk\tests\integration
+:: npm caches `file:` deps by package.json version. The local SDK version
+:: rarely bumps between builds, so a plain `npm install` keeps reusing the
+:: stale packed copy. Force a refresh of the @microsoft/mxc-sdk link so
+:: type-checking sees the dist we just rebuilt above.
+if exist node_modules\@microsoft\mxc-sdk rmdir /s /q node_modules\@microsoft\mxc-sdk
 call npm install & call npm run build
 popd
 

@@ -137,7 +137,9 @@ impl IsolationSessionManager {
         let err = user_result
             .Error()
             .map_err(|e| lifecycle_err(format!("AddUserAsync: get Error failed: {}", e)))?;
-        let is_error = err.IsError().unwrap_or(false);
+        let is_error = err
+            .IsError()
+            .map_err(|e| lifecycle_err(format!("AddUserAsync: get IsError failed: {}", e)))?;
         if is_error {
             return Err(format_iso_error("AddUserAsync", &err));
         }
@@ -177,7 +179,9 @@ impl IsolationSessionManager {
         let err = user_result
             .Error()
             .map_err(|e| lifecycle_err(format!("AddUserAsync2: get Error failed: {}", e)))?;
-        let is_error = err.IsError().unwrap_or(false);
+        let is_error = err
+            .IsError()
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get IsError failed: {}", e)))?;
         if is_error {
             return Err(format_iso_error("AddUserAsync2", &err));
         }
@@ -303,7 +307,12 @@ impl IsolationSessionManager {
                 e
             ))
         })?;
-        let is_error = err.IsError().unwrap_or(false);
+        let is_error = err.IsError().map_err(|e| {
+            lifecycle_err(format!(
+                "RunProcessWithOptionsAsync: get IsError failed: {}",
+                e
+            ))
+        })?;
         if is_error {
             return Err(format_iso_error("RunProcessWithOptionsAsync", &err));
         }
@@ -333,9 +342,28 @@ impl IsolationSessionManager {
         // Lifetime: relay-param structs are stack-allocated; we wait on
         // every spawned thread (INFINITE for stdout/stderr, bounded for
         // stdin) before this function returns.
-        let stdout_handle_val = process.OutputHandle().unwrap_or(0);
-        let stderr_handle_val = process.ErrorHandle().unwrap_or(0);
-        let stdin_handle_val = process.InputHandle().unwrap_or(0);
+        // A getter that errors is a backend failure, not an absent stream:
+        // propagate it rather than coercing to 0, which downstream treats as
+        // "no handle" and silently skips the corresponding stdio relay. A
+        // genuinely returned 0 still means absent and is preserved.
+        let stdout_handle_val = process.OutputHandle().map_err(|e| {
+            lifecycle_err(format!(
+                "RunProcessWithOptionsAsync: get OutputHandle failed: {}",
+                e
+            ))
+        })?;
+        let stderr_handle_val = process.ErrorHandle().map_err(|e| {
+            lifecycle_err(format!(
+                "RunProcessWithOptionsAsync: get ErrorHandle failed: {}",
+                e
+            ))
+        })?;
+        let stdin_handle_val = process.InputHandle().map_err(|e| {
+            lifecycle_err(format!(
+                "RunProcessWithOptionsAsync: get InputHandle failed: {}",
+                e
+            ))
+        })?;
 
         let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
             .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;

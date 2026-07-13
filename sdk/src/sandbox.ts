@@ -12,7 +12,7 @@ import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromCode } from './errors.js';
 
 const SUPPORTED_VERSION = '0.8.0-alpha';
-const MIN_VERSION = '0.4.0-alpha';
+const MIN_VERSION = '0.6.0-alpha';
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -30,7 +30,7 @@ function validatePolicyVersion(version: string): void {
     if (!parsed) {
         throw new Error(
             `Invalid policy version '${version}': must be valid semver` +
-            ` (e.g., '0.5.0' or '0.5.0-alpha')`
+            ` (e.g., '0.6.0' or '0.6.0-alpha')`
         );
     }
 
@@ -214,7 +214,7 @@ function buildMicroVmConfig(
  * @example
  * ```typescript
  * const policy: SandboxPolicy = {
- *   version: '0.5.0-alpha',
+ *   version: '0.6.0-alpha',
  *   network: { allowOutbound: true },
  *   ui: { allowWindows: true, clipboard: 'read' },
  * };
@@ -553,7 +553,7 @@ function spawnWithConfig(
  * @example
  * ```typescript
  * const script = 'python -c "import sys; print(sys.version)"';
- * const policy: SandboxPolicy = { version: '0.4.0-alpha' };
+ * const policy: SandboxPolicy = { version: '0.6.0-alpha' };
  *
  * const ptyProcess = spawnSandbox(script, policy);
  * ptyProcess.onData((data) => console.log(data));
@@ -665,7 +665,7 @@ export function spawnSandboxFromConfig(
  * @example
  * ```typescript
  * const policy: SandboxPolicy = {
- *   version: '0.4.0-alpha',
+ *   version: '0.6.0-alpha',
  *   filesystem: { readwritePaths: ['/workspace'] },
  * };
  *

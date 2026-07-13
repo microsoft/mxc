@@ -23,7 +23,7 @@
     "watch": "tsc --watch",
     "clean": "rimraf dist",
     "test": "npm run test:unit",
-    "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js dist-tests/tests/unit/errors.test.js dist-tests/tests/unit/state-aware-types.test.js dist-tests/tests/unit/state-aware.test.js dist-tests/tests/unit/platform.test.js dist-tests/tests/unit/wire-conformance.test.js",
+    "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js dist-tests/tests/unit/errors.test.js dist-tests/tests/unit/state-aware-types.test.js dist-tests/tests/unit/state-aware.test.js dist-tests/tests/unit/platform.test.js dist-tests/tests/unit/wire-conformance.test.js dist-tests/tests/unit/wire-conformance-state-aware.test.js",
     "test:integration": "cd tests/integration && npm install && npm run build && npm test",
     "prepublishOnly": "npm run build"
   },

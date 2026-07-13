@@ -110,12 +110,12 @@ type PfnQuerySandboxSupport = unsafe extern "system" fn(capabilities: *mut u64) 
 /// `SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX`: when clear, Tier 1 is unusable.
 const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 
-/// `SANDBOX_CAP_DENY_PATHS`: when set, the BaseContainer (Tier 1) backend can
+/// `SANDBOX_CAP_FS_DENY`: when set, the BaseContainer (Tier 1) backend can
 /// enforce `filesystem.deniedPaths`. Bit 0 reports whether the create API is
 /// callable; deny support is expected to light up on a separate bit (currently
 /// assumed bit 1). When clear, `deniedPaths` is rejected at launch and callers
 /// must rely on default-deny plus explicit `readwrite`/`readonly` grants.
-const SANDBOX_CAP_DENY_PATHS: u64 = 0x0000_0000_0000_0002;
+const SANDBOX_CAP_FS_DENY: u64 = 0x0000_0000_0000_0002;
 
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
@@ -185,7 +185,7 @@ impl BaseContainerRunner {
     /// Whether the BaseContainer (Tier 1) backend can enforce
     /// `filesystem.deniedPaths` on this host.
     ///
-    /// Reads the `SANDBOX_CAP_DENY_PATHS` bit from
+    /// Reads the `SANDBOX_CAP_FS_DENY` bit from
     /// `Experimental_QuerySandboxSupport`. Returns `false` when the query
     /// export is absent or the bit is clear — the behavior on builds where
     /// BaseContainer deny support has not yet shipped, where `deniedPaths` is
@@ -207,7 +207,7 @@ impl BaseContainerRunner {
     /// query call succeeded), NOT an HRESULT. The capability is present only
     /// when the call succeeded and the bit is set.
     fn decode_deny_capability(succeeded: i32, capabilities: u64) -> bool {
-        succeeded != 0 && (capabilities & SANDBOX_CAP_DENY_PATHS) != 0
+        succeeded != 0 && (capabilities & SANDBOX_CAP_FS_DENY) != 0
     }
 
     /// Query `Experimental_QuerySandboxSupport` for the create-process bit.
@@ -313,6 +313,7 @@ impl BaseContainerRunner {
     /// - `capabilities` from `policy.capabilities` (comma-joined)
     /// - `fs_read_write` from `policy.readwrite_paths`
     /// - `fs_read_only` from `policy.readonly_paths`
+    /// - `fs_deny` from `policy.denied_paths`
     /// - `disallow_win32k_system_calls` from `ui.disable`
     /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
     /// - `network_policy.proxy.url` from proxy config
@@ -360,6 +361,18 @@ impl BaseContainerRunner {
             let offsets: Vec<_> = request
                 .policy
                 .readonly_paths
+                .iter()
+                .map(|s| builder.create_string(s))
+                .collect();
+            Some(builder.create_vector(&offsets))
+        };
+
+        let fs_deny = if request.policy.denied_paths.is_empty() {
+            None
+        } else {
+            let offsets: Vec<_> = request
+                .policy
+                .denied_paths
                 .iter()
                 .map(|s| builder.create_string(s))
                 .collect();
@@ -414,6 +427,7 @@ impl BaseContainerRunner {
                 capabilities,
                 fs_read_write,
                 fs_read_only,
+                fs_deny,
                 network_policy,
                 ..Default::default()
             },
@@ -1204,9 +1218,14 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if !request.policy.denied_paths.is_empty() {
+        // deniedPaths reaches the OS via the SandboxSpec `fs_deny` field, honored
+        // only when the OS advertises SANDBOX_CAP_FS_DENY. The dispatcher only
+        // routes deny here when supported; fail closed for direct callers.
+        if !request.policy.denied_paths.is_empty()
+            && !crate::fallback_detector::base_container_supports_deny_paths()
+        {
             return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+                wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG,
             ));
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
@@ -1215,22 +1234,13 @@ impl SandboxBackend for BaseContainerRunner {
             ));
         }
         Self::is_base_container_api_present().map_err(|e| {
-            let hint = if !request.experimental_enabled {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: Config schema version '{}' requires the BaseContainer backend, \
-                     but this OS build does not support it. \
-                     Use schema version '0.4.0-alpha' to fall back to AppContainer.",
-                    request.schema_version
-                )
-            } else {
-                format!(
-                    "BaseContainer API unavailable: {e}\n\
-                     Hint: --experimental requested BaseContainer, but this OS build \
-                     does not support it. Remove --experimental to use the AppContainer \
-                     backend, or use an OS build with BaseContainer support."
-                )
-            };
+            let hint = format!(
+                "BaseContainer API unavailable: {e}\n\
+                 Hint: this OS build does not support the BaseContainer backend. \
+                 MXC selects BaseContainer automatically when the host supports it \
+                 and otherwise uses AppContainer; use an OS build with BaseContainer \
+                 support if you require it."
+            );
             ScriptResponse {
                 // Symbol absent: report BackendUnavailable, not a hard error.
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -1467,7 +1477,8 @@ fn derive_sid_string_from_name(name: &str) -> String {
 
     match unsafe { DeriveAppContainerSidFromAppContainerName(pcwstr_name) } {
         Ok(sid) => {
-            let s = unsafe { string_util::sid_to_string(sid.0, "unknown-sid") };
+            let s = unsafe { string_util::sid_to_string(sid.0) }
+                .unwrap_or_else(|| "unknown-sid".to_string());
             // SAFETY: SID returned by DeriveAppContainerSidFromAppContainerName
             // must be freed with FreeSid.
             unsafe {
@@ -1512,7 +1523,7 @@ mod tests {
     #[test]
     fn decode_deny_capability_table() {
         // create bit alone does not imply deny support, and vice versa.
-        let cap = SANDBOX_CAP_DENY_PATHS;
+        let cap = SANDBOX_CAP_FS_DENY;
         assert!(!BaseContainerRunner::decode_deny_capability(0, cap)); // FALSE return
         assert!(!BaseContainerRunner::decode_deny_capability(1, 0)); // bit clear
         assert!(BaseContainerRunner::decode_deny_capability(1, cap)); // enabled
@@ -1533,6 +1544,7 @@ mod tests {
         request.policy.capabilities = vec!["internetClient".into(), "registryRead".into()];
         request.policy.readwrite_paths = vec!["C:\\temp".into()];
         request.policy.readonly_paths = vec!["C:\\Windows".into()];
+        request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
 
@@ -1574,6 +1586,10 @@ mod tests {
         assert_eq!(ro.len(), 1);
         assert_eq!(ro.get(0), "C:\\Windows");
 
+        let deny = spec.fs_deny().unwrap();
+        assert_eq!(deny.len(), 1);
+        assert_eq!(deny.get(0), "C:\\secret");
+
         assert!(spec.network_policy().is_none());
     }
 
@@ -1594,6 +1610,7 @@ mod tests {
         assert!(spec.capabilities().is_none());
         assert!(spec.fs_read_write().is_none());
         assert!(spec.fs_read_only().is_none());
+        assert!(spec.fs_deny().is_none());
         assert!(spec.disallow_win32k_system_calls());
         assert!(spec.network_policy().is_none());
     }
@@ -1731,17 +1748,36 @@ mod tests {
     use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
-    fn validate_runner_rejects_denied_paths() {
+    fn validate_runner_accepts_denied_paths_when_supported() {
+        let _guard = crate::test_env::DenyPathsGuard::supported(true);
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        // May still fail if the BaseContainer API is unavailable, but not for deny.
+        if let Err(err) = runner.validate(&request) {
+            assert!(
+                !err.error_message.contains("deniedPaths")
+                    && !err.error_message.contains("SANDBOX_CAP_FS_DENY"),
+                "deniedPaths should not be rejected when supported, got: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_runner_rejects_denied_paths_when_unsupported() {
+        let _guard = crate::test_env::DenyPathsGuard::supported(false);
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         let err = runner
             .validate(&request)
-            .expect_err("BaseContainer does not yet support deniedPaths");
+            .expect_err("deniedPaths must be rejected when the capability is unavailable");
         assert!(
-            err.error_message.contains("deniedPaths"),
-            "expected message to mention deniedPaths, got: {}",
+            err.error_message.contains("SANDBOX_CAP_FS_DENY"),
+            "expected the capability-gate message, got: {}",
             err.error_message
         );
     }

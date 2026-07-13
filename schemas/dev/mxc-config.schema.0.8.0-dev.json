@@ -161,6 +161,17 @@
           ],
           "description": "Seatbelt backend config (pre-promotion alias)."
         },
+        "telemetry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Telemetry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Telemetry configuration."
+        },
         "test": {
           "anyOf": [
             {
@@ -743,6 +754,19 @@
           "description": "Replace the generated profile entirely (advanced/testing escape hatch).",
           "type": [
             "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Telemetry": {
+      "description": "Telemetry configuration (`experimental.telemetry`).",
+      "properties": {
+        "enabled": {
+          "description": "Explicit telemetry override. `true` = force on, `false` = force off, omitted = disabled (default off).",
+          "type": [
+            "boolean",
             "null"
           ]
         }

@@ -95,7 +95,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
 
   it('should run a simple Python script and capture output', async () => {
     const config = {
-      version: '0.5.0-alpha',
+      version: '0.6.0-alpha',
       containment: 'microvm' as const,
       process: {
         commandLine: "print('Hello from MicroVM SDK E2E!')",
@@ -111,7 +111,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
 
   it('should propagate non-zero exit codes', async () => {
     const config = {
-      version: '0.5.0-alpha',
+      version: '0.6.0-alpha',
       containment: 'microvm' as const,
       process: {
         commandLine: "import sys; sys.exit(42)",
@@ -125,7 +125,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
 
   it('should run multiline scripts with imports', async () => {
     const config = {
-      version: '0.5.0-alpha',
+      version: '0.6.0-alpha',
       containment: 'microvm' as const,
       process: {
         commandLine: [
@@ -154,7 +154,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
       // Use the host path directly in the script — the staging layer rewrites
       // it to the guest mount path before the script reaches the VM.
       const config = {
-        version: '0.5.0-alpha',
+        version: '0.6.0-alpha',
         containment: 'microvm' as const,
         process: {
           commandLine: [
@@ -183,7 +183,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
 
   it('should reject denied_paths with an error', async () => {
     const config = {
-      version: '0.5.0-alpha',
+      version: '0.6.0-alpha',
       containment: 'microvm' as const,
       process: {
         commandLine: "print('should not run')",
@@ -208,7 +208,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
 
     try {
       const config = {
-        version: '0.5.0-alpha',
+        version: '0.6.0-alpha',
         containment: 'microvm' as const,
         process: {
           commandLine: [
@@ -242,7 +242,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
 
     try {
       const config = {
-        version: '0.5.0-alpha',
+        version: '0.6.0-alpha',
         containment: 'microvm' as const,
         process: {
           commandLine: [
@@ -278,7 +278,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     try {
       const rwDirPy = pyEscape(rwDir);
       const config = {
-        version: '0.5.0-alpha',
+        version: '0.6.0-alpha',
         containment: 'microvm' as const,
         process: {
           // Generate a minimal valid PPTX using only stdlib (zipfile + xml).
@@ -334,7 +334,7 @@ describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm',
     try {
       const rwDirPy = pyEscape(rwDir);
       const config = {
-        version: '0.5.0-alpha',
+        version: '0.6.0-alpha',
         containment: 'microvm' as const,
         process: {
           commandLine: [

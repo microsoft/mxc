@@ -46,6 +46,8 @@ extends:
     featureFlags:
       WindowsHostVersion:
         Version: 2022
+      networkisolation:
+        policy: Preferred,ESRP
 
     cloudvault:
       enabled: false
@@ -151,3 +153,15 @@ extends:
                   $scriptsSrc | Copy-Item -Destination $scriptsDest -Force
                   $configsSrc | Copy-Item -Destination $configsDest -Force
                   Write-Host "Staged $($scriptsSrc.Count) scripts and $($configsSrc.Count) configs into isolation_session\main"
+
+            # Authenticode-sign the staged PowerShell scripts so Code Sign
+            # Validation (CSV) passes and the vpack ships signed scripts. The
+            # downloaded wxc binaries arrive pre-signed from MXC-Official-Build;
+            # only these source-staged .ps1 scripts need signing here.
+            - task: onebranch.pipeline.signing@1
+              displayName: Sign isolation_session scripts
+              inputs:
+                command: sign
+                signing_profile: external_distribution
+                files_to_sign: '**/*.ps1'
+                search_root: $(ob_outputDirectory)\isolation_session\main\scripts

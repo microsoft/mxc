@@ -24,8 +24,9 @@ export const sdk = sdkNamespace;
 // Schema versions
 
 export const supportedVersions = [
-  new semver.SemVer('0.4.0-alpha'),
-  new semver.SemVer('0.5.0-alpha'),
+  new semver.SemVer('0.6.0-alpha'),
+  new semver.SemVer('0.7.0-alpha'),
+  new semver.SemVer('0.8.0-alpha'),
 ];
 
 // SDK package location
@@ -67,6 +68,8 @@ export const EXPECTED_MACOS_BINARIES = [
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
   'wslcsdk.dll',   // Only built with --with-wslc
+  'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
+                   // only when the plm crate is included in the build.
 ];
 
 // Combined list of all known binaries across platforms. The npm package

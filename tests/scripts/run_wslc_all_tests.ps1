@@ -215,6 +215,25 @@ $null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
     -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
 $null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
 
+Write-Host "`n--- Object Validation Tests ---" -ForegroundColor Cyan
+# Object-based validation (roadmap D6): a directory under readwritePaths and a
+# Windows junction to that same directory under deniedPaths resolve to one
+# filesystem object; the runner tightens both aliases to denied so the
+# directory is not mounted and its secret is masked. Delegated to a standalone
+# script that owns the directory+junction fixture (the config is never run
+# without its on-disk aliasing).
+$objScript = Join-Path $PSScriptRoot "run_wslc_object_test.ps1"
+$objArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $objArgs.Debug = $true }
+& $objScript @objArgs
+$objPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_filesystem_object.json"
+    Pass    = $objPass
+    Skipped = $false
+    Reason  = $(if ($objPass) { "" } else { "object-validation test failed" })
+})
+
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_tcp.json" -OutputContains "PORT_MAPPING_TCP_OK"))
