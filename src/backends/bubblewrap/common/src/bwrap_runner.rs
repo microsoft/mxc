@@ -568,10 +568,11 @@ fn resolve_denied_paths(
     policy: &wxc_common::models::ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<DeniedPlan, String> {
-    let mut changed = false;
     let mut out = Vec::with_capacity(policy.denied_paths.len());
-    let mut kinds = policy.denied_path_kinds.clone();
     let mut files = HashSet::new();
+    // Cloned lazily on the first rewrite so the common no-symlink path pays
+    // nothing; `Some` also doubles as the "something changed" flag.
+    let mut kinds: Option<HashMap<String, PathKind>> = None;
     for p in &policy.denied_paths {
         if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
             let resolved = resolved.to_str().ok_or_else(|| {
@@ -587,27 +588,31 @@ fn resolve_denied_paths(
                      its real path '{resolved}' instead."
                 );
                 // Keep denied_path_kinds keyed by the path as it now appears.
+                let kinds = kinds.get_or_insert_with(|| policy.denied_path_kinds.clone());
                 if let Some(kind) = kinds.remove(p) {
                     kinds.insert(resolved.to_owned(), kind);
                 }
-                if denied_masks_as_file(resolved, kinds.get(resolved)) {
+                // Classify by declared kind (looked up under the original key
+                // `p`, since re-keying changes only the key) + host stat of the
+                // resolved path.
+                if denied_masks_as_file(resolved, policy.denied_path_kinds.get(p)) {
                     files.insert(resolved.to_owned());
                 }
                 out.push(resolved.to_owned());
-                changed = true;
                 continue;
             }
         }
         // Not rewritten: a real path, a rooted not-yet-existing path, or a
         // dangling symlink. Classify by declared kind + host stat of the entry.
-        if denied_masks_as_file(p, kinds.get(p)) {
+        if denied_masks_as_file(p, policy.denied_path_kinds.get(p)) {
             files.insert(p.clone());
         }
         out.push(p.clone());
     }
+    let changed = kinds.is_some();
     Ok(DeniedPlan {
         paths: changed.then_some(out),
-        kinds,
+        kinds: kinds.unwrap_or_default(),
         files,
     })
 }
@@ -671,7 +676,15 @@ fn missing_denied_stub_candidates(policy: &wxc_common::models::ContainerPolicy) 
     policy
         .denied_paths
         .iter()
-        .filter(|p| std::fs::symlink_metadata(p).is_err())
+        // Only a genuine NotFound means the path is absent — treat other errors
+        // (e.g. a transient PermissionDenied) as "present" so we never enroll,
+        // and later reclaim, a real host path we did not create.
+        .filter(|p| {
+            matches!(
+                std::fs::symlink_metadata(p),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            )
+        })
         .filter(|p| path_is_within_any(p, &policy.readwrite_paths))
         .cloned()
         .collect()
