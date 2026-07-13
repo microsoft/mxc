@@ -1464,6 +1464,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hyperlight_common",
  "lxc_common",
  "mxc_build_common",
  "mxc_engine",
