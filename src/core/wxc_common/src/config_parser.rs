@@ -514,28 +514,46 @@ fn convert_wire_egress_rules(
             destinations.push(dest.cidr);
         }
 
-        let mut ports = Vec::with_capacity(rule.ports.len());
-        let mut protocols = Vec::with_capacity(rule.ports.len());
+        // GA `ports` is a flat list of (protocol, port) selectors, but the
+        // internal `EgressRule` interprets `protocols` × `ports` as a cartesian
+        // grid. Collapsing the selectors into two independent lists would widen
+        // the policy — e.g. `tcp/80` + `udp/53` would also permit `tcp/53` and
+        // `udp/80`. Group the selectors by protocol (preserving first-seen
+        // order) so each emitted rule is a single-protocol grid whose cartesian
+        // expansion is exactly the requested selectors.
+        let mut grouped: Vec<(Protocol, Vec<u16>)> = Vec::new();
         for (port_index, port) in rule.ports.into_iter().enumerate() {
             if port.port == 0 {
                 return Err(WxcError::ConfigParse(format!(
                     "{path}[{rule_index}].ports[{port_index}].port must be between 1 and 65535"
                 )));
             }
-            ports.push(port.port);
-            protocols.push(match port.protocol {
+            let protocol = match port.protocol {
                 wire::NetworkProtocol::Tcp => Protocol::Tcp,
                 wire::NetworkProtocol::Udp => Protocol::Udp,
                 wire::NetworkProtocol::Icmp => Protocol::Icmp,
-            });
+            };
+            match grouped
+                .iter_mut()
+                .find(|(existing, _)| *existing == protocol)
+            {
+                Some((_, group_ports)) => {
+                    if !group_ports.contains(&port.port) {
+                        group_ports.push(port.port);
+                    }
+                }
+                None => grouped.push((protocol, vec![port.port])),
+            }
         }
 
-        out.push(EgressRule {
-            destinations,
-            ports,
-            protocols,
-            action: action.clone(),
-        });
+        for (protocol, ports) in grouped {
+            out.push(EgressRule {
+                destinations: destinations.clone(),
+                ports,
+                protocols: vec![protocol],
+                action: action.clone(),
+            });
+        }
     }
 
     Ok(())
@@ -1897,6 +1915,64 @@ mod tests {
         assert_eq!(req.policy.egress_rules[1].ports, vec![53]);
         assert_eq!(req.policy.egress_rules[1].protocols, vec![Protocol::Udp]);
         assert_eq!(req.policy.egress_rules[1].action, RuleAction::Deny);
+    }
+
+    #[test]
+    fn ga_egress_groups_mixed_selectors_by_protocol_without_widening() {
+        // A single GA rule that mixes protocols (tcp/80, tcp/443, udp/53) must
+        // not widen into the cartesian product — which would also permit tcp/53
+        // and udp/80. It must map to one internal rule per protocol.
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "egress": {
+                    "allow": [{
+                        "to": [{ "cidr": "192.0.2.0/24" }],
+                        "ports": [
+                            { "protocol": "tcp", "port": 80 },
+                            { "protocol": "tcp", "port": 443 },
+                            { "protocol": "udp", "port": 53 }
+                        ]
+                    }]
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+
+        // One rule per protocol (tcp, udp), never a single widened rule.
+        assert_eq!(req.policy.egress_rules.len(), 2);
+
+        let tcp = req
+            .policy
+            .egress_rules
+            .iter()
+            .find(|rule| matches!(rule.protocols.as_slice(), [Protocol::Tcp]))
+            .expect("expected a tcp-only egress rule");
+        assert_eq!(tcp.ports, vec![80, 443]);
+        assert_eq!(tcp.destinations, vec!["192.0.2.0/24"]);
+        assert_eq!(tcp.action, RuleAction::Allow);
+
+        let udp = req
+            .policy
+            .egress_rules
+            .iter()
+            .find(|rule| matches!(rule.protocols.as_slice(), [Protocol::Udp]))
+            .expect("expected a udp-only egress rule");
+        assert_eq!(udp.ports, vec![53]);
+        assert_eq!(udp.action, RuleAction::Allow);
+
+        // No emitted rule may permit the cross terms tcp/53 or udp/80.
+        for rule in &req.policy.egress_rules {
+            let permits_tcp_53 =
+                rule.protocols.contains(&Protocol::Tcp) && rule.ports.contains(&53);
+            let permits_udp_80 =
+                rule.protocols.contains(&Protocol::Udp) && rule.ports.contains(&80);
+            assert!(!permits_tcp_53, "rule widened to tcp/53: {rule:?}");
+            assert!(!permits_udp_80, "rule widened to udp/80: {rule:?}");
+        }
     }
 
     #[test]
