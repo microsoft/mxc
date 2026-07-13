@@ -1,8 +1,9 @@
 # Microsoft.Mxc.Sdk (C# SDK)
 
-A C# binding for [MXC](../README.md) (Microsoft eXecution Container). It runs a
-command inside a sandbox described by a `SandboxPolicy`, capturing the output —
-by P/Invoking the native `mxc_ffi` library, which wraps the Rust engine.
+A .NET binding for [MXC](../README.md) (Microsoft eXecution Container),
+implemented in C#. It runs a command inside a sandbox described by a
+`SandboxPolicy`, capturing the output — by P/Invoking the native `mxc_ffi`
+library, which wraps the Rust engine.
 
 ```
 C# (Microsoft.Mxc.Sdk)
@@ -82,10 +83,14 @@ than linking third-party code directly against `mxc_ffi`.
 
 - `Native/NativeMethods.g.cs` is generated from the Rust FFI by csbindgen in
   `src/ffi/mxc_ffi/build.rs`, gated behind the crate's **`csharpsdk`** cargo
-  feature (off by default, so normal/backend builds don't compile csbindgen or
-  touch the source tree) — do not hand-edit. Regenerate with
-  `cargo build -p mxc_ffi --features csharpsdk`; `scripts/check-csharp-bindings-codegen.js`
-  does exactly that and fails if the committed file drifts.
+  feature (off by default, so normal/backend builds don't compile csbindgen).
+  It is **not committed** (gitignored) — the `GenerateNativeBindings` MSBuild
+  target in the csproj (re)generates it before every C# compile by running
+  `cargo build -p mxc_ffi --features csharpsdk`, so a plain `dotnet build`
+  produces fresh bindings that can never drift from the Rust FFI. (This means
+  building the C# SDK requires the Rust toolchain on PATH.)
+  `scripts/check-csharp-bindings-codegen.js` runs that codegen and asserts the
+  expected entry points are produced, catching a broken/renamed C ABI in CI.
 - The `ErrorCode` enum mirrors the native `MXC_STATUS_*` constants;
   `scripts/check-csharp-errorcode-parity.js` enforces that.
 - The C# package version tracks the Rust workspace version;

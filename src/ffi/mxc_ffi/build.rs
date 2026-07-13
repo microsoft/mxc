@@ -27,6 +27,11 @@ fn generate_csharp_bindings() {
     let out_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../csharp/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs");
 
+    // Re-run when the generated file changes or is deleted, so a missing output
+    // (it is gitignored, not committed) forces regeneration even when the FFI
+    // source is otherwise unchanged.
+    println!("cargo:rerun-if-changed={}", out_path.display());
+
     if let Some(parent) = out_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             println!("cargo:warning=mxc_ffi: could not create {parent:?}: {e}");

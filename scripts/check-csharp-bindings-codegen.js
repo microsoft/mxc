@@ -2,14 +2,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Drift gate for the generated C# P/Invoke layer. Rebuilds `mxc_ffi` (whose
-// build.rs regenerates NativeMethods.g.cs via csbindgen) and fails if the
-// committed file changed — i.e. the checked-in bindings drifted from the Rust
-// FFI. Run from the repository root:
+// Generation check for the C# P/Invoke layer. The generated file
+// (NativeMethods.g.cs) is NOT committed — it is produced at build time by the
+// GenerateNativeBindings MSBuild target (and by `cargo build -p mxc_ffi
+// --features csharpsdk`). This gate rebuilds the FFI with codegen enabled and
+// asserts the bindings are produced and expose the expected entry points, so a
+// broken/renamed C ABI is caught in CI even though nothing is committed. Run
+// from the repository root:
 //
 //   node scripts/check-csharp-bindings-codegen.js
 
-const { readFileSync, existsSync } = require("fs");
+const { readFileSync, existsSync, rmSync } = require("fs");
 const { join } = require("path");
 const { execFileSync } = require("child_process");
 
@@ -22,15 +25,22 @@ const generated = join(
   "NativeMethods.g.cs"
 );
 
-function read(path) {
-  return existsSync(path) ? readFileSync(path, "utf8") : null;
+// The extern entry points the C# SDK P/Invokes; the generated file must expose
+// each one. Keep in sync with the `#[no_mangle] extern "C"` fns in
+// src/ffi/mxc_ffi/src/lib.rs.
+const REQUIRED_ENTRY_POINTS = [
+  "mxc_run",
+  "mxc_run_result_free",
+  "mxc_string_free",
+  "mxc_version",
+];
+
+// Remove any stale copy so we prove codegen actually (re)produces it.
+if (existsSync(generated)) {
+  rmSync(generated);
 }
 
-const before = read(generated);
-
 try {
-  // build.rs regenerates the C# file as a side effect of building the crate
-  // with the `csharpsdk` feature (csbindgen is off in normal builds).
   execFileSync("cargo", ["build", "-p", "mxc_ffi", "--features", "csharpsdk"], {
     cwd: join(repoRoot, "src"),
     stdio: "inherit",
@@ -42,19 +52,25 @@ try {
   process.exit(1);
 }
 
-const after = read(generated);
-
-if (after === null) {
-  console.error(`ERROR: expected generated file not found: ${generated}`);
-  process.exit(1);
-}
-
-if (before !== after) {
+if (!existsSync(generated)) {
   console.error(
-    "ERROR: generated C# bindings are out of date. Rebuild `mxc_ffi` and commit\n" +
-      "       csharp/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs."
+    `ERROR: binding generation did not produce the expected file:\n  ${generated}`
   );
   process.exit(1);
 }
 
-console.log("C# bindings codegen OK: NativeMethods.g.cs is up to date");
+const content = readFileSync(generated, "utf8");
+const missing = REQUIRED_ENTRY_POINTS.filter(
+  (name) => !content.includes(`EntryPoint = "${name}"`)
+);
+if (missing.length > 0) {
+  console.error(
+    "ERROR: generated C# bindings are missing expected entry point(s): " +
+      missing.join(", ")
+  );
+  process.exit(1);
+}
+
+console.log(
+  `C# bindings codegen OK: generated with ${REQUIRED_ENTRY_POINTS.length} expected entry points`
+);
