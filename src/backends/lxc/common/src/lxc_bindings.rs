@@ -68,6 +68,16 @@ pub fn resolve_default_lxcpath() -> String {
     resolve_lxcpath_with_env(|k| std::env::var(k).ok(), current_euid)
 }
 
+/// Test-only convenience wrapper over [`build_attach_args_with_env_control`]
+/// that hardcodes `force_clear_env = false` (the legacy behavior). Kept
+/// `#[cfg(test)]`-only because production code always calls the
+/// `_with_env_control` variant directly, so compiling this wrapper outside
+/// tests would trip the dead-code lint.
+#[cfg(test)]
+fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
+    build_attach_args_with_env_control(env, working_directory, command, false)
+}
+
 /// Build the post-binary argv for `lxc-attach` (the args that follow the
 /// `-n NAME -P lxcpath` flags already appended by `lxc_command`).
 ///
@@ -75,14 +85,13 @@ pub fn resolve_default_lxcpath() -> String {
 /// actually spawning `lxc-attach`. See [`LxcContainer::attach_run`] for
 /// the full contract.
 ///
+/// `force_clear_env` forces `--clear-env` even when `env` is empty, so a
+/// fully-scrubbed proxy env can't silently fall back to inheriting the
+/// host's variables.
+///
 /// Gated to Linux + test builds because `attach_run` is a Windows stub
 /// that never calls this helper, and the workspace clippy lane on
 /// `windows-latest` would otherwise flag it as dead code.
-#[cfg(test)]
-fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
-    build_attach_args_with_env_control(env, working_directory, command, false)
-}
-
 #[cfg(any(target_os = "linux", test))]
 fn build_attach_args_with_env_control(
     env: &[String],

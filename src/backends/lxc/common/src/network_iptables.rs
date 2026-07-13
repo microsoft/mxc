@@ -227,6 +227,17 @@ impl NetworkIptablesManager {
         resolved
     }
 
+    /// Whether `host` is already an IP literal (v4 or v6) and therefore needs
+    /// no DNS resolution to reach. Accepts bracketed IPv6 literals (e.g.
+    /// `[::1]`) as stored by the proxy URL parser.
+    fn host_is_ip_literal(host: &str) -> bool {
+        let candidate = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        candidate.parse::<std::net::IpAddr>().is_ok()
+    }
+
     fn resolve_proxy_endpoints(
         policy: &ContainerPolicy,
         logger: &mut Logger,
@@ -315,43 +326,70 @@ impl NetworkIptablesManager {
             logger,
         )?;
 
-        // Allow DNS (needed for hostname resolution)
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-p",
-                "udp",
-                "--dport",
-                "53",
-                "-j",
-                "ACCEPT",
-            ],
-            logger,
-        )?;
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-p",
-                "tcp",
-                "--dport",
-                "53",
-                "-j",
-                "ACCEPT",
-            ],
-            logger,
-        )?;
-
         let proxy_endpoints = Self::resolve_proxy_endpoints(policy, logger)?;
-        let (blocked_ips, allowed_ips) = if proxy_endpoints.is_empty() {
+        let proxy_enabled = !proxy_endpoints.is_empty();
+
+        // Decide whether outbound DNS (port 53) may be opened.
+        //
+        // In proxy mode the posture is "deny-all-except-proxy", so DNS is only
+        // opened when the proxy is addressed by hostname (the container has to
+        // resolve it). When the proxy is an IP literal no resolution is needed,
+        // so DNS stays closed and nothing but the proxy endpoint is reachable.
+        // Outside proxy mode DNS is required for the hostname-based allow/block
+        // lists, so it is always opened.
+        let allow_dns = if proxy_enabled {
+            policy
+                .network_proxy
+                .address
+                .as_ref()
+                .is_some_and(|addr| !Self::host_is_ip_literal(addr.host()))
+        } else {
+            true
+        };
+
+        if allow_dns {
+            // Allow DNS (needed for hostname resolution)
+            Self::run_iptables(
+                &[
+                    "-A",
+                    &self.chain_name,
+                    "-p",
+                    "udp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
+                logger,
+            )?;
+            Self::run_iptables(
+                &[
+                    "-A",
+                    &self.chain_name,
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
+                logger,
+            )?;
+        }
+
+        let (blocked_ips, allowed_ips) = if !proxy_enabled {
             (
                 Self::resolve_policy_hosts(&policy.blocked_hosts, "Blocking", logger),
                 Self::resolve_policy_hosts(&policy.allowed_hosts, "Allowing", logger),
             )
+        } else if allow_dns {
+            logger.log_line(
+                "Network proxy enabled: allowing proxy egress plus DNS (for proxy hostname resolution) and dropping all other outbound traffic.",
+            );
+            (Vec::new(), Vec::new())
         } else {
             logger.log_line(
-                "Network proxy enabled: allowing proxy egress only and dropping all other outbound traffic.",
+                "Network proxy enabled: allowing proxy egress only and dropping all other outbound traffic (including DNS).",
             );
             (Vec::new(), Vec::new())
         };
@@ -483,6 +521,20 @@ mod tests {
         // IPv4-only filter must not regress the happy path.
         let ips = NetworkIptablesManager::resolve_host("10.0.0.1");
         assert_eq!(ips, vec!["10.0.0.1"]);
+    }
+
+    #[test]
+    fn host_is_ip_literal_detects_ips_and_hostnames() {
+        assert!(NetworkIptablesManager::host_is_ip_literal("10.0.0.5"));
+        assert!(NetworkIptablesManager::host_is_ip_literal("127.0.0.1"));
+        // Bracketed and bare IPv6 literals both count as "no DNS needed".
+        assert!(NetworkIptablesManager::host_is_ip_literal("[::1]"));
+        assert!(NetworkIptablesManager::host_is_ip_literal("::1"));
+        // Hostnames require resolution, so they are not IP literals.
+        assert!(!NetworkIptablesManager::host_is_ip_literal(
+            "proxy.example.com"
+        ));
+        assert!(!NetworkIptablesManager::host_is_ip_literal("localhost"));
     }
 
     #[test]

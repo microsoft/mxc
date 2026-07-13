@@ -783,6 +783,9 @@ fn convert_wire_config(
     // Network section
     if let Some(net) = cfg.network {
         if let Some(proxy) = net.proxy {
+            // Capture which shorthand was used before the wire proxy is
+            // consumed — LXC can't reach a localhost/loopback proxy.
+            let proxy_used_localhost = proxy.localhost.is_some();
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
@@ -796,7 +799,20 @@ fn convert_wire_config(
             }
             if containment == ContainmentBackend::Lxc && proxy_config.builtin_test_server {
                 let msg = "LXC: network.proxy.builtinTestServer is not supported; \
-                           use network.proxy.localhost or network.proxy.url";
+                           use network.proxy.url";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+            // `network.proxy.localhost` maps to 127.0.0.1, which inside an LXC
+            // network namespace is the container's own loopback rather than the
+            // host. The injected HTTP(S)_PROXY would be unreachable and the
+            // iptables proxy-allow rule would never match, so require a routable
+            // host via `network.proxy.url` instead.
+            if containment == ContainmentBackend::Lxc && proxy_used_localhost {
+                let msg = "LXC: network.proxy.localhost is not reachable from the \
+                           container network namespace (127.0.0.1 is the container \
+                           loopback); use network.proxy.url with a host routable from \
+                           inside the container";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -2113,16 +2129,29 @@ mod tests {
 
     #[test]
     fn proxy_accepted_with_lxc() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
+        // LXC requires a routable proxy host: localhost/127.0.0.1 is the
+        // container loopback and unreachable, so use network.proxy.url.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
-        assert_eq!(
-            req.policy.network_proxy.address.as_ref().unwrap().port(),
-            8080
-        );
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.host(), "proxy.example.com");
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn proxy_localhost_rejected_with_lxc() {
+        // network.proxy.localhost maps to 127.0.0.1, unreachable from inside
+        // the LXC network namespace — it must be rejected at parse time.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        assert!(result.is_err());
     }
 
     #[test]
