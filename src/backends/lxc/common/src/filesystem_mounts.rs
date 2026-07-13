@@ -9,6 +9,7 @@
 //! - `readonlyPaths` → `bind,ro` mount
 //! - `deniedPaths` → masked (inaccessible inside container)
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use wxc_common::logger::Logger;
@@ -41,8 +42,17 @@ enum ObservedMaskPathKind {
     Symlink,
 }
 
-fn observed_mask_path_kind(full_path: &str) -> Result<Option<ObservedMaskPathKind>, String> {
-    match std::fs::symlink_metadata(full_path) {
+/// Inspect a denied path on the **host** filesystem to infer its mask kind.
+///
+/// Uses `symlink_metadata` so a symlink is classified as itself rather than
+/// followed (avoids the TOCTOU-prone `is_file` heuristic). A missing path
+/// yields `Ok(None)` so the caller can fall back to an explicit `type`.
+///
+/// This must observe the host path — not the container rootfs path, which does
+/// not exist before mounts are applied — otherwise every host denied path would
+/// resolve to `NotFound` and spuriously demand an explicit `type`.
+fn observed_mask_path_kind(host_path: &Path) -> Result<Option<ObservedMaskPathKind>, String> {
+    match std::fs::symlink_metadata(host_path) {
         Ok(metadata) => {
             let file_type = metadata.file_type();
             if file_type.is_dir() {
@@ -56,9 +66,40 @@ fn observed_mask_path_kind(full_path: &str) -> Result<Option<ObservedMaskPathKin
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(format!(
             "Unable to inspect denied path '{}': {}. Set deniedPaths entry to an object with explicit type \"file\" or \"dir\".",
-            full_path, err
+            host_path.display(),
+            err
         )),
     }
+}
+
+/// Trim trailing path separators from a denied-path key so an explicit `type`
+/// is not dropped when the resolved mount path and the configured
+/// `denied_path_kinds` key differ only by a trailing slash. A root-only path is
+/// preserved rather than normalized to an empty string.
+fn normalize_denied_key(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path
+    } else {
+        trimmed
+    }
+}
+
+/// Look up the explicit mask kind for a denied host path, tolerating a
+/// trailing-separator mismatch between the resolved mount path and the
+/// configured key. The exact match is tried first as a fast path.
+fn lookup_mask_kind(
+    denied_path_kinds: &HashMap<String, MaskKind>,
+    host_path: &str,
+) -> Option<MaskKind> {
+    if let Some(kind) = denied_path_kinds.get(host_path) {
+        return Some(*kind);
+    }
+    let normalized = normalize_denied_key(host_path);
+    denied_path_kinds
+        .iter()
+        .find(|(key, _)| normalize_denied_key(key) == normalized)
+        .map(|(_, kind)| *kind)
 }
 
 fn resolve_mask_kind(
@@ -115,13 +156,11 @@ pub fn configure_filesystem_mounts(
                 container.set_config_item("lxc.mount.entry", &mount_entry)?;
             }
             FsIntent::Denied => {
-                let rootfs_base = format!("{}/{}/rootfs", container.lxc_path(), container.name());
-                let full_path = Path::new(&rootfs_base).join(container_path);
-                let explicit = policy.denied_path_kinds.get(host_path).copied();
+                let explicit = lookup_mask_kind(&policy.denied_path_kinds, host_path);
                 let kind = resolve_mask_kind(
                     host_path,
                     explicit,
-                    observed_mask_path_kind(&full_path.to_string_lossy())?,
+                    observed_mask_path_kind(Path::new(host_path))?,
                 )?;
 
                 let mount_entry = match kind {
@@ -248,5 +287,70 @@ mod tests {
         let err = resolve_mask_kind("/missing/file", None, None).unwrap_err();
         assert!(err.contains("does not exist"));
         assert!(err.contains("type"));
+    }
+
+    #[test]
+    fn observed_mask_path_kind_reports_host_dir_file_and_missing() {
+        use std::fs;
+
+        let base = std::env::temp_dir().join(format!(
+            "mxc_observed_mask_kind_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let dir = base.join("a_dir");
+        let file = base.join("a_file");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&file, b"x").unwrap();
+
+        assert_eq!(
+            observed_mask_path_kind(&dir).unwrap(),
+            Some(ObservedMaskPathKind::Dir)
+        );
+        assert_eq!(
+            observed_mask_path_kind(&file).unwrap(),
+            Some(ObservedMaskPathKind::File)
+        );
+        assert_eq!(
+            observed_mask_path_kind(&base.join("does_not_exist")).unwrap(),
+            None
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn lookup_mask_kind_prefers_exact_match() {
+        let mut kinds = HashMap::new();
+        kinds.insert("/data/secret".to_string(), MaskKind::File);
+        assert_eq!(
+            lookup_mask_kind(&kinds, "/data/secret"),
+            Some(MaskKind::File)
+        );
+    }
+
+    #[test]
+    fn lookup_mask_kind_tolerates_trailing_separator_mismatch() {
+        // Configured key lacks the trailing slash the resolved mount path carries.
+        let mut kinds = HashMap::new();
+        kinds.insert("/data/secret".to_string(), MaskKind::Dir);
+        assert_eq!(
+            lookup_mask_kind(&kinds, "/data/secret/"),
+            Some(MaskKind::Dir)
+        );
+
+        // Configured key carries a trailing slash the resolved mount path lacks.
+        let mut kinds = HashMap::new();
+        kinds.insert("/data/secret/".to_string(), MaskKind::File);
+        assert_eq!(
+            lookup_mask_kind(&kinds, "/data/secret"),
+            Some(MaskKind::File)
+        );
+    }
+
+    #[test]
+    fn lookup_mask_kind_absent_returns_none() {
+        let kinds = HashMap::new();
+        assert_eq!(lookup_mask_kind(&kinds, "/data/secret"), None);
     }
 }
