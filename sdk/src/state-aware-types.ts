@@ -111,13 +111,22 @@ export interface LxcProvisionConfig {
   release: string;
 }
 
+/**
+ * Network policy accepted by LXC state-aware `start`. Structurally
+ * `NetworkConfig` minus `proxy`: the Rust LXC state-aware runner rejects
+ * `network.proxy` at start (`apply_network_policy` returns a policy-validation
+ * error), so excluding it here surfaces the constraint at compile time instead
+ * of pushing a preventable failure to runtime.
+ */
+export type LxcNetworkConfig = Omit<NetworkConfig, 'proxy'>;
+
 export interface LxcStartConfig {
   /** Schema version (semver). */
   version?: string;
   /** Filesystem mounts to apply before starting the container. */
   filesystem?: FilesystemConfig;
-  /** iptables policy to apply after the container starts. */
-  network?: NetworkConfig;
+  /** iptables policy to apply after the container starts. `proxy` is not supported by this backend. */
+  network?: LxcNetworkConfig;
 }
 
 export interface LxcExecConfig {

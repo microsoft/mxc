@@ -61,11 +61,35 @@ fn extract_container_name(sandbox_id: &str) -> Result<&str, MxcError> {
     }
 }
 
+/// Maximum LXC sandbox container-name length.
+///
+/// `NetworkIptablesManager::new` derives a per-container iptables chain name
+/// (`MXC-<sanitized>`) by keeping only alphanumeric/`-`/`_` characters and
+/// truncating to 20 characters. Bounding valid container names to that same
+/// length and character set (see [`is_valid_container_name`]) makes the
+/// derivation an identity map on valid names — nothing is filtered out and no
+/// truncation occurs — so two distinct container names can never collide onto
+/// the same firewall chain (e.g. `"a.b"` vs `"ab"`, or long names that differ
+/// only after the 20th character). Such a collision would let one container's
+/// stop/deprovision tear down another container's firewall rules.
+const MAX_CONTAINER_NAME_LEN: usize = 20;
+
+/// Returns whether `name` is a valid LXC sandbox container name: non-empty, at
+/// most [`MAX_CONTAINER_NAME_LEN`] characters, and restricted to ASCII
+/// alphanumerics, `-`, and `_`.
+///
+/// The character set and length deliberately match the iptables chain-name
+/// derivation in `NetworkIptablesManager::new` so the container-name →
+/// chain-name mapping stays collision-free. `'.'` is intentionally excluded
+/// because it is stripped by that derivation.
 fn is_valid_container_name(name: &str) -> bool {
+    // Valid characters are ASCII (one byte each), so the byte length reported
+    // by `str::len` equals the character count for any otherwise-valid name.
     !name.is_empty()
+        && name.len() <= MAX_CONTAINER_NAME_LEN
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 fn resolve_container_name(request: &ExecutionRequest) -> Result<String, MxcError> {
@@ -502,6 +526,45 @@ mod tests {
     }
 
     #[test]
+    fn is_valid_container_name_rejects_dot() {
+        // '.' is stripped by the iptables chain-name derivation, so "a.b" and
+        // "ab" would collide onto the same chain; reject dotted names.
+        assert!(!is_valid_container_name("a.b"));
+    }
+
+    #[test]
+    fn is_valid_container_name_rejects_overlong_name() {
+        // One character over the bound: the chain derivation would truncate it,
+        // letting names that differ only past the bound collide.
+        assert!(!is_valid_container_name(
+            &"a".repeat(MAX_CONTAINER_NAME_LEN + 1)
+        ));
+    }
+
+    #[test]
+    fn is_valid_container_name_accepts_max_length_name() {
+        assert!(is_valid_container_name(&"a".repeat(MAX_CONTAINER_NAME_LEN)));
+    }
+
+    #[test]
+    fn extract_container_name_rejects_dotted_name() {
+        let err = extract_container_name("lxc:a.b").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn generated_container_name_fits_iptables_chain_bound() {
+        // The auto-generated name must itself satisfy the tightened rules so the
+        // firewall chain derived from it is collision-free.
+        let name = resolve_container_name(&ExecutionRequest::default()).unwrap();
+        assert!(
+            is_valid_container_name(&name),
+            "generated name {name:?} is invalid"
+        );
+        assert!(name.len() <= MAX_CONTAINER_NAME_LEN);
+    }
+
+    #[test]
     fn validate_provision_requires_distribution_and_release() {
         let runner = LxcStateAwareRunner::new();
         let err = runner
@@ -523,6 +586,21 @@ mod tests {
         let runner = LxcStateAwareRunner::new();
         let req = ExecutionRequest {
             container_id: "bad/name".to_string(),
+            ..Default::default()
+        };
+        let err = runner
+            .validate_provision(&req, Some(&provision_config()))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+    }
+
+    #[test]
+    fn validate_provision_rejects_dotted_container_id() {
+        // A dotted containerId would collide with its dot-stripped sibling on
+        // the derived iptables chain, so provisioning must reject it up front.
+        let runner = LxcStateAwareRunner::new();
+        let req = ExecutionRequest {
+            container_id: "has.dot".to_string(),
             ..Default::default()
         };
         let err = runner
