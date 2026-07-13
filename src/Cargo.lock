@@ -1630,7 +1630,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
- "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
  "wslc_common",
  "wxc_common",
 ]
@@ -3070,8 +3070,25 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 name = "windows_sandbox_common"
 version = "0.7.0"
 dependencies = [
+ "getrandom 0.2.17",
  "serde",
  "serde_json",
+ "tokio",
+ "wxc_common",
+]
+
+[[package]]
+name = "windows_sandbox_lifecycle"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows",
+ "windows_sandbox_common",
  "wxc_common",
 ]
 
@@ -3320,21 +3337,6 @@ name = "wxc_ui_probe"
 version = "0.1.0"
 
 [[package]]
-name = "wxc_windows_sandbox_daemon"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "mxc_build_common",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
- "windows_sandbox_common",
- "wxc_common",
-]
-
-[[package]]
 name = "wxc_windows_sandbox_guest"
 version = "0.7.0"
 dependencies = [
@@ -3342,6 +3344,7 @@ dependencies = [
  "mxc_build_common",
  "serde_json",
  "tokio",
+ "windows",
  "windows_sandbox_common",
  "wxc_common",
 ]
