@@ -12,6 +12,9 @@ use mxc_sdk::{
 #[cfg(target_os = "macos")]
 use mxc_sdk::{spawn_sandbox, WaitOutcome};
 
+#[cfg(target_os = "windows")]
+use mxc_sdk::IsolationTier;
+
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
         .iter()
@@ -25,6 +28,8 @@ fn platform_support_reports_host() {
     // Every platform this test runs on (macOS/Linux/Windows in CI) is supported.
     assert!(support.is_supported, "reason: {:?}", support.reason);
     assert!(!support.available_methods.is_empty());
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(support.isolation_tier, None);
 }
 
 #[cfg(target_os = "macos")]
@@ -214,6 +219,13 @@ fn platform_support_windows_is_processcontainer() {
     assert_eq!(
         support.available_methods,
         vec!["processcontainer".to_string()]
+    );
+    let isolation_tier = support
+        .isolation_tier
+        .expect("Windows probe should select an isolation tier");
+    assert_eq!(
+        isolation_tier == IsolationTier::BaseContainer,
+        appcontainer_common::fallback_detector::is_base_container_usable()
     );
 }
 

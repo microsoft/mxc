@@ -12,6 +12,11 @@
 //! probing is a temporary home; it moves to the future `mxc` engine crate that
 //! both `mxc-sdk` and the executor binaries will share.
 
+#[cfg(target_os = "windows")]
+use appcontainer_common::fallback_detector::{self, IsolationTier as BackendIsolationTier};
+#[cfg(target_os = "windows")]
+use wxc_common::models::ContainerPolicy;
+
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
 #[derive(Debug, Clone, Default)]
@@ -23,14 +28,28 @@ pub struct PlatformSupport {
     /// Containment backends available on this host, by wire name
     /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).
     pub available_methods: Vec<String>,
+    /// Isolation tier selected for the default Windows process-container policy.
+    ///
+    /// `None` on non-Windows hosts or when the Windows capability probe fails.
+    pub isolation_tier: Option<IsolationTier>,
+}
+
+/// Windows process-container isolation tier selected by the runtime probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationTier {
+    /// BaseContainer via `Experimental_CreateProcessInSandbox`.
+    BaseContainer,
+    /// AppContainer with BFS filesystem isolation.
+    AppContainerBfs,
+    /// AppContainer with host DACL augmentation.
+    AppContainerDacl,
 }
 
 /// Detect MXC support on the current host.
 ///
-/// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
-/// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
-/// capabilities come from the in-process fallback probe rather than a
-/// `wxc-exec --probe` subprocess.
+/// Mirrors the SDK's `getPlatformSupport`. Available methods are restricted to
+/// the backends this crate can run. On Windows the isolation tier comes from the
+/// in-process fallback probe rather than a `wxc-exec --probe` subprocess.
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
@@ -68,9 +87,18 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "windows")]
     {
+        let isolation_tier = fallback_detector::detect(&ContainerPolicy::default(), true)
+            .ok()
+            .map(|decision| match decision.tier {
+                BackendIsolationTier::BaseContainer => IsolationTier::BaseContainer,
+                BackendIsolationTier::AppContainerBfs => IsolationTier::AppContainerBfs,
+                BackendIsolationTier::AppContainerDacl => IsolationTier::AppContainerDacl,
+            });
+
         PlatformSupport {
             is_supported: true,
             available_methods: vec!["processcontainer".to_string()],
+            isolation_tier,
             ..Default::default()
         }
     }

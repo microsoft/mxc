@@ -47,7 +47,9 @@ available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
 
 [`platform_support`] is the Rust port of `getPlatformSupport` — reports host
-support and the available containment backends.
+support and the available containment backends. On Windows,
+`PlatformSupport::isolation_tier` reports the process-container tier selected
+for the default policy.
 
 ## Live stdio + kill (streaming)
 

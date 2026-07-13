@@ -51,7 +51,7 @@ pub mod policy;
 mod sandbox;
 
 use dispatch::spawn_runner;
-pub use platform::{platform_support, PlatformSupport};
+pub use platform::{platform_support, IsolationTier, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
     FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
