@@ -118,10 +118,12 @@ impl NetworkIptablesManager {
     /// Resolve a destination string to IPv4 and IPv6 firewall destinations.
     ///
     /// Bare IPv4/IPv6 literals are retained in their matching family. CIDR
-    /// strings are accepted after validating the network address and prefix
-    /// length, then passed through unchanged. Hostnames are resolved to both A
-    /// and AAAA records so IPv4 destinations route to `iptables` and IPv6
-    /// destinations route to `ip6tables`.
+    /// strings are accepted after validating that the address parses and the
+    /// prefix length is within range for its family; the host bits are not
+    /// required to be zero, since `iptables`/`ip6tables` apply the prefix mask
+    /// themselves. Validated CIDRs are passed through unchanged. Hostnames are
+    /// resolved to both A and AAAA records so IPv4 destinations route to
+    /// `iptables` and IPv6 destinations route to `ip6tables`.
     fn resolve_host(host: &str) -> ResolvedDestinations {
         if host.contains('/') {
             return match Self::destination_family(host) {
@@ -185,12 +187,25 @@ impl NetworkIptablesManager {
         }
     }
 
-    fn protocol_arg(protocol: &Protocol) -> &'static str {
+    /// The iptables/ip6tables `-p` protocol name for a rule in the given
+    /// address family. ICMP is family-specific: IPv4 uses `icmp` while IPv6
+    /// uses the `ipv6-icmp` name that ip6tables expects (ip6tables rejects
+    /// `icmp`).
+    fn protocol_arg(protocol: &Protocol, family: IpFamily) -> &'static str {
         match protocol {
             Protocol::Tcp => "tcp",
             Protocol::Udp => "udp",
-            Protocol::Icmp => "icmp",
+            Protocol::Icmp => match family {
+                IpFamily::V4 => "icmp",
+                IpFamily::V6 => "ipv6-icmp",
+            },
         }
+    }
+
+    /// Whether a protocol carries transport-layer ports and therefore supports
+    /// `--dport`. ICMP/ICMPv6 have no ports.
+    fn protocol_supports_ports(protocol: &Protocol) -> bool {
+        matches!(protocol, Protocol::Tcp | Protocol::Udp)
     }
 
     fn rule_action_arg(action: &RuleAction) -> &'static str {
@@ -249,6 +264,7 @@ impl NetworkIptablesManager {
                 action,
                 None,
                 None,
+                IpFamily::V4,
             ));
         }
         for destination in &destinations.ipv6 {
@@ -258,6 +274,7 @@ impl NetworkIptablesManager {
                 action,
                 None,
                 None,
+                IpFamily::V6,
             ));
         }
         args
@@ -287,15 +304,25 @@ impl NetworkIptablesManager {
             ports.iter().copied().map(Some).collect()
         };
 
+        // ICMP/ICMPv6 carry no ports, so collapse the port dimension for those
+        // protocols. This avoids emitting an invalid `--dport` on an ICMP rule
+        // (which iptables/ip6tables reject) and prevents duplicating the same
+        // portless rule once per configured port.
+        let portless = [None];
         let mut args = FirewallRuleArgs::default();
         for protocol in &protocol_options {
-            for port in &port_options {
+            let ports_for_protocol: &[Option<u16>] = match protocol.as_ref() {
+                Some(p) if !Self::protocol_supports_ports(p) => &portless,
+                _ => &port_options,
+            };
+            for port in ports_for_protocol {
                 let rule = Self::build_single_rule_args(
                     chain_name,
                     destination,
                     action,
                     protocol.as_ref(),
                     *port,
+                    family,
                 );
                 match family {
                     IpFamily::V4 => args.ipv4.push(rule),
@@ -312,6 +339,7 @@ impl NetworkIptablesManager {
         action: &RuleAction,
         protocol: Option<&Protocol>,
         port: Option<u16>,
+        family: IpFamily,
     ) -> Vec<String> {
         let mut args = vec![
             "-A".to_string(),
@@ -321,9 +349,13 @@ impl NetworkIptablesManager {
         ];
         if let Some(protocol) = protocol {
             args.push("-p".to_string());
-            args.push(Self::protocol_arg(protocol).to_string());
+            args.push(Self::protocol_arg(protocol, family).to_string());
         }
-        if let Some(port) = port {
+        // `--dport` is only valid for port-bearing protocols (TCP/UDP); never
+        // emit it for ICMP/ICMPv6 (or when no protocol is set), where it would
+        // make iptables/ip6tables reject the rule.
+        let port_supported = protocol.is_some_and(Self::protocol_supports_ports);
+        if let Some(port) = port.filter(|_| port_supported) {
             args.push("--dport".to_string());
             args.push(port.to_string());
         }
@@ -477,14 +509,17 @@ impl NetworkIptablesManager {
         Self::run_iptables(&default_args, logger)?;
         Self::run_ip6tables(&default_args, logger)?;
 
-        // Hook the chains into FORWARD for the container's traffic.
+        // Hook the chains into FORWARD for the container's egress traffic.
+        // Packets originating in the container arrive at the host on the
+        // host-side veth, so they match FORWARD by input interface (`-i`);
+        // `-o` would instead match traffic flowing toward the container.
         if let Some(ref iface) = self.veth_interface {
             Self::run_iptables(
-                &["-I", "FORWARD", "-o", iface, "-j", &self.chain_name],
+                &["-I", "FORWARD", "-i", iface, "-j", &self.chain_name],
                 logger,
             )?;
             Self::run_ip6tables(
-                &["-I", "FORWARD", "-o", iface, "-j", &self.chain_name],
+                &["-I", "FORWARD", "-i", iface, "-j", &self.chain_name],
                 logger,
             )?;
         } else {
@@ -511,14 +546,16 @@ impl NetworkIptablesManager {
             self.chain_name
         ));
 
-        // Remove from FORWARD (only if we had a veth interface and hooked it)
+        // Remove from FORWARD (only if we had a veth interface and hooked it).
+        // Must match the `-i` direction used at insertion so the delete finds
+        // the rule; a `-o` delete would leak the FORWARD hook.
         if let Some(ref iface) = self.veth_interface {
             let _ = Self::run_iptables(
-                &["-D", "FORWARD", "-o", iface, "-j", &self.chain_name],
+                &["-D", "FORWARD", "-i", iface, "-j", &self.chain_name],
                 logger,
             );
             let _ = Self::run_ip6tables(
-                &["-D", "FORWARD", "-o", iface, "-j", &self.chain_name],
+                &["-D", "FORWARD", "-i", iface, "-j", &self.chain_name],
                 logger,
             );
         }
@@ -840,5 +877,89 @@ mod tests {
                 "DROP",
             ])]
         );
+    }
+
+    #[test]
+    fn build_egress_rule_args_uses_ipv4_icmp_protocol_name() {
+        let rule = EgressRule {
+            destinations: vec!["140.82.112.4".to_string()],
+            protocols: vec![Protocol::Icmp],
+            action: RuleAction::Allow,
+            ..Default::default()
+        };
+
+        let args = NetworkIptablesManager::build_egress_rule_args("MXC-test", &rule);
+
+        assert!(args.ipv6.is_empty());
+        assert_eq!(
+            args.ipv4,
+            vec![strings(&[
+                "-A",
+                "MXC-test",
+                "-d",
+                "140.82.112.4",
+                "-p",
+                "icmp",
+                "-j",
+                "ACCEPT",
+            ])]
+        );
+    }
+
+    #[test]
+    fn build_egress_rule_args_uses_ipv6_icmp_protocol_name() {
+        // ip6tables requires the `ipv6-icmp` protocol name; `icmp` is rejected.
+        let rule = EgressRule {
+            destinations: vec!["2606:50c0::1".to_string()],
+            protocols: vec![Protocol::Icmp],
+            action: RuleAction::Allow,
+            ..Default::default()
+        };
+
+        let args = NetworkIptablesManager::build_egress_rule_args("MXC-test", &rule);
+
+        assert!(args.ipv4.is_empty());
+        assert_eq!(
+            args.ipv6,
+            vec![strings(&[
+                "-A",
+                "MXC-test",
+                "-d",
+                "2606:50c0::1",
+                "-p",
+                "ipv6-icmp",
+                "-j",
+                "ACCEPT",
+            ])]
+        );
+    }
+
+    #[test]
+    fn build_egress_rule_args_omits_dport_for_icmp_even_with_ports() {
+        // ICMP has no transport ports: a configured port list must not emit
+        // `--dport` and must not fan out into one rule per port.
+        let rule = EgressRule {
+            destinations: vec!["140.82.112.4".to_string()],
+            ports: vec![80, 443],
+            protocols: vec![Protocol::Icmp],
+            action: RuleAction::Allow,
+        };
+
+        let args = NetworkIptablesManager::build_egress_rule_args("MXC-test", &rule);
+
+        assert_eq!(
+            args.ipv4,
+            vec![strings(&[
+                "-A",
+                "MXC-test",
+                "-d",
+                "140.82.112.4",
+                "-p",
+                "icmp",
+                "-j",
+                "ACCEPT",
+            ])]
+        );
+        assert!(args.ipv6.is_empty());
     }
 }
