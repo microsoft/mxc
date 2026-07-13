@@ -80,9 +80,12 @@ than linking third-party code directly against `mxc_ffi`.
 
 ## Generated code & CI gates
 
-- `Native/NativeMethods.g.cs` is generated from the Rust FFI by csbindgen
-  (`src/ffi/mxc_ffi/build.rs`) — do not hand-edit. `scripts/check-csharp-bindings-codegen.js`
-  fails if it drifts.
+- `Native/NativeMethods.g.cs` is generated from the Rust FFI by csbindgen in
+  `src/ffi/mxc_ffi/build.rs`, gated behind the crate's **`csharpsdk`** cargo
+  feature (off by default, so normal/backend builds don't compile csbindgen or
+  touch the source tree) — do not hand-edit. Regenerate with
+  `cargo build -p mxc_ffi --features csharpsdk`; `scripts/check-csharp-bindings-codegen.js`
+  does exactly that and fails if the committed file drifts.
 - The `ErrorCode` enum mirrors the native `MXC_STATUS_*` constants;
   `scripts/check-csharp-errorcode-parity.js` enforces that.
 - The C# package version tracks the Rust workspace version;

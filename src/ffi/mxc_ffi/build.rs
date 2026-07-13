@@ -3,14 +3,25 @@
 
 //! Generates the C# P/Invoke layer for the C# SDK from this crate's `extern
 //! "C"` surface, using csbindgen. The generated file is checked in (a CI drift
-//! gate regenerates and diffs it); regenerating on build keeps it in lockstep
-//! with the Rust FFI.
-
-use std::path::Path;
+//! gate regenerates and diffs it).
+//!
+//! Code generation is gated behind the **`csharpsdk`** cargo feature so that
+//! normal builds — including the whole-workspace backend build matrix — do
+//! **not** compile csbindgen or write into the source tree. Only the drift gate
+//! (`scripts/check-csharp-bindings-codegen.js`, which builds with
+//! `--features csharpsdk`) regenerates the committed file.
 
 fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=build.rs");
+
+    #[cfg(feature = "csharpsdk")]
+    generate_csharp_bindings();
+}
+
+#[cfg(feature = "csharpsdk")]
+fn generate_csharp_bindings() {
+    use std::path::Path;
 
     // Repo-root `csharp/` project (this crate lives at `src/ffi/mxc_ffi`).
     let out_path = Path::new(env!("CARGO_MANIFEST_DIR"))

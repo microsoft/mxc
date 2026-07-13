@@ -29,13 +29,16 @@ function read(path) {
 const before = read(generated);
 
 try {
-  // build.rs regenerates the C# file as a side effect of building the crate.
-  execFileSync("cargo", ["build", "-p", "mxc_ffi"], {
+  // build.rs regenerates the C# file as a side effect of building the crate
+  // with the `csharpsdk` feature (csbindgen is off in normal builds).
+  execFileSync("cargo", ["build", "-p", "mxc_ffi", "--features", "csharpsdk"], {
     cwd: join(repoRoot, "src"),
     stdio: "inherit",
   });
 } catch (e) {
-  console.error(`ERROR: 'cargo build -p mxc_ffi' failed: ${e.message}`);
+  console.error(
+    `ERROR: 'cargo build -p mxc_ffi --features csharpsdk' failed: ${e.message}`
+  );
   process.exit(1);
 }
 

@@ -16,5 +16,13 @@ crate-type = ["cdylib", "staticlib", "lib"]
 mxc-sdk = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+# Opt-in C# SDK P/Invoke code generation (csbindgen) in build.rs. Off by
+# default so normal builds — including the whole-workspace backend build
+# matrix — don't compile csbindgen or write into the source tree. The drift
+# gate (scripts/check-csharp-bindings-codegen.js) builds with this feature to
+# regenerate the committed bindings.
+csharpsdk = ["dep:csbindgen"]
+
 [build-dependencies]
-csbindgen = "1"
+csbindgen = { version = "1", optional = true }
