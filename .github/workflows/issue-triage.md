@@ -50,6 +50,7 @@ safe-outputs:
       - huzaifa-d
       - adpa-ms
       - richiemsft
+      - theelliotm
     max: 2
   add-comment:
     max: 1
@@ -82,6 +83,10 @@ Assign matching owner(s) with `assign_to_user` using this map:
 | @huzaifa-d | MicroVM / NanVix / Hyperlight / Windows Sandbox |
 | @adpa-ms | IsolationSession / session isolation |
 | @richiemsft | macOS / Seatbelt |
+| @mgudgin | SDK configuration and policy (Area-SDK-Configuration, Area-SDK-Policy) |
+| @huzaifa-d | SDK API, executor schema, and TypeScript build (Area-SDK-Api, Area-Executor-Schema, Area-Build-TypeScript) |
+| @bbonaby | Rust build (Area-Build-Rust) |
+| @theelliotm | SDK and executor test infrastructure (Area-Test-SDK, Area-Test-Executor) |
 
 Rules:
 
