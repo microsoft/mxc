@@ -12,7 +12,8 @@ permissions:
   copilot-requests: write
 tools:
   github:
-    allowed-repos: "${{ github.repository }}"
+    allowed-repos:
+      - "${{ github.repository }}"
     min-integrity: unapproved
 safe-outputs:
   report-failure-as-issue: false
