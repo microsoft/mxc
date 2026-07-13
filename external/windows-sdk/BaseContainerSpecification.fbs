@@ -77,6 +77,11 @@ table SandboxSpec {
 
     // File Paths that have been denied access
     fs_deny:[string];
+
+    // Marks an agentic caller. Set true by MXC when the IsAgentic config
+    // flag is enabled; in response the OS generates a per-workload agent
+    // id GUID. False (the default) for non-agentic callers.
+    is_agentic:bool = false;
 }
 
 table proxy_info {

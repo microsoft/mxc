@@ -139,6 +139,13 @@
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
+        "is_agentic": {
+          "description": "Agentic-workload marker. When true, MXC marks the sandbox spec as agentic so the OS generates a per-workload agent id.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "isolation_session": {
           "anyOf": [
             {

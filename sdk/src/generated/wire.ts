@@ -52,6 +52,10 @@ export type Containment = "process" | "processcontainer" | "vm" | "windows_sandb
  */
 export interface Experimental {
   /**
+   * Agentic-workload marker. When true, MXC marks the sandbox spec as agentic so the OS generates a per-workload agent id.
+   */
+  is_agentic?: boolean | null;
+  /**
    * IsolationSession backend config (Windows).
    */
   isolation_session?: IsolationSession | null;

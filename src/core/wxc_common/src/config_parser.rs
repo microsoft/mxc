@@ -964,12 +964,14 @@ fn convert_wire_config(
         let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
             enabled: raw_t.enabled,
         });
+        let is_agentic = raw_exp.is_agentic.unwrap_or(false);
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
             telemetry,
+            is_agentic,
         }
     } else {
         ExperimentalConfig::default()

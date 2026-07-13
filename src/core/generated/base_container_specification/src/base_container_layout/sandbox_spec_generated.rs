@@ -31,6 +31,7 @@ impl<'a> SandboxSpec<'a> {
     pub const VT_NETWORK_POLICY: ::flatbuffers::VOffsetT = 22;
     pub const VT_INTEGRITY: ::flatbuffers::VOffsetT = 24;
     pub const VT_FS_DENY: ::flatbuffers::VOffsetT = 26;
+    pub const VT_IS_AGENTIC: ::flatbuffers::VOffsetT = 28;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -66,6 +67,7 @@ impl<'a> SandboxSpec<'a> {
         if let Some(x) = args.version {
             builder.add_version(x);
         }
+        builder.add_is_agentic(args.is_agentic);
         builder.add_integrity(args.integrity);
         builder.add_least_privilege(args.least_privilege);
         builder.add_disallow_win32k_system_calls(args.disallow_win32k_system_calls);
@@ -104,6 +106,7 @@ impl<'a> SandboxSpec<'a> {
                 .map(|s| alloc::string::ToString::to_string(s))
                 .collect()
         });
+        let is_agentic = self.is_agentic();
         SandboxSpecT {
             version,
             app_container,
@@ -116,6 +119,7 @@ impl<'a> SandboxSpec<'a> {
             network_policy,
             integrity,
             fs_deny,
+            is_agentic,
         }
     }
 
@@ -250,6 +254,17 @@ impl<'a> SandboxSpec<'a> {
             >>(SandboxSpec::VT_FS_DENY, None)
         }
     }
+    #[inline]
+    pub fn is_agentic(&self) -> bool {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<bool>(SandboxSpec::VT_IS_AGENTIC, Some(false))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
@@ -288,6 +303,7 @@ impl ::flatbuffers::Verifiable for SandboxSpec<'_> {
             .visit_field::<::flatbuffers::ForwardsUOffset<
                 ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>,
             >>("fs_deny", Self::VT_FS_DENY, false)?
+            .visit_field::<bool>("is_agentic", Self::VT_IS_AGENTIC, false)?
             .finish();
         Ok(())
     }
@@ -316,6 +332,7 @@ pub struct SandboxSpecArgs<'a> {
             ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>,
         >,
     >,
+    pub is_agentic: bool,
 }
 impl<'a> Default for SandboxSpecArgs<'a> {
     #[inline]
@@ -332,6 +349,7 @@ impl<'a> Default for SandboxSpecArgs<'a> {
             network_policy: None,
             integrity: IntegrityLevel::system_default,
             fs_deny: None,
+            is_agentic: false,
         }
     }
 }
@@ -430,6 +448,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SandboxSpecBuilder<'a, 'b, A>
             .push_slot_always::<::flatbuffers::WIPOffset<_>>(SandboxSpec::VT_FS_DENY, fs_deny);
     }
     #[inline]
+    pub fn add_is_agentic(&mut self, is_agentic: bool) {
+        self.fbb_
+            .push_slot::<bool>(SandboxSpec::VT_IS_AGENTIC, is_agentic, false);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> SandboxSpecBuilder<'a, 'b, A> {
@@ -464,6 +487,7 @@ impl ::core::fmt::Debug for SandboxSpec<'_> {
         ds.field("network_policy", &self.network_policy());
         ds.field("integrity", &self.integrity());
         ds.field("fs_deny", &self.fs_deny());
+        ds.field("is_agentic", &self.is_agentic());
         ds.finish()
     }
 }
@@ -481,6 +505,7 @@ pub struct SandboxSpecT {
     pub network_policy: Option<alloc::boxed::Box<NetworkPolicyT>>,
     pub integrity: IntegrityLevel,
     pub fs_deny: Option<alloc::vec::Vec<alloc::string::String>>,
+    pub is_agentic: bool,
 }
 impl Default for SandboxSpecT {
     fn default() -> Self {
@@ -496,6 +521,7 @@ impl Default for SandboxSpecT {
             network_policy: None,
             integrity: IntegrityLevel::system_default,
             fs_deny: None,
+            is_agentic: false,
         }
     }
 }
@@ -527,6 +553,7 @@ impl SandboxSpecT {
             let w: alloc::vec::Vec<_> = x.iter().map(|s| _fbb.create_string(s)).collect();
             _fbb.create_vector(&w)
         });
+        let is_agentic = self.is_agentic;
         SandboxSpec::create(
             _fbb,
             &SandboxSpecArgs {
@@ -541,6 +568,7 @@ impl SandboxSpecT {
                 network_policy,
                 integrity,
                 fs_deny,
+                is_agentic,
             },
         )
     }
