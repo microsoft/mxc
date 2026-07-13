@@ -92,56 +92,56 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     set "BIN_DIR=src\target\%%T\%BUILD_CONFIG%"
     if "%%T"=="x86_64-pc-windows-msvc" (set "SDK_ARCH=x64") else (set "SDK_ARCH=arm64")
     if exist "!BIN_DIR!\wxc-exec.exe" (
-        if not exist "sdk\bin\!SDK_ARCH!" mkdir "sdk\bin\!SDK_ARCH!"
-        copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\bin\!SDK_ARCH!\" >nul
+        if not exist "sdk\node\bin\!SDK_ARCH!" mkdir "sdk\node\bin\!SDK_ARCH!"
+        copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
         echo   Copied !SDK_ARCH!\wxc-exec.exe
         if exist "!BIN_DIR!\wxc-windows-sandbox-guest.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            copy /Y "!BIN_DIR!\wxc-windows-sandbox-guest.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-windows-sandbox-guest.exe
         )
         if exist "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" (
-            copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-windows-sandbox-daemon.exe
         )
         if exist "!BIN_DIR!\winhttp-proxy-shim.exe" (
-            copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\winhttp-proxy-shim.exe
         )
         if exist "!BIN_DIR!\wxc-test-proxy.exe" (
-            copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-test-proxy.exe
         )
         if exist "!BIN_DIR!\wxc-host-prep.exe" (
-            copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-host-prep.exe
         )
         if exist "!BIN_DIR!\plm.exe" (
-            copy /Y "!BIN_DIR!\plm.exe" "sdk\bin\!SDK_ARCH!\" >nul
+            copy /Y "!BIN_DIR!\plm.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\plm.exe
         )
         if "%WITH_NANVIX%"=="1" (
             for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
                 if exist "!BIN_DIR!\%%B" (
-                    copy /Y "!BIN_DIR!\%%B" "sdk\bin\!SDK_ARCH!\" >nul
+                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
                     echo   Copied !SDK_ARCH!\%%B
                 )
             )
             if exist "!BIN_DIR!\bin\kernel.elf" (
-                if not exist "sdk\bin\!SDK_ARCH!\bin" mkdir "sdk\bin\!SDK_ARCH!\bin"
-                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\bin\!SDK_ARCH!\bin\" >nul
+                if not exist "sdk\node\bin\!SDK_ARCH!\bin" mkdir "sdk\node\bin\!SDK_ARCH!\bin"
+                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\node\bin\!SDK_ARCH!\bin\" >nul
                 echo   Copied !SDK_ARCH!\bin\kernel.elf
             )
             for %%S in (kernel.vmem kernel.whp.cbor) do (
                 if exist "!BIN_DIR!\snapshots\%%S" (
-                    if not exist "sdk\bin\!SDK_ARCH!\snapshots" mkdir "sdk\bin\!SDK_ARCH!\snapshots"
-                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\bin\!SDK_ARCH!\snapshots\" >nul
+                    if not exist "sdk\node\bin\!SDK_ARCH!\snapshots" mkdir "sdk\node\bin\!SDK_ARCH!\snapshots"
+                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\node\bin\!SDK_ARCH!\snapshots\" >nul
                     echo   Copied !SDK_ARCH!\snapshots\%%S
                 )
             )
         )
         if "%WITH_WSLC%"=="1" (
             if exist "!BIN_DIR!\wslcsdk.dll" (
-                copy /Y "!BIN_DIR!\wslcsdk.dll" "sdk\bin\!SDK_ARCH!\" >nul
+                copy /Y "!BIN_DIR!\wslcsdk.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
                 echo   Copied !SDK_ARCH!\wslcsdk.dll
             )
         )
@@ -151,8 +151,8 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     :: NuGet pack picks it up as runtimes/<rid>/native/mxc_ffi.dll.
     if "%%T"=="x86_64-pc-windows-msvc" (set "RID=win-x64") else (set "RID=win-arm64")
     if exist "!BIN_DIR!\mxc_ffi.dll" (
-        if not exist "csharp\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "csharp\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
-        copy /Y "!BIN_DIR!\mxc_ffi.dll" "csharp\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
+        if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
+        copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
         echo   Copied !RID!\native\mxc_ffi.dll
     )
 )
@@ -160,13 +160,13 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
 :: Build npm packages
 echo.
 echo Building npm SDK package...
-pushd sdk
+pushd sdk\node
 call npm install & call npm run build
 popd
 
 echo.
 echo Building SDK integration tests...
-pushd sdk\tests\integration
+pushd sdk\node\tests\integration
 :: npm caches `file:` deps by package.json version. The local SDK version
 :: rarely bumps between builds, so a plain `npm install` keeps reusing the
 :: stale packed copy. Force a refresh of the @microsoft/mxc-sdk link so

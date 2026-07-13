@@ -432,7 +432,7 @@ spawnSandboxFromConfig(config);
 
 An MXC developer adding UI containment support would:
 
-**1. Add policy fields (if applicable)** (`sdk/src/types.ts`):
+**1. Add policy fields (if applicable)** (`sdk/node/src/types.ts`):
 
 If the feature is cross-platform security intent, add it to
 `SandboxPolicy`. If the feature introduces a new containment
@@ -473,7 +473,7 @@ Process container-specific UI fields (in this case Windows):
 }
 ```
 
-**3. Add Config TypeScript types** (`sdk/src/types.ts`):
+**3. Add Config TypeScript types** (`sdk/node/src/types.ts`):
 
 Top-level UI (all backends):
 
@@ -498,7 +498,7 @@ ui: {
 };
 ```
 
-**4. Map policy to Config in SDK** (`sdk/src/sandbox.ts`):
+**4. Map policy to Config in SDK** (`sdk/node/src/sandbox.ts`):
 
 In `createConfigFromPolicy()`, map policy `ui` fields to
 Config `ui` fields and fill backend-specific defaults:

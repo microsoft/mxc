@@ -253,9 +253,9 @@ Setup scripts (PowerShell & Bash) will download matching pre-release binaries an
 **Goal:** Make the TypeScript SDK aware of NanVix as a backend option.
 
 **What changes:**
-- `sdk/src/types.ts` — Add `'microvm'` to `SandboxingMethod` type, add `NanVixConfig` interface
-- `sdk/src/platform.ts` — Detect NanVix availability via `wxc-exec.exe --check-platform`
-- `sdk/src/sandbox.ts` — Accept `containment: 'microvm'` in `SandboxSpawnOptions`
+- `sdk/node/src/types.ts` — Add `'microvm'` to `SandboxingMethod` type, add `NanVixConfig` interface
+- `sdk/node/src/platform.ts` — Detect NanVix availability via `wxc-exec.exe --check-platform`
+- `sdk/node/src/sandbox.ts` — Accept `containment: 'microvm'` in `SandboxSpawnOptions`
 - `wxc/src/main.rs` — Add `--check-platform` subcommand returning JSON capabilities
 
 ### Phase 3 — CLI Flags & Setup Scripts

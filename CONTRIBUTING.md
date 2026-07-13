@@ -114,7 +114,7 @@ schemas/            JSON schemas (stable + dev)
 
 ### Building MXC
 
-MXC has a Rust core (under `src/`) and a TypeScript SDK (under `sdk/`). The full project layout and commands are documented in the [README](./README.md). The short version:
+MXC has a Rust core (under `src/`) and a TypeScript SDK (under `sdk/node/`). The full project layout and commands are documented in the [README](./README.md). The short version:
 
 **Windows** — `build.bat`:
 
@@ -154,7 +154,7 @@ cargo build --release --target aarch64-pc-windows-msvc
 cargo build --release -p lxc                                       # Linux only — builds lxc-exec
 cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS only — builds mxc-exec-mac
 
-# SDK (from sdk/)
+# SDK (from sdk/node/)
 npm install && npm run build
 ```
 
@@ -180,7 +180,7 @@ cargo test --workspace
 cargo test -p wxc_common                    # Single crate
 cargo test -p wxc_common -- config_parser   # Filter by test name
 
-# SDK unit and integration tests (from sdk/)
+# SDK unit and integration tests (from sdk/node/)
 npm test
 npm run test:integration
 
@@ -189,7 +189,7 @@ cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests
 ```
 
-PowerShell and shell helper scripts that drive the executor end-to-end live under `tests/scripts/` and require a local build. See the [README](./README.md) and the [SDK README](./sdk/README.md) for more.
+PowerShell and shell helper scripts that drive the executor end-to-end live under `tests/scripts/` and require a local build. See the [README](./README.md) and the [SDK README](./sdk/node/README.md) for more.
 
 ### Code review
 
@@ -201,7 +201,7 @@ Reviewers will look for:
 
 * Correctness and security — MXC is a sandboxing system, so containment policy changes get extra scrutiny.
 * Tests covering the new or changed behavior.
-* Documentation updates when behavior covered by existing docs changes (e.g., `docs/schema.md` for schema changes, the relevant backend doc in `docs/` for runner changes, `sdk/README.md` for SDK API changes).
+* Documentation updates when behavior covered by existing docs changes (e.g., `docs/schema.md` for schema changes, the relevant backend doc in `docs/` for runner changes, `sdk/node/README.md` for SDK API changes).
 * Code style consistent with the rest of the repo.
 
 It may take several review cycles. The result should be solid, testable, conformant code that is safe to merge.

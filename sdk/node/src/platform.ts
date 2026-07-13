@@ -398,7 +398,7 @@ export function findWxcExecutable(): string | null {
 
   const pkgRoot = getSdkPackageRoot();
   const targetTriple = getRustTargetTriple();
-  const targetDir = path.join(pkgRoot, '..', 'src', 'target');
+  const targetDir = path.join(pkgRoot, '..', '..', 'src', 'target');
 
   const possiblePaths = [
     // Bundled in the SDK package (e.g. when installed via npm)
@@ -471,7 +471,7 @@ export function findLxcExecutable(): string | null {
 
   const pkgRoot = getSdkPackageRoot();
   const targetTriple = getLinuxRustTargetTriple();
-  const targetDir = path.join(pkgRoot, '..', 'src', 'target');
+  const targetDir = path.join(pkgRoot, '..', '..', 'src', 'target');
 
   const possiblePaths = [
     // Bundled in the SDK package
@@ -511,7 +511,7 @@ export function findSeatbeltExecutable(): string | null {
   }
 
   const targetTriple = getDarwinRustTargetTriple();
-  const targetDir = path.join(__dirname, '..', '..', 'src', 'target');
+  const targetDir = path.join(__dirname, '..', '..', '..', 'src', 'target');
 
   const possiblePaths = [
     // Bundled in the SDK package

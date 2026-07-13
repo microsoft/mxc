@@ -16,7 +16,7 @@ When a consumer specifies a SandboxPolicy version (e.g.,
 `0.4.0` schema.
 
 ```typescript
-// sdk/src/types.ts
+// sdk/node/src/types.ts
 const policy: SandboxPolicy = {
   version: "0.6.0-alpha",
   filesystem: { ... },

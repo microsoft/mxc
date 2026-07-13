@@ -20,9 +20,9 @@ serde_json = { workspace = true }
 # Opt-in C# SDK P/Invoke code generation (csbindgen) in build.rs. Off by
 # default so normal builds — including the whole-workspace backend build
 # matrix — don't compile csbindgen or write into the source tree. The drift
-# gate (scripts/check-csharp-bindings-codegen.js) builds with this feature to
+# gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
 # regenerate the committed bindings.
-csharpsdk = ["dep:csbindgen"]
+dotnetsdk = ["dep:csbindgen"]
 
 [build-dependencies]
 csbindgen = { version = "1", optional = true }

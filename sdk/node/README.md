@@ -45,8 +45,8 @@ child.on('close', (code) => console.log('exit:', code));
 
 <!--
   Keep this section in sync with:
-    - sdk/src/sandbox.ts          (SUPPORTED_VERSION / MIN_VERSION)
-    - sdk/src/platform.ts         (availableMethods per platform)
+    - sdk/node/src/sandbox.ts          (SUPPORTED_VERSION / MIN_VERSION)
+    - sdk/node/src/platform.ts         (availableMethods per platform)
     - schemas/{stable,dev}/*.json (supported policy.version values)
   When a new schema graduates or a new backend ships, update only this block.
 -->
@@ -391,4 +391,4 @@ Full TypeScript definitions ship with the package (`dist/index.d.ts`). All expor
 
 ## License
 
-[MIT](https://github.com/microsoft/mxc/blob/main/sdk/LICENSE.md). Contributions welcome — see the main [MXC repository](https://github.com/microsoft/mxc).
+[MIT](https://github.com/microsoft/mxc/blob/main/sdk/node/LICENSE.md). Contributions welcome — see the main [MXC repository](https://github.com/microsoft/mxc).
