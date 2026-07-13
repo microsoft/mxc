@@ -1086,12 +1086,53 @@ impl Drop for AppContainerScriptRunner {
 // Shared setup/teardown + streaming (handle-based) execution
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Per-run resources (firewall + filesystem policy) whose lifetime is tied to
-/// the sandboxed child. Created by [`AppContainerScriptRunner::prepare`] and
-/// torn down by [`AppContainerScriptRunner::teardown`] after the child exits.
-struct Prepared {
+/// RAII guard for per-run firewall and filesystem policy.
+///
+/// Call [`cleanup`](PolicyScope::cleanup) with a logger for logged cleanup. If
+/// that path is missed, `Drop` performs best-effort cleanup with a buffer logger.
+struct PolicyScope {
     network_manager: crate::network_manager::NetworkManager,
     bfs_manager: crate::filesystem_bfs::FileSystemBfsManager,
+    preserve_policy: bool,
+    cleaned_up: bool,
+}
+
+impl PolicyScope {
+    fn new(
+        bfs_manager: crate::filesystem_bfs::FileSystemBfsManager,
+        network_manager: crate::network_manager::NetworkManager,
+        preserve_policy: bool,
+    ) -> Self {
+        Self {
+            network_manager,
+            bfs_manager,
+            preserve_policy,
+            cleaned_up: false,
+        }
+    }
+
+    /// Perform cleanup with proper logging. Marks the scope as cleaned up so
+    /// `Drop` becomes a no-op.
+    fn cleanup(&mut self, logger: &mut Logger) {
+        if self.cleaned_up {
+            return;
+        }
+        self.cleaned_up = true;
+        self.network_manager
+            .stop_all(!self.preserve_policy, logger);
+        if self.bfs_manager.configured() && !self.preserve_policy {
+            self.bfs_manager.remove_configuration(logger);
+        }
+    }
+}
+
+impl Drop for PolicyScope {
+    fn drop(&mut self) {
+        if !self.cleaned_up {
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            self.cleanup(&mut logger);
+        }
+    }
 }
 
 impl AppContainerScriptRunner {
@@ -1102,7 +1143,7 @@ impl AppContainerScriptRunner {
         &mut self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-    ) -> Result<Prepared, ScriptResponse> {
+    ) -> Result<PolicyScope, ScriptResponse> {
         use crate::filesystem_bfs::FileSystemBfsManager;
         use crate::network_manager::NetworkManager;
 
@@ -1158,8 +1199,12 @@ impl AppContainerScriptRunner {
             );
         }
 
-        let mut network_manager = NetworkManager::new();
-        match network_manager.start(
+        let mut scope = PolicyScope::new(
+            bfs_manager,
+            NetworkManager::new(),
+            request.lifecycle.preserve_policy,
+        );
+        match scope.network_manager.start(
             &principal_id,
             &self.app_container_name,
             &request.policy,
@@ -1167,29 +1212,15 @@ impl AppContainerScriptRunner {
             logger,
         ) {
             Ok(()) => {
-                self.proxy_address = network_manager.proxy_address().cloned();
+                self.proxy_address = scope.network_manager.proxy_address().cloned();
             }
             Err(err) => {
+                scope.cleanup(logger);
                 return Err(ScriptResponse::error(&err.to_string()));
             }
         }
 
-        Ok(Prepared {
-            network_manager,
-            bfs_manager,
-        })
-    }
-
-    /// Tear down the per-run firewall and filesystem policy. Idempotent at the
-    /// manager level; called once after the child exits.
-    fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
-        prepared.network_manager.stop_all(!preserve_policy, logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
-            && prepared.bfs_manager.configured()
-            && !preserve_policy
-        {
-            prepared.bfs_manager.remove_configuration(logger);
-        }
+        Ok(scope)
     }
 }
 
@@ -1227,21 +1258,16 @@ impl SandboxBackend for AppContainerScriptRunner {
         let child = match self.spawn_suspended(request, logger, capture) {
             Ok(c) => c,
             Err(e) => {
-                self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
+                prepared.cleanup(logger);
                 return Err(ScriptResponse::error(&e.to_string()));
             }
         };
         if let Err(e) = child.resume() {
-            self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
+            prepared.cleanup(logger);
             return Err(ScriptResponse::error(&e.to_string()));
         }
 
-        Ok(Box::new(AppContainerSandboxProcess::new(
-            child,
-            prepared,
-            self.filesystem_mode,
-            request,
-        )))
+        Ok(Box::new(AppContainerSandboxProcess::new(child, prepared)))
     }
 
     fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
@@ -1270,9 +1296,7 @@ struct AppContainerSandboxProcess {
     /// closers can mint a [`StreamCloser`] even after the stream is taken.
     stdout_canceller: Option<PipeReadCanceller>,
     stderr_canceller: Option<PipeReadCanceller>,
-    prepared: Prepared,
-    filesystem_mode: FilesystemMode,
-    preserve_policy: bool,
+    prepared: PolicyScope,
     timeout_ms: u32,
     teardown_done: bool,
 }
@@ -1296,12 +1320,7 @@ struct AppContainerSandboxProcess {
 unsafe impl Send for AppContainerSandboxProcess {}
 
 impl AppContainerSandboxProcess {
-    fn new(
-        mut child: SpawnedChild,
-        prepared: Prepared,
-        filesystem_mode: FilesystemMode,
-        request: &ExecutionRequest,
-    ) -> Self {
+    fn new(mut child: SpawnedChild, prepared: PolicyScope) -> Self {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
         let stdin = child.stdin_write.take().map(PipeWriter::new);
@@ -1320,8 +1339,6 @@ impl AppContainerSandboxProcess {
             stdout_canceller,
             stderr_canceller,
             prepared,
-            filesystem_mode,
-            preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
             teardown_done: false,
         }
@@ -1333,15 +1350,7 @@ impl AppContainerSandboxProcess {
         }
         self.teardown_done = true;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        self.prepared
-            .network_manager
-            .stop_all(!self.preserve_policy, &mut logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
-            && self.prepared.bfs_manager.configured()
-            && !self.preserve_policy
-        {
-            self.prepared.bfs_manager.remove_configuration(&mut logger);
-        }
+        self.prepared.cleanup(&mut logger);
     }
 }
 
