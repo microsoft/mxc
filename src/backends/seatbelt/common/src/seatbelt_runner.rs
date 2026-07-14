@@ -42,15 +42,32 @@ use crate::profile_builder::build_profile_with_proxy;
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
 /// are stripped from the caller-supplied environment so sandboxed code cannot
-/// override the `HTTP_PROXY` / `HTTPS_PROXY` values we inject (or re-enable a
-/// `NO_PROXY` bypass). Mirrors the Bubblewrap backend's `PROXY_ENV_KEYS`.
+/// override the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` values we inject (or
+/// re-enable a `NO_PROXY` bypass). `ALL_PROXY` is the catch-all curl/libcurl
+/// and many HTTP clients honor for every scheme, so leaving it caller-settable
+/// would let sandboxed code redirect or bypass the proxy. Mirrors the
+/// Bubblewrap backend's `PROXY_ENV_KEYS`.
 const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
+    "ALL_PROXY",
     "http_proxy",
     "https_proxy",
+    "all_proxy",
     "NO_PROXY",
     "no_proxy",
+];
+
+/// Proxy env var keys injected (pointing at the resolved proxy URL) when a
+/// proxy is active. `NO_PROXY` is intentionally absent — see the module docs
+/// and [`resolve_environment`].
+const PROXY_INJECT_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
 ];
 
 // ---------------------------------------------------------------------------
@@ -701,8 +718,8 @@ const DEFAULT_SANDBOX_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 /// host environment (matching the bubblewrap `--clearenv` and AppContainer
 /// clean-block behaviour). Sets a default `PATH`, then the resolved request
 /// vars (which may override `PATH`). When a proxy is active its
-/// `HTTP_PROXY` / `HTTPS_PROXY` vars are injected and caller-supplied proxy
-/// vars stripped (see [`resolve_environment`]). `PWD` is set separately
+/// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` vars are injected and
+/// caller-supplied proxy vars stripped (see [`resolve_environment`]). `PWD` is set separately
 /// alongside the cwd.
 fn apply_clean_environment(
     command: &mut Command,
@@ -721,8 +738,9 @@ fn apply_clean_environment(
 ///
 /// When `proxy_address` is `Some`, any caller-supplied proxy vars
 /// ([`PROXY_ENV_KEYS`]) are dropped so sandboxed code cannot override or
-/// bypass the proxy, then `HTTP_PROXY` / `HTTPS_PROXY` (and their lowercase
-/// forms) are set to the proxy URL. Shared by the exec and open launch paths
+/// bypass the proxy, then the injected keys ([`PROXY_INJECT_KEYS`]:
+/// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and their lowercase forms) are
+/// set to the proxy URL. Shared by the exec and open launch paths
 /// so both enforce the proxy identically.
 fn resolve_environment(
     request: &ExecutionRequest,
@@ -739,7 +757,7 @@ fn resolve_environment(
     }
     if let Some(addr) = proxy_address {
         let url = addr.to_url();
-        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        for key in PROXY_INJECT_KEYS {
             pairs.push((key.to_string(), url.clone()));
         }
     }
@@ -848,7 +866,14 @@ mod tests {
         let request = base_request();
         let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
         let pairs = resolve_environment(&request, Some(&addr));
-        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
             assert_eq!(
                 env_value(&pairs, key),
                 Some("http://127.0.0.1:8888"),
@@ -863,6 +888,7 @@ mod tests {
         request.env = vec![
             "HTTP_PROXY=http://attacker.example:9999".into(),
             "https_proxy=http://attacker.example:9999".into(),
+            "ALL_PROXY=http://attacker.example:9999".into(),
             "NO_PROXY=localhost".into(),
             "KEEP=me".into(),
         ];
@@ -877,6 +903,10 @@ mod tests {
         );
         assert_eq!(
             env_value(&pairs, "https_proxy"),
+            Some("http://127.0.0.1:7777")
+        );
+        assert_eq!(
+            env_value(&pairs, "ALL_PROXY"),
             Some("http://127.0.0.1:7777")
         );
         assert!(env_value(&pairs, "NO_PROXY").is_none());

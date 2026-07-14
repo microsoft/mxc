@@ -813,6 +813,26 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
+        // Seatbelt has no privileged packet-filter layer on macOS: it enforces
+        // network policy through the sandbox profile (capabilities-style) and
+        // ignores enforcementMode. Combining network.proxy with a firewall mode
+        // would silently drop the firewall expectation, so reject it explicitly,
+        // mirroring the Bubblewrap guard above.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.network_proxy.is_enabled()
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Seatbelt: network.proxy cannot be combined with \
+                       network.enforcementMode='firewall' or 'both'. macOS Seatbelt \
+                       enforces network policy through the sandbox profile and has no \
+                       packet-filter layer, so a firewall mode cannot be honored.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
         // External proxy (`url` / `localhost`) enforces its own policy — the
         // runner does NOT forward host lists to it. Reject configs that combine
         // an external proxy with host lists or a restrictive default, otherwise
@@ -2222,6 +2242,52 @@ mod tests {
         assert!(!req.policy.network_proxy.builtin_test_server);
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn proxy_with_seatbelt_and_firewall_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Seatbelt: network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_with_seatbelt_and_both_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "both"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
     }
 
     #[test]

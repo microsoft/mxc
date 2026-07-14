@@ -24,8 +24,8 @@ provides:
   enforce DNS host lists: `allowedHosts` degrades to allow-all outbound and
   `blockedHosts` is rejected.
 - **Cooperative HTTP proxy** via `network.proxy`: `HTTP_PROXY` /
-  `HTTPS_PROXY` are injected into the sandbox so well-behaved clients route
-  through the configured proxy (raw-socket clients can bypass it).
+  `HTTPS_PROXY` / `ALL_PROXY` are injected into the sandbox so well-behaved
+  clients route through the configured proxy (raw-socket clients can bypass it).
 - **UI isolation** by denying mach-lookup of `com.apple.windowserver`,
   pasteboard, and HID iokit user clients when `ui.disable` /
   `ui.clipboard=none` / `ui.injection=false`.
@@ -203,9 +203,9 @@ independently of the profile.
 
 Proxy configuration (`network.proxy`) is supported via the **cooperative
 env-var model** (the same as the Bubblewrap backend): the runner launches or
-points at an HTTP proxy and injects `HTTP_PROXY` / `HTTPS_PROXY` (and their
-lowercase forms) into the sandbox environment, stripping any caller-supplied
-proxy vars so sandboxed code can't override them. Well-behaved HTTP clients
+points at an HTTP proxy and injects `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+(and their lowercase forms) into the sandbox environment, stripping any
+caller-supplied proxy vars so sandboxed code can't override them. Well-behaved HTTP clients
 (curl, requests, fetch, …) honor it; clients that open raw sockets and ignore
 the env vars bypass it. `builtinTestServer` launches a bundled, testing-only
 proxy (`unix-test-proxy`) and requires `--allow-testing-features`. macOS has no
@@ -311,7 +311,7 @@ environment.
 ## Limitations and caveats
 
 - **Proxy support is cooperative, not enforced.** `network.proxy` injects
-  `HTTP_PROXY` / `HTTPS_PROXY` into the sandbox (see [Network policy](#network-policy)).
+  `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` into the sandbox (see [Network policy](#network-policy)).
   Clients that honor those env vars route through the proxy; clients that open
   raw sockets and ignore them bypass it. The macOS sandbox cannot interpose at
   the TLS/socket layer per process, so this matches the Bubblewrap backend
