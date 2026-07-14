@@ -118,10 +118,15 @@ pub fn build_volume_mounts(
 /// separator does not skew the result), and lowercases each component because
 /// Windows paths are case-insensitive (`C:\Project` and `c:\project` are the
 /// same object). `C:\Project` and `C:/project/` both yield `["c:", "project"]`.
+///
+/// Uses full-Unicode [`str::to_lowercase`] (not ASCII-only) so non-ASCII case
+/// variants (`C:\Ä` vs `c:\ä`) fold together. Still best-effort: NTFS does not
+/// fold Unicode normalization forms, so precomposed vs decomposed spellings
+/// stay distinct here (as on disk) and are left to D6 object identity.
 fn normalize_path_components(path: &str) -> Vec<String> {
     path.split(['/', '\\'])
         .filter(|component| !component.is_empty())
-        .map(|component| component.to_ascii_lowercase())
+        .map(|component| component.to_lowercase())
         .collect()
 }
 
@@ -161,12 +166,13 @@ fn is_strict_descendant(child: &[String], ancestor: &[String]) -> bool {
 /// This is a **structural, string-level** pre-check: it compares path
 /// components and does not canonicalize `..`/symlinks, so a traversal spelling
 /// (e.g. `C:\proj\sub\..\..\secrets`) will not match a mounted `C:\proj` here.
+/// It folds case (full Unicode) but not Unicode normalization forms.
 /// Object-level enforcement — an alias reaching a denied object via symlink,
-/// hard link, or `..` — is the job of the D6 object-identity pass
-/// (`normalize_object_conflicts`), which runs before this check and fails closed
-/// on unresolvable paths when `deniedPaths` are present. Treat this function as
-/// defense-in-depth for the flat-mount overlay gap, not a complete
-/// traversal-safe deny on its own.
+/// hard link, `..`, or an unfolded spelling — is the job of the D6
+/// object-identity pass (`normalize_object_conflicts`), which runs before this
+/// check and fails closed on unresolvable paths when `deniedPaths` are present.
+/// Treat this function as defense-in-depth for the flat-mount overlay gap, not
+/// a complete traversal-safe deny on its own.
 pub fn validate_denied_path_overlap(
     readwrite_paths: &[String],
     readonly_paths: &[String],
@@ -536,6 +542,17 @@ mod tests {
             &strings(&["c:/project/Secrets"]),
         )
         .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn overlap_is_case_insensitive_for_non_ascii_components() {
+        // NTFS folds non-ASCII case (C:\Ä == c:\ä), so a denied child differing
+        // only by non-ASCII case from a mounted parent must still be rejected.
+        let err =
+            validate_denied_path_overlap(&strings(&["C:\\Ä"]), &[], &strings(&["c:\\ä\\secret"]))
+                .unwrap_err();
 
         assert!(err.contains("cannot be enforced"), "{err}");
     }
