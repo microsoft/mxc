@@ -4,10 +4,18 @@
 //! C ABI over the MXC public Rust SDK ([`mxc_sdk`]).
 //!
 //! This is the flat, panic-safe C surface that language bindings (currently the
-//! C# SDK) load. It intentionally mirrors the SDK's run-to-completion path:
-//! [`mxc_run`] builds a request from a `SandboxPolicy` JSON + a command string,
-//! runs the sandbox to completion, and returns the captured stdout/stderr and
-//! exit outcome.
+//! C# SDK) load. It spans three surfaces:
+//!
+//! - **Run to completion** — [`mxc_run`] builds a request from a `SandboxPolicy`
+//!   JSON + a command string, runs the sandbox to completion, and returns the
+//!   captured stdout/stderr and exit outcome.
+//! - **Streaming** (`streaming` module) — [`mxc_spawn`] returns an opaque live
+//!   handle the caller reads/writes/waits/kills via the `mxc_stream_*` /
+//!   `mxc_sandbox_*` externs.
+//! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
+//!   drives the envelope phases (provision / start / stop / deprovision), and
+//!   [`mxc_state_aware_exec`] runs the exec phase as a live streaming handle
+//!   (reusing the streaming externs).
 //!
 //! ## Contract
 //!
@@ -35,11 +43,6 @@
 //! binding is regenerated in the same change. Do not treat `mxc_ffi` as a
 //! frozen ABI to link third-party consumers against; consume MXC through a
 //! versioned binding (the C# SDK) matched to the same release.
-//!
-//! Planned additions (streaming stdio + process control, and the state-aware
-//! lifecycle) will extend this surface with new entry points and types; the
-//! [`MXC_STATUS_*`](MXC_STATUS_SUCCESS) space already reserves the codes those
-//! paths need, so they will not perturb the existing one.
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::catch_unwind;
