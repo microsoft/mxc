@@ -39,6 +39,40 @@ catch (MxcException ex)
 `MxcSandbox.RunAsync(policy, command)` offloads the blocking native call to the
 thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
 
+### Streaming
+
+`MxcSandbox.Spawn(policy, command)` returns a live `MxcSandboxProcess` you can
+stream stdio through, wait on, and kill while it runs:
+
+```csharp
+using var proc = MxcSandbox.Spawn(policy, "cmd /c echo hello");
+
+// Read stdout live as the child produces it.
+using (var reader = new StreamReader(proc.StandardOutput!))
+{
+    string? line;
+    while ((line = reader.ReadLine()) is not null)
+    {
+        Console.WriteLine(line);
+    }
+}
+
+SandboxWaitResult result = proc.Wait();
+Console.WriteLine($"exit={result.ExitCode} timedOut={result.TimedOut}");
+```
+
+`StandardInput` / `StandardOutput` / `StandardError` are ordinary `Stream`s (no
+pty); each is a separate object, so you may read stdout, read stderr, and write
+stdin concurrently on different threads. `Wait()` drains any standard stream you
+did **not** take, so a caller that ignores the child's output cannot deadlock on
+a full pipe; if you take a stream, read it (e.g. via
+`WaitForExitWithOutputAsync()`, which reads both streams to end while waiting).
+`WaitAsync(cancellationToken)` awaits exit; `Kill()` terminates the child and its
+whole tree and may be called from another thread while `WaitAsync` is in flight.
+`WaitBlocking()` uses the native blocking wait and reports a policy timeout
+distinctly (but cannot be interrupted by a concurrent `Kill`). Dispose the
+process to release native resources (killing the child if still running).
+
 ## Projects
 
 - **`Microsoft.Mxc.Sdk`** — the class library (public API + generated P/Invoke).
@@ -61,10 +95,10 @@ and tests find the native library with no extra steps. For packaging,
 
 ## Supported surface
 
-This first increment exposes **run-to-completion** only (`Run` / `RunAsync`),
-over the backends the public Rust SDK supports (Windows ProcessContainer, Linux
-Bubblewrap, macOS Seatbelt). Streaming stdio, process control, and the
-state-aware lifecycle are planned follow-ups.
+Exposes **run-to-completion** (`Run` / `RunAsync`) and **streaming**
+(`Spawn` → `MxcSandboxProcess`) over the backends the public Rust SDK supports
+(Windows ProcessContainer, Linux Bubblewrap, macOS Seatbelt). The state-aware
+lifecycle is a planned follow-up.
 
 ## ABI stability
 

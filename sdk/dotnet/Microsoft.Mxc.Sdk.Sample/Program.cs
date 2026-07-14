@@ -40,6 +40,27 @@ try
         Console.WriteLine($"stderr    : {result.Stderr.TrimEnd()}");
     }
 
+    // Streaming variant: spawn the same command as a live process and stream
+    // its stdout as it is produced, then wait for exit.
+    Console.WriteLine();
+    Console.WriteLine("Streaming the same command live:");
+    using (var proc = MxcSandbox.Spawn(policy, command))
+    {
+        var stdout = proc.StandardOutput;
+        if (stdout is not null)
+        {
+            using var reader = new StreamReader(stdout);
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                Console.WriteLine($"  [live] {line}");
+            }
+        }
+
+        var streamResult = proc.Wait();
+        Console.WriteLine($"streamed exit code : {streamResult.ExitCode}");
+    }
+
     return result.ExitCode;
 }
 catch (MxcException ex)
