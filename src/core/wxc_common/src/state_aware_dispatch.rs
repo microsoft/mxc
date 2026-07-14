@@ -59,6 +59,36 @@ pub fn run_state_aware(
     )))
 }
 
+/// Streaming counterpart of the exec phase of [`dispatch_state_aware`]: run the
+/// exec phase up to (and including) [`StatefulSandboxBackend::exec`] and return
+/// the resulting [`ExecHandle`] to the caller **without** relaying it to the
+/// executor's stdio.
+///
+/// This is what lets the library / FFI streaming path drive an exec live —
+/// wrapping the returned handle in a [`SandboxProcess`](crate::sandbox_process::SandboxProcess)
+/// via [`ExecSandboxProcess`](crate::exec_stream::ExecSandboxProcess) — instead
+/// of the run-to-completion relay that [`dispatch_state_aware`] performs for
+/// `wxc-exec`. Requires the `exec` phase; any other phase is a
+/// `malformed_request`. `dry_run` has no meaning for a streaming exec (there is
+/// nothing to stream) and is intentionally not accepted.
+pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
+    backend: &mut B,
+    parsed: ParsedStateAwareRequest,
+) -> Result<ExecHandle, MxcError> {
+    if !matches!(parsed.phase, Phase::Exec) {
+        return Err(MxcError::malformed_request(format!(
+            "streaming exec requires the exec phase, got {}",
+            parsed.phase
+        )));
+    }
+    let request = parsed.request.clone();
+    let sandbox_id = parsed.sandbox_id_required()?.to_string();
+    let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
+    validate_exec_common(&request)?;
+    backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
+    backend.exec(&sandbox_id, &request, config)
+}
+
 /// Per-backend phase router. The `run_state_aware` arm for a participating
 /// backend constructs `B` and delegates here.
 pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
