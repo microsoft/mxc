@@ -77,7 +77,7 @@ if (!supMatch) {
   }
 }
 
-// -- SDK (sdk/src/sandbox.ts, sdk/src/state-aware-helper.ts) --
+// -- SDK (sdk/node/src/sandbox.ts, sdk/node/src/state-aware-helper.ts) --
 const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
 expectConst(
   "sandbox.ts",
