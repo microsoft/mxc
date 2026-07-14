@@ -61,6 +61,15 @@ pub struct MxcSandbox {
     inner: Sandbox,
 }
 
+impl MxcSandbox {
+    /// Wrap an [`mxc_sdk::Sandbox`] as an opaque FFI handle. Used by both the
+    /// one-shot spawn path ([`mxc_spawn`]) and the state-aware streaming exec
+    /// path (`mxc_state_aware_exec`).
+    pub(crate) fn new(inner: Sandbox) -> Self {
+        Self { inner }
+    }
+}
+
 /// Opaque readable stream (a child's stdout or stderr), handed out by
 /// [`mxc_sandbox_take_stdout`] / [`mxc_sandbox_take_stderr`].
 pub struct MxcReadStream {
@@ -125,7 +134,7 @@ pub unsafe extern "C" fn mxc_spawn(
 
     match outcome {
         Ok(sandbox) => {
-            let boxed = Box::new(MxcSandbox { inner: sandbox });
+            let boxed = Box::new(MxcSandbox::new(sandbox));
             // SAFETY: `out_handle` non-null and writable (checked above).
             unsafe { *out_handle = Box::into_raw(boxed) };
             MXC_STATUS_SUCCESS

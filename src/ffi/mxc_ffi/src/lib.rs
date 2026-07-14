@@ -48,7 +48,9 @@ use std::sync::OnceLock;
 
 use mxc_sdk::{build_request, run, ErrorCode, SandboxPolicy, WaitOutcome};
 
+mod state_aware;
 mod streaming;
+pub use state_aware::*;
 pub use streaming::*;
 
 // ---------------------------------------------------------------------------
