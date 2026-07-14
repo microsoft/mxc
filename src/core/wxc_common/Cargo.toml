@@ -3,6 +3,8 @@ name = "wxc_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shared core types (execution requests, policies, wire model) for MXC sandboxing."
 
 [features]
 microvm = ["dep:nanvix_common", "dep:uuid"]
@@ -19,7 +21,7 @@ url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
 schemars = { version = "0.8", optional = true }
-nanvix_common = { path = "../../backends/nanvix/common", optional = true }
+nanvix_common = { path = "../../backends/nanvix/common", version = "0.7.0", optional = true }
 uuid = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }
 
