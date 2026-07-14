@@ -5,6 +5,7 @@ description: Triage newly opened or edited issues with labels, assignment, and a
 on:
   issues:
     types: [opened, edited]
+  roles: [admin, maintainer, write, read]
 engine: copilot
 permissions:
   contents: read
@@ -14,7 +15,7 @@ tools:
   github:
     allowed-repos:
       - "${{ github.repository }}"
-    min-integrity: unapproved
+    min-integrity: none
 safe-outputs:
   report-failure-as-issue: false
   add-labels:
