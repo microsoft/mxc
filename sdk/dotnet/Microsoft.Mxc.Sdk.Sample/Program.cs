@@ -61,6 +61,32 @@ try
         Console.WriteLine($"streamed exit code : {streamResult.ExitCode}");
     }
 
+    // State-aware lifecycle: provision -> start -> exec -> stop -> deprovision.
+    // Requires the IsolationSession backend (Windows-only, experimental, with
+    // its OS-side service), so this reports the MXC error on hosts without it.
+    Console.WriteLine();
+    Console.WriteLine("State-aware lifecycle:");
+    try
+    {
+        var provisioned = MxcLifecycle.ProvisionSandbox();
+        Console.WriteLine($"  provisioned: {provisioned.SandboxId}");
+        try
+        {
+            MxcLifecycle.StartSandbox(provisioned.SandboxId);
+            var lifecycleRun = await MxcLifecycle.ExecInSandboxAsync(provisioned.SandboxId, command);
+            Console.WriteLine($"  exec exit={lifecycleRun.ExitCode} stdout={lifecycleRun.Stdout.TrimEnd()}");
+            MxcLifecycle.StopSandbox(provisioned.SandboxId);
+        }
+        finally
+        {
+            MxcLifecycle.DeprovisionSandbox(provisioned.SandboxId);
+        }
+    }
+    catch (MxcException ex)
+    {
+        Console.WriteLine($"  lifecycle unavailable on this host [{ex.Code}]: {ex.Message}");
+    }
+
     return result.ExitCode;
 }
 catch (MxcException ex)

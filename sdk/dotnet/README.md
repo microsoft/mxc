@@ -95,10 +95,41 @@ and tests find the native library with no extra steps. For packaging,
 
 ## Supported surface
 
-Exposes **run-to-completion** (`Run` / `RunAsync`) and **streaming**
-(`Spawn` → `MxcSandboxProcess`) over the backends the public Rust SDK supports
-(Windows ProcessContainer, Linux Bubblewrap, macOS Seatbelt). The state-aware
-lifecycle is a planned follow-up.
+Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
+(`Spawn` → `MxcSandboxProcess`), and the **state-aware lifecycle**
+(`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
+ProcessContainer, Linux Bubblewrap, macOS Seatbelt for run/stream; the
+state-aware lifecycle is IsolationSession, Windows-only and experimental).
+
+### State-aware lifecycle
+
+`MxcLifecycle` drives a sandbox through provision → start → exec → stop →
+deprovision:
+
+```csharp
+var provisioned = MxcLifecycle.ProvisionSandbox(new ProvisionSandboxOptions
+{
+    Filesystem = new FilesystemPolicy { ReadwritePaths = { @"C:\Temp" } },
+});
+SandboxId id = provisioned.SandboxId;
+
+MxcLifecycle.StartSandbox(id);
+
+// Live streaming exec (an MxcSandboxProcess, like Spawn):
+using (var proc = MxcLifecycle.ExecInSandbox(id, "cmd /c echo hi"))
+{
+    // ... read proc.StandardOutput, proc.Wait() ...
+}
+// or run to completion:
+RunResult run = await MxcLifecycle.ExecInSandboxAsync(id, "cmd /c echo hi");
+
+MxcLifecycle.StopSandbox(id);
+MxcLifecycle.DeprovisionSandbox(id);
+```
+
+The only state-aware backend, IsolationSession, is Windows-only and needs its
+OS-side service; on a host or build without it, these calls throw an
+`MxcException` with `ErrorCode.UnsupportedPhase` / `BackendUnavailable`.
 
 ## ABI stability
 
