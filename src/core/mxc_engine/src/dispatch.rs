@@ -10,10 +10,12 @@
 //! build on).
 //!
 //! Only the backends with a streaming path are handled here: ProcessContainer
-//! (Windows AppContainer / BaseContainer fallback), Bubblewrap (Linux), and
-//! Seatbelt (macOS). Every other backend — including the experimental ones
-//! (Windows Sandbox, IsolationSession, MicroVM, Hyperlight, WSLC) and LXC (no
-//! streaming path suitable for the library) — returns
+//! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
+//! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
+//! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
+//! (Linux), and Seatbelt (macOS). Every other backend — including the
+//! experimental ones (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
+//! WSLC) and LXC (no streaming path suitable for the library) — returns
 //! [`MxcError::unsupported_containment`]; callers that need those must drive the
 //! standalone executor binaries (whose run-to-completion path will, in a later
 //! increment, also route through this engine).
@@ -143,40 +145,59 @@ fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use appcontainer_common::appcontainer_runner::{AppContainerScriptRunner, FilesystemMode};
-    use appcontainer_common::fallback_detector::is_base_container_usable;
-    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    use appcontainer_common::dispatcher::{spawn_with_fallback, DispatchError, SpawnDispatchError};
+    use std::fmt::Write;
+    use wxc_common::sandbox_process::StdioMode;
 
-    // ProcessContainer resolves to a concrete backend purely by host
-    // capability: prefer the native BaseContainer (OS sandbox API) when usable,
-    // otherwise AppContainer. The schema version does not influence this choice.
-    //
-    // Unlike the executor binaries' run-to-completion path, streaming does NOT
-    // route through `dispatch_with_fallback` — that yields a run-to-completion
-    // `Box<dyn ScriptRunner>` plus a `DaclManager` guard, neither of which fits
-    // the streaming handle (the DACL tier would require the returned
-    // `SandboxProcess` to own the guard so ACE restore outlives the child). So
-    // streaming offers only two of the dispatcher's tiers: BaseContainer when
-    // the API is usable, otherwise AppContainer in BFS mode (equivalent to the
-    // dispatcher's Tier 2 AppContainer-BFS path, which still requires
-    // `bfscfg.exe`). The Tier 3 AppContainer-DACL fallback is not available on
-    // the streaming path. The BaseContainer-vs-AppContainer choice uses the same
-    // `is_base_container_usable()` probe as the dispatcher's Tier 1 selection, so
-    // the two paths agree on that decision.
-    if is_base_container_usable() {
-        let mut runner = appcontainer_common::base_container_runner::BaseContainerRunner::new();
-        return runner
-            .spawn(request, logger, StdioMode::Pipes)
-            .map_err(map_spawn_error);
+    // ProcessContainer resolves to a concrete backend + isolation tier purely
+    // by host capability, via the shared `spawn_with_fallback` dispatcher — the
+    // streaming counterpart of the run-to-completion `dispatch_with_fallback`
+    // the executor binaries use. Both share `select_backend_with_fallback`, so
+    // the streaming and run-to-completion paths agree on tier selection and the
+    // streaming path gets the full three-tier fallback: BaseContainer (Tier 1),
+    // AppContainer + BFS (Tier 2), and AppContainer + DACL (Tier 3). The
+    // returned handle owns any DACL guard, so host-ACE restore outlives the
+    // child (see issue #643).
+    match spawn_with_fallback(request, logger, StdioMode::Pipes) {
+        Ok(dispatched) => {
+            for w in &dispatched.warnings {
+                let _ = writeln!(logger, "warning: {w}");
+            }
+            let _ = writeln!(
+                logger,
+                "selected isolation tier: {}",
+                dispatched.tier.as_str()
+            );
+            Ok(dispatched.process)
+        }
+        Err(SpawnDispatchError::Dispatch(e)) => {
+            // Surface any retained-entry DACL warnings through the logger so the
+            // caller's buffer flush still reports them — mirroring the
+            // run-to-completion `resolve_runner_inner`.
+            if let DispatchError::Dacl { warnings, .. } = &e {
+                for w in warnings {
+                    let _ = writeln!(logger, "dacl warning: {w}");
+                }
+            }
+            Err(MxcError::backend_unavailable(format!("{e}")))
+        }
+        Err(SpawnDispatchError::Spawn {
+            response,
+            tier,
+            warnings,
+        }) => {
+            // The tier was chosen (and any DACL ACEs applied then rolled back)
+            // before the spawn failed, so log the same tier/warnings the success
+            // arm does — the run-to-completion path logs these at resolve time,
+            // before its separate spawn attempt, so a spawn failure never loses
+            // them there either.
+            for w in &warnings {
+                let _ = writeln!(logger, "warning: {w}");
+            }
+            let _ = writeln!(logger, "selected isolation tier: {}", tier.as_str());
+            Err(map_spawn_error(*response))
+        }
     }
-
-    // Select BFS mode explicitly so this does not silently change if
-    // `AppContainerScriptRunner::new()`'s default filesystem mode is ever
-    // altered.
-    let mut runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs);
-    runner
-        .spawn(request, logger, StdioMode::Pipes)
-        .map_err(map_spawn_error)
 }
 
 #[cfg(not(target_os = "windows"))]
