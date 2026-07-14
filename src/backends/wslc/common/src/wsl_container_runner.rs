@@ -890,6 +890,21 @@ impl WSLContainerRunner {
             return ScriptResponse::error(&msg);
         }
 
+        // Denied-path overlap validation: WSLC's flat volume-mount surface has no
+        // overlay primitive, so a deniedPaths entry nested under a mounted
+        // (readwrite/readonly) parent cannot be masked and would stay accessible
+        // through the parent mount. Reject such configs rather than silently
+        // leaving the subtree exposed. Runs after object normalization so it sees
+        // the already-tightened intents.
+        if let Err(msg) = policy_mapping::validate_denied_path_overlap(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+            &request.policy.denied_paths,
+        ) {
+            let _ = writeln!(logger, "[WSLC] {}", msg);
+            return ScriptResponse::error(&msg);
+        }
+
         // -- Init: COM + SDK + preflight --
         let sdk = match Self::init_and_load_sdk(logger) {
             Ok(r) => r,
