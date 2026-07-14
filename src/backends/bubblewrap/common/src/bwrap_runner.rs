@@ -584,8 +584,8 @@ fn resolve_denied_paths(
 }
 
 /// Classify a denied path for masking: `true` = `--ro-bind /dev/null` (file),
-/// `false` = `--tmpfs` (directory). Only a real directory is directory-masked;
-/// files, symlink nodes, and unstattable paths are file-masked.
+/// `false` = `--tmpfs` (directory). A real directory and any path that cannot be
+/// stat'd are directory-masked; regular files and symlink nodes are file-masked.
 fn is_file_mask_target(path: &str) -> bool {
     std::fs::symlink_metadata(path)
         .map(|md| !md.file_type().is_dir())
