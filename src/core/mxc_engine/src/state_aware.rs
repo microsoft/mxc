@@ -94,10 +94,7 @@ pub fn exec_state_aware(
 /// rejecting a one-shot config (no `phase`).
 fn parse_state_aware(request_json: &str) -> Result<ParsedStateAwareRequest, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    // `load_mxc_request` treats a plain string as a file path; base64-encode the
-    // raw JSON and use the base64 path so we parse the string in-memory.
-    let encoded = wxc_common::encoding::base64_encode(request_json.as_bytes());
-    match wxc_common::config_parser::load_mxc_request(&encoded, &mut logger, true) {
+    match wxc_common::config_parser::load_mxc_request_from_json(request_json, &mut logger) {
         Ok(MxcRequest::StateAware(parsed)) => Ok(parsed),
         Ok(MxcRequest::OneShot(_)) => Err(Error::from(MxcError::malformed_request(
             "expected a state-aware lifecycle request (with a 'phase' field), got a one-shot config",

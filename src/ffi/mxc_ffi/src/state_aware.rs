@@ -206,21 +206,8 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
         "the mxc engine panicked".to_string(),
     )));
 
-    match outcome {
-        Ok(sandbox) => {
-            let boxed = Box::new(MxcSandbox::new(sandbox));
-            // SAFETY: `out_handle` non-null and writable (checked above).
-            unsafe { *out_handle = Box::into_raw(boxed) };
-            MXC_STATUS_SUCCESS
-        }
-        Err((status, message)) => {
-            if !out_error.is_null() {
-                // SAFETY: `out_error` non-null and writable (checked above).
-                unsafe { *out_error = alloc_cstring(message.as_bytes()) };
-            }
-            status
-        }
-    }
+    // SAFETY: `out_handle` non-null (checked), `out_error` null or writable.
+    unsafe { crate::streaming::finish_spawn(outcome, out_handle, out_error) }
 }
 
 #[cfg(test)]

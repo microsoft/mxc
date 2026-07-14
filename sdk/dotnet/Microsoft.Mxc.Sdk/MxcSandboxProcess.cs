@@ -43,9 +43,11 @@ namespace Microsoft.Mxc.Sdk;
 /// </remarks>
 public sealed class MxcSandboxProcess : IDisposable
 {
-    // Poll cadence for the try_wait-based wait loop. Short enough to feel
-    // responsive, long enough not to spin a core.
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(5);
+    // Poll cadence bounds for the try_wait-based wait loop: start short so a
+    // quick child returns promptly, back off to a cap so a long-running child
+    // does not spin a core.
+    private static readonly TimeSpan MinPollInterval = TimeSpan.FromMilliseconds(1);
+    private static readonly TimeSpan MaxPollInterval = TimeSpan.FromMilliseconds(50);
 
     private readonly object _controlLock = new();
     private readonly MxcSandboxHandle _handle;
@@ -65,7 +67,14 @@ public sealed class MxcSandboxProcess : IDisposable
         _handle = handle;
     }
 
-    /// <summary>The child's OS process id (its PID on Unix, process id on Windows).</summary>
+    /// <summary>
+    /// The child's OS process id (its PID on Unix, process id on Windows).
+    /// </summary>
+    /// <remarks>
+    /// Returns <c>0</c> for a process obtained from
+    /// <see cref="MxcLifecycle.ExecInSandbox"/>: a state-aware exec is driven by
+    /// the backend behind its own waiter/terminator and exposes no OS process id.
+    /// </remarks>
     public uint Id
     {
         get
@@ -161,6 +170,7 @@ public sealed class MxcSandboxProcess : IDisposable
     {
         EnsureDrainUntaken();
 
+        var poll = MinPollInterval;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -191,7 +201,9 @@ public sealed class MxcSandboxProcess : IDisposable
             // enforced natively by killing the tree, which try_wait then sees as
             // an exit. Callers that need the timeout distinction should use the
             // blocking WaitBlocking() path.
-            cancellationToken.WaitHandle.WaitOne(PollInterval);
+            cancellationToken.WaitHandle.WaitOne(poll);
+            var next = poll + poll;
+            poll = next > MaxPollInterval ? MaxPollInterval : next;
         }
     }
 

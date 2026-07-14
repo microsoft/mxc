@@ -140,16 +140,33 @@ pub unsafe extern "C" fn mxc_spawn(
         "the mxc engine panicked".to_string(),
     )));
 
+    // SAFETY: `out_handle` non-null (checked), `out_error` null or writable.
+    unsafe { finish_spawn(outcome, out_handle, out_error) }
+}
+
+/// Shared tail of the handle-returning spawn entry points ([`mxc_spawn`] and
+/// `mxc_state_aware_exec`): on success box the [`Sandbox`] into an
+/// [`MxcSandbox`] handle and write it to `*out_handle`; on failure write the
+/// message to `*out_error` (when non-null) and return the status.
+///
+/// # Safety
+/// `out_handle` must be non-null and writable; `out_error` must be null or
+/// writable. Both are pointer-sized.
+pub(crate) unsafe fn finish_spawn(
+    outcome: Result<Sandbox, (i32, String)>,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut *mut c_char,
+) -> i32 {
     match outcome {
         Ok(sandbox) => {
             let boxed = Box::new(MxcSandbox::new(sandbox));
-            // SAFETY: `out_handle` non-null and writable (checked above).
+            // SAFETY: `out_handle` non-null and writable per the caller contract.
             unsafe { *out_handle = Box::into_raw(boxed) };
             MXC_STATUS_SUCCESS
         }
         Err((status, message)) => {
             if !out_error.is_null() {
-                // SAFETY: `out_error` non-null and writable (checked above).
+                // SAFETY: `out_error` non-null and writable per the caller contract.
                 unsafe { *out_error = alloc_cstring(message.as_bytes()) };
             }
             status
