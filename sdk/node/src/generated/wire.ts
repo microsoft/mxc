@@ -13,7 +13,7 @@
  * `scripts/versioning/check-sdk-types-codegen.js`.
  *
  * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/src/generated/wire.ts
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
  */
 /**
  * BaseProcessContainer UI isolation settings.

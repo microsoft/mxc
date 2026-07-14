@@ -5,12 +5,12 @@
 // Generation check for the C# P/Invoke layer. The generated file
 // (NativeMethods.g.cs) is NOT committed — it is produced at build time by the
 // GenerateNativeBindings MSBuild target (and by `cargo build -p mxc_ffi
-// --features csharpsdk`). This gate rebuilds the FFI with codegen enabled and
+// --features dotnetsdk`). This gate rebuilds the FFI with codegen enabled and
 // asserts the bindings are produced and expose the expected entry points, so a
 // broken/renamed C ABI is caught in CI even though nothing is committed. Run
 // from the repository root:
 //
-//   node scripts/check-csharp-bindings-codegen.js
+//   node scripts/check-dotnet-bindings-codegen.js
 
 const { readFileSync, existsSync, rmSync } = require("fs");
 const { join } = require("path");
@@ -19,7 +19,8 @@ const { execFileSync } = require("child_process");
 const repoRoot = join(__dirname, "..");
 const generated = join(
   repoRoot,
-  "csharp",
+  "sdk",
+  "dotnet",
   "Microsoft.Mxc.Sdk",
   "Native",
   "NativeMethods.g.cs"
@@ -41,13 +42,13 @@ if (existsSync(generated)) {
 }
 
 try {
-  execFileSync("cargo", ["build", "-p", "mxc_ffi", "--features", "csharpsdk"], {
+  execFileSync("cargo", ["build", "-p", "mxc_ffi", "--features", "dotnetsdk"], {
     cwd: join(repoRoot, "src"),
     stdio: "inherit",
   });
 } catch (e) {
   console.error(
-    `ERROR: 'cargo build -p mxc_ffi --features csharpsdk' failed: ${e.message}`
+    `ERROR: 'cargo build -p mxc_ffi --features dotnetsdk' failed: ${e.message}`
   );
   process.exit(1);
 }

@@ -5,27 +5,27 @@
 //! "C"` surface, using csbindgen. The generated file is checked in (a CI drift
 //! gate regenerates and diffs it).
 //!
-//! Code generation is gated behind the **`csharpsdk`** cargo feature so that
+//! Code generation is gated behind the **`dotnetsdk`** cargo feature so that
 //! normal builds — including the whole-workspace backend build matrix — do
 //! **not** compile csbindgen or write into the source tree. Only the drift gate
-//! (`scripts/check-csharp-bindings-codegen.js`, which builds with
-//! `--features csharpsdk`) regenerates the committed file.
+//! (`scripts/check-dotnet-bindings-codegen.js`, which builds with
+//! `--features dotnetsdk`) regenerates the committed file.
 
 fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
-    #[cfg(feature = "csharpsdk")]
+    #[cfg(feature = "dotnetsdk")]
     generate_csharp_bindings();
 }
 
-#[cfg(feature = "csharpsdk")]
+#[cfg(feature = "dotnetsdk")]
 fn generate_csharp_bindings() {
     use std::path::Path;
 
-    // Repo-root `csharp/` project (this crate lives at `src/ffi/mxc_ffi`).
+    // `sdk/dotnet/` project (this crate lives at `src/ffi/mxc_ffi`).
     let out_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../csharp/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs");
+        .join("../../../sdk/dotnet/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs");
 
     // Re-run when the generated file changes or is deleted, so a missing output
     // (it is gitignored, not committed) forces regeneration even when the FFI

@@ -77,8 +77,8 @@ if (!supMatch) {
   }
 }
 
-// -- SDK (sdk/src/sandbox.ts, sdk/src/state-aware-helper.ts) --
-const sandboxTs = read("sdk", "src", "sandbox.ts");
+// -- SDK (sdk/node/src/sandbox.ts, sdk/node/src/state-aware-helper.ts) --
+const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
 expectConst(
   "sandbox.ts",
   sandboxTs,
@@ -93,7 +93,7 @@ expectConst(
   /const MIN_VERSION\s*=\s*'([^']+)'/,
   min
 );
-const stateAwareTs = read("sdk", "src", "state-aware-helper.ts");
+const stateAwareTs = read("sdk", "node", "src", "state-aware-helper.ts");
 expectConst(
   "state-aware-helper.ts",
   stateAwareTs,

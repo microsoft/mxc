@@ -672,7 +672,7 @@ fn build_wire_config(
         },
     });
 
-    // Mirror the SDK's `resolvesToHostFilteringBackend` (sdk/src/sandbox.ts):
+    // Mirror the SDK's `resolvesToHostFilteringBackend` (sdk/node/src/sandbox.ts):
     // Linux (Bubblewrap/LXC) and macOS (Seatbelt) are treated as host-filtering
     // backends, so `allowedHosts`/`blockedHosts` are accepted without
     // `allowOutbound`; only Windows ProcessContainer requires `allowOutbound`.
@@ -929,7 +929,7 @@ mod tests {
     }
 
     // macOS Seatbelt is treated as a host-filtering backend to mirror the SDK
-    // (`resolvesToHostFilteringBackend` in sdk/src/sandbox.ts), so `allowedHosts`
+    // (`resolvesToHostFilteringBackend` in sdk/node/src/sandbox.ts), so `allowedHosts`
     // is accepted with or without `allowOutbound` — consistency with the SDK over
     // rejecting on macOS, even though Seatbelt can't actually filter by host.
     #[cfg(target_os = "macos")]

@@ -5,7 +5,7 @@
 // Validates that the C# `ErrorCode` enum matches the native FFI `MXC_STATUS_*`
 // constants one-for-one (name and value). Run from the repository root:
 //
-//   node scripts/check-csharp-errorcode-parity.js
+//   node scripts/check-dotnet-errorcode-parity.js
 
 const { readFileSync } = require("fs");
 const { join } = require("path");
@@ -15,7 +15,8 @@ const repoRoot = join(__dirname, "..");
 const rustPath = join(repoRoot, "src", "ffi", "mxc_ffi", "src", "lib.rs");
 const csharpPath = join(
   repoRoot,
-  "csharp",
+  "sdk",
+  "dotnet",
   "Microsoft.Mxc.Sdk",
   "ErrorCode.cs"
 );

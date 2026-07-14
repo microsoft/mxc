@@ -45,7 +45,7 @@ thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
 - **`Microsoft.Mxc.Sdk.Sample`** — a console sample (`dotnet run`).
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit tests (`dotnet test`).
 
-Build/test everything: `dotnet test csharp/Microsoft.Mxc.Sdk.slnx`.
+Build/test everything: `dotnet test sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 
 ## Native library loading
 
@@ -82,16 +82,16 @@ than linking third-party code directly against `mxc_ffi`.
 ## Generated code & CI gates
 
 - `Native/NativeMethods.g.cs` is generated from the Rust FFI by csbindgen in
-  `src/ffi/mxc_ffi/build.rs`, gated behind the crate's **`csharpsdk`** cargo
+  `src/ffi/mxc_ffi/build.rs`, gated behind the crate's **`dotnetsdk`** cargo
   feature (off by default, so normal/backend builds don't compile csbindgen).
   It is **not committed** (gitignored) — the `GenerateNativeBindings` MSBuild
   target in the csproj (re)generates it before every C# compile by running
-  `cargo build -p mxc_ffi --features csharpsdk`, so a plain `dotnet build`
+  `cargo build -p mxc_ffi --features dotnetsdk`, so a plain `dotnet build`
   produces fresh bindings that can never drift from the Rust FFI. (This means
   building the C# SDK requires the Rust toolchain on PATH.)
-  `scripts/check-csharp-bindings-codegen.js` runs that codegen and asserts the
+  `scripts/check-dotnet-bindings-codegen.js` runs that codegen and asserts the
   expected entry points are produced, catching a broken/renamed C ABI in CI.
 - The `ErrorCode` enum mirrors the native `MXC_STATUS_*` constants;
-  `scripts/check-csharp-errorcode-parity.js` enforces that.
+  `scripts/check-dotnet-errorcode-parity.js` enforces that.
 - The C# package version tracks the Rust workspace version;
   `scripts/check-version-sync.js` enforces that.
