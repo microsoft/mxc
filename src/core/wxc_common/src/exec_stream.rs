@@ -16,15 +16,18 @@
 //!
 //! # Pipe-handle ownership
 //!
-//! Unlike the run-to-completion relay ([`relay_exec_to_stdio`]), which never
-//! touches the pipe fields, this adapter **takes ownership** of any non-null
-//! pipe handle in the [`ExecHandle`] and closes it when the corresponding
-//! stream is dropped. A backend that returns real pipe handles for streaming
-//! must therefore hand them to this adapter (not also close them itself). The
-//! only in-tree state-aware backend today (IsolationSession) relays internally
-//! and returns null pipe handles, so its streams are simply absent here.
+//! [`ExecHandle`]'s contract is that pipe-handle ownership stays with the
+//! backend's underlying process object. So this adapter does **not** take the
+//! raw handles: it **duplicates** each non-null pipe handle
+//! ([`try_clone_to_owned`]) and wraps the *duplicate* as an owned reader/writer.
+//! The adapter closes only its duplicates on drop; the backend's originals (and
+//! its `waiter`/`terminator`, which may also reference them) are untouched — so
+//! there is no double-close even for a backend that keeps and closes its own
+//! pipe ends. The only in-tree state-aware backend today (IsolationSession)
+//! relays internally and returns null pipe handles, so its streams are simply
+//! absent here.
 //!
-//! [`relay_exec_to_stdio`]: crate::state_aware_dispatch
+//! [`try_clone_to_owned`]: std::os::windows::io::BorrowedHandle::try_clone_to_owned
 
 use std::io::{Read, Write};
 use std::thread::JoinHandle;
@@ -154,50 +157,52 @@ impl Drop for ExecSandboxProcess {
 
 #[cfg(target_os = "windows")]
 fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
-    use std::os::windows::io::FromRawHandle;
-    if handle.0.is_null() {
-        return None;
-    }
-    // SAFETY: a non-null exec pipe handle is a valid readable pipe whose
-    // ownership this adapter assumes (see the module-level ownership note).
-    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-    Some(Box::new(file))
+    dup_handle_to_file(handle).map(|f| Box::new(f) as Box<dyn Read + Send>)
 }
 
 #[cfg(target_os = "windows")]
 fn wrap_write(handle: PipeHandle) -> Option<Box<dyn Write + Send>> {
-    use std::os::windows::io::FromRawHandle;
+    dup_handle_to_file(handle).map(|f| Box::new(f) as Box<dyn Write + Send>)
+}
+
+/// Duplicate a non-null Windows pipe `HANDLE` into an owned [`File`], leaving
+/// the caller's original handle untouched. Returns `None` for a null handle or
+/// if duplication fails.
+#[cfg(target_os = "windows")]
+fn dup_handle_to_file(handle: PipeHandle) -> Option<std::fs::File> {
+    use std::os::windows::io::BorrowedHandle;
     if handle.0.is_null() {
         return None;
     }
-    // SAFETY: a non-null exec pipe handle is a valid writable pipe whose
-    // ownership this adapter assumes (see the module-level ownership note).
-    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-    Some(Box::new(file))
+    // SAFETY: a non-null exec pipe handle is valid for the borrow; we only
+    // duplicate it (DuplicateHandle) and never take ownership of the original.
+    let borrowed = unsafe { BorrowedHandle::borrow_raw(handle.0 as _) };
+    borrowed.try_clone_to_owned().ok().map(std::fs::File::from)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
-    use std::os::unix::io::FromRawFd;
-    if handle < 0 {
-        return None;
-    }
-    // SAFETY: a non-negative exec pipe fd is a valid readable pipe whose
-    // ownership this adapter assumes (see the module-level ownership note).
-    let file = unsafe { std::fs::File::from_raw_fd(handle) };
-    Some(Box::new(file))
+    dup_fd_to_file(handle).map(|f| Box::new(f) as Box<dyn Read + Send>)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn wrap_write(handle: PipeHandle) -> Option<Box<dyn Write + Send>> {
-    use std::os::unix::io::FromRawFd;
+    dup_fd_to_file(handle).map(|f| Box::new(f) as Box<dyn Write + Send>)
+}
+
+/// Duplicate a non-negative pipe fd into an owned [`File`] (via `dup`), leaving
+/// the caller's original fd untouched. Returns `None` for an invalid fd or if
+/// duplication fails.
+#[cfg(not(target_os = "windows"))]
+fn dup_fd_to_file(handle: PipeHandle) -> Option<std::fs::File> {
+    use std::os::fd::BorrowedFd;
     if handle < 0 {
         return None;
     }
-    // SAFETY: a non-negative exec pipe fd is a valid writable pipe whose
-    // ownership this adapter assumes (see the module-level ownership note).
-    let file = unsafe { std::fs::File::from_raw_fd(handle) };
-    Some(Box::new(file))
+    // SAFETY: a non-negative exec pipe fd is valid for the borrow; we only
+    // duplicate it (dup) and never take ownership of the original.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(handle) };
+    borrowed.try_clone_to_owned().ok().map(std::fs::File::from)
 }
 
 #[cfg(test)]
@@ -248,5 +253,86 @@ mod tests {
                               // Exactly one terminator signal.
         assert!(rx.recv().is_ok());
         assert!(rx.try_recv().is_err());
+    }
+
+    // Build a PipeHandle from a live pipe end's raw handle/fd (the adapter
+    // duplicates it, so the original stays owned by the test).
+    #[cfg(target_os = "windows")]
+    fn reader_handle(r: &std::io::PipeReader) -> PipeHandle {
+        use std::os::windows::io::AsRawHandle;
+        windows::Win32::Foundation::HANDLE(r.as_raw_handle() as _)
+    }
+    #[cfg(target_os = "windows")]
+    fn writer_handle(w: &std::io::PipeWriter) -> PipeHandle {
+        use std::os::windows::io::AsRawHandle;
+        windows::Win32::Foundation::HANDLE(w.as_raw_handle() as _)
+    }
+    #[cfg(not(target_os = "windows"))]
+    fn reader_handle(r: &std::io::PipeReader) -> PipeHandle {
+        use std::os::fd::AsRawFd;
+        r.as_raw_fd()
+    }
+    #[cfg(not(target_os = "windows"))]
+    fn writer_handle(w: &std::io::PipeWriter) -> PipeHandle {
+        use std::os::fd::AsRawFd;
+        w.as_raw_fd()
+    }
+
+    /// A real stdout pipe is streamed through the adapter: the adapter reads a
+    /// *duplicate*, so the caller's original handle is unaffected and there is
+    /// no double-close.
+    #[test]
+    fn real_stdout_pipe_is_streamed_via_duplicate() {
+        use std::io::{Read, Write};
+
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        writer.write_all(b"exec-stream-ok").unwrap();
+        drop(writer); // close the write end so the reader sees EOF
+
+        let handle = ExecHandle {
+            stdout: reader_handle(&reader),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(0)),
+            terminator: Box::new(|| {}),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle);
+        // The adapter duplicated the handle; the test's original can now drop.
+        drop(reader);
+
+        let mut out = proc.take_stdout().expect("stdout should be present");
+        let mut buf = String::new();
+        out.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "exec-stream-ok");
+        assert_eq!(proc.wait().unwrap(), 0);
+    }
+
+    /// A real stdin pipe is fed through the adapter's writer (a duplicate).
+    #[test]
+    fn real_stdin_pipe_accepts_writes_via_duplicate() {
+        use std::io::{Read, Write};
+
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+
+        let handle = ExecHandle {
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin: writer_handle(&writer),
+            waiter: Box::new(|| Ok(0)),
+            terminator: Box::new(|| {}),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle);
+        drop(writer); // original write end closed; adapter owns a duplicate
+
+        {
+            let mut stdin = proc.take_stdin().expect("stdin should be present");
+            stdin.write_all(b"fed-via-adapter").unwrap();
+            stdin.flush().unwrap();
+        } // drop the adapter's writer -> EOF on the read end
+
+        let mut buf = String::new();
+        reader.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "fed-via-adapter");
+        assert_eq!(proc.wait().unwrap(), 0);
     }
 }

@@ -39,6 +39,7 @@ public static class MxcLifecycle
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
@@ -48,6 +49,22 @@ public static class MxcLifecycle
     /// </summary>
     /// <exception cref="MxcException">Provisioning failed.</exception>
     public static ProvisionResult ProvisionSandbox(ProvisionSandboxOptions? options = null)
+    {
+        var result = RunEnvelopePhase(BuildProvisionEnvelope(options));
+        var sandboxId = result?["sandboxId"]?.GetValue<string>()
+            ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no sandboxId");
+        var metadata = result["metadata"];
+        return new ProvisionResult
+        {
+            SandboxId = new SandboxId(sandboxId),
+            MetadataJson = metadata?.ToJsonString(),
+        };
+    }
+
+    // Build the provision request envelope: containment + cross-cutting
+    // filesystem lifted to the top level, user nested under
+    // experimental.isolation_session.provision.
+    internal static JsonObject BuildProvisionEnvelope(ProvisionSandboxOptions? options)
     {
         var envelope = NewEnvelope("provision");
         envelope["containment"] = IsolationSessionContainment;
@@ -59,16 +76,7 @@ public static class MxcLifecycle
         {
             SetBackendConfig(envelope, "provision", "user", SerializeToNode(user));
         }
-
-        var result = RunEnvelopePhase(envelope);
-        var sandboxId = result?["sandboxId"]?.GetValue<string>()
-            ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no sandboxId");
-        var metadata = result["metadata"];
-        return new ProvisionResult
-        {
-            SandboxId = new SandboxId(sandboxId),
-            MetadataJson = metadata?.ToJsonString(),
-        };
+        return envelope;
     }
 
     /// <summary>Start a provisioned sandbox.</summary>
@@ -98,11 +106,7 @@ public static class MxcLifecycle
     {
         ArgumentNullException.ThrowIfNull(command);
 
-        var envelope = NewEnvelope("exec");
-        envelope["sandboxId"] = id.Value;
-        envelope["process"] = new JsonObject { ["commandLine"] = command };
-
-        var requestJson = envelope.ToJsonString();
+        var requestJson = BuildExecEnvelope(id, command).ToJsonString();
         var requestBuf = ToNullTerminatedUtf8(requestJson);
 
         unsafe
@@ -126,6 +130,16 @@ public static class MxcLifecycle
         }
     }
 
+    // Build the exec request envelope: sandboxId + the command as the
+    // cross-cutting process.commandLine.
+    internal static JsonObject BuildExecEnvelope(SandboxId id, string command)
+    {
+        var envelope = NewEnvelope("exec");
+        envelope["sandboxId"] = id.Value;
+        envelope["process"] = new JsonObject { ["commandLine"] = command };
+        return envelope;
+    }
+
     /// <summary>
     /// Run <paramref name="command"/> in a started sandbox to completion,
     /// draining stdout/stderr concurrently, and return the captured result.
@@ -136,17 +150,28 @@ public static class MxcLifecycle
         string command,
         CancellationToken cancellationToken = default)
     {
-        using var proc = ExecInSandbox(id, command);
-        var (result, stdout, stderr) = await proc
-            .WaitForExitWithOutputAsync(cancellationToken)
+        // Offload the blocking exec-start P/Invoke so this method never blocks
+        // the caller's thread (for a backend that relays exec internally, the
+        // whole exec runs during ExecInSandbox).
+        var proc = await Task.Run(() => ExecInSandbox(id, command), cancellationToken)
             .ConfigureAwait(false);
-        return new RunResult
+        try
         {
-            ExitCode = result.ExitCode,
-            TimedOut = result.TimedOut,
-            Stdout = Encoding.UTF8.GetString(stdout),
-            Stderr = Encoding.UTF8.GetString(stderr),
-        };
+            var (result, stdout, stderr) = await proc
+                .WaitForExitWithOutputAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return new RunResult
+            {
+                ExitCode = result.ExitCode,
+                TimedOut = result.TimedOut,
+                Stdout = Encoding.UTF8.GetString(stdout),
+                Stderr = Encoding.UTF8.GetString(stderr),
+            };
+        }
+        finally
+        {
+            proc.Dispose();
+        }
     }
 
     /// <summary>Stop a running sandbox.</summary>

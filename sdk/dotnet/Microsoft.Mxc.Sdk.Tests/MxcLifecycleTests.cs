@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Text.Json;
 using Microsoft.Mxc.Sdk;
 using Xunit;
 
@@ -90,5 +91,59 @@ public class MxcLifecycleTests
     {
         Assert.Throws<ArgumentException>(() => new SandboxId(""));
         Assert.Throws<ArgumentException>(() => new SandboxId(null!));
+    }
+
+    [Fact]
+    public void BuildProvisionEnvelope_LiftsFilesystem_NestsUserUnderExperimental()
+    {
+        var options = new ProvisionSandboxOptions
+        {
+            Filesystem = new FilesystemPolicy { ReadwritePaths = { @"C:\Temp" } },
+            User = new SandboxUserCredentials { Upn = "agent@contoso.com", WamToken = "tok" },
+        };
+
+        var json = MxcLifecycle.BuildProvisionEnvelope(options).ToJsonString();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal("0.6.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("provision", root.GetProperty("phase").GetString());
+        Assert.Equal("isolation_session", root.GetProperty("containment").GetString());
+        // Cross-cutting filesystem lifted to the top level.
+        Assert.Equal(@"C:\Temp",
+            root.GetProperty("filesystem").GetProperty("readwritePaths")[0].GetString());
+        // Backend-specific user nested under experimental.isolation_session.provision.
+        var user = root.GetProperty("experimental")
+            .GetProperty("isolation_session")
+            .GetProperty("provision")
+            .GetProperty("user");
+        Assert.Equal("agent@contoso.com", user.GetProperty("upn").GetString());
+        Assert.Equal("tok", user.GetProperty("wamToken").GetString());
+    }
+
+    [Fact]
+    public void BuildProvisionEnvelope_Minimal_HasNoExperimentalOrFilesystem()
+    {
+        var json = MxcLifecycle.BuildProvisionEnvelope(null).ToJsonString();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal("provision", root.GetProperty("phase").GetString());
+        Assert.Equal("isolation_session", root.GetProperty("containment").GetString());
+        Assert.False(root.TryGetProperty("filesystem", out _));
+        Assert.False(root.TryGetProperty("experimental", out _));
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_CarriesSandboxIdAndCommandLine()
+    {
+        var json = MxcLifecycle.BuildExecEnvelope(new SandboxId("iso:abc"), "cmd /c echo hi").ToJsonString();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal("exec", root.GetProperty("phase").GetString());
+        Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
+        Assert.Equal("cmd /c echo hi",
+            root.GetProperty("process").GetProperty("commandLine").GetString());
     }
 }

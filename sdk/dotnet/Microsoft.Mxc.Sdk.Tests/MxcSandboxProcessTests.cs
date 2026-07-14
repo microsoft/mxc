@@ -90,6 +90,44 @@ public class MxcSandboxProcessTests
     }
 
     [Fact]
+    public async Task Streaming_WritesStdin_AndReadsEchoedStdout()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // A cmd builtin (set /p) reads one stdin line and echoes it with delayed
+        // expansion — no external process spawn, so it is robust to the sandbox
+        // cwd. Exercises the stdin write path with the stdout read path.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var command = OperatingSystem.IsWindows()
+            ? @"C:\Windows\System32\cmd.exe /v:on /c set /p L= & echo GOT:!L!"
+            : "cat";
+
+        using var proc = MxcSandbox.Spawn(policy, command);
+
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        var stdoutTask = Task.Run(() =>
+        {
+            using var reader = new StreamReader(proc.StandardOutput!);
+            return reader.ReadToEnd();
+        });
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes("mxc_stdin_echo\n");
+        stdin!.Write(bytes, 0, bytes.Length);
+        stdin.Flush();
+        stdin.Dispose(); // close stdin -> EOF so the child produces output and exits
+
+        var stdout = await stdoutTask;
+        var result = proc.Wait();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("mxc_stdin_echo", stdout);
+    }
+
+    [Fact]
     public void Wait_IgnoringOutput_DoesNotDeadlock_AndExitsZero()
     {
         if (!HostCanSpawn)
