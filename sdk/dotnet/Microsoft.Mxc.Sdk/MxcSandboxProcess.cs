@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System.Runtime.InteropServices;
 using Microsoft.Mxc.Sdk.Native;
-using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
 
 namespace Microsoft.Mxc.Sdk;
 
@@ -30,11 +28,17 @@ namespace Microsoft.Mxc.Sdk;
 /// <b>Threading.</b> The process-control operations (<see cref="Id"/>,
 /// <see cref="Wait"/>, <see cref="WaitAsync"/>, <see cref="Kill"/>,
 /// <see cref="Dispose"/>) are serialized internally, so <see cref="Kill"/> may be
-/// called from another thread while <see cref="WaitAsync"/> is in flight.
+/// called from another thread while <see cref="WaitAsync"/> is in flight. The
+/// standard streams refcount their native handle, so reading/writing a stream
+/// concurrently with <see cref="Dispose"/> is safe — an in-flight read/write
+/// completes and the handle is freed afterwards, never underneath it.
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="Dispose"/> kills the child tree if it is still
-/// running and releases the native handles. Dispose exactly once.
+/// running and releases the native handles (draining and awaiting any internal
+/// readers first). If it is skipped, the finalizers on the underlying
+/// <see cref="System.Runtime.InteropServices.SafeHandle"/>s still reclaim the
+/// native handles and kill the child.
 /// </para>
 /// </remarks>
 public sealed class MxcSandboxProcess : IDisposable
@@ -44,7 +48,7 @@ public sealed class MxcSandboxProcess : IDisposable
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(5);
 
     private readonly object _controlLock = new();
-    private unsafe NativeSandbox* _handle;
+    private readonly MxcSandboxHandle _handle;
     private bool _disposed;
 
     private MxcStdinStream? _stdin;
@@ -56,7 +60,7 @@ public sealed class MxcSandboxProcess : IDisposable
 
     private readonly List<Task> _drainTasks = new();
 
-    internal unsafe MxcSandboxProcess(NativeSandbox* handle)
+    internal MxcSandboxProcess(MxcSandboxHandle handle)
     {
         _handle = handle;
     }
@@ -71,7 +75,7 @@ public sealed class MxcSandboxProcess : IDisposable
                 ThrowIfDisposed();
                 unsafe
                 {
-                    return NativeMethods.mxc_sandbox_id(_handle);
+                    return NativeMethods.mxc_sandbox_id(_handle.Ptr);
                 }
             }
         }
@@ -95,8 +99,8 @@ public sealed class MxcSandboxProcess : IDisposable
                     _stdinTaken = true;
                     unsafe
                     {
-                        var s = NativeMethods.mxc_sandbox_take_stdin(_handle);
-                        _stdin = s is null ? null : new MxcStdinStream(s);
+                        var s = NativeMethods.mxc_sandbox_take_stdin(_handle.Ptr);
+                        _stdin = s is null ? null : new MxcStdinStream(MxcWriteStreamHandle.FromRaw(s));
                     }
                 }
                 return _stdin;
@@ -127,9 +131,9 @@ public sealed class MxcSandboxProcess : IDisposable
                 unsafe
                 {
                     var s = stdout
-                        ? NativeMethods.mxc_sandbox_take_stdout(_handle)
-                        : NativeMethods.mxc_sandbox_take_stderr(_handle);
-                    slot = s is null ? null : new MxcReadPipeStream(s);
+                        ? NativeMethods.mxc_sandbox_take_stdout(_handle.Ptr)
+                        : NativeMethods.mxc_sandbox_take_stderr(_handle.Ptr);
+                    slot = s is null ? null : new MxcReadPipeStream(MxcReadStreamHandle.FromRaw(s));
                 }
             }
             return slot;
@@ -169,7 +173,7 @@ public sealed class MxcSandboxProcess : IDisposable
                 ThrowIfDisposed();
                 unsafe
                 {
-                    status = NativeMethods.mxc_sandbox_try_wait(_handle, &exit, &running);
+                    status = NativeMethods.mxc_sandbox_try_wait(_handle.Ptr, &exit, &running);
                 }
             }
 
@@ -185,9 +189,8 @@ public sealed class MxcSandboxProcess : IDisposable
             // try_wait cannot report a timeout (only exited / still-running), so
             // once the child is gone we return Exited. A policy timeout is
             // enforced natively by killing the tree, which try_wait then sees as
-            // an exit — surfaced here as ExitCode with TimedOut=false. Callers
-            // that need the timeout distinction should use the blocking
-            // WaitBlocking() path.
+            // an exit. Callers that need the timeout distinction should use the
+            // blocking WaitBlocking() path.
             cancellationToken.WaitHandle.WaitOne(PollInterval);
         }
     }
@@ -210,7 +213,7 @@ public sealed class MxcSandboxProcess : IDisposable
             int status;
             unsafe
             {
-                status = NativeMethods.mxc_sandbox_wait(_handle, &exit, &timedOut);
+                status = NativeMethods.mxc_sandbox_wait(_handle.Ptr, &exit, &timedOut);
             }
             if (status != (int)ErrorCode.Success)
             {
@@ -237,10 +240,34 @@ public sealed class MxcSandboxProcess : IDisposable
 
         var stdoutTask = ReadAll(outStream);
         var stderrTask = ReadAll(errStream);
-        var result = await WaitAsync(cancellationToken).ConfigureAwait(false);
-        var stdout = await stdoutTask.ConfigureAwait(false);
-        var stderr = await stderrTask.ConfigureAwait(false);
-        return (result, stdout, stderr);
+        try
+        {
+            var result = await WaitAsync(cancellationToken).ConfigureAwait(false);
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
+            return (result, stdout, stderr);
+        }
+        catch
+        {
+            // On cancellation/failure, still observe the reader tasks so they do
+            // not run detached. The stream handles are refcounted, so this is
+            // safe regardless of when the caller disposes.
+            await Task.WhenAll(SwallowAsync(stdoutTask), SwallowAsync(stderrTask))
+                .ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static async Task SwallowAsync(Task task)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Observed and ignored: the caller is already handling the outer error.
+        }
     }
 
     private static async Task<byte[]> ReadToEndAsync(Stream s, CancellationToken ct)
@@ -260,7 +287,7 @@ public sealed class MxcSandboxProcess : IDisposable
             int status;
             unsafe
             {
-                status = NativeMethods.mxc_sandbox_kill(_handle);
+                status = NativeMethods.mxc_sandbox_kill(_handle.Ptr);
             }
             if (status != (int)ErrorCode.Success)
             {
@@ -292,13 +319,13 @@ public sealed class MxcSandboxProcess : IDisposable
         unsafe
         {
             var s = stdout
-                ? NativeMethods.mxc_sandbox_take_stdout(_handle)
-                : NativeMethods.mxc_sandbox_take_stderr(_handle);
+                ? NativeMethods.mxc_sandbox_take_stdout(_handle.Ptr)
+                : NativeMethods.mxc_sandbox_take_stderr(_handle.Ptr);
             if (s is null)
             {
                 return;
             }
-            slot = new MxcReadPipeStream(s);
+            slot = new MxcReadPipeStream(MxcReadStreamHandle.FromRaw(s));
         }
         var stream = slot;
         _drainTasks.Add(Task.Run(() =>
@@ -326,6 +353,7 @@ public sealed class MxcSandboxProcess : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
+        List<Task> drains;
         lock (_controlLock)
         {
             if (_disposed)
@@ -333,29 +361,42 @@ public sealed class MxcSandboxProcess : IDisposable
                 return;
             }
             _disposed = true;
+            // Snapshot the drain tasks under the lock; no new ones start once
+            // _disposed is set (EnsureDrainUntaken throws).
+            drains = new List<Task>(_drainTasks);
         }
 
-        // Dispose the standard streams first (closing pipes), then free the
-        // sandbox handle, which kills the child tree if it is still running.
+        // Free the sandbox handle first: mxc_sandbox_free kills the child tree,
+        // closing the child's stdout/stderr write ends so any blocked reader or
+        // drain task gets EOF and unblocks. (No control op can be running: they
+        // hold _controlLock, which we just took to set _disposed.)
+        _handle.Dispose();
+
+        // Now the drain/read tasks observe EOF and finish; wait for them before
+        // releasing the stream handles so no detached task keeps running.
+        // Refcounting already makes the free itself safe against an in-flight
+        // read; this just avoids leaking background tasks.
+        try
+        {
+            Task.WaitAll(drains.ToArray());
+        }
+        catch
+        {
+            // Faulted drain tasks are best-effort; their handles are freed below.
+        }
+
         _stdin?.Dispose();
         _stdout?.Dispose();
         _stderr?.Dispose();
-
-        unsafe
-        {
-            NativeMethods.mxc_sandbox_free(_handle);
-            _handle = null;
-        }
     }
 }
 
 /// <summary>Readable <see cref="Stream"/> over a native <c>MxcReadStream</c> (child stdout/stderr).</summary>
 internal sealed class MxcReadPipeStream : Stream
 {
-    private unsafe MxcReadStream* _stream;
-    private bool _disposed;
+    private readonly MxcReadStreamHandle _handle;
 
-    internal unsafe MxcReadPipeStream(MxcReadStream* stream) => _stream = stream;
+    internal MxcReadPipeStream(MxcReadStreamHandle handle) => _handle = handle;
 
     public override bool CanRead => true;
     public override bool CanSeek => false;
@@ -374,27 +415,38 @@ internal sealed class MxcReadPipeStream : Stream
         {
             throw new ArgumentOutOfRangeException(nameof(count));
         }
-        if (_disposed)
-        {
-            throw new ObjectDisposedException(nameof(MxcReadPipeStream));
-        }
         if (count == 0)
         {
             return 0;
         }
 
-        unsafe
+        // Hold a reference across the blocking native read so a concurrent
+        // Dispose cannot free the handle underneath it (the SafeHandle defers
+        // the actual free until every reference is released).
+        var added = false;
+        try
         {
-            nuint read = 0;
-            fixed (byte* p = &buffer[offset])
+            _handle.DangerousAddRef(ref added);
+            unsafe
             {
-                var status = NativeMethods.mxc_stream_read(_stream, p, (nuint)count, &read);
-                if (status != (int)ErrorCode.Success)
+                nuint read = 0;
+                fixed (byte* p = &buffer[offset])
                 {
-                    throw new MxcException((ErrorCode)status, "reading from the sandbox stream failed");
+                    var status = NativeMethods.mxc_stream_read(_handle.Ptr, p, (nuint)count, &read);
+                    if (status != (int)ErrorCode.Success)
+                    {
+                        throw new MxcException((ErrorCode)status, "reading from the sandbox stream failed");
+                    }
                 }
+                return (int)read;
             }
-            return (int)read;
+        }
+        finally
+        {
+            if (added)
+            {
+                _handle.DangerousRelease();
+            }
         }
     }
 
@@ -405,14 +457,9 @@ internal sealed class MxcReadPipeStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (!_disposed)
+        if (disposing)
         {
-            _disposed = true;
-            unsafe
-            {
-                NativeMethods.mxc_read_stream_free(_stream);
-                _stream = null;
-            }
+            _handle.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -421,10 +468,9 @@ internal sealed class MxcReadPipeStream : Stream
 /// <summary>Writable <see cref="Stream"/> over a native <c>MxcWriteStream</c> (child stdin).</summary>
 internal sealed class MxcStdinStream : Stream
 {
-    private unsafe MxcWriteStream* _stream;
-    private bool _disposed;
+    private readonly MxcWriteStreamHandle _handle;
 
-    internal unsafe MxcStdinStream(MxcWriteStream* stream) => _stream = stream;
+    internal MxcStdinStream(MxcWriteStreamHandle handle) => _handle = handle;
 
     public override bool CanRead => false;
     public override bool CanSeek => false;
@@ -443,46 +489,67 @@ internal sealed class MxcStdinStream : Stream
         {
             throw new ArgumentOutOfRangeException(nameof(count));
         }
-        if (_disposed)
-        {
-            throw new ObjectDisposedException(nameof(MxcStdinStream));
-        }
 
         var written = 0;
         while (written < count)
         {
-            unsafe
+            // Reference the handle across each native write (see MxcReadPipeStream).
+            var added = false;
+            try
             {
-                nuint n = 0;
-                fixed (byte* p = &buffer[offset + written])
+                _handle.DangerousAddRef(ref added);
+                unsafe
                 {
-                    var status = NativeMethods.mxc_stream_write(_stream, p, (nuint)(count - written), &n);
-                    if (status != (int)ErrorCode.Success)
+                    nuint n = 0;
+                    fixed (byte* p = &buffer[offset + written])
                     {
-                        throw new MxcException((ErrorCode)status, "writing to the sandbox stream failed");
+                        var status = NativeMethods.mxc_stream_write(_handle.Ptr, p, (nuint)(count - written), &n);
+                        if (status != (int)ErrorCode.Success)
+                        {
+                            throw new MxcException((ErrorCode)status, "writing to the sandbox stream failed");
+                        }
                     }
+                    if (n == 0)
+                    {
+                        throw new IOException("the sandbox stdin stream accepted no bytes (pipe closed?)");
+                    }
+                    written += (int)n;
                 }
-                if (n == 0)
+            }
+            finally
+            {
+                if (added)
                 {
-                    throw new IOException("the sandbox stdin stream accepted no bytes (pipe closed?)");
+                    _handle.DangerousRelease();
                 }
-                written += (int)n;
             }
         }
     }
 
     public override void Flush()
     {
-        if (_disposed)
+        var added = false;
+        try
         {
-            return;
-        }
-        unsafe
-        {
-            var status = NativeMethods.mxc_stream_flush(_stream);
-            if (status != (int)ErrorCode.Success)
+            _handle.DangerousAddRef(ref added);
+            unsafe
             {
-                throw new MxcException((ErrorCode)status, "flushing the sandbox stream failed");
+                var status = NativeMethods.mxc_stream_flush(_handle.Ptr);
+                if (status != (int)ErrorCode.Success)
+                {
+                    throw new MxcException((ErrorCode)status, "flushing the sandbox stream failed");
+                }
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Flushing an already-closed stdin is a no-op.
+        }
+        finally
+        {
+            if (added)
+            {
+                _handle.DangerousRelease();
             }
         }
     }
@@ -493,14 +560,9 @@ internal sealed class MxcStdinStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (!_disposed)
+        if (disposing)
         {
-            _disposed = true;
-            unsafe
-            {
-                NativeMethods.mxc_write_stream_free(_stream);
-                _stream = null;
-            }
+            _handle.Dispose();
         }
         base.Dispose(disposing);
     }

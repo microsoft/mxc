@@ -139,7 +139,7 @@ public static class MxcSandbox
                     }
                     throw new MxcException((ErrorCode)status, message);
                 }
-                return new MxcSandboxProcess(handle);
+                return new MxcSandboxProcess(MxcSandboxHandle.FromRaw(handle));
             }
         }
     }

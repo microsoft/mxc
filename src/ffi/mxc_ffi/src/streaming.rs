@@ -31,6 +31,14 @@
 //! in [`mxc_sandbox_wait`] and killing from another. The per-stream handles are
 //! separate objects and are unaffected by this rule.
 //!
+//! Each stream handle is likewise single-owner: [`mxc_stream_read`] /
+//! [`mxc_stream_write`] borrow the stream mutably, so a read/write and a
+//! [`mxc_read_stream_free`] / [`mxc_write_stream_free`] on the **same** stream
+//! must not run concurrently — freeing a stream while a read/write is in flight
+//! is undefined behaviour (a use-after-free). Free a stream only once its reads
+//! and writes have returned. (The C# binding enforces this by refcounting the
+//! handle across each native call via `SafeHandle`.)
+//!
 //! ## Panics & errors
 //!
 //! Every entry point is wrapped in [`catch_unwind`]; a panic becomes

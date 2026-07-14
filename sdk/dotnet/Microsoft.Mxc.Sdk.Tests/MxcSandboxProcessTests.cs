@@ -129,4 +129,52 @@ public class MxcSandboxProcessTests
         proc.Dispose();
         proc.Dispose(); // second dispose must be a no-op, not a double-free
     }
+
+    [Fact]
+    public async Task Dispose_WhileReadingStdout_DoesNotCrash()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // Regression guard for the stream use-after-free: take stdout, start a
+        // blocking read on a background thread, then dispose the process from
+        // this thread. The SafeHandle refcount must keep the native stream alive
+        // across the in-flight read; the read completes (EOF once the child is
+        // killed) or throws ObjectDisposedException — never a crash / UAF.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var command = OperatingSystem.IsWindows()
+            ? @"C:\Windows\System32\cmd.exe /c echo hi & ping -n 3 127.0.0.1 >nul"
+            : "sh -c 'echo hi; sleep 2'";
+
+        var proc = MxcSandbox.Spawn(policy, command);
+        var stdout = proc.StandardOutput!;
+        Exception? readError = null;
+        var reader = Task.Run(() =>
+        {
+            try
+            {
+                var buf = new byte[64];
+                // Loop until EOF (0) — Dispose kills the child, closing the pipe.
+                while (stdout.Read(buf, 0, buf.Length) > 0) { }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Acceptable: the handle was disposed while we read.
+            }
+            catch (Exception e)
+            {
+                readError = e;
+            }
+        });
+
+        // Give the reader a moment to park inside the native read, then dispose.
+        await Task.Delay(50);
+        proc.Dispose();
+
+        var finished = await Task.WhenAny(reader, Task.Delay(TimeSpan.FromSeconds(10))) == reader;
+        Assert.True(finished, "reader should finish after dispose");
+        Assert.Null(readError);
+    }
 }
