@@ -9,9 +9,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
-    IsolationSessionConfig, LifecycleConfig, LxcConfig, MaskKind, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig, TestFeatureConfig,
+    UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -298,19 +298,6 @@ fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError>
         }
     }
     Ok(())
-}
-
-fn convert_denied_path(entry: wire::DeniedPath) -> (String, Option<MaskKind>) {
-    match entry {
-        wire::DeniedPath::Path(path) => (path, None),
-        wire::DeniedPath::Object(obj) => {
-            let kind = match obj.kind {
-                wire::DeniedPathKind::File => MaskKind::File,
-                wire::DeniedPathKind::Dir => MaskKind::Dir,
-            };
-            (obj.path, Some(kind))
-        }
-    }
 }
 
 /// Normalizes cross-list filesystem path constraints by applying
@@ -774,13 +761,7 @@ fn convert_wire_config(
     // Filesystem section
     if let Some(fscfg) = cfg.filesystem {
         if let Some(v) = fscfg.denied_paths {
-            for entry in v {
-                let (path, kind) = convert_denied_path(entry);
-                if let Some(kind) = kind {
-                    policy.denied_path_kinds.insert(path.clone(), kind);
-                }
-                policy.denied_paths.push(path);
-            }
+            policy.denied_paths = v;
         }
         if let Some(v) = fscfg.readwrite_paths {
             policy.readwrite_paths = v;
@@ -1743,48 +1724,6 @@ mod tests {
         assert_eq!(req.policy.denied_paths.len(), 2);
         assert_eq!(req.policy.denied_paths[0], "C:\\Windows\\System32");
         assert_eq!(req.policy.denied_paths[1], "C:\\Program Files");
-    }
-
-    #[test]
-    fn filesystem_denied_paths_accept_string_and_typed_object() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "filesystem": {
-                "deniedPaths": [
-                    "C:\\Windows\\System32",
-                    {"path": "C:\\Users\\Public\\secret.txt", "type": "file"},
-                    {"path": "C:\\Users\\Public\\secret-dir", "type": "dir"}
-                ]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.policy.denied_paths,
-            vec![
-                "C:\\Windows\\System32",
-                "C:\\Users\\Public\\secret.txt",
-                "C:\\Users\\Public\\secret-dir"
-            ]
-        );
-        assert_eq!(
-            req.policy
-                .denied_path_kinds
-                .get("C:\\Users\\Public\\secret.txt"),
-            Some(&MaskKind::File)
-        );
-        assert_eq!(
-            req.policy
-                .denied_path_kinds
-                .get("C:\\Users\\Public\\secret-dir"),
-            Some(&MaskKind::Dir)
-        );
-        assert!(!req
-            .policy
-            .denied_path_kinds
-            .contains_key("C:\\Windows\\System32"));
     }
 
     #[test]

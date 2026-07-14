@@ -243,41 +243,8 @@ pub struct Filesystem {
     pub readwrite_paths: Option<Vec<String>>,
     /// Paths the process can read but not write.
     pub readonly_paths: Option<Vec<String>>,
-    /// Paths explicitly denied (override broader allow rules). Entries may be
-    /// bare strings for backwards compatibility or objects with an explicit
-    /// file/dir mask type.
-    pub denied_paths: Option<Vec<DeniedPath>>,
-}
-
-/// A denied filesystem path, accepted as either a legacy string or an object
-/// with explicit mask intent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(untagged)]
-pub enum DeniedPath {
-    Path(String),
-    Object(DeniedPathObject),
-}
-
-/// Object form for a denied filesystem path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DeniedPathObject {
-    /// Path to deny.
-    pub path: String,
-    /// Whether to mask the path as a file or directory.
-    #[serde(rename = "type")]
-    pub kind: DeniedPathKind,
-}
-
-/// Mask type for a denied filesystem path.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum DeniedPathKind {
-    File,
-    Dir,
+    /// Paths explicitly denied (override broader allow rules).
+    pub denied_paths: Option<Vec<String>>,
 }
 
 /// AppContainer DACL-mutation fallback policy.

@@ -48,30 +48,6 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
- * A denied filesystem path, accepted as either a legacy string or an object with explicit mask intent.
- */
-export type DeniedPath = string | DeniedPathObject;
-
-/**
- * Mask type for a denied filesystem path.
- */
-export type DeniedPathKind = "file" | "dir";
-
-/**
- * Object form for a denied filesystem path.
- */
-export interface DeniedPathObject {
-  /**
-   * Path to deny.
-   */
-  path: string;
-  /**
-   * Whether to mask the path as a file or directory.
-   */
-  type: DeniedPathKind;
-}
-
-/**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
  */
 export interface Experimental {
@@ -117,9 +93,9 @@ export interface Fallback {
  */
 export interface Filesystem {
   /**
-   * Paths explicitly denied (override broader allow rules). Entries may be bare strings for backwards compatibility or objects with an explicit file/dir mask type.
+   * Paths explicitly denied (override broader allow rules).
    */
-  deniedPaths?: DeniedPath[] | null;
+  deniedPaths?: string[] | null;
   /**
    * Paths the process can read but not write.
    */
