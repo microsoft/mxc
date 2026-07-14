@@ -48,6 +48,11 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
+ * GA egress default outbound action applied when no egress rule matches.
+ */
+export type EgressDefault = "allow" | "deny";
+
+/**
  * GA outbound destination.
  */
 export interface EgressDestinationWire {
@@ -62,9 +67,9 @@ export interface EgressDestinationWire {
  */
 export interface EgressPortWire {
   /**
-   * Destination port.
+   * Destination port. Must be omitted for `icmp` (which has no ports); the parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp` the selector matches all ports for that protocol.
    */
-  port: number;
+  port?: number | null;
   /**
    * Transport protocol.
    */
@@ -76,9 +81,9 @@ export interface EgressPortWire {
  */
 export interface EgressRuleWire {
   /**
-   * Destination ports and protocols.
+   * Destination ports and protocols. When omitted or empty, the rule matches all ports and all protocols to the listed destinations.
    */
-  ports: EgressPortWire[];
+  ports?: EgressPortWire[];
   /**
    * Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
    */
@@ -294,6 +299,10 @@ export interface NetworkEgress {
    * Rules that allow matching outbound connections.
    */
   allow?: EgressRuleWire[];
+  /**
+   * Default outbound action when no egress rule matches (`allow` or `deny`). When omitted, defaults to `deny` (fail-closed). Setting `default: "allow"` expresses the "allow everything except this deny-list" model; when GA egress is present it supersedes the legacy `defaultPolicy`.
+   */
+  default?: EgressDefault | null;
   /**
    * Rules that deny matching outbound connections.
    */

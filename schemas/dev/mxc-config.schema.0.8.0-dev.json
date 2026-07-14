@@ -136,6 +136,14 @@
         }
       ]
     },
+    "EgressDefault": {
+      "description": "GA egress default outbound action applied when no egress rule matches.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
     "EgressDestinationWire": {
       "additionalProperties": false,
       "description": "GA outbound destination.",
@@ -155,10 +163,13 @@
       "description": "GA outbound port selector.",
       "properties": {
         "port": {
-          "description": "Destination port.",
+          "description": "Destination port. Must be omitted for `icmp` (which has no ports); the parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp` the selector matches all ports for that protocol.",
           "maximum": 65535.0,
           "minimum": 1.0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "protocol": {
           "allOf": [
@@ -170,7 +181,6 @@
         }
       },
       "required": [
-        "port",
         "protocol"
       ],
       "type": "object"
@@ -180,7 +190,8 @@
       "description": "GA outbound policy rule.",
       "properties": {
         "ports": {
-          "description": "Destination ports and protocols.",
+          "default": [],
+          "description": "Destination ports and protocols. When omitted or empty, the rule matches all ports and all protocols to the listed destinations.",
           "items": {
             "$ref": "#/definitions/EgressPortWire"
           },
@@ -195,7 +206,6 @@
         }
       },
       "required": [
-        "ports",
         "to"
       ],
       "type": "object"
@@ -620,6 +630,17 @@
             "$ref": "#/definitions/EgressRuleWire"
           },
           "type": "array"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EgressDefault"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default outbound action when no egress rule matches (`allow` or `deny`). When omitted, defaults to `deny` (fail-closed). Setting `default: \"allow\"` expresses the \"allow everything except this deny-list\" model; when GA egress is present it supersedes the legacy `defaultPolicy`."
         },
         "deny": {
           "default": [],

@@ -290,6 +290,21 @@ pub struct NetworkEgress {
     /// Rules that deny matching outbound connections.
     #[serde(default)]
     pub deny: Vec<EgressRuleWire>,
+    /// Default outbound action when no egress rule matches (`allow` or `deny`).
+    /// When omitted, defaults to `deny` (fail-closed). Setting `default: "allow"`
+    /// expresses the "allow everything except this deny-list" model; when GA
+    /// egress is present it supersedes the legacy `defaultPolicy`.
+    #[serde(rename = "default")]
+    pub default_action: Option<EgressDefault>,
+}
+
+/// GA egress default outbound action applied when no egress rule matches.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum EgressDefault {
+    Allow,
+    Deny,
 }
 
 /// GA outbound policy rule.
@@ -299,7 +314,9 @@ pub struct NetworkEgress {
 pub struct EgressRuleWire {
     /// Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
     pub to: Vec<EgressDestinationWire>,
-    /// Destination ports and protocols.
+    /// Destination ports and protocols. When omitted or empty, the rule matches
+    /// all ports and all protocols to the listed destinations.
+    #[serde(default)]
     pub ports: Vec<EgressPortWire>,
 }
 
@@ -319,9 +336,11 @@ pub struct EgressDestinationWire {
 pub struct EgressPortWire {
     /// Transport protocol.
     pub protocol: NetworkProtocol,
-    /// Destination port.
+    /// Destination port. Must be omitted for `icmp` (which has no ports); the
+    /// parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp`
+    /// the selector matches all ports for that protocol.
     #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
-    pub port: u16,
+    pub port: Option<u16>,
 }
 
 /// GA outbound transport protocol.

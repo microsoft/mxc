@@ -510,7 +510,10 @@ pub struct EgressDestination {
 #[serde(rename_all = "camelCase")]
 pub struct EgressPort {
     pub protocol: NetworkProtocol,
-    pub port: u16,
+    /// Destination port. Omitted for `icmp` (which has no ports); when omitted
+    /// for `tcp`/`udp` the selector matches all ports for that protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 /// GA outbound allow/deny rule.
@@ -527,6 +530,18 @@ pub struct EgressRule {
 pub struct NetworkEgress {
     pub allow: Vec<EgressRule>,
     pub deny: Vec<EgressRule>,
+    /// Default outbound action when no egress rule matches. `Deny` (or omitted)
+    /// fails closed; `Allow` expresses "allow everything except this deny-list".
+    #[serde(rename = "default", skip_serializing_if = "Option::is_none")]
+    pub default_action: Option<EgressDefault>,
+}
+
+/// GA egress default outbound action applied when no egress rule matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressDefault {
+    Allow,
+    Deny,
 }
 
 /// GA host-loopback ingress policy.
@@ -1148,7 +1163,7 @@ mod tests {
 
     #[test]
     fn build_request_maps_ga_network_schema() {
-        use wxc_common::models::{Protocol, RuleAction};
+        use wxc_common::models::{NetworkPolicy, Protocol, RuleAction};
 
         let policy = policy_with_network(NetworkSection {
             egress: Some(super::NetworkEgress {
@@ -1158,7 +1173,7 @@ mod tests {
                     }],
                     ports: vec![super::EgressPort {
                         protocol: super::NetworkProtocol::Tcp,
-                        port: 443,
+                        port: Some(443),
                     }],
                 }],
                 deny: vec![super::EgressRule {
@@ -1167,18 +1182,23 @@ mod tests {
                     }],
                     ports: vec![super::EgressPort {
                         protocol: super::NetworkProtocol::Udp,
-                        port: 53,
+                        port: Some(53),
                     }],
                 }],
+                default_action: Some(super::EgressDefault::Allow),
             }),
             ingress: Some(super::NetworkIngress {
                 host_loopback: Some(super::HostLoopbackPolicy::Deny),
             }),
-            proxy: Some(ProxySpec::Http("http://127.0.0.1:8080".to_string())),
             ..Default::default()
         });
 
         let request = build_request(&policy, None).expect("GA network policy should build");
+        // `default: "allow"` maps through to the internal default-outbound policy.
+        assert_eq!(
+            request.inner.policy.default_network_policy,
+            NetworkPolicy::Allow
+        );
         assert_eq!(request.inner.policy.egress_rules.len(), 2);
         assert_eq!(
             request.inner.policy.egress_rules[0].action,
@@ -1198,6 +1218,20 @@ mod tests {
             RuleAction::Deny
         );
         assert!(!request.inner.policy.allow_local_network);
+        assert!(request.inner.policy.allowed_hosts.is_empty());
+    }
+
+    // Proxy is unsupported on macOS (build rejects it), so gate this off macOS.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn build_request_maps_http_proxy_without_egress() {
+        let policy = policy_with_network(NetworkSection {
+            proxy: Some(ProxySpec::Http("http://127.0.0.1:8080".to_string())),
+            ..Default::default()
+        });
+
+        let request = build_request(&policy, None).expect("http proxy policy should build");
+        assert!(request.inner.policy.network_proxy.is_enabled());
         assert_eq!(
             request
                 .inner
@@ -1209,7 +1243,6 @@ mod tests {
                 .to_url(),
             "http://127.0.0.1:8080"
         );
-        assert!(request.inner.policy.allowed_hosts.is_empty());
     }
 
     #[cfg(target_os = "macos")]

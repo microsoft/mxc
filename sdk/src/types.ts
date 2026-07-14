@@ -226,18 +226,25 @@ export interface NetworkEgress {
  allow?: EgressRule[];
  /** Rules that deny matching outbound connections. */
  deny?: EgressRule[];
+ /**
+  * Default outbound action when no egress rule matches (default: "deny").
+  * `"allow"` expresses the "allow everything except this deny-list" model;
+  * when GA egress is present this supersedes the legacy `defaultPolicy`.
+  */
+ default?: 'allow' | 'deny';
 }
 
 /**
 * A single GA egress rule: a set of destinations combined with a set of
 * port/protocol selectors. A connection matches when it targets one of the
-* destinations on one of the listed ports/protocols.
+* destinations on one of the listed ports/protocols. When `ports` is omitted
+* or empty, the rule matches all ports and protocols to the destinations.
 */
 export interface EgressRule {
  /** Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected. */
  to: EgressDestination[];
- /** Destination ports and protocols. */
- ports: EgressPort[];
+ /** Destination ports and protocols. Omit to match all ports and protocols. */
+ ports?: EgressPort[];
 }
 
 /** A GA egress destination: an IPv4/IPv6 CIDR range or a bare IP address. */
@@ -250,8 +257,11 @@ export interface EgressDestination {
 export interface EgressPort {
  /** Transport protocol. */
  protocol: 'tcp' | 'udp' | 'icmp';
- /** Destination port. */
- port: number;
+ /**
+  * Destination port. Must be omitted for `icmp` (which has no ports). When
+  * omitted for `tcp`/`udp`, the selector matches all ports for that protocol.
+  */
+ port?: number;
 }
 
 /**
