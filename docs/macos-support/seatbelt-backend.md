@@ -278,7 +278,7 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 ./build-mac.sh --rust-only
 ```
 
-The script writes to `sdk/bin/<arch>/mxc-exec-mac` so the SDK's
+The script writes to `sdk/node/bin/<arch>/mxc-exec-mac` so the SDK's
 `findDarwinExecutable()` picks up the dev build automatically.
 
 ### Codesigning and notarization

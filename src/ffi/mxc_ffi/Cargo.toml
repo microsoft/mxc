@@ -1,0 +1,28 @@
+[package]
+name = "mxc_ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI over the MXC public Rust SDK (mxc-sdk) for language bindings (e.g. the C# SDK)."
+
+[lib]
+name = "mxc_ffi"
+# cdylib: the shared library language bindings load (mxc_ffi.dll / libmxc_ffi.so
+# / libmxc_ffi.dylib). staticlib: for consumers that link statically. lib: so
+# Rust integration tests can call the `extern "C"` entry points directly.
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+mxc-sdk = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# Opt-in C# SDK P/Invoke code generation (csbindgen) in build.rs. Off by
+# default so normal builds — including the whole-workspace backend build
+# matrix — don't compile csbindgen or write into the source tree. The drift
+# gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
+# regenerate the committed bindings.
+dotnetsdk = ["dep:csbindgen"]
+
+[build-dependencies]
+csbindgen = { version = "1", optional = true }

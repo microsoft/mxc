@@ -108,11 +108,18 @@ fn test_configs() {
         "C:\\temp\\wxc_test_allowed",
         "C:\\temp\\wxc_test_allowedreadonly",
         "C:\\temp\\wxc_test_denied",
+        "C:\\temp\\wxc_test_gitproj",
+        "C:\\temp\\wxc_test_gitexisting",
+        "C:\\temp\\wxc_test_outside",
     ]);
     temp.write_absolute_file(
         "C:\\temp\\wxc_test_allowedreadonly\\test_input.txt",
         "Test Input",
     );
+    // Pre-seed a protected child inside a writable parent (the `.git` protection
+    // regression scenario) and an out-of-policy secret for the deny tests.
+    temp.write_absolute_file("C:\\temp\\wxc_test_gitexisting\\.git\\config", "ORIGINAL");
+    temp.write_absolute_file("C:\\temp\\wxc_test_outside\\secret.txt", "SECRET");
 
     let result = run_test_driver(&test_configs_dir(), &[]);
     assert_success(&result);

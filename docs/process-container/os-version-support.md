@@ -19,7 +19,7 @@ For the enforcement mechanisms themselves see the
 | 25H2+ | 26600+ |
 
 > **Product floor:** the [README](../../README.md#platforms) and
-> [SDK README](../../sdk/README.md) state that `processcontainer`'s **minimum
+> [SDK README](../../sdk/node/README.md) state that `processcontainer`'s **minimum
 > supported build is 26100 (24H2)**. The Rust code build-gates individual
 > capabilities down to 23H2 (build 22631); the **23H2** column below therefore
 > describes *what the code can enforce if run there* — it is below the
@@ -123,4 +123,4 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
   `src/backends/appcontainer/common/src/job_object.rs`
 - FlatBuffer contract: `external/windows-sdk/BaseContainerSpecification.fbs`
 - Product support floor: [README](../../README.md#platforms),
-  [SDK README](../../sdk/README.md)
+  [SDK README](../../sdk/node/README.md)

@@ -32,7 +32,7 @@ pub mod validator;
 pub mod wire;
 
 // TypeScript emitter for the SDK wire types (drift oracle). Walks the generated
-// schema value and emits `sdk/src/generated/wire.ts`. Compiled with the wire
+// schema value and emits `sdk/node/src/generated/wire.ts`. Compiled with the wire
 // model under the `schema-gen` feature.
 #[cfg(feature = "schema-gen")]
 pub mod ts_emit;

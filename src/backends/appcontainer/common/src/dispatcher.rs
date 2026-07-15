@@ -72,8 +72,9 @@ use crate::base_container_runner::BaseContainerRunner;
 use crate::fallback_detector::{self, FallbackError, IsolationTier};
 use wxc_common::error::WxcError;
 use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
-use wxc_common::models::ExecutionRequest;
-use wxc_common::sandbox_process::Runner;
+use wxc_common::logger::Logger;
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::ScriptRunner;
 
 /// Result of a successful dispatch decision: a phased handle holding a
@@ -266,26 +267,81 @@ fn build_t3_dacl(
     Ok(mgr)
 }
 
-/// Build a runner with appropriate DACL augmentation for the
-/// BaseContainer-preferred path. The caller is responsible for the explicit
-/// (no-fallback) AppContainer path.
+/// The concrete Windows backend chosen by the fallback dispatcher, before it is
+/// adapted to either the run-to-completion surface (wrapped in [`Runner`] →
+/// [`ScriptRunner`], via [`dispatch_with_fallback`]) or the streaming surface
+/// ([`SandboxBackend::spawn`], via [`spawn_with_fallback`]).
 ///
-/// On success the returned [`Dispatched`] contains a runner ready to
-/// execute and (when applicable) a [`DaclManager`] that has already
-/// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
-/// extract both; the manager MUST stay alive through the run.
-pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
+/// Keeping tier selection in one place ([`select_backend_with_fallback`]) is
+/// what guarantees the two surfaces can't drift — the streaming path previously
+/// reimplemented a two-tier subset and so never reached the AppContainer + DACL
+/// fallback (issue #643).
+enum SelectedBackend {
+    BaseContainer(BaseContainerRunner),
+    AppContainer(AppContainerScriptRunner),
+}
+
+impl SandboxBackend for SelectedBackend {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        match self {
+            SelectedBackend::BaseContainer(b) => b.validate(request),
+            SelectedBackend::AppContainer(a) => a.validate(request),
+        }
+    }
+
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        match self {
+            SelectedBackend::BaseContainer(b) => b.spawn(request, logger, stdio),
+            SelectedBackend::AppContainer(a) => a.spawn(request, logger, stdio),
+        }
+    }
+
+    fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
+        match self {
+            SelectedBackend::BaseContainer(b) => b.diagnose_exit(request, exit_code),
+            SelectedBackend::AppContainer(a) => a.diagnose_exit(request, exit_code),
+        }
+    }
+}
+
+/// Run tier selection and construct the backend + (optional) DACL guard for
+/// `request`. This is the single source of truth for the tier → (backend, DACL)
+/// mapping, shared by the run-to-completion ([`dispatch_with_fallback`]) and
+/// streaming ([`spawn_with_fallback`]) surfaces.
+///
+/// On success the returned [`DaclManager`], when present, has **already applied
+/// its ACEs** and MUST outlive the run (its `Drop` restores the host ACEs). The
+/// selected [`IsolationTier`] and any tier-selection warnings are returned for
+/// telemetry.
+fn select_backend_with_fallback(
+    request: &ExecutionRequest,
+) -> Result<
+    (
+        SelectedBackend,
+        Option<DaclManager>,
+        IsolationTier,
+        Vec<String>,
+    ),
+    DispatchError,
+> {
     let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
 
-    let (runner, dacl_manager): (Box<dyn ScriptRunner>, Option<DaclManager>) = match decision.tier {
+    let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
             // Tier 1 delegates filesystem-policy enforcement to
             // BaseContainer's native API. We stamp no host-DACL deny ACEs
             // here: the detector only routes a denied-paths policy to T1
             // when the OS enforces `fs_deny` natively, so there is nothing
             // for a host DACL to add.
-            let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(BaseContainerRunner::new()));
-            (runner, None)
+            (
+                SelectedBackend::BaseContainer(BaseContainerRunner::new()),
+                None,
+            )
         }
         IsolationTier::AppContainerBfs => {
             // T2 only needs deny ACEs (BFS handles the rest in-runner)
@@ -294,10 +350,12 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
             // common no-deny case skips both costs.
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             if denied.is_empty() {
-                let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(
-                    AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs),
-                ));
-                (runner, None)
+                (
+                    SelectedBackend::AppContainer(AppContainerScriptRunner::with_filesystem_mode(
+                        FilesystemMode::Bfs,
+                    )),
+                    None,
+                )
             } else {
                 let sid =
                     derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
@@ -305,13 +363,15 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
                 // Hand the derived SID string to the runner so it does
                 // not re-run `ConvertSidToStringSidW` for the firewall
                 // principal-id lookup.
-                let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(
-                    AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
-                        FilesystemMode::Bfs,
-                        sid,
+                (
+                    SelectedBackend::AppContainer(
+                        AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
+                            FilesystemMode::Bfs,
+                            sid,
+                        ),
                     ),
-                ));
-                (runner, mgr)
+                    mgr,
+                )
             }
         }
         IsolationTier::AppContainerDacl => {
@@ -339,22 +399,190 @@ pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, 
             let denied = paths_to_pathbufs(&request.policy.denied_paths);
             let sid = derive_sid_string(&container_name(request)).map_err(DispatchError::Sid)?;
             let mgr = build_t3_dacl(&sid, &readwrite, &readonly, &denied)?;
-            let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(
-                AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
-                    FilesystemMode::Dacl,
-                    sid,
+            (
+                SelectedBackend::AppContainer(
+                    AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
+                        FilesystemMode::Dacl,
+                        sid,
+                    ),
                 ),
-            ));
-            (runner, Some(mgr))
+                Some(mgr),
+            )
         }
     };
 
+    Ok((backend, dacl_manager, decision.tier, decision.warnings))
+}
+
+/// Build a runner with appropriate DACL augmentation for the
+/// BaseContainer-preferred path. The caller is responsible for the explicit
+/// (no-fallback) AppContainer path.
+///
+/// On success the returned [`Dispatched`] contains a runner ready to
+/// execute and (when applicable) a [`DaclManager`] that has already
+/// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
+/// extract both; the manager MUST stay alive through the run.
+pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
+    let (backend, dacl_manager, tier, warnings) = select_backend_with_fallback(request)?;
+    let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(backend));
     Ok(Dispatched {
         runner,
         dacl_manager,
-        tier: decision.tier,
-        warnings: decision.warnings,
+        tier,
+        warnings,
     })
+}
+
+/// A successful streaming dispatch: a [`SandboxProcess`] handle plus the tier
+/// and warnings for telemetry. The handle already owns any [`DaclManager`]
+/// guard (via [`DaclGuardedProcess`]), so ACE restore outlives the child — the
+/// caller only has to keep the handle alive until the run is done.
+pub struct DispatchedProcess {
+    /// The spawned sandboxed process, streaming stdio over pipes.
+    pub process: Box<dyn SandboxProcess>,
+    /// The selected tier, for telemetry.
+    pub tier: IsolationTier,
+    /// Operator-visible warnings collected during tier selection.
+    pub warnings: Vec<String>,
+}
+
+/// Error from the streaming [`spawn_with_fallback`] path. Kept distinct from a
+/// flat error so the caller can preserve fallback semantics: tier-selection /
+/// DACL failures map to `backend_unavailable` (as the run-to-completion path
+/// does), while a backend spawn failure preserves the backend's
+/// [`FailurePhase`](wxc_common::models::FailurePhase).
+pub enum SpawnDispatchError {
+    /// Tier selection or DACL application failed before the process spawned.
+    /// Mirrors [`dispatch_with_fallback`]'s [`DispatchError`].
+    Dispatch(DispatchError),
+    /// The selected backend's `spawn` failed *after* a tier was already chosen
+    /// (and any DACL ACEs applied then rolled back). Carries the backend's
+    /// [`ScriptResponse`] so the caller can preserve its `failure_phase`, plus
+    /// the selected `tier` and tier-selection `warnings` so the caller can log
+    /// them on the failure path too — matching the run-to-completion path, which
+    /// logs both at resolve time before the (separate, later) spawn attempt.
+    ///
+    /// `response` is boxed to keep this cold-path error variant small (it would
+    /// otherwise trip `clippy::result_large_err` on every `spawn_with_fallback`
+    /// return).
+    Spawn {
+        response: Box<ScriptResponse>,
+        tier: IsolationTier,
+        warnings: Vec<String>,
+    },
+}
+
+/// Streaming counterpart of [`dispatch_with_fallback`]: select the tier, apply
+/// any DACL augmentation, spawn the sandboxed process with `stdio`, and return a
+/// [`SandboxProcess`] handle that owns the DACL guard so ACE restore outlives
+/// the child.
+///
+/// This exists so the streaming (`mxc-sdk`) path gets the **same** three-tier
+/// fallback as the executor binaries' run-to-completion path — including the
+/// AppContainer + DACL (Tier 3) tier used when neither BaseContainer nor
+/// `bfscfg.exe` (Tier 2 BFS) is available. See issue #643.
+///
+/// # Drop ordering
+///
+/// When a DACL guard is attached, the returned handle is a [`DaclGuardedProcess`]
+/// whose field order drops the inner process (killing the child tree and
+/// tearing down firewall / BFS enforcement) **before** the [`DaclManager`]
+/// (restoring host ACEs) — the same order the run-to-completion path enforces
+/// via [`Dispatched::into_runner_and_guard`].
+pub fn spawn_with_fallback(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdio: StdioMode,
+) -> Result<DispatchedProcess, SpawnDispatchError> {
+    let (mut backend, dacl_manager, tier, warnings) =
+        select_backend_with_fallback(request).map_err(SpawnDispatchError::Dispatch)?;
+
+    // Spawn with the DACL ACEs (if any) already applied. On a spawn failure the
+    // `dacl_manager` local drops here, restoring any ACEs that were stamped; we
+    // hand the already-selected `tier`/`warnings` to the error so the caller can
+    // still log them (the run-to-completion path logs them at resolve time,
+    // before its separate spawn attempt).
+    let inner = match backend.spawn(request, logger, stdio) {
+        Ok(inner) => inner,
+        Err(response) => {
+            return Err(SpawnDispatchError::Spawn {
+                response: Box::new(response),
+                tier,
+                warnings,
+            })
+        }
+    };
+
+    // Attach the guard to the handle only when there is one — T1 and T2-without-
+    // deny need no DACL work, so their handle is returned unwrapped.
+    let process: Box<dyn SandboxProcess> = match dacl_manager {
+        Some(dacl_manager) => Box::new(DaclGuardedProcess {
+            inner,
+            _dacl_manager: dacl_manager,
+        }),
+        None => inner,
+    };
+
+    Ok(DispatchedProcess {
+        process,
+        tier,
+        warnings,
+    })
+}
+
+/// A streaming [`SandboxProcess`] paired with the [`DaclManager`] guard whose
+/// `Drop` restores the host ACEs the DACL tier applied.
+///
+/// **Field order is load-bearing.** Rust drops struct fields in declaration
+/// order, so `inner` (which kills the child tree and tears down the per-run
+/// firewall / BFS enforcement) drops **before** `_dacl_manager` (which restores
+/// host ACEs). This matches the run-to-completion path's `(runner, dacl_manager)`
+/// drop order (see [`Dispatched::into_runner_and_guard`]): the host ACEs must
+/// not be revoked until the child and its descendants are gone.
+///
+/// Every [`SandboxProcess`] method delegates to `inner`; the guard is otherwise
+/// inert until drop.
+struct DaclGuardedProcess {
+    inner: Box<dyn SandboxProcess>,
+    _dacl_manager: DaclManager,
+}
+
+impl SandboxProcess for DaclGuardedProcess {
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        self.inner.take_stdin()
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.inner.take_stdout()
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.inner.take_stderr()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        self.inner.try_wait()
+    }
+
+    fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.inner.kill()
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        self.inner.wait()
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
+        self.inner.stdout_closer()
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
+        self.inner.stderr_closer()
+    }
 }
 
 #[cfg(test)]
@@ -595,5 +823,158 @@ mod tests {
         let req = test_request(empty_policy());
         let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
+    }
+
+    // -------------------------------------------------------------------
+    // Streaming dispatch (`select_backend_with_fallback` /
+    // `spawn_with_fallback`) — issue #643.
+    //
+    // These assert the *shared* selector both surfaces call constructs the
+    // backend variant matching the chosen tier and attaches a DaclManager
+    // exactly when the tier needs host-ACE augmentation. Because the streaming
+    // path (`spawn_with_fallback`) and the run-to-completion path
+    // (`dispatch_with_fallback`) now both go through this one function, they
+    // can no longer disagree on tier selection the way the old two-tier
+    // streaming path did.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn select_backend_t1_builds_base_container_no_dacl() {
+        let _g = ForceTierGuard::set("base-container");
+        let req = test_request(empty_policy());
+        let (backend, dacl, tier, _w) =
+            select_backend_with_fallback(&req).expect("T1 selection should succeed");
+        assert!(matches!(tier, IsolationTier::BaseContainer));
+        assert!(
+            matches!(backend, SelectedBackend::BaseContainer(_)),
+            "T1 must construct the BaseContainer backend, not AppContainer"
+        );
+        assert!(
+            dacl.is_none(),
+            "T1 delegates deny to the native API; no host DACL"
+        );
+    }
+
+    #[test]
+    fn select_backend_t2_no_deny_builds_appcontainer_no_dacl() {
+        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let req = test_request(empty_policy());
+        let (backend, dacl, tier, _w) =
+            select_backend_with_fallback(&req).expect("T2 selection should succeed");
+        assert!(matches!(tier, IsolationTier::AppContainerBfs));
+        assert!(matches!(backend, SelectedBackend::AppContainer(_)));
+        assert!(
+            dacl.is_none(),
+            "T2 without deniedPaths needs no host DACL (BFS handles it in-runner)"
+        );
+    }
+
+    #[test]
+    fn select_backend_t2_with_deny_builds_appcontainer_with_dacl() {
+        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let (policy, _tmp) = policy_with_denied_temp();
+        let req = test_request(policy);
+        let (backend, dacl, tier, _w) =
+            select_backend_with_fallback(&req).expect("T2+deny selection should succeed");
+        assert!(matches!(tier, IsolationTier::AppContainerBfs));
+        assert!(matches!(backend, SelectedBackend::AppContainer(_)));
+        assert!(
+            dacl.is_some(),
+            "T2 deniedPaths require deny ACEs via a DaclManager"
+        );
+    }
+
+    #[test]
+    fn select_backend_t3_builds_appcontainer_with_dacl() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (policy, _tmp) = policy_with_rw_temp();
+        let req = test_request(policy);
+        let (backend, dacl, tier, _w) =
+            select_backend_with_fallback(&req).expect("T3 selection should succeed");
+        assert!(matches!(tier, IsolationTier::AppContainerDacl));
+        assert!(matches!(backend, SelectedBackend::AppContainer(_)));
+        assert!(
+            dacl.is_some(),
+            "T3 always applies grant ACEs via a DaclManager"
+        );
+    }
+
+    #[test]
+    fn select_backend_streaming_falls_back_to_t3_when_bc_unusable() {
+        // Streaming analog of `dispatch_falls_back_to_t3_when_bc_unusable` and
+        // the direct regression guard for issue #643: with BaseContainer
+        // present-but-unusable and BFS not compiled in, the shared selector the
+        // streaming path calls must still resolve to Tier 3 (AppContainer +
+        // DACL) — where the old two-tier streaming path instead failed closed
+        // with the "bfscfg.exe is not available" error.
+        let _g = BcUsableGuard::set(false);
+        let req = test_request(empty_policy());
+        let (backend, dacl, tier, _w) =
+            select_backend_with_fallback(&req).expect("selection should succeed");
+        assert!(matches!(tier, IsolationTier::AppContainerDacl));
+        assert!(matches!(backend, SelectedBackend::AppContainer(_)));
+        assert!(dacl.is_some());
+    }
+
+    /// `DaclGuardedProcess` must forward every `SandboxProcess` method to the
+    /// wrapped handle unchanged; the guard is inert until drop (when it restores
+    /// host ACEs, after `inner` has torn the child down — enforced by field
+    /// order, documented on the struct).
+    #[test]
+    fn dacl_guarded_process_delegates_to_inner() {
+        use crate::test_env::ScopedStateDir;
+        use std::io::{Read, Write};
+        use wxc_common::sandbox_process::SandboxProcess;
+
+        /// Minimal fake recording which delegated calls arrived and returning
+        /// distinctive canned values.
+        #[derive(Default)]
+        struct FakeProcess {
+            stdin_taken: bool,
+            killed: bool,
+        }
+        impl SandboxProcess for FakeProcess {
+            fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+                self.stdin_taken = true;
+                None
+            }
+            fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+                None
+            }
+            fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+                None
+            }
+            fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+                Ok(Some(7))
+            }
+            fn id(&self) -> u32 {
+                4242
+            }
+            fn kill(&mut self) -> std::io::Result<()> {
+                self.killed = true;
+                Ok(())
+            }
+            fn wait(&mut self) -> std::io::Result<i32> {
+                Ok(7)
+            }
+        }
+
+        let _scope = ScopedStateDir::new();
+        // A manager with no ACEs applied: `Drop`/`restore` is a no-op, so the
+        // test only exercises delegation, not real host-ACE mutation.
+        let dacl_manager = DaclManager::new().expect("dacl mgr");
+        let mut guarded = DaclGuardedProcess {
+            inner: Box::new(FakeProcess::default()),
+            _dacl_manager: dacl_manager,
+        };
+
+        assert_eq!(guarded.id(), 4242, "id() must delegate");
+        assert!(
+            matches!(guarded.try_wait(), Ok(Some(7))),
+            "try_wait() must delegate"
+        );
+        assert!(matches!(guarded.wait(), Ok(7)), "wait() must delegate");
+        assert!(guarded.take_stdin().is_none(), "take_stdin() must delegate");
+        assert!(guarded.kill().is_ok(), "kill() must delegate");
     }
 }
