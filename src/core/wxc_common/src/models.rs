@@ -255,11 +255,15 @@ impl Default for WindowsSandboxConfig {
 
 /// Configuration specific to the Isolation Session backend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionConfig {
     /// Optional Entra cloud-agent credentials. Honored on the state-aware
     /// `start` phase; rejected by the one-shot path.
     pub user: Option<IsolationSessionUser>,
+    /// Optional app-scoped registration id (appId). Explicit value is used
+    /// verbatim; when absent, the backend auto-detects the invoking (parent)
+    /// process's Package Family Name as "PFN:<pfn>".
+    pub app_id: Option<String>,
 }
 
 /// Entra cloud-agent credentials. Both fields are required when the bundle
@@ -294,9 +298,13 @@ impl From<crate::wire::IsolationUser> for IsolationSessionUser {
 /// credentials when the caller wants a cloud-agent sandbox; absent for
 /// local sandboxes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
     pub user: Option<IsolationSessionUser>,
+    /// Optional app-scoped registration id (appId). Explicit value is used
+    /// verbatim; when absent, the backend auto-detects the invoking (parent)
+    /// process's Package Family Name as "PFN:<pfn>".
+    pub app_id: Option<String>,
 }
 
 /// Configuration specific to the LXC container backend.

@@ -91,6 +91,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
     "Win32_System_JobObjects",
+    "Win32_Storage_Packaging_Appx",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }
