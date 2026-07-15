@@ -1,0 +1,82 @@
+name: CodeQL
+
+# Static analysis (SAST) for the TypeScript SDK and the Rust workspace.
+# Runs on pushes/PRs to main and on a weekly schedule so newly-published
+# advisories are caught even without a code change.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays at 06:00 UTC
+    - cron: '0 6 * * 1'
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    permissions:
+      security-events: write
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            runner: ubuntu-latest
+            build-mode: none
+          - language: rust
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # ---- Rust: CodeQL's Rust extractor is buildless (build-mode: none). It
+      # does not compile the workspace; instead it runs `cargo metadata` to
+      # resolve the crate graph and extracts straight from source. We still
+      # surface the pinned toolchain and the MxcDependencies feed so that
+      # dependency resolution succeeds (the private feed 401s otherwise). No
+      # `cargo build` is run, so the feature-gated backends' build workarounds
+      # (hyperlight/microvm/windows_sandbox) are irrelevant here.
+      - name: Surface toolchain file at repo root
+        if: matrix.language == 'rust'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - name: Setup Rust toolchain
+        if: matrix.language == 'rust'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        if: matrix.language == 'rust'
+        uses: ./.github/actions/setup-cargo-feed
+
+      # ---- JS/TS: no build required; CodeQL extracts the source directly. ----
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

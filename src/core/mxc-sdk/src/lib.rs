@@ -4,15 +4,20 @@
 //! `mxc-sdk` — an importable library for starting MXC sandboxes in-process.
 //!
 //! Build a [`SandboxRequest`] from a [`SandboxPolicy`] with [`build_request`],
-//! then hand it to [`spawn_sandbox`]:
-//! it selects the right containment backend for the host and spawns the
-//! sandboxed process **without ever allocating a pty**, returning a
-//! [`Sandbox`] handle for live bidirectional stdio and termination.
+//! then either:
+//!
+//! - hand it to [`run`] to run the sandboxed process **to completion** and get
+//!   its captured stdout/stderr and exit outcome in one call, or
+//! - hand it to [`spawn_sandbox`] for a live [`Sandbox`] handle you can stream
+//!   stdio through, feed stdin, and kill while it runs.
+//!
+//! Either way the right containment backend is selected for the host and the
+//! process runs **without ever allocating a pty**.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
+//! use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 //!
-//! // Turn a policy into a request, fill in the command, and spawn it.
+//! // Turn a policy into a request, fill in the command, and run it.
 //! let policy = SandboxPolicy {
 //!     version: "0.7.0-alpha".to_string(),
 //!     filesystem: None,
@@ -22,11 +27,12 @@
 //! };
 //! let mut request = build_request(&policy, None)?;
 //! request.set_script("echo hi");
-//! let mut proc = spawn_sandbox(request)?;
-//! match proc.wait()? {
+//! let output = run(request)?;
+//! match output.outcome {
 //!     WaitOutcome::Exited(code) => println!("exit={code}"),
 //!     WaitOutcome::TimedOut => println!("timed out"),
 //! }
+//! println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -35,32 +41,40 @@
 //! The selected backend is driven by the `containment` field in the request
 //! (or the host default). The library supports Bubblewrap (Linux), Seatbelt
 //! (macOS), and ProcessContainer — AppContainer and BaseContainer —
-//! (Windows). Other backends return an [`Error`] with
-//! [`ErrorCode::UnsupportedContainment`].
+//! (Windows). Other backends (Windows Sandbox, IsolationSession, MicroVM,
+//! Hyperlight, WSLC, LXC) return an [`Error`] with
+//! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
+//! binaries for those.
+//!
+//! | Entry point       | Stdio                                   |
+//! |-------------------|-----------------------------------------|
+//! | [`run`]           | captured (stdout/stderr returned)       |
+//! | [`spawn_sandbox`] | live (stream, feed stdin, kill)         |
 //!
 //! ## No pty
 //!
 //! The child's stdio is always wired to ordinary pipes — the library never
-//! allocates a pty. Stream the handle's `take_stdout`/`take_stderr`, or let
+//! allocates a pty. [`run`] captures both streams; with [`spawn_sandbox`],
+//! stream the handle's `take_stdout`/`take_stderr`, or let
 //! [`wait`](Sandbox::wait) drain and discard any untaken stream.
+//!
+//! ## Relationship to `mxc_engine`
+//!
+//! This crate is a thin, streaming-focused public facade. Backend dispatch,
+//! host probing, and config building live in the internal `mxc_engine` crate;
+//! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
+//! handle in [`Sandbox`].
 
-mod dispatch;
-mod error;
-mod platform;
-pub mod policy;
 mod sandbox;
 
-use dispatch::spawn_runner;
-pub use platform::{platform_support, PlatformSupport};
-pub use policy::{
-    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
+pub use mxc_engine::policy;
+pub use mxc_engine::{
+    available_tools_policy, build_request, platform_support, temporary_files_policy,
+    user_profile_policy, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport, SandboxPolicy,
+    SandboxRequest,
 };
 
-pub use error::{Error, ErrorCode};
 pub use sandbox::{Output, Sandbox, StreamCloser, WaitOutcome};
-
-use wxc_common::logger::{Logger, Mode};
 
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
 /// the command, and any working directory / env, filled in).
@@ -69,8 +83,27 @@ use wxc_common::logger::{Logger, Mode};
 /// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
 /// drained and discarded by [`wait`](Sandbox::wait).
 pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
-    let mut logger = Logger::new(Mode::Buffer);
-    spawn_runner(&request.inner, &mut logger)
-        .map(Sandbox::new)
-        .map_err(Error::from)
+    mxc_engine::spawn(&request).map(Sandbox::new)
+}
+
+/// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
+/// output.
+///
+/// A convenience over [`spawn_sandbox`] + [`Sandbox::wait_with_output`]: it
+/// spawns the sandboxed process, waits for it to exit (honouring the request's
+/// `scriptTimeout`), and returns the captured stdout/stderr plus the
+/// [`WaitOutcome`]. Both streams are drained concurrently, so an output-heavy
+/// child can't deadlock. No pty is allocated.
+///
+/// Use [`spawn_sandbox`] instead when you need to stream stdio live, feed
+/// stdin, or kill the process while it runs.
+///
+/// `Err` is returned when the backend can't be selected/spawned (an
+/// [`Error`]), or when waiting on the child fails at the OS level.
+pub fn run(request: SandboxRequest) -> Result<Output, Error> {
+    let sandbox = spawn_sandbox(request)?;
+    sandbox.wait_with_output().map_err(|e| Error {
+        code: ErrorCode::BackendError,
+        message: format!("waiting for the sandbox to complete failed: {e}"),
+    })
 }

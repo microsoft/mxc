@@ -1,0 +1,24 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-ProcessContainer-Network-DnsBlocked",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"nslookup -timeout=2 example.com 1.1.1.1 >nul 2>&1 && (echo LEAK:dns&exit 1) || (echo OK:dns_blocked&exit 0)\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_allowed"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
+    ]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "capabilities"
+  },
+  "ui": {
+    "disable": false
+  }
+}

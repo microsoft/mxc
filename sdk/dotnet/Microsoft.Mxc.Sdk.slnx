@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Microsoft.Mxc.Sdk.Sample/Microsoft.Mxc.Sdk.Sample.csproj" />
+  <Project Path="Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj" />
+  <Project Path="Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj" />
+</Solution>

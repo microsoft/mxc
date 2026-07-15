@@ -1,0 +1,23 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-ProcessContainer-Git-DeniedExisting",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"cd /d C:\\temp\\wxc_test_gitexisting & echo HACKED> .git\\config 2>nul & (type .git\\config 2>nul | findstr HACKED >nul) && (echo LEAK:config_overwritten&exit 1) || (echo OK:config_write_denied) & echo x> parent_ok.txt & if exist parent_ok.txt (echo OK:parent_write) else (echo FAIL:parent_write&exit 1) & exit 0\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_gitexisting"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
+    ],
+    "deniedPaths": [
+      "C:\\temp\\wxc_test_gitexisting\\.git"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}

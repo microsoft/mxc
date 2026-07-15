@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
-SDK_DIR="$SCRIPT_DIR/sdk"
+SDK_DIR="$SCRIPT_DIR/sdk/node"
 
 # Parse arguments
 BUILD_TYPE="release"

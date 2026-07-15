@@ -228,6 +228,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "wxc_common",
 ]
@@ -504,6 +505,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "csbindgen"
+version = "1.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "950f59b281d7e20f050b4efd56d7c36c0deb853bf9ea1f20b985a75ae5b03b34"
+dependencies = [
+ "regex",
+ "syn",
 ]
 
 [[package]]
@@ -1453,14 +1464,13 @@ name = "lxc"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "bwrap_common",
  "clap",
  "hyperlight_common",
  "lxc_common",
  "mxc_build_common",
+ "mxc_engine",
  "nanvix_binaries",
  "nanvix_build_common",
- "nanvix_runner",
  "wxc_common",
 ]
 
@@ -1572,12 +1582,8 @@ dependencies = [
 name = "mxc-sdk"
 version = "0.7.0"
 dependencies = [
- "appcontainer_common",
- "bwrap_common",
  "libc",
- "seatbelt_common",
- "serde",
- "serde_json",
+ "mxc_engine",
  "wxc_common",
 ]
 
@@ -1594,7 +1600,7 @@ version = "0.7.0"
 dependencies = [
  "clap",
  "mxc_build_common",
- "seatbelt_common",
+ "mxc_engine",
  "wxc_common",
 ]
 
@@ -1609,6 +1615,34 @@ dependencies = [
  "windows",
  "windows-core",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_engine"
+version = "0.7.0"
+dependencies = [
+ "appcontainer_common",
+ "bwrap_common",
+ "hyperlight_common",
+ "isolation_session_bindings",
+ "isolation_session_common",
+ "lxc_common",
+ "nanvix_runner",
+ "seatbelt_common",
+ "serde",
+ "serde_json",
+ "windows_sandbox_lifecycle",
+ "wslc_common",
+ "wxc_common",
+]
+
+[[package]]
+name = "mxc_ffi"
+version = "0.7.0"
+dependencies = [
+ "csbindgen",
+ "mxc-sdk",
+ "serde_json",
 ]
 
 [[package]]
@@ -3037,8 +3071,25 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 name = "windows_sandbox_common"
 version = "0.7.0"
 dependencies = [
+ "getrandom 0.2.17",
  "serde",
  "serde_json",
+ "tokio",
+ "wxc_common",
+]
+
+[[package]]
+name = "windows_sandbox_lifecycle"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows",
+ "windows_sandbox_common",
  "wxc_common",
 ]
 
@@ -3199,17 +3250,14 @@ dependencies = [
  "appcontainer_common",
  "clap",
  "hyperlight_common",
- "isolation_session_bindings",
- "isolation_session_common",
  "mxc_build_common",
+ "mxc_engine",
  "nanvix_binaries",
  "nanvix_build_common",
- "nanvix_runner",
  "plm",
  "serde_json",
  "tempfile",
  "windows",
- "windows_sandbox_common",
  "wslc_common",
  "wxc_common",
 ]
@@ -3290,21 +3338,6 @@ name = "wxc_ui_probe"
 version = "0.1.0"
 
 [[package]]
-name = "wxc_windows_sandbox_daemon"
-version = "0.7.0"
-dependencies = [
- "anyhow",
- "mxc_build_common",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
- "windows_sandbox_common",
- "wxc_common",
-]
-
-[[package]]
 name = "wxc_windows_sandbox_guest"
 version = "0.7.0"
 dependencies = [
@@ -3312,6 +3345,7 @@ dependencies = [
  "mxc_build_common",
  "serde_json",
  "tokio",
+ "windows",
  "windows_sandbox_common",
  "wxc_common",
 ]

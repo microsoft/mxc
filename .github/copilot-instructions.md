@@ -11,6 +11,8 @@ rustup component add rust-analyzer
 npm install -g typescript-language-server typescript
 ```
 
+Building or testing the C# SDK (`sdk/dotnet/`) additionally requires the .NET SDK (net8.0 or newer; a net8.0 target is used).
+
 ## Build Commands
 
 ### Full build (Windows)
@@ -49,9 +51,13 @@ cargo build --release --target x86_64-pc-windows-msvc
 cargo build --release --target aarch64-pc-windows-msvc
 cargo build --release -p lxc          # Linux only — builds lxc-exec
 cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS only — builds mxc-exec-mac
+cargo build --release -p mxc_ffi      # C ABI cdylib (mxc_ffi.dll/.so/.dylib) for the C# SDK
 
-# SDK (from sdk/)
+# TypeScript SDK (from sdk/node/)
 npm install && npm run build
+
+# C# SDK (from sdk/dotnet/)
+dotnet build Microsoft.Mxc.Sdk.slnx
 ```
 
 ### Lint and format
@@ -70,15 +76,19 @@ cargo test --workspace
 cargo test -p wxc_common                    # Single crate
 cargo test -p wxc_common -- config_parser   # Filter by test name
 
-# SDK (from sdk/)
+# SDK (from sdk/node/)
 npm test
 npm run test:integration
+
+# C# SDK (from sdk/dotnet/)
+dotnet test Microsoft.Mxc.Sdk.slnx           # requires mxc_ffi built (cargo build -p mxc_ffi); resolver finds it in src/target/{debug,release}
 
 # Local PowerShell helpers — run from repo root, require built binaries
 tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
 tests\scripts\run_basicprocess_test.ps1            # Single process container test
 tests\scripts\run_isolation_session_tests.ps1                # IsolationSession one-shot E2E (requires host with the OS-side IsoSessionOps service)
 tests\scripts\run_isolation_session_state_aware_tests.ps1    # IsolationSession state-aware lifecycle E2E (multi-invocation provision/start/exec/stop/deprovision, same host requirements)
+tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one-shot E2E (fresh disposable VM per test; requires the Windows Sandbox optional feature)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
 
@@ -99,7 +109,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 |---------|--------|----------|--------|
 | AppContainer | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/appcontainer_runner.rs` |
 | BaseContainer (OS sandbox API) | `wxc-exec.exe` | Windows | `backends/appcontainer/common/src/base_container_runner.rs` — calls `Experimental_CreateProcessInSandbox` via FlatBuffer |
-| Windows Sandbox | `wxc-exec.exe` | Windows | `backends/windows_sandbox/common/src/windows_sandbox_runner.rs` |
+| Windows Sandbox | `wxc-exec.exe` | Windows | `backends/windows_sandbox/lifecycle/src/` — transient one-shot `WindowsSandboxRunner` (`ScriptRunner`). Experimental — requires `--experimental`. Each invocation launches a **fresh, disposable** Windows Sandbox VM, runs the script once, and guarantees teardown on every exit path (no warm-VM reuse; the legacy `experimental.windows_sandbox.idleTimeoutMs`/`daemonPipeName` fields are accepted but ignored, with a warning only for non-default values). The boot sequence (write per-launch nonce, launch VM, capture ownership proof, wait rendezvous, connect) lives in `lifecycle/src/vm.rs`; per-launch handshake is a 32-byte `Nonce` + 1-byte `ChannelRole` tag on every TCP connection (`windows_sandbox_common::auth`), so the guest pairs sockets by declared role, not accept order. Feature detection is by `WindowsSandbox.exe` presence (no elevated DISM query). The guest agent `wxc-windows-sandbox-guest.exe` (`backends/windows_sandbox/guest/`) is injected into the VM. (State-aware lifecycle + host daemon land in a follow-up.) |
 | MicroVM (NanVix) | `wxc-exec.exe` | Windows | `backends/nanvix/runner/src/lib.rs` — feature-gated behind `microvm` |
 | Hyperlight | `wxc-exec.exe` | Windows | `backends/hyperlight/common/src/lib.rs` — Hyperlight + Unikraft micro-VM backend |
 | IsolationSession | `wxc-exec.exe` | Windows | `backends/isolation_session/common/src/` — feature-gated behind `isolation_session`, experimental, uses the in-proc `Windows.AI.IsolationSession` `IsoSessionOps` API (loaded from `IsoSessionApp.dll`). Supports both one-shot (single-invocation lifecycle, via `ScriptRunner`) and state-aware (multi-invocation provision/start/exec/stop/deprovision, via `StatefulSandboxBackend`) modes. Honors `readwritePaths` and `readonlyPaths` at provision via `ShareFolderBatchAsync` (rejects `deniedPaths` since the API has no Deny ACE primitive); filesystem policy is immutable post-provision and rejected at later phases. State-aware additionally accepts an optional `user` bundle (`upn`, `wamToken`) at provision and start to provision Entra cloud-agent sandboxes; one-shot rejects the bundle, and hosts that don't support Entra agents surface `backend_unavailable`. Streams stdout/stderr, forwards stdin, and switches to ConPTY mode when wxc-exec's stdout is a TTY for `spawnSandbox` parity. |
@@ -115,15 +125,19 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### TypeScript layers
 
-- **SDK** (`sdk/`, `@microsoft/mxc-sdk`) — the public API. The one-shot surface (`spawnSandbox` / `spawnSandboxFromConfig` / `spawnSandboxAsync`) builds a `ContainerConfig` from a `SandboxPolicy`, serialises to base64, and spawns the correct native binary (`wxc-exec.exe`, `lxc-exec`, or `mxc-exec-mac`) via `node-pty`. The state-aware surface (`provisionSandbox` / `startSandbox` / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` / `deprovisionSandbox`, in `sdk/src/state-aware.ts`) drives a sandbox through a multi-call lifecycle against `StateAwareContainmentBackend` backends; per-(backend, phase) typed `*Config` interfaces and a branded `SandboxId<C>` live in `sdk/src/state-aware-types.ts`. Typed wire-format errors live in `sdk/src/errors.ts` (closed `ErrorCode` union plus a single `MxcError` class carrying `code: ErrorCode`, mirroring the Rust `MxcError` shape). Platform detection is in `platform.ts`.
+- **SDK** (`sdk/node/`, `@microsoft/mxc-sdk`) — the public API. The one-shot surface (`spawnSandbox` / `spawnSandboxFromConfig` / `spawnSandboxAsync`) builds a `ContainerConfig` from a `SandboxPolicy`, serialises to base64, and spawns the correct native binary (`wxc-exec.exe`, `lxc-exec`, or `mxc-exec-mac`) via `node-pty`. The state-aware surface (`provisionSandbox` / `startSandbox` / `execInSandbox` / `execInSandboxAsync` / `stopSandbox` / `deprovisionSandbox`, in `sdk/node/src/state-aware.ts`) drives a sandbox through a multi-call lifecycle against `StateAwareContainmentBackend` backends; per-(backend, phase) typed `*Config` interfaces and a branded `SandboxId<C>` live in `sdk/node/src/state-aware-types.ts`. Typed wire-format errors live in `sdk/node/src/errors.ts` (closed `ErrorCode` union plus a single `MxcError` class carrying `code: ErrorCode`, mirroring the Rust `MxcError` shape). Platform detection is in `platform.ts`.
 
-The SDK auto-discovers native binaries by checking `sdk/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh`/`build-mac.sh` scripts copy binaries into the SDK bin directory.
+The SDK auto-discovers native binaries by checking `sdk/node/bin/<target-triple>/` (npm-packaged) and `src/target/<target-triple>/{release,debug}/` (local dev). The `build.bat`/`build.sh`/`build-mac.sh` scripts copy binaries into the SDK bin directory.
+
+### C# SDK
+
+- **C# SDK** (`sdk/dotnet/`, `Microsoft.Mxc.Sdk`) — a managed binding that P/Invokes the native `mxc_ffi` library (which wraps the Rust `mxc-sdk` → `mxc_engine`), rather than spawning an executor. `MxcSandbox.Run(policy, command)` / `RunAsync` run a command to completion and return a `RunResult` (`ExitCode`, `TimedOut`, `Stdout`, `Stderr`); policy POCOs (`SandboxPolicy`, `FilesystemPolicy`, `NetworkPolicy`, `UiPolicy`) serialize to the same camelCase JSON the native layer expects. `MxcException` carries a typed `ErrorCode` that mirrors the native `MXC_STATUS_*` codes (parity-gated by `scripts/check-dotnet-errorcode-parity.js`). `Native/NativeMethods.g.cs` is **generated** by csbindgen from the Rust FFI and is **not committed** (gitignored) — the csproj's `GenerateNativeBindings` MSBuild target regenerates it before each C# compile via `cargo build -p mxc_ffi --features dotnetsdk`, so a `dotnet build` needs the Rust toolchain on PATH. `NativeLibraryResolver` finds `mxc_ffi` via `MXC_FFI_DIR`, the assembly dir / `runtimes/<rid>/native`, or `src/target/{debug,release}`. Projects: `Microsoft.Mxc.Sdk` (library), `Microsoft.Mxc.Sdk.Sample` (console), `Microsoft.Mxc.Sdk.Tests` (xUnit), in `Microsoft.Mxc.Sdk.slnx`. This first increment exposes run-to-completion only.
 
 ### Schema system
 
 - **Stable schemas**: released, immutable schemas live in [`schemas/stable/`](../schemas/stable) (one file per released version) — never edit them after release.
 - **Dev schema**: the in-progress schema lives in [`schemas/dev/`](../schemas/dev). It is **generated** from the Rust wire model (`src/core/wxc_common/src/wire.rs`) by the `mxc_schema_gen` tool — **do not hand-edit it**. To change the dev schema, edit the wire model and regenerate with `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.<dev>.json`. `scripts/versioning/check-schema-codegen.js` is a CI gate that regenerates and fails if the committed schema drifts. See [`docs/schema-codegen.md`](../docs/schema-codegen.md).
-- **Generated SDK wire types**: `sdk/src/generated/wire.ts` is **generated** from the same wire model by the `mxc_schema_gen --ts` TypeScript emitter (`wxc_common::ts_emit`, no third-party generator) — **do not hand-edit it**. It is a drift oracle (not public API); the SDK unit test `sdk/tests/unit/wire-conformance.test.ts` asserts the hand-written public types in `sdk/src/types.ts` conform to it, and `scripts/versioning/check-sdk-types-codegen.js` is a CI gate that fails if the committed file drifts. Regenerate with `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/src/generated/wire.ts`.
+- **Generated SDK wire types**: `sdk/node/src/generated/wire.ts` is **generated** from the same wire model by the `mxc_schema_gen --ts` TypeScript emitter (`wxc_common::ts_emit`, no third-party generator) — **do not hand-edit it**. It is a drift oracle (not public API); the SDK unit test `sdk/node/tests/unit/wire-conformance.test.ts` asserts the hand-written public types in `sdk/node/src/types.ts` conform to it, and `scripts/versioning/check-sdk-types-codegen.js` is a CI gate that fails if the committed file drifts. Regenerate with `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts`.
 - **Canonical schema-version source**: `schemas/schema-version.json` — the single source of truth for the schema-version constants (min/maxSupported/state-aware/stable/dev). `scripts/versioning/check-schema-versions.js` enforces that the Rust parser, SDK, and schema filenames all agree with it; do not hand-edit a schema-version constant without updating the canonical file. See [`docs/versioning.md`](../docs/versioning.md) for the full design.
 - Config files can reference schemas via `"$schema"` for editor validation. `scripts/versioning/validate-configs.js` validates the `tests/examples` + `tests/configs` corpus against the dev schema in CI.
 
@@ -171,20 +185,24 @@ New features go under the `experimental` JSON section and are only active when `
 
 ### Rust workspace structure
 
-The workspace is organized into five top-level directories under `src/`:
+The workspace is organized into six top-level directories under `src/`:
 
 | Directory | Purpose | Examples |
 |-----------|---------|----------|
-| `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc-sdk/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
-| `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,build_common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
+| `core/` | Cross-platform foundation + per-platform aggregator binaries | `wxc_common/`, `wxc/`, `lxc/`, `mxc_darwin/`, `mxc_engine/`, `mxc-sdk/`, `mxc_pty/`, `mxc_build_common/`, `generated/` |
+| `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common,lifecycle}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,build_common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
+| `ffi/` | Foreign-function-interface crates (C ABI for language bindings) | `mxc_ffi/` |
 | `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
 | `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `linux_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
 | `tools/` | Developer/diagnostic tools | `mxc_diagnostic_console/` |
 
 - `wxc_common` is the **cross-platform foundation**: config parsing, models, errors, logger, `ScriptRunner` / `StatefulSandboxBackend` traits, state-aware dispatch helpers, validators, ids, ui-policy, encoding. Plus a few thin Windows API helpers shared by host tools and backends (`process_util`, `string_util`, `filesystem_dacl`, `diagnostic`). It must not depend on any `backends/*` crate.
-- Each Windows containment backend lives in its own `backends/*/common` crate (e.g. `appcontainer_common`, `windows_sandbox_common`, `isolation_session_common`, `hyperlight_common`, `nanvix_runner`). Backend crates depend on `wxc_common`; there are no cross-edges between backend crates.
-- `wxc` and `lxc` are thin binary crates that wire up CLI args (`clap`) and dispatch to `wxc_common` and the per-backend crates
-- `mxc-sdk` is an **importable library** for starting sandboxes in-process without a pty: `spawn_sandbox` takes a `SandboxRequest` (from `build_request`), selects the host backend, and returns a `Sandbox` handle for persistent bidirectional stdio (`take_stdin`/`take_stdout`/`take_stderr`), `kill()`, and `wait()` (which drains and discards any untaken stdout/stderr and returns a `WaitOutcome` — `Exited(i32)` or `TimedOut` — as `io::Result`, reserving `Err` for an actual OS/wait failure), or `wait_with_output()` (consumes the handle, drains both streams concurrently, returns an `Output` with the `WaitOutcome` + captured `stdout`/`stderr`). It additionally ports the SDK's config-building surface so callers don't need the TypeScript module: `mxc_sdk::policy` (`SandboxPolicy` + `build_request` → `SandboxRequest` (opaque wrapper mapping to the internal `ExecutionRequest`), the port of `createConfigFromPolicy`; plus `available_tools_policy`/`user_profile_policy`/`temporary_files_policy` discovery helpers) and `mxc_sdk::platform_support` (port of `getPlatformSupport`, using the in-process probe on Windows). It depends on the backend crates (cfg-split: appcontainer on Windows, bubblewrap on Linux, seatbelt on macOS) — so it can't live in `wxc_common`. The public surface is deliberately minimal (streaming only): the `dispatch` and `platform` modules are private and only their used items are re-exported at the crate root (`platform_support`, `PlatformSupport`); `policy` is the one public submodule (callers name `mxc_sdk::policy::{SandboxPolicy sections}`). The execution surface lives in `wxc_common::sandbox_process`: the `SandboxBackend` trait (`validate` + `spawn(request, logger, StdioMode) -> Box<dyn SandboxProcess>` + a `diagnose_exit` hook for enriching launch-failure exits) and the generic `Runner<B>` adapter that bridges any `SandboxBackend` to the run-to-completion `ScriptRunner` (by calling `spawn(StdioMode::Inherit)` then `wait()`). `StdioMode::Pipes` hands the caller live stdin/stdout/stderr (what `mxc-sdk` uses); `StdioMode::Inherit` lets the child inherit the host process's own stdio (what the executor binaries use, preserving the TTY under a pty). `SandboxBackend` is implemented for every library backend — Seatbelt (macOS), Bubblewrap (Linux), and Windows ProcessContainer (AppContainer + BaseContainer). The `wxc`/`lxc`/`mxc_darwin` executor binaries do **not** depend on `mxc-sdk`; they keep their own backend dispatch (sharing only the lower-level `appcontainer_common::dispatcher::dispatch_with_fallback`). The `mxc-sdk` in-crate backend dispatch (`dispatch.rs`) and host probing (`platform.rs`) are **provisional** — a follow-up will move them into a dedicated `mxc` engine crate that both `mxc-sdk` and the executor binaries call into.
+- Each Windows containment backend lives in its own `backends/*/common` crate (e.g. `appcontainer_common`, `windows_sandbox_common`, `isolation_session_common`, `hyperlight_common`, `nanvix_runner`). Backend crates depend on `wxc_common`; there are no cross-edges between backend crates. Windows Sandbox additionally has `windows_sandbox_lifecycle`, which owns the live one-shot runner and depends on `windows_sandbox_common` for the wire protocol.
+- `wxc`, `lxc`, and `mxc_darwin` are thin binary crates (`wxc-exec` / `lxc-exec` / `mxc-exec-mac`) that wire up CLI args (`clap`), load/validate config, handle maintenance modes (`--probe`, `--delete`, `--setup-*`, `--audit`), and **delegate all backend dispatch to `mxc_engine`**. They contain no `match request.containment` of their own. `wxc-exec` additionally owns the Windows Ctrl-C / DACL-cleanup / `--audit` PLM-trace / telemetry orchestration around the engine call.
+- `mxc_engine` is the **single execution engine** — the one home for "given an `ExecutionRequest`, run it". It owns: run-to-completion backend selection (`run` / `resolve_runner`, covering **all** backends, incl. the Windows ProcessContainer BaseContainer/AppContainer BFS/DACL fallback tiers via `appcontainer_common::dispatcher::dispatch_with_fallback`, and every experimental backend, feature-gated); streaming (`spawn` → `Box<dyn SandboxProcess>`); state-aware lifecycle dispatch (`run_state_aware`); host probing (`platform_support` / `PlatformSupport`); and config building (`build_request`, `SandboxPolicy` + sections, `available_tools_policy`/`user_profile_policy`/`temporary_files_policy`). It depends on the backend crates (cfg-split: appcontainer/windows_sandbox lifecycle/isolation_session/wslc/nanvix on Windows, bubblewrap/lxc/nanvix on Linux, seatbelt on macOS) so it can't live in `wxc_common`. Both the executor binaries and `mxc-sdk` call into it. `ResolvedRunner` carries the boxed runner plus (Windows only) the optional `DaclManager` guard, so `wxc-exec` can park the guard for its signal handler.
+- `mxc-sdk` is the **public Rust SDK** — a thin facade over `mxc_engine`. Build a `SandboxRequest` with `build_request`, then either `run(request)` (run-to-completion; returns an `Output` with the `WaitOutcome` + captured `stdout`/`stderr`) or `spawn_sandbox(request)` (returns a `Sandbox` handle for live bidirectional stdio — `take_stdin`/`take_stdout`/`take_stderr`, `kill()`, `wait()` returning a `WaitOutcome` (`Exited(i32)` / `TimedOut`) as `io::Result`, or `wait_with_output()`). It re-exports the engine's config-building surface (`build_request`, `mxc_sdk::policy::{SandboxPolicy sections}`, discovery helpers) and `platform_support`; `mod sandbox` (wrapping the engine's `SandboxProcess` in `Sandbox`) is its only local module. No pty is ever allocated. Streaming supports Seatbelt (macOS), Bubblewrap (Linux), and Windows ProcessContainer (AppContainer + BaseContainer); other backends return `ErrorCode::UnsupportedContainment`.
+- The lower-level execution surface lives in `wxc_common::sandbox_process`: the `SandboxBackend` trait (`validate` + `spawn(request, logger, StdioMode) -> Box<dyn SandboxProcess>` + a `diagnose_exit` hook) and the generic `Runner<B>` adapter that bridges any `SandboxBackend` to the run-to-completion `ScriptRunner` (via `spawn(StdioMode::Inherit)` then `wait()`). `StdioMode::Pipes` hands the caller live stdin/stdout/stderr (what the `mxc-sdk` streaming path uses); `StdioMode::Inherit` lets the child inherit the host's stdio (what the executor binaries use, preserving the TTY under a pty). `SandboxBackend` is implemented for Seatbelt, Bubblewrap, and Windows ProcessContainer.
+- `mxc_ffi` (`ffi/mxc_ffi`, `crate-type = ["cdylib", "staticlib", "lib"]`) is a flat, panic-safe **C ABI over `mxc-sdk`** for language bindings. `mxc_run(policyJson, command, out)` runs a sandbox to completion, filling a `#[repr(C)] MxcRunResult` (status + exit_code + timed_out + owned stdout/stderr/error C strings); every entry point is `catch_unwind`-wrapped so a panic becomes a status code, never an unwind. Its `build.rs` runs **csbindgen** to generate the C# P/Invoke (`sdk/dotnet/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs`), gated behind the crate's **`dotnetsdk`** feature (off by default, so the whole-workspace backend build matrix doesn't compile csbindgen). The generated file is **not committed** (gitignored); the C# csproj regenerates it at build time and `scripts/check-dotnet-bindings-codegen.js` runs the codegen in CI and asserts the expected entry points are produced. The C ABI is **not a stable external contract** (native + binding are co-versioned and generated together; see the crate docs). Currently exposes run-to-completion only; streaming + state-aware over FFI are deferred.
 - `mxc_pty` is the shared pty bridge used by the LXC backend (`lxc_common::lxc_bindings::attach_run`) so the inner shell sees a real TTY and host stdio is streamed live. (Seatbelt and Bubblewrap no longer use it: they spawn directly and let the child inherit the host's stdio — a TTY when the executor binary runs under a pty — via `SandboxBackend::spawn(StdioMode::Inherit)`.)
 - `mxc_build_common` is a build-time helper crate — all Windows binary crates use it in their `build.rs` to embed VersionInfo (ProductName, FileDescription, copyright, version+commit). When adding a new Windows binary crate, add `mxc_build_common` as a build-dependency and call `mxc_build_common::embed_version_info()` from `build.rs`
 - `nanvix_build_common` is a **build-only** helper crate (never linked into the runtime): it stages NanVix binaries next to the executable and resolves the `NANVIX_BIN` prefetch directory. The `nanvix_binaries`, `wxc`, and `lxc` build scripts consume it as a `[build-dependencies]` entry. Runtime constants it needs (binary/snapshot filenames) stay in `nanvix_common`. Keep build-only file-staging logic here, not in `nanvix_common` (which is a runtime dependency of `nanvix_runner`).
@@ -209,7 +227,7 @@ The parser deserializes JSON directly into the typed wire model (`wxc_common::wi
 
 ### Package versioning
 
-All Rust crates use `version.workspace = true` to inherit the version from `src/Cargo.toml` `[workspace.package]`. The npm SDK version in `sdk/package.json` must match. Run `node scripts/check-version-sync.js` to validate they are in sync. When bumping the version, update both `src/Cargo.toml` (workspace version) and `sdk/package.json` in the same commit.
+All Rust crates use `version.workspace = true` to inherit the version from `src/Cargo.toml` `[workspace.package]`. The npm SDK version in `sdk/node/package.json` and the C# SDK version (`<Version>` in `sdk/dotnet/Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj`) must match. Run `node scripts/check-version-sync.js` to validate they are in sync. When bumping the version, update `src/Cargo.toml` (workspace version), `sdk/node/package.json`, and the C# csproj in the same commit.
 
 ### Keeping docs up to date
 
@@ -217,13 +235,13 @@ When changing behavior covered by existing documentation, update the relevant do
 
 - **Schema changes** (adding/removing/renaming config fields) → update `docs/schema.md` and the appropriate JSON schema in `schemas/dev/` or `schemas/stable/`
 - **New experimental features** → follow `docs/authoring-a-new-feature.md`, which includes schema, Rust, and test config steps
-- **SDK API changes** (new exports, changed signatures, new options) → update `sdk/README.md` and the JSDoc in `sdk/src/index.ts`
+- **SDK API changes** (new exports, changed signatures, new options) → update `sdk/node/README.md` and the JSDoc in `sdk/node/src/index.ts` (TypeScript SDK); the Rust `mxc-sdk` crate docs/`README.md`; and `sdk/dotnet/README.md` (C# SDK). If the `mxc_ffi` C ABI surface changes, the C# P/Invoke regenerates on the next C# build; keep the `ErrorCode` parity + bindings-codegen gates green.
 - **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-support/lxc-backend.md`, `windows-sandbox/windows-sandbox.md`)
 - **Versioning or promotion changes** → update `docs/versioning.md`
 
 ### Policy versioning
 
-The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.4.0-alpha` minimum, `0.8.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
+The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.6.0-alpha` minimum, `0.8.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
 
 ## Creating Issues
 

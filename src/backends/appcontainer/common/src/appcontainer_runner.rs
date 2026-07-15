@@ -1137,17 +1137,12 @@ impl AppContainerScriptRunner {
             FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
         if self.filesystem_mode == FilesystemMode::Bfs {
             if let Err(e) = bfs_manager.configure(&request.policy, logger) {
-                let msg = if matches!(&e, WxcError::BfsNotAvailable)
-                    && request.schema_version.starts_with("0.4.0")
-                {
-                    format!(
-                        "Filesystem policy error: bfscfg.exe is not available on this Windows build. \
-                         Your config uses schema version '{}', which requires BFS support. \
-                         Either update your Windows build to one that includes bfscfg.exe, \
-                         or update your config to schema version '0.6.0-alpha' or later \
-                         (which uses the BaseContainer backend and does not require bfscfg.exe).",
-                        request.schema_version
-                    )
+                let msg = if matches!(&e, WxcError::BfsNotAvailable) {
+                    "Filesystem policy error: bfscfg.exe is not available on this Windows \
+                     build, so the AppContainer + BFS filesystem tier cannot enforce your \
+                     policy. Use an OS build that includes bfscfg.exe, or run on a host that \
+                     supports the BaseContainer backend (which does not require bfscfg.exe)."
+                        .to_string()
                 } else {
                     e.to_string()
                 };

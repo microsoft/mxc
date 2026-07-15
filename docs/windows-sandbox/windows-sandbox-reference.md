@@ -1,211 +1,248 @@
-# Windows Sandbox Backend — Reference
+# Windows Sandbox One-Shot Backend - Reference
 
-Detailed reference for the sandbox backend internals. For the high-level design overview, see [windows-sandbox.md](windows-sandbox.md).
+This document describes the one-shot implementation. For the high-level
+overview, see [windows-sandbox.md](windows-sandbox.md).
 
-## IPC Protocol
+## Host-to-Guest Protocol
 
-### wxc-exec ↔ Daemon (line-based TCP)
+The host opens four TCP connections to the guest:
 
-The daemon listens on a localhost TCP port derived deterministically from the pipe name:
+| Channel | Purpose |
+|---|---|
+| Control | Protocol preamble and JSON control messages |
+| Stdin | Child standard input |
+| Stdout | Child standard output |
+| Stderr | Child standard error |
 
-```rust
-fn pipe_name_to_port(name: &str) -> u16 {
-    let hash: u32 = name.bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    let range = 65535 - 49152;
-    49152 + (hash % range) as u16
-}
+### Authentication and channel roles
+
+Before any protocol data, each connection sends:
+
+```text
+[32-byte per-launch nonce][1-byte ChannelRole]
 ```
 
-**Protocol:**
-- Client → Daemon: `EXEC <json>\n`
-- Daemon → Client: `RESULT <exit-code> <stdout-base64> <stderr-base64> <error-message>\n`
-- Daemon → Client: `ERROR <message>\n`
+The nonce is generated for each VM launch, written into the secured rendezvous
+directory, consumed and deleted by the guest, and compared without
+data-dependent early exit. The role byte identifies control, stdin, stdout, or
+stderr, so sockets are paired by declaration rather than TCP accept order.
 
-### Daemon ↔ Agent (length-prefixed JSON over TCP)
+Unauthenticated, duplicate-role, stalled, or unexpected-role connections are
+dropped. Same-user processes remain within the backend's trust boundary.
 
-4 TCP connections: control channel + stdin + stdout + stderr.
+### Control preamble
 
-Control channel frame format: `[4 bytes: u32 LE length][JSON payload]`
+The guest begins the control channel with:
+
+```text
+["WSBP"][protocol version: u32 little-endian]
+```
+
+The version is incremented only for incompatible framing, preamble, or required
+message changes. A magic or version mismatch rejects the connection before
+framed messages are processed.
+
+### Control messages
+
+Control messages use a four-byte little-endian length followed by JSON.
 
 | Message | Direction | Purpose |
-|---------|-----------|---------|
-| `Ready` | Agent → Host | Agent ready for EXEC commands |
-| `Exec(ExecRequest)` | Host → Agent | Execute a script |
-| `Exit(ExitNotification)` | Agent → Host | Script finished |
-| `StreamsReady` | Agent → Host | New data streams ready for next execution |
-| `Ping` / `Pong` | Either | Keepalive |
+|---|---|---|
+| `Ready` | Guest to host | Guest is ready for execution |
+| `Exec(ExecRequest)` | Host to guest | Execute one command |
+| `Exit(ExitNotification)` | Guest to host | Report completion |
+| `StreamsReady` | Guest to host | Protocol support for reconnectable data streams; unused for one-shot reuse |
+| `Ping` / `Pong` | Either | Liveness |
 
-## Sandbox VM Setup
+The one-shot host pumps stdin, stdout, stderr, and control concurrently to avoid
+opposing TCP-window deadlocks. A reset before any output is treated as an empty
+stream; a reset after output is a transport failure so partial output is not
+silently truncated.
 
-### Folder Mapping
+## Per-Run Host State
 
-| Host path | Sandbox path | Access | Contents |
-|-----------|-------------|--------|----------|
-| Daemon's exe directory | `C:\sandbox-guest` | Read-only | `wxc-windows-sandbox-guest.exe` |
-| `%TEMP%\wxc-sandbox-rendezvous` | `C:\sandbox-rendezvous` | Read-write | `rendezvous.txt`, `bootstrap.cmd`, `bootstrap.log` |
-| Host Python directory | `C:\sandbox-python` | Read-only | Host's Python installation |
+Each invocation creates:
 
-### Bootstrap Sequence
-
-The `.wsb` LogonCommand runs `C:\sandbox-rendezvous\bootstrap.cmd`:
-
-1. Adds `C:\sandbox-python` and `C:\sandbox-python\Scripts` to PATH
-2. Sets `PYTHONDONTWRITEBYTECODE=1` and `PYTHONNOUSERSITE=1`
-3. Logs diagnostics to `bootstrap.log`
-4. Launches `wxc-windows-sandbox-guest.exe`
-
-### .wsb Configuration
-
-```xml
-<Configuration>
-  <MappedFolders>
-    <MappedFolder>
-      <HostFolder>{agent_dir}</HostFolder>
-      <SandboxFolder>C:\sandbox-guest</SandboxFolder>
-      <ReadOnly>true</ReadOnly>
-    </MappedFolder>
-    <MappedFolder>
-      <HostFolder>{rendezvous_dir}</HostFolder>
-      <SandboxFolder>C:\sandbox-rendezvous</SandboxFolder>
-      <ReadOnly>false</ReadOnly>
-    </MappedFolder>
-    <MappedFolder>
-      <HostFolder>{python_dir}</HostFolder>
-      <SandboxFolder>C:\sandbox-python</SandboxFolder>
-      <ReadOnly>true</ReadOnly>
-    </MappedFolder>
-  </MappedFolders>
-  <LogonCommand>
-    <Command>C:\sandbox-rendezvous\bootstrap.cmd</Command>
-  </LogonCommand>
-  <vGPU>Disable</vGPU>
-  <Networking>Enable</Networking>
-</Configuration>
+```text
+%TEMP%\wxc-wsb\oneshot\<run-id>\
+  oneshot.marker
+  config\
+    wxc-windows-sandbox.wsb
+  rendezvous\
+    bootstrap.cmd
+    bootstrap.log
+    nonce.bin
+    rendezvous.txt
 ```
 
-`vGPU` is disabled to avoid intermittent GPU virtualization failures under nested Hyper-V.
+The root and run directory receive owner-only ACLs. A directory owned by
+another user is rejected because its owner retains implicit `WRITE_DAC` even
+after an ACL replacement.
 
-## Agent Startup & Rendezvous
+The marker records:
 
-1. Agent binds TCP on `0.0.0.0:0` (OS-assigned port)
-2. Discovers its IP via UDP "fake connect" to `1.1.1.1:80`
-3. Writes `<ip>:<port>` to `C:\sandbox-rendezvous\rendezvous.txt`
-4. Accepts 4 TCP connections from the daemon
-5. Locks down Windows Firewall via `netsh` — only allows host IP
-6. Sends `Ready` on control channel
-7. Enters command loop
+- the `wxc-exec` PID and process creation time;
+- VM host-process PID and creation-time proof captured after launch.
 
-## Python in the Sandbox
+PID plus creation time prevents a recycled PID from authorising cleanup of an
+unrelated process.
 
-Python is **not installed** inside the sandbox — the host's Python directory is mapped read-only.
+## VM Configuration
 
-### Discovery (`find_host_python()`)
+The generated `.wsb` file always maps:
 
-1. `where python` — skips Windows Store stubs (`WindowsApps`), verifies `python --version`
-2. Hardcoded paths: `C:\Python312`, `C:\Python311`, `C:\Python310`, `C:\Program Files\Python31x`
-3. User-scoped: `%LOCALAPPDATA%\Programs\Python\*`
+| Host path | Guest path | Access |
+|---|---|---|
+| Directory containing `wxc-windows-sandbox-guest.exe` | `C:\Sandbox-Guest` | Read-only |
+| Per-run rendezvous directory | `C:\Sandbox-Rendezvous` | Read-write |
 
-### Read-Only Mount Workaround
+Filesystem policy can add existing directories at the same absolute path
+inside the guest. Read-only and read-write access follow the corresponding
+policy lists.
 
-Python's `site` module writes `.pyc` cache to its install dir. Read-only mount causes exit code 1. Mitigated by:
-- `bootstrap.cmd` sets `PYTHONDONTWRITEBYTECODE=1` and `PYTHONNOUSERSITE=1`
-- Test configs use `python -S -B -c "..."`
+The generated configuration disables vGPU, enables networking for the
+host-to-guest bridge, and runs:
 
-### Other Languages
-
-The sandbox runs any command through `cmd.exe /C <script>`:
-- **PowerShell**: Built into Windows Sandbox — works directly
-- **cmd/batch**: Works out of the box
-- **Node.js/TypeScript**: Would need host-mapping (not implemented)
-
-## Daemon Lifecycle
-
-### Startup
-
-```
-wxc-windows-sandbox-daemon.exe <pipe-name> <idle-timeout-ms>
+```text
+C:\Sandbox-Rendezvous\bootstrap.cmd
 ```
 
-Auto-launched by `wxc-exec` if not already running.
+The bootstrap script truncates `bootstrap.log` and starts the guest agent. No
+host runtime, including Python, is implicitly discovered or mapped.
 
-### Retry & Error Handling
+## Launch Sequence
 
-| Attempt | Backoff | Action |
-|---------|---------|--------|
-| 1 | 0s | Launch sandbox, wait up to 120s for rendezvous |
-| 2 | 10s | Teardown, cleanup, relaunch |
-| 3 | 20s | Final attempt, propagate error |
+1. Validate policy and acquire the per-session host VM mutex.
+2. Secure `%TEMP%\wxc-wsb\oneshot`.
+3. Reconcile any prior marker and running `WindowsSandbox*` processes.
+4. Create the per-run directories and initial launcher marker.
+5. Generate the nonce, bootstrap script, and `.wsb` file.
+6. Launch `WindowsSandbox.exe`.
+7. Capture PID-plus-creation-time ownership proof and persist it.
+8. Wait for `rendezvous.txt`.
+9. Connect and authenticate the four guest channels.
+10. Validate the control preamble and wait for `Ready`.
+11. Send one execution request and relay stdio.
 
-### Teardown
+A failed process-enumeration probe is treated conservatively: the runner refuses
+to launch over an unknown potentially-live singleton VM.
 
-1. Kills `WindowsSandbox.exe`, `WindowsSandboxServer`, `WindowsSandboxRemoteSession`
-2. Polls for process exit (up to 30s)
-3. 5s Hyper-V cooldown
+## Policy Validation
+
+### Filesystem
+
+`readwritePaths` and `readonlyPaths` must contain absolute existing directories.
+The backend rejects:
+
+- files rather than directories;
+- one path listed with conflicting access;
+- nested or overlapping mapped roots;
+- a `deniedPaths` entry equal to, inside, or containing a mapped share.
+
+Windows Sandbox has no per-path deny primitive. A denied path outside all
+mapped shares is therefore already inaccessible and requires no additional
+rule.
+
+### Network
+
+The guest firewall supports only the default `block` policy. The backend
+rejects:
+
+- default network policy `allow`;
+- `allowedHosts` or `blockedHosts`;
+- network proxy configuration.
+
+Before binding, the guest temporarily pre-authorises its executable to avoid an
+interactive firewall prompt. After the host connects, it replaces that rule
+with host-IP/listener-port rules and sets both default directions to block.
+
+## Teardown and Crash Recovery
+
+The host permits one Windows Sandbox VM per logon session. A named mutex
+serialises one-shot execution with other MXC Windows Sandbox owners.
+
+Normal return and panic use an ownership-scoped teardown guard. Console
+shutdown paths take the same parked ownership state and issue termination
+without waiting.
+
+Cleanup follows these rules:
+
+- a live launcher means another one-shot invocation owns the VM, so launch is
+  refused;
+- prior ownership proof intersecting the live VM set authorises orphan reclaim;
+- a live VM without intersecting proof is treated as foreign and is never
+  enumerated into ownership;
+- markers are removed only after teardown confirms all `WindowsSandbox*`
+  processes have exited;
+- a probe failure or timeout preserves the marker for a later reclaim attempt.
+
+Markerless scratch directories can remain temporarily while Hyper-V processes
+hold mapped-folder handles. A later invocation garbage-collects old markerless
+directories.
+
+## Legacy Configuration
+
+The following fields remain parseable for schema compatibility but do not
+affect the one-shot backend:
+
+- `experimental.windows_sandbox.idleTimeoutMs`
+- `experimental.windows_sandbox.daemonPipeName`
+
+A targeted warning is emitted only when either value differs from its default.
+The one-shot path does not connect to `wxc-windows-sandbox-daemon.exe`.
 
 ## Debugging
 
+Per-run files are normally removed after confirmed teardown. While a run is
+active, inspect the newest directory under:
+
 ```powershell
-# Check rendezvous file
-Get-Content "$env:TEMP\wxc-sandbox-rendezvous\rendezvous.txt"
+$root = Join-Path $env:TEMP "wxc-wsb\oneshot"
+$run = Get-ChildItem $root -Directory |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
 
-# Check bootstrap log
-Get-Content "$env:TEMP\wxc-sandbox-rendezvous\bootstrap.log"
-
-# Check generated .wsb config
-Get-Content "$env:TEMP\wxc-sandbox-config\wxc-windows-sandbox.wsb"
-
-# Check for zombie VM processes
-Get-Process | Where-Object { $_.ProcessName -match "vmmem|vmwp|sandbox" }
-
-# Run daemon manually (visible logs)
-src\target\release\wxc-windows-sandbox-daemon.exe wxc-windows-sandbox 300000
-# In another terminal:
-src\target\release\wxc-exec.exe --debug tests\configs\basic_windows_sandbox.json
-
-# Clean slate
-Get-Process -Name "wxc-windows-sandbox-daemon","WindowsSandbox*" -ErrorAction SilentlyContinue |
-  ForEach-Object { Stop-Process -Id $_.Id -Force }
-Start-Sleep 30
-Remove-Item "$env:TEMP\wxc-sandbox-rendezvous\*" -ErrorAction SilentlyContinue
+Get-Content (Join-Path $run.FullName "rendezvous\bootstrap.log")
+Get-Content (Join-Path $run.FullName "rendezvous\rendezvous.txt")
+Get-Content (Join-Path $run.FullName "config\wxc-windows-sandbox.wsb")
 ```
+
+Check host processes with:
+
+```powershell
+Get-Process | Where-Object { $_.ProcessName -like "WindowsSandbox*" }
+```
+
+Do not terminate processes by name during normal cleanup; the backend uses
+PID-plus-creation-time ownership proof to avoid killing an unrelated VM.
 
 ## Key Source Files
 
 | File | Purpose |
-|------|---------|
-| `src/backends/windows_sandbox/common/src/windows_sandbox_runner.rs` | Client: connects to daemon, sends EXEC, reads RESULT |
-| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Shared control protocol |
-| `src/backends/windows_sandbox/daemon/src/main.rs` | Daemon entry point, idle watchdog |
-| `src/backends/windows_sandbox/daemon/src/pipe_server.rs` | TCP IPC server, EXEC handling, retry logic |
-| `src/backends/windows_sandbox/daemon/src/sandbox_vm.rs` | .wsb generation, Python discovery, VM launch/teardown |
-| `src/backends/windows_sandbox/daemon/src/rendezvous.rs` | Polls rendezvous.txt |
-| `src/backends/windows_sandbox/daemon/src/tcp_bridge.rs` | 4-channel TCP bridge, execute_on_guest, reconnect |
-| `src/backends/windows_sandbox/guest/src/main.rs` | Guest entry point |
-| `src/backends/windows_sandbox/guest/src/listener.rs` | TCP listener, rendezvous writer |
-| `src/backends/windows_sandbox/guest/src/executor.rs` | Command loop, stdio bridging |
-| `src/backends/windows_sandbox/guest/src/firewall.rs` | Guest firewall lockdown |
+|---|---|
+| `src/core/mxc_engine/src/run.rs` | Selects the one-shot runner |
+| `src/backends/windows_sandbox/lifecycle/src/one_shot.rs` | One-shot orchestration |
+| `src/backends/windows_sandbox/lifecycle/src/policy.rs` | Filesystem and network validation |
+| `src/backends/windows_sandbox/lifecycle/src/vm.rs` | `.wsb` generation, launch, and ownership capture |
+| `src/backends/windows_sandbox/lifecycle/src/rendezvous.rs` | Guest address discovery |
+| `src/backends/windows_sandbox/lifecycle/src/bridge.rs` | Host-to-guest channels and stdio relay |
+| `src/backends/windows_sandbox/lifecycle/src/teardown.rs` | Markers, reconcile, and guaranteed cleanup |
+| `src/backends/windows_sandbox/lifecycle/src/control_plane.rs` | Ownership decisions and process identity |
+| `src/backends/windows_sandbox/common/src/auth.rs` | Nonce and role handshake |
+| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Control-channel framing |
+| `src/backends/windows_sandbox/guest/src/main.rs` | Guest startup |
+| `src/backends/windows_sandbox/guest/src/listener.rs` | Authenticated socket acceptance |
+| `src/backends/windows_sandbox/guest/src/executor.rs` | Process execution and stdio bridge |
+| `src/backends/windows_sandbox/guest/src/firewall.rs` | Guest firewall policy |
+| `src/backends/windows_sandbox/guest/src/job.rs` | Process-tree cleanup |
 
 ## E2E Tests
 
-Manual-only — requires Hyper-V + Windows Sandbox feature (cannot run in GitHub CI).
-
-### Running
+The one-shot test suite requires Windows Sandbox and Hyper-V:
 
 ```powershell
-cd tests\scripts
-.\run_windows_sandbox_tests.ps1 -Release
+.\tests\scripts\run_windows_sandbox_one_shot_tests.ps1
 ```
 
-### Test Configs
-
-| Config | Script | Validates |
-|--------|--------|-----------|
-| `windows_sandbox_echo.json` | `echo Hello from sandbox!` | Boot, stdout relay |
-| `basic_windows_sandbox.json` | `python -S -B -c "..."` | Python mapping |
-| `windows_sandbox_powershell.json` | `powershell ... "PowerShell works"` | PowerShell |
-| `windows_sandbox_powershell_env.json` | `powershell ... $env:COMPUTERNAME` | VM isolation |
-| `windows_sandbox_stderr.json` | `echo stdout && echo stderr 1>&2` | stderr relay |
-| `windows_sandbox_exit_code.json` | `exit /b 42` | Exit codes |
-| `windows_sandbox_timeout.json` | `ping -n 30 127.0.0.1` (5s timeout) | Timeout |
-| *(multi-exec)* | `windows_sandbox_echo.json` × 3 | VM reuse |
+It covers command execution, PowerShell, stderr, exit-code propagation,
+timeouts, and repeated independent fresh-VM invocations.

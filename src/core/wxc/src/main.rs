@@ -13,30 +13,18 @@ use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::{
-    delete_app_container_profile, AppContainerScriptRunner,
-};
+use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
-#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-use hyperlight_common::HyperlightScriptRunner;
-#[cfg(feature = "isolation_session")]
-use isolation_session_common::IsolationSessionRunner;
-#[cfg(feature = "microvm")]
-use nanvix_runner::NanVixScriptRunner;
-use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
-    is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
+    load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
-use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
-use wxc_common::state_aware_dispatch::dispatch_state_aware;
-use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
+use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use wxc_common::telemetry;
 
@@ -195,22 +183,6 @@ fn has_cli_command(cli: &Cli) -> bool {
     !cli.command.is_empty()
 }
 
-fn command_line_context_for_backend(backend: &ContainmentBackend) -> CommandLineContext {
-    match backend {
-        ContainmentBackend::IsolationSession | ContainmentBackend::WindowsSandbox => {
-            CommandLineContext::WindowsCommandProcessor
-        }
-        ContainmentBackend::Wslc
-        | ContainmentBackend::Lxc
-        | ContainmentBackend::Seatbelt
-        | ContainmentBackend::Bubblewrap => CommandLineContext::PosixShell,
-        ContainmentBackend::ProcessContainer
-        | ContainmentBackend::Vm
-        | ContainmentBackend::MicroVm
-        | ContainmentBackend::Hyperlight => CommandLineContext::WindowsCreateProcess,
-    }
-}
-
 fn command_override_from_cli(
     cli: &Cli,
     context: CommandLineContext,
@@ -234,7 +206,7 @@ fn command_override_context_for_state_aware(
             "CLI command override is only supported for state-aware exec requests",
         ));
     }
-    resolve_backend(parsed).map(|backend| Some(command_line_context_for_backend(&backend)))
+    resolve_backend(parsed).map(|backend| Some(CommandLineContext::for_backend(&backend)))
 }
 
 fn apply_command_override(
@@ -398,7 +370,7 @@ fn run_state_aware_main(
     }
 
     let started = Instant::now();
-    let mut outcome = dispatch_state_aware_request(parsed, dry_run);
+    let mut outcome = mxc_engine::run_state_aware(parsed, dry_run);
     let elapsed = started.elapsed();
 
     // For provision, return the freshly-seeded correlation vector to the client
@@ -462,28 +434,6 @@ fn finalize_state_aware_outcome(outcome: Result<DispatchOutcome, MxcError>) -> S
         Ok(DispatchOutcome::Envelope(value)) => StateAwareExit::Envelope(value.to_string()),
         Ok(DispatchOutcome::ExecCompleted { exit_code }) => StateAwareExit::ExecCode(exit_code),
         Err(e) => StateAwareExit::Error(error_envelope_string(&e)),
-    }
-}
-
-/// Per-backend dispatch for state-aware requests. Resolves the requested
-/// backend and constructs its `StatefulSandboxBackend` impl from the
-/// owning backend crate (which depends on `wxc_common`, so the
-/// construction can't live inside `wxc_common` without a cycle). Falls
-/// back to `wxc_common::state_aware_dispatch::run_state_aware` for
-/// backends that have no state-aware impl, which surfaces the
-/// `unsupported_phase` envelope.
-fn dispatch_state_aware_request(
-    parsed: ParsedStateAwareRequest,
-    dry_run: bool,
-) -> Result<DispatchOutcome, MxcError> {
-    let backend = resolve_backend(&parsed)?;
-    match backend {
-        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        wxc_common::models::ContainmentBackend::IsolationSession => {
-            let mut runner = isolation_session_common::IsolationSessionRunner::new();
-            dispatch_state_aware(&mut runner, parsed, dry_run)
-        }
-        _ => run_state_aware(parsed, dry_run),
     }
 }
 
@@ -1039,7 +989,7 @@ fn main() {
     // exec is handled above before dispatch.
     let command_override = match command_override_from_cli(
         &cli,
-        command_line_context_for_backend(&request.containment),
+        CommandLineContext::for_backend(&request.containment),
     ) {
         Ok(command_override) => command_override,
         Err(e) => {
@@ -1173,220 +1123,32 @@ fn main() {
         wxc_common::diagnostic::redacted_request_json(&request)
     );
 
-    // DaclManager parking for the BaseContainer/fallback path. Parked
-    // into a global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler
-    // can drop it on signal as well as the normal-exit path below. The
-    // slot returns `None` if no DACL augmentation was required.
-
-    // Run script in selected containment backend.
-    // BaseContainer is used when --experimental is passed or schema version >= 0.5.
-    // Sandbox and MicroVM require --experimental flag.
-    let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::ProcessContainer => {
-            // Compute fallback eligibility on the ProcessContainer arm
-            // only — every other `ContainmentBackend` variant is
-            // unaffected by `use_base_container` and does not need to
-            // pay the (trivial) semver parse cost.
-            let version_implies_base_container = is_base_container_version(&request.schema_version);
-            let use_base_container = request.experimental_enabled || version_implies_base_container;
-
-            if use_base_container {
-                let reason = if version_implies_base_container {
-                    format!("schema version {}", request.schema_version)
-                } else {
-                    "--experimental".to_string()
-                };
-                let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
-
-                match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
-                    Ok(dispatched) => {
-                        for w in &dispatched.warnings {
-                            let _ = writeln!(logger, "warning: {w}");
-                        }
-                        let _ = writeln!(
-                            logger,
-                            "selected isolation tier: {}",
-                            dispatched.tier.as_str()
-                        );
-
-                        let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
-                        if let Some(mgr) = dacl_manager {
-                            park_dacl_for_cleanup(mgr);
-                        }
-                        dispatched_runner
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        if let appcontainer_common::dispatcher::DispatchError::Dacl {
-                            warnings,
-                            ..
-                        } = &e
-                        {
-                            for w in warnings {
-                                eprintln!("  dacl warning: {w}");
-                            }
-                        }
-                        eprint!("{}", logger.get_buffer());
-                        telemetry::emit_early_exit(
-                            telemetry_active,
-                            &request.containment,
-                            telemetry::FailureReason::InitError,
-                        );
-                        process::exit(1);
-                    }
-                }
-            } else {
-                Box::new(Runner::new(AppContainerScriptRunner::new()))
+    // Run script in the selected containment backend. Backend selection and
+    // runner construction — including the ProcessContainer BaseContainer /
+    // AppContainer (BFS / DACL) fallback tiers and every experimental backend —
+    // live in `mxc_engine::resolve_runner`, the single home for one-shot backend
+    // dispatch. The DACL guard it returns for the fallback tiers is parked into
+    // the global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler can drop
+    // it on signal as well as the normal-exit path below; it is `None` when no
+    // DACL augmentation was required. Tier-selection warnings and the selected
+    // tier are logged to `logger` by the engine.
+    let mut runner: Box<dyn ScriptRunner> = match mxc_engine::resolve_runner(&request, &mut logger)
+    {
+        Ok(resolved) => {
+            if let Some(mgr) = resolved.dacl_manager {
+                park_dacl_for_cleanup(mgr);
             }
+            resolved.runner
         }
-        ContainmentBackend::Wslc => {
-            #[cfg(feature = "wslc")]
-            {
-                if !request.experimental_enabled {
-                    eprintln!("Error: WSLC is an experimental feature. Use --experimental flag.");
-                    process::exit(1);
-                }
-                let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
-                let wslc_config = request
-                    .experimental
-                    .wslc
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_default();
-                Box::new(wslc_common::wsl_container_runner::WSLContainerRunner::new(
-                    &wslc_config,
-                ))
-            }
-            #[cfg(not(feature = "wslc"))]
-            {
-                eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Lxc => {
-            eprintln!("Error: LXC backend not available on Windows");
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            eprint!("{}", logger.get_buffer());
             telemetry::emit_early_exit(
                 telemetry_active,
                 &request.containment,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
-        }
-        ContainmentBackend::Bubblewrap => {
-            eprintln!("Error: Bubblewrap backend not available on Windows");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::Seatbelt => {
-            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::Vm => {
-            eprintln!("Error: VM backend not yet implemented");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
-                process::exit(1);
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Box::new(NanVixScriptRunner::new())
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Hyperlight => {
-            #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-            {
-                if !request.experimental_enabled {
-                    eprintln!(
-                        "Error: Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
-                         Use --experimental flag."
-                    );
-                    process::exit(1);
-                }
-                Box::new(HyperlightScriptRunner::new())
-            }
-            #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
-            {
-                eprintln!(
-                    "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
-                );
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::WindowsSandbox => {
-            if !request.experimental_enabled {
-                eprintln!(
-                    "Error: Windows Sandbox is an experimental feature. Use --experimental flag."
-                );
-                process::exit(1);
-            }
-            let sandbox_config = request
-                .experimental
-                .windows_sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
-            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
-        }
-        ContainmentBackend::IsolationSession => {
-            #[cfg(feature = "isolation_session")]
-            {
-                if !request.experimental_enabled {
-                    eprintln!(
-                        "Error: Isolation Session is an experimental feature. Use --experimental flag."
-                    );
-                    process::exit(1);
-                }
-                Box::new(IsolationSessionRunner::new())
-            }
-            #[cfg(not(feature = "isolation_session"))]
-            {
-                eprintln!(
-                    "Error: IsolationSession backend not compiled. Rebuild with --features isolation_session."
-                );
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
         }
     };
 
@@ -1580,6 +1342,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use wxc_common::encoding::base64_encode;
     use wxc_common::logger::Mode;
+    use wxc_common::models::ContainmentBackend;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::MxcRequest;
 
@@ -1741,7 +1504,7 @@ mod tests {
     #[test]
     fn windows_sandbox_cli_command_uses_cmd_context() {
         assert_eq!(
-            command_line_context_for_backend(&ContainmentBackend::WindowsSandbox),
+            CommandLineContext::for_backend(&ContainmentBackend::WindowsSandbox),
             CommandLineContext::WindowsCommandProcessor
         );
     }

@@ -2,130 +2,153 @@
 
 ## Overview
 
-The Windows Sandbox backend provides VM-level isolation for script execution using [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview). Unlike the process container backend (which runs scripts in a sandboxed process on the host), the Sandbox backend boots an ephemeral Windows VM, executes scripts inside it, and tears it down when idle.
+The Windows Sandbox backend provides VM-level isolation using
+[Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview).
+The one-shot surface launches a fresh disposable VM for each invocation, runs
+one command, and tears the VM down before returning. It does not use the
+host-side daemon or reuse a warm VM.
 
-This provides stronger isolation than process containers — the script runs in a completely separate OS instance with its own filesystem, registry, and network stack.
+Windows Sandbox is experimental and requires `--experimental`.
 
 ## Architecture
 
+```text
+wxc-exec.exe
+  |
+  `-- mxc_engine
+        |
+        `-- WindowsSandboxRunner (windows_sandbox_lifecycle)
+              |-- validates policy and acquires the host VM slot
+              |-- writes a per-launch nonce and generates the .wsb file
+              |-- launches WindowsSandbox.exe and records ownership proof
+              |-- waits for guest rendezvous
+              |-- opens authenticated control/stdin/stdout/stderr channels
+              |-- executes one command
+              `-- tears down the owned VM
+                    |
+                    `-- wxc-windows-sandbox-guest.exe
+                          |-- consumes the launch nonce
+                          |-- publishes its TCP address
+                          |-- authenticates and pairs channels by role
+                          |-- locks down the guest firewall
+                          `-- runs the command through cmd.exe /C
 ```
-wxc-exec.exe (CLI client)
-  │
-  └── WindowsSandboxScriptRunner (src/backends/windows_sandbox/common/src/windows_sandbox_runner.rs)
-        │
-        ├── Pre-flight: checks Windows Sandbox feature is enabled
-        ├── Connects to wxc-windows-sandbox-daemon via TCP IPC on localhost
-        │
-        └── Sends: "EXEC {json}\n"
-              │
-              wxc-windows-sandbox-daemon.exe (host-side, long-lived)
-                │
-                ├── Discovers Python on the host
-                ├── Generates .wsb config with mapped folders
-                ├── Launches WindowsSandbox.exe
-                ├── Polls rendezvous file for guest agent address
-                ├── Connects 4 TCP channels to guest agent
-                │
-                └── Bridges EXEC requests to the guest
-                      │
-                      wxc-windows-sandbox-guest.exe (inside sandbox VM)
-                        │
-                        ├── Binds TCP, writes IP:port to rendezvous file
-                        ├── Accepts 4 connections (control, stdin, stdout, stderr)
-                        ├── Locks down firewall (only allow host IP)
-                        ├── Executes scripts via cmd.exe /C
-                        └── Bridges stdin/stdout/stderr over TCP
-```
+
+The `src/backends/windows_sandbox/daemon/` crate remains in the repository for
+future state-aware lifecycle work, but the one-shot path does not start or
+connect to it.
 
 ### Components
 
-| Binary | Crate | Runs where | Purpose |
-|--------|-------|------------|---------|
-| `wxc-exec.exe` | `wxc` | Host | CLI entry point, dispatches to WindowsSandboxScriptRunner |
-| `wxc-windows-sandbox-daemon.exe` | `wxc_windows_sandbox_daemon` | Host | Manages sandbox VM lifecycle, bridges IPC to TCP |
-| `wxc-windows-sandbox-guest.exe` | `wxc_windows_sandbox_guest` | Inside sandbox VM | Accepts commands, runs scripts, bridges stdio |
+| Component | Location | Purpose |
+|---|---|---|
+| Execution engine | `src/core/mxc_engine/src/run.rs` | Selects the one-shot runner and reports ignored legacy settings |
+| Lifecycle crate | `src/backends/windows_sandbox/lifecycle/` | Policy validation, VM launch, authenticated bridge, ownership, and teardown |
+| Shared protocol | `src/backends/windows_sandbox/common/` | Nonce authentication and control-channel wire format |
+| Guest agent | `src/backends/windows_sandbox/guest/` | Runs inside the VM and bridges the child process |
 
 ## Execution Flow
 
-### Single Execution
+1. `mxc_engine` validates that Windows Sandbox is experimental-enabled.
+2. The runner validates filesystem and network policy.
+3. A per-session mutex reserves the host's single Windows Sandbox VM slot.
+4. Stale one-shot markers and any provably-owned orphan are reconciled.
+5. The runner creates a secured per-run directory, nonce, bootstrap script, and
+   `.wsb` configuration.
+6. `WindowsSandbox.exe` starts, and the runner records PID-plus-creation-time
+   ownership proof for its host processes.
+7. The guest publishes its address and accepts four authenticated channels:
+   control, stdin, stdout, and stderr.
+8. The guest executes `process.commandLine` through `cmd.exe /C`.
+9. Output and the exit status are returned, then ownership-scoped teardown
+   terminates the VM and confirms it has exited.
 
-1. `wxc-exec` verifies Windows Sandbox is enabled, connects to daemon IPC, sends `EXEC {json}\n`
-2. Daemon calls `ensure_sandbox_ready()` — launches sandbox if needed (with up to 3 retries)
-3. Daemon sends `Exec` on the control channel to the agent
-4. Agent spawns `cmd.exe /C <script>`, bridges stdio over TCP
-5. Agent sends `Exit` with exit code on control channel
-6. Daemon reads stdout/stderr, returns `RESULT <code> <stdout-b64> <stderr-b64> <error>\n`
-
-### Multi-Execution (Same Sandbox)
-
-After the first execution, the agent re-accepts fresh data streams via the `StreamsReady` protocol:
-
-1. Agent sends `Exit`, then `StreamsReady` on control channel
-2. Daemon receives `StreamsReady`, connects 3 new TCP streams to the agent
-3. Next `EXEC` request reuses the existing sandbox VM
-
-This avoids the 30-60s boot cost for subsequent executions.
+Every invocation follows this complete lifecycle; there is no one-shot
+multi-exec or warm-VM reuse.
 
 ## Configuration
 
 ```json
 {
-  "version": "0.5.0-alpha",
+  "version": "0.6.0-alpha",
   "containment": "windows_sandbox",
   "process": {
-    "commandLine": "python -S -B -c \"print('hello')\"",
+    "commandLine": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
     "timeout": 60000
-  },
-  "experimental": {
-    "windows_sandbox": {
-      "idleTimeoutMs": 300000,
-      "daemonPipeName": "wxc-windows-sandbox"
-    }
   }
 }
 ```
 
-> **Note:** Windows Sandbox is experimental — requires the `--experimental` CLI flag.
-> The `experimental.windows_sandbox` section is optional; defaults are used if omitted.
+The legacy `experimental.windows_sandbox.idleTimeoutMs` and
+`daemonPipeName` fields are still accepted for schema compatibility but are
+ignored by the one-shot backend. A warning is emitted only when either field
+is explicitly changed from its default.
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `containment` | `"processcontainer"` | Must be `"windows_sandbox"` to use this backend |
-| `process.commandLine` | *(required)* | Command line to execute inside the sandbox |
-| `process.timeout` | `0` (none) | Script execution timeout in milliseconds |
-| `experimental.windows_sandbox.idleTimeoutMs` | `300000` (5 min) | Daemon idle timeout before VM teardown |
-| `experimental.windows_sandbox.daemonPipeName` | `"wxc-windows-sandbox"` | IPC identifier (determines TCP port) |
+## Policy Support
 
-When `containment` is `"windows_sandbox"`, the `processContainer`, `filesystem`, and `network` sections are ignored — isolation is managed by the sandbox VM and guest agent firewall.
+| Policy | Behaviour |
+|---|---|
+| `filesystem.readwritePaths` | Existing host directories are mapped read-write at the same path inside the guest |
+| `filesystem.readonlyPaths` | Existing host directories are mapped read-only at the same path inside the guest |
+| `filesystem.deniedPaths` | Accepted when outside mapped shares; rejected when equal to, inside, or containing a mapped share |
+| Default network policy `block` | Supported through guest firewall lockdown |
+| Default network policy `allow` | Rejected |
+| `allowedHosts` / `blockedHosts` | Rejected; per-host filtering is not supported |
+| Network proxy | Rejected |
+
+Mapped paths must be absolute existing directories. Files, overlapping mapped
+roots, and a path listed as both read-only and read-write are rejected.
 
 ## Security Model
 
-- **VM isolation**: Scripts run inside a separate Windows instance — full OS boundary
-- **Firewall lockdown**: After the agent accepts host connections, it blocks all other network traffic via `netsh advfirewall` rules
-- **Read-only mounts**: Agent binaries and Python are mounted read-only — scripts cannot modify them
-- **Ephemeral**: The sandbox VM is destroyed on teardown — no state persists between sessions
-- **Multi-exec constraint**: VM reuse assumes all scripts come from the same trust domain
+- **VM boundary:** workload code runs in a separate Windows instance.
+- **Authenticated channels:** every TCP connection presents a random
+  per-launch 32-byte nonce and a channel-role byte before protocol traffic.
+- **Role-based pairing:** the guest pairs sockets by declared role rather than
+  TCP accept order.
+- **Network isolation:** the guest permits only the established host
+  connection and blocks other inbound and outbound traffic.
+- **Secured host state:** nonce, rendezvous, and ownership-marker directories
+  use owner-only ACLs and reject roots owned by another user.
+- **Ownership-scoped teardown:** PID-plus-creation-time proof prevents PID reuse
+  or an unrelated Windows Sandbox instance from being treated as owned.
+- **Ephemeral execution:** the VM and per-run marker are removed only after
+  teardown confirms the owned VM has exited.
+
+Same-user processes are within the backend's trust boundary.
 
 ## Prerequisites
 
-| Requirement | How to verify |
+| Requirement | Check |
 |---|---|
-| Windows 11 Pro/Enterprise | `winver` |
-| Windows Sandbox feature enabled | `dism /online /get-featureinfo /featurename:Containers-DisposableClientVM` |
-| Hyper-V / Virtualization enabled | `systeminfo` → "A hypervisor has been detected" |
-| Python 3.x on host (for Python scripts) | `python --version` |
+| Windows 11 Pro, Enterprise, or another edition supporting Windows Sandbox | `winver` |
+| Windows Sandbox optional feature enabled | `Test-Path "$env:WINDIR\System32\WindowsSandbox.exe"` |
+| Hardware virtualisation and Hyper-V support | `systeminfo` |
 
-After enabling Windows Sandbox: **reboot required**.
+Enabling the optional feature requires a reboot. No host Python installation is
+required; workloads can use runtimes already present in the Windows Sandbox
+image or directories explicitly mapped by policy.
 
 ## Known Limitations
 
-1. **IPC uses TCP, not named pipes** — port conflicts possible if another process occupies the derived port
-2. **Single language mapped** — only Python is mapped from host; Node.js would need similar treatment. PowerShell and cmd.exe work out of the box.
-3. **Windows Insider regression** — builds 26100+ have confirmed sandbox boot failures (zombie VM processes)
-4. **Cold boot time** — first sandbox boot takes 15-60s; subsequent executions reuse the VM
-5. **Buffered output** — stdout/stderr are captured and returned after completion, not streamed live
-6. **No filesystem/network policy forwarding** — the `filesystem` and `network` config sections are ignored; isolation relies on the VM boundary and agent firewall
+1. Every invocation pays the Windows Sandbox cold-boot cost.
+2. The host supports only one active Windows Sandbox VM per logon session.
+3. One-shot stdin is buffered and capped at 64 MiB.
+4. Filesystem sharing supports directories only.
+5. Network policy is block-only; allow-lists, block-lists, proxies, and
+   unrestricted outbound access are unsupported.
+6. Output is captured and returned after execution rather than streamed live to
+   the caller.
+
+## Testing
+
+The end-to-end suite requires a Windows host with the Windows Sandbox feature:
+
+```powershell
+.\tests\scripts\run_windows_sandbox_one_shot_tests.ps1
+```
 
 ## Further Reading
 
-See [windows-sandbox-reference.md](windows-sandbox-reference.md) for detailed protocol specs, VM setup internals, debugging guide, source file reference, and E2E test documentation.
+See [windows-sandbox-reference.md](windows-sandbox-reference.md) for protocol,
+VM setup, teardown, debugging, and source-level details.

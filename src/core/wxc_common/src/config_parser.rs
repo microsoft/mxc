@@ -203,39 +203,18 @@ pub fn decode_request_input(
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.4, <=0.8";
+const SUPPORTED_VERSION: &str = ">=0.6, <=0.8";
 
 /// Canonical "latest" schema version string used in samples and tests. Bump
 /// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
 #[cfg(test)]
 const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 
-/// The minimum schema version that implies BaseContainer backend usage.
-const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
-
 /// Known `experimental.<backend>` keys. Used by validation code to flag
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
-
-/// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
-///
-/// Pre-release labels are stripped before comparison, so `"0.5.0-alpha"` is
-/// treated identically to `"0.5.0"`.  Returns `false` for empty or
-/// unparseable version strings.
-pub fn is_base_container_version(version: &str) -> bool {
-    if version.is_empty() {
-        return false;
-    }
-    let parsed = match semver::Version::parse(version) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
-    let threshold = semver::Version::parse(BASE_CONTAINER_MIN_VERSION).unwrap();
-    comparable >= threshold
-}
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -261,7 +240,7 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     // against a version without the pre-release label for major.minor check.
     let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
     if !req.matches(&comparable) {
-        let min = semver::VersionReq::parse(">=0.4").unwrap();
+        let min = semver::VersionReq::parse(">=0.6").unwrap();
         let msg = if !min.matches(&comparable) {
             format!(
                 "Config schema version '{}' is older than supported (supported: {}). Update your config.",
@@ -1728,7 +1707,7 @@ mod tests {
     fn network_default_policy_absent_defaults_to_block_on_any_version() {
         // wxc-exec is the trust boundary -- absent `defaultPolicy`
         // resolves to `Block` regardless of declared schema version.
-        for version in ["0.4.0-alpha", "0.5.0-alpha", "0.6.0-alpha"] {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
             let json = format!(
                 r#"{{"version": "{}", "process": {{"commandLine": "echo x"}}}}"#,
                 version
@@ -2536,12 +2515,12 @@ mod tests {
 
     #[test]
     fn new_toplevel_fields_parsed() {
-        let json = r#"{"version": "0.4.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.6.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.4.0-alpha");
+        assert_eq!(req.schema_version, "0.6.0-alpha");
         assert_eq!(req.container_id, "abc-123");
     }
 
@@ -2609,26 +2588,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::MicroVm);
-    }
-
-    #[test]
-    fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.9.0"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn schema_version_0_7_alpha_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.7.0-alpha"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.7.0-alpha");
     }
 
     #[test]
@@ -2965,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_current_accepted() {
+    fn schema_version_max_accepted() {
         let json = format!(
             r#"{{"process": {{"commandLine": "echo hi"}}, "version": "{}"}}"#,
             CURRENT_SCHEMA_VERSION
@@ -2978,20 +2937,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_0_5_still_accepted() {
+    fn schema_version_below_min_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.5.0-alpha");
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            err.to_string().contains("older than supported"),
+            "expected an older-than-supported error, got: {err}"
+        );
     }
 
     #[test]
-    fn schema_version_state_aware_06_accepted() {
-        // 0.6 is the state-aware schema version (SDK side bumps to it for
-        // provision/start/exec/stop/deprovision envelopes); the parser must
-        // accept it on the same path used for one-shot 0.5 requests.
+    fn schema_version_min_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -3001,30 +2960,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_older_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.4.0-alpha"}"#;
+    fn schema_version_between_bounds_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.7.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.4.0-alpha");
+        assert_eq!(req.schema_version, "0.7.0-alpha");
     }
 
     #[test]
-    fn schema_version_too_old_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.3.0-alpha"}"#;
+    fn schema_version_above_max_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.9.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            err.to_string().contains("newer than supported"),
+            "expected a newer-than-supported error, got: {err}"
+        );
     }
 
     #[test]
-    fn full_config_with_0_5_0_alpha_accepted() {
+    fn full_config_with_0_6_0_alpha_accepted() {
         let json = r#"{
-            "version": "0.5.0-alpha",
-            "containerId": "test-050",
+            "version": "0.6.0-alpha",
+            "containerId": "test-060",
             "containment": "processcontainer",
             "process": { "commandLine": "echo hello", "timeout": 5000 },
             "filesystem": { "readwritePaths": ["C:\\workspace"] },
@@ -3034,8 +2996,8 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.5.0-alpha");
-        assert_eq!(req.container_id, "test-050");
+        assert_eq!(req.schema_version, "0.6.0-alpha");
+        assert_eq!(req.container_id, "test-060");
         assert_eq!(req.script_timeout, 5000);
         assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
     }
@@ -3063,16 +3025,6 @@ mod tests {
     #[test]
     fn schema_version_major_only_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "2"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn schema_version_future_major_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "1.0.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3431,24 +3383,6 @@ mod tests {
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
     }
 
-    #[test]
-    fn is_base_container_version_recognizes_050() {
-        assert!(is_base_container_version("0.5.0-alpha"));
-        assert!(is_base_container_version("0.5.0"));
-        assert!(is_base_container_version("0.5.1"));
-        assert!(is_base_container_version("0.6.0"));
-        assert!(is_base_container_version("1.0.0"));
-    }
-
-    #[test]
-    fn is_base_container_version_rejects_040() {
-        assert!(!is_base_container_version("0.4.0-alpha"));
-        assert!(!is_base_container_version("0.4.0"));
-        assert!(!is_base_container_version("0.4.9"));
-        assert!(!is_base_container_version(""));
-        assert!(!is_base_container_version("not-a-version"));
-    }
-
     // ====== Isolation Session containment and config tests ======
 
     #[test]
@@ -3675,9 +3609,9 @@ mod tests {
 
     // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
     // (`appcontainer`, `macos_sandbox`, and the `appContainer` /
-    // `experimental.macos_sandbox` sub-block keys) so that configs declaring
-    // earlier stable schemas (0.4.0-alpha, 0.5.0-alpha) continue to parse.
-    // Each alias maps to the canonical backend / sub-block and emits a
+    // `experimental.macos_sandbox` sub-block keys) regardless of the declared
+    // schema version, so configs carried forward from older spellings still
+    // parse. Each alias maps to the canonical backend / sub-block and emits a
     // deprecation log so callers know to migrate.
 
     #[test]
@@ -3702,9 +3636,9 @@ mod tests {
 
     #[test]
     fn legacy_app_container_subblock_alias_accepted() {
-        // Configs written against 0.4.0-alpha / 0.5.0-alpha still use the
-        // `appContainer` JSON key; serde's alias routes it to the same
-        // `processContainer` parsing path.
+        // The `appContainer` JSON key is a deprecated spelling; serde's alias
+        // routes it to the same `processContainer` parsing path regardless of
+        // the declared schema version.
         let json = r#"{
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",

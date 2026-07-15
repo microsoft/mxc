@@ -63,7 +63,7 @@ elaborates.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
+| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (the `wire::MxcConfig` parse target). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
@@ -361,7 +361,7 @@ interface ExecResult {
 ```
 
 `FilesystemConfig`, `NetworkConfig`, `UiConfig`, `ProcessConfig` are the existing
-wire-format-aligned interfaces from `sdk/src/types.ts`, reused unchanged as field
+wire-format-aligned interfaces from `sdk/node/src/types.ts`, reused unchanged as field
 types inside the per-(backend, phase) Configs. State-aware deliberately does not use
 `SandboxPolicy`; consumers spell out wire-format-aligned values directly (e.g.,
 `network: { defaultPolicy: 'block' }` instead of `network: { allowOutbound: false }`).
@@ -435,7 +435,7 @@ branded id and do not restate it. The wire envelope mirrors this: provision carr
 `containment`; non-provision phases route via the prefix on `sandboxId` (§5, §7.1).
 
 The third positional argument is the existing `SandboxSpawnOptions` from
-`sdk/src/sandbox.ts`, extended with `signal?: AbortSignal` for cancellation.
+`sdk/node/src/sandbox.ts`, extended with `signal?: AbortSignal` for cancellation.
 State-aware reuses the same options bag as one-shot — single mental model, single place
 to learn the cross-cutting flags. Phase-specific fields on `SandboxSpawnOptions`
 (`ptyOptions`, `usePty`) are honored by `execInSandbox` / `execInSandboxAsync` and
@@ -505,7 +505,7 @@ await deprovisionSandbox(sandboxId, {}, opts);
 
 `spawnSandbox` is the composition of the five state-aware phases run end-to-end. The two
 surfaces share `ContainmentBackend` and the wire-format-aligned interfaces in
-`sdk/src/types.ts` (`ProcessConfig`, `FilesystemConfig`, `NetworkConfig`, `UiConfig`).
+`sdk/node/src/types.ts` (`ProcessConfig`, `FilesystemConfig`, `NetworkConfig`, `UiConfig`).
 They differ in granularity and in how those interfaces are surfaced: one-shot bundles
 them inside `ContainerConfig` (which is itself produced from a `SandboxPolicy` by
 `createConfigFromPolicy`); state-aware uses them as field types inside the
@@ -1249,7 +1249,7 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
    existing `RawProcess` intermediate in `config_parser.rs`. Wrapping these four
    typed fields into a Rust `ProcessConfig` struct adds no type safety the compiler
    does not already provide on the flat fields. The TypeScript-side `ProcessConfig`
-   in `sdk/src/types.ts` is unchanged regardless.
+   in `sdk/node/src/types.ts` is unchanged regardless.
 
 3. **Cross-cutting policy is already typed on `ExecutionRequest`.** Existing backends read
    `request.policy.readwrite_paths`, `request.policy.allowed_hosts`,
@@ -1269,7 +1269,7 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 5. **No SDK or wire-format change is required.** The TypeScript `ProcessConfig`,
    `FilesystemConfig`, `NetworkConfig`, and `UiConfig` interfaces in
-   `sdk/src/types.ts` are public consumer-facing types and remain unchanged. The
+   `sdk/node/src/types.ts` are public consumer-facing types and remain unchanged. The
    wire JSON shape is unchanged. The Rust trait reading `request.script_code`,
    `request.policy.allowed_hosts`, etc. is an internal implementation choice
    invisible above the Rust layer.

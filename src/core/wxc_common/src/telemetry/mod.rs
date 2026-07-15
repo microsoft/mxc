@@ -187,7 +187,10 @@ pub fn shutdown() {
 /// Classify a failed execution into a bounded [`FailureReason`].
 fn classify_failure(phase: &FailurePhase) -> FailureReason {
     match phase {
-        FailurePhase::LaunchFailed | FailurePhase::BackendUnavailable => FailureReason::InitError,
+        FailurePhase::LaunchFailed
+        | FailurePhase::BackendUnavailable
+        | FailurePhase::PostLaunchFailed => FailureReason::InitError,
+        FailurePhase::Rejected => FailureReason::PolicyError,
         FailurePhase::Timeout => FailureReason::Timeout,
         FailurePhase::ProcessExited | FailurePhase::None => FailureReason::ProcessError,
     }
@@ -1096,6 +1099,16 @@ mod tests {
         );
         assert_eq!(
             classify_failure(&FailurePhase::BackendUnavailable),
+            FailureReason::InitError
+        );
+        // A rejected request is a policy error; a post-launch infra failure
+        // is an init error.
+        assert_eq!(
+            classify_failure(&FailurePhase::Rejected),
+            FailureReason::PolicyError
+        );
+        assert_eq!(
+            classify_failure(&FailurePhase::PostLaunchFailed),
             FailureReason::InitError
         );
         // A process that ran and exited (or an unclassified failure) is a

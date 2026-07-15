@@ -1,0 +1,11 @@
+# C# build artifacts
+bin/
+obj/
+
+# Generated code (csbindgen P/Invoke) — produced at build time by the
+# GenerateNativeBindings MSBuild target from src/ffi/mxc_ffi; not source.
+*.g.cs
+
+# Native libraries staged by build.bat / build.sh / build-mac.sh for packaging
+# (rebuilt from src/ffi/mxc_ffi; not source).
+runtimes/
