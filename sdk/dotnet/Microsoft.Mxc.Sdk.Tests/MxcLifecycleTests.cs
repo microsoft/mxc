@@ -12,21 +12,26 @@ public class MxcLifecycleTests
     // The only state-aware backend (IsolationSession) is Windows-only,
     // experimental, and needs its OS-side service, so end-to-end lifecycle runs
     // are CI/host-gated. These host-independent tests assert the facade's
-    // contract: request routing and typed error mapping. Because the packaged
-    // native library does not enable the engine's isolation_session feature,
-    // provisioning surfaces UnsupportedPhase rather than attempting a backend
-    // call — which still exercises envelope construction + the native round trip
-    // + error mapping.
+    // contract: request routing and typed error mapping. Provisioning without a
+    // usable backend surfaces a typed error — UnsupportedPhase when the native
+    // library is built without the engine's isolation_session feature (the
+    // default dotnetsdk build), or BackendUnavailable when it is built with the
+    // feature but the OS-side service is absent — either way exercising envelope
+    // construction + the native round trip + error mapping.
+    private static void AssertNoUsableBackend(MxcException ex) =>
+        Assert.True(
+            ex.Code is ErrorCode.UnsupportedPhase or ErrorCode.BackendUnavailable,
+            $"expected UnsupportedPhase or BackendUnavailable, got {ex.Code}");
 
     [Fact]
-    public void ProvisionSandbox_WithoutBackend_ThrowsUnsupportedPhase()
+    public void ProvisionSandbox_WithoutBackend_FailsWithTypedError()
     {
         var ex = Assert.Throws<MxcException>(() => MxcLifecycle.ProvisionSandbox());
-        Assert.Equal(ErrorCode.UnsupportedPhase, ex.Code);
+        AssertNoUsableBackend(ex);
     }
 
     [Fact]
-    public void ProvisionSandbox_WithFilesystemAndUser_ThrowsUnsupportedPhase()
+    public void ProvisionSandbox_WithFilesystemAndUser_FailsWithTypedError()
     {
         // Exercises the fuller envelope (cross-cutting filesystem lifted to top
         // level, user nested under experimental.isolation_session.provision).
@@ -36,7 +41,7 @@ public class MxcLifecycleTests
             User = new SandboxUserCredentials { Upn = "agent@contoso.com", WamToken = "token" },
         };
         var ex = Assert.Throws<MxcException>(() => MxcLifecycle.ProvisionSandbox(options));
-        Assert.Equal(ErrorCode.UnsupportedPhase, ex.Code);
+        AssertNoUsableBackend(ex);
     }
 
     [Fact]

@@ -56,13 +56,18 @@ fn exec_sandbox_rejects_one_shot_config() {
     }
 }
 
-// The `mxc-sdk` crate does not enable the engine's optional `isolation_session`
-// feature, so no state-aware backend is compiled in and an otherwise-valid
-// provision request surfaces `unsupported_phase` rather than a backend call.
+// A non-provision phase resolves the backend from the `sandbox_id` prefix, so an
+// unregistered prefix deterministically yields `unsupported_containment` —
+// independent of build features (`isolation_session` on/off) and host
+// capability, and with no backend side effects. (A real `isolation_session`
+// provision is intentionally avoided here: its outcome varies by feature/host —
+// unsupported_phase / backend_unavailable / an actual provisioned sandbox — so
+// it is neither deterministic nor side-effect-free. Real lifecycle runs are
+// covered by the host-gated executor E2E suites.)
 #[test]
-fn provision_without_a_state_aware_backend_is_unsupported_phase() {
-    let json = r#"{"phase":"provision","containment":"isolation_session"}"#;
+fn unregistered_backend_prefix_is_unsupported_containment() {
+    let json = r#"{"phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
     let err = run_state_aware_json(json, false)
-        .expect_err("no state-aware backend is available in this build");
-    assert_eq!(err.code, ErrorCode::UnsupportedPhase);
+        .expect_err("an unregistered sandbox-id prefix has no backend");
+    assert_eq!(err.code, ErrorCode::UnsupportedContainment);
 }

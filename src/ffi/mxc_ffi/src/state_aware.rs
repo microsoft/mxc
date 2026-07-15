@@ -250,12 +250,17 @@ mod tests {
     }
 
     #[test]
-    fn provision_without_backend_is_unsupported_phase() {
+    fn unregistered_backend_prefix_is_unsupported_containment() {
+        // A non-provision phase routes by the sandbox-id prefix; an unregistered
+        // prefix is unsupported_containment — deterministic regardless of the
+        // isolation_session feature or host, and with no backend side effects.
+        // (A real isolation_session provision is avoided: on a capable host it
+        // would actually provision a sandbox. See the mxc-sdk state_aware test.)
         let mut out = call(
-            r#"{"phase":"provision","containment":"isolation_session"}"#,
+            r#"{"phase":"start","sandboxId":"nosuchbackend:abc123"}"#,
             false,
         );
-        assert_eq!(out.status, crate::MXC_STATUS_UNSUPPORTED_PHASE);
+        assert_eq!(out.status, crate::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
         // SAFETY: filled by `mxc_state_aware`.
         unsafe { mxc_state_aware_result_free(&mut out) };
     }
