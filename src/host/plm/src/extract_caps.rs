@@ -188,7 +188,7 @@ pub struct CapabilityEntry {
 
 #[cfg(target_os = "windows")]
 fn to_wide_z(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
+    wxc_common::string_util::to_wide(s)
 }
 
 /// Copy a SID pointed to by `psid` into a managed byte vector.
