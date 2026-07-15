@@ -28,7 +28,7 @@ jobs:
         os: linux
 
     variables:
-      sdkDirectory: $(Build.SourcesDirectory)/sdk
+      sdkDirectory: $(Build.SourcesDirectory)/sdk/node
       # Cache npm package downloads across runs (see Package.NpmSdk.Job.yml).
       npm_config_cache: $(Pipeline.Workspace)/.npm
 
@@ -43,7 +43,7 @@ jobs:
       - task: Cache@2
         displayName: Cache npm
         inputs:
-          key: 'npm | "$(Agent.OS)" | sdk/package-lock.json'
+          key: 'npm | "$(Agent.OS)" | sdk/node/package-lock.json'
           restoreKeys: |
             npm | "$(Agent.OS)"
           path: $(npm_config_cache)

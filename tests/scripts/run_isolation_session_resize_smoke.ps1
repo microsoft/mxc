@@ -148,7 +148,7 @@ $encodedLoop = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loop
 # the loop run until Ctrl-C.
 
 $config = [ordered]@{
-    version     = '0.5.0-alpha'
+    version     = '0.6.0-alpha'
     containerId = 'isolation-session-resize-smoke'
     containment = 'isolation_session'
     process     = [ordered]@{

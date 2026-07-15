@@ -79,7 +79,7 @@
         "to": "bin/x64/snapshots/kernel.whp.cbor"
       },
       {
-        "from": "../sdk/bin/x64/vcruntime140.dll",
+        "from": "../sdk/node/bin/x64/vcruntime140.dll",
         "to": "bin/x64/vcruntime140.dll"
       },
       {

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 wxc_common.workspace = true
+mxc_engine.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -20,12 +21,8 @@ hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 appcontainer_common = { workspace = true }
-windows_sandbox_common = { workspace = true }
-isolation_session_common = { workspace = true, optional = true }
-nanvix_runner = { workspace = true, optional = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
-isolation_session_bindings = { workspace = true, optional = true }
 # Shared PLM dep for the singleton env-var name and `wait_until_cleared`
 # helper — single source of truth so the two crates can't drift.
 plm = { path = "../../host/plm" }
@@ -39,12 +36,9 @@ nanvix_build_common = { path = "../../backends/nanvix/build_common" }
 
 [features]
 default = []
-microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "dep:nanvix_runner"]
-wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
-hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
-isolation_session = [
-    "dep:isolation_session_bindings",
-    "dep:isolation_session_common",
-]
+microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "mxc_engine/microvm"]
+wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk", "mxc_engine/wslc"]
+hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engine/hyperlight"]
+isolation_session = ["mxc_engine/isolation_session"]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
-tier2_bfs = ["appcontainer_common/tier2_bfs"]
+tier2_bfs = ["appcontainer_common/tier2_bfs", "mxc_engine/tier2_bfs"]

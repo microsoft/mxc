@@ -223,7 +223,7 @@ Add `bwrap_common` dependency to `lxc/Cargo.toml`.
 
 ### 7. SDK / TypeScript Changes
 
-**`sdk/src/types.ts`:**
+**`sdk/node/src/types.ts`:**
 ```typescript
 export type ContainmentBackend =
   | 'processcontainer' | 'windows_sandbox' | 'wslc'
@@ -233,7 +233,7 @@ export type ContainmentBackend =
 export const ExperimentalBackends = ['microvm', 'wslc', 'seatbelt', 'bubblewrap'];
 ```
 
-**`sdk/src/platform.ts`:**
+**`sdk/node/src/platform.ts`:**
 ```typescript
 // In getPlatformSupport() Linux block:
 if (platform === 'linux') {
@@ -256,10 +256,10 @@ function isBubblewrapAvailable(): boolean {
 }
 ```
 
-**`sdk/src/sandbox.ts`:**
+**`sdk/node/src/sandbox.ts`:**
 Add a `buildBubblewrapConfig()` builder function (similar to `buildLinuxProcessConfig()`).
 
-**`sdk/src/helper.ts`:**
+**`sdk/node/src/helper.ts`:**
 No changes needed — `lxc-exec` handles both LXC and Bubblewrap backends, so the existing
 Linux binary resolution path works as-is.
 
@@ -346,10 +346,10 @@ policy gap is a design decision, not an implementation challenge.
 - `schemas/dev/mxc-config.schema.0.6.0-dev.json` — add `"bubblewrap"` to enum, add config block
 
 ### TypeScript (modify)
-- `sdk/src/types.ts` — add `'bubblewrap'` to `ContainmentBackend`, `ExperimentalBackends`
-- `sdk/src/platform.ts` — add `isBubblewrapAvailable()`, update Linux detection
-- `sdk/src/sandbox.ts` — add `buildBubblewrapConfig()` builder
-- `sdk/src/helper.ts` — no changes needed (lxc-exec handles both backends)
+- `sdk/node/src/types.ts` — add `'bubblewrap'` to `ContainmentBackend`, `ExperimentalBackends`
+- `sdk/node/src/platform.ts` — add `isBubblewrapAvailable()`, update Linux detection
+- `sdk/node/src/sandbox.ts` — add `buildBubblewrapConfig()` builder
+- `sdk/node/src/helper.ts` — no changes needed (lxc-exec handles both backends)
 
 ### Documentation (new/modify)
 - `docs/bwrap-support/bubblewrap-backend.md` (new)

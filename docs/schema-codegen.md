@@ -106,10 +106,10 @@ CI run, and the corpus gate pins the accept-side behavior.
 
 The SDK's wire TypeScript types are generated too — by a **Rust emitter**, with
 no third-party generator. `mxc_schema_gen --ts` walks the same generated schema
-value and `wxc_common::ts_emit` emits `sdk/src/generated/wire.ts`. That file is
+value and `wxc_common::ts_emit` emits `sdk/node/src/generated/wire.ts`. That file is
 **not public API** — it is a drift oracle. The unit test
-`sdk/tests/unit/wire-conformance.test.ts` asserts (at `tsc` time) that the
-hand-written public types in `sdk/src/types.ts` still conform to it, and
+`sdk/node/tests/unit/wire-conformance.test.ts` asserts (at `tsc` time) that the
+hand-written public types in `sdk/node/src/types.ts` still conform to it, and
 `check-sdk-types-codegen.js` is a CI gate (running the emitter and diffing the
 committed file) that fails on drift. So a wire-model change ripples to all three
 surfaces — Rust ⇄ schema ⇄ TS — and a forgotten SDK update fails CI instead of
@@ -119,19 +119,19 @@ scalars); extending the wire model with a new construct may require teaching the
 emitter about it.
 
 The conformance check covers both SDK surfaces: `wire-conformance.test.ts` pins
-the one-shot public types in `sdk/src/types.ts`, and
+the one-shot public types in `sdk/node/src/types.ts`, and
 `wire-conformance-state-aware.test.ts` pins the state-aware lifecycle types in
-`sdk/src/state-aware-types.ts` (the `Phase` and sizing-profile enums, the Entra
+`sdk/node/src/state-aware-types.ts` (the `Phase` and sizing-profile enums, the Entra
 user bundle, and the per-phase `IsolationSessionPhase` field set) against the
 same generated wire defs. Both share the assertion helpers in
-`sdk/tests/unit/conformance-helpers.ts` and check drift in both directions
+`sdk/node/tests/unit/conformance-helpers.ts` and check drift in both directions
 (public→wire and wire→public) so a new wire field the SDK forgets to expose also
 fails the build.
 
 ### Why a hand-written emitter (alternatives considered)
 
 The generated `wire.ts` is a **drift oracle, not the public API**. The public
-SDK types (`sdk/src/types.ts`, `sdk/src/state-aware-types.ts`) stay
+SDK types (`sdk/node/src/types.ts`, `sdk/node/src/state-aware-types.ts`) stay
 hand-written, and the conformance test asserts they match the oracle. Two other
 approaches were evaluated and rejected:
 
@@ -167,6 +167,6 @@ here.
   are gone, so the schema source and the trust boundary share one definition of
   the wire shape and cannot drift.
 - The SDK TypeScript wire types are generated from the same wire model
-  (`sdk/src/generated/wire.ts`, via the `wxc_common::ts_emit` Rust emitter),
+  (`sdk/node/src/generated/wire.ts`, via the `wxc_common::ts_emit` Rust emitter),
   guarded by a conformance test plus the `check-sdk-types-codegen.js` gate, and
   the hand-maintained `*-strict.json` stable view has been retired.
