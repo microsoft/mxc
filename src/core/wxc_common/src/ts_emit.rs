@@ -7,7 +7,7 @@
 //! `MxcConfig` wire model, the same value that
 //! [`crate::wire::generate_config_schema_json`] renders to JSON text — and emits
 //! the SDK's wire TypeScript types, with no third-party generator.
-//! The result is `sdk/src/generated/wire.ts`, a drift oracle that the SDK's
+//! The result is `sdk/node/src/generated/wire.ts`, a drift oracle that the SDK's
 //! hand-written public types are asserted to conform to (and that a CI gate
 //! regenerates + diffs).
 //!
@@ -36,7 +36,7 @@ const BANNER: &str = "\
  * `scripts/versioning/check-sdk-types-codegen.js`.
  *
  * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/src/generated/wire.ts
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
  */
 ";
 

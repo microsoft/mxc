@@ -673,7 +673,7 @@ mod schema_gen {
 
     /// Emit the SDK's wire TypeScript types directly from the same generated schema
     /// model — no third-party generator. The output is a drift oracle
-    /// (`sdk/src/generated/wire.ts`): the SDK's hand-written public types are
+    /// (`sdk/node/src/generated/wire.ts`): the SDK's hand-written public types are
     /// asserted to conform to it by a unit test, and a CI gate regenerates and
     /// diffs the committed file. Deterministic: `serde_json`'s default `Map` is a
     /// `BTreeMap`, so definitions and object properties are emitted in stable

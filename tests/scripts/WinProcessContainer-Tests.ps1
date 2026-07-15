@@ -568,7 +568,7 @@ function New-Config {
         [string[]]$Env                      = @()
     )
     $obj = [ordered]@{
-        version     = '0.5.0-dev'
+        version     = '0.6.0-alpha'
         containerId = "MxcWinPC-$Name"
         containment = 'appcontainer'
         process     = [ordered]@{

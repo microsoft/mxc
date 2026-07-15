@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
-        working-directory: sdk/tests/integration
+        working-directory: sdk/node/tests/integration
     env:
       MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
       # Skip network-dependent LXC tests on GHA. Capability probe
@@ -39,7 +39,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: sdk/tests/integration/package-lock.json
+          cache-dependency-path: sdk/node/tests/integration/package-lock.json
 
       - name: Download SDK package
         uses: actions/download-artifact@v4
@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
-          SDK_TGZ=$(ls ../../../sdk-pkg/*.tgz | head -n1)
+          SDK_TGZ=$(ls ../../../../sdk-pkg/*.tgz | head -n1)
           npm install "$SDK_TGZ"
 
       - name: npm run build

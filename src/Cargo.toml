@@ -5,6 +5,7 @@ members = [
     "core/lxc",
     "core/mxc_darwin",
     "core/mxc-sdk",
+    "core/mxc_engine",
     "core/mxc_pty",
     "core/mxc_build_common",
     "host/plm",
@@ -33,6 +34,7 @@ members = [
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
+    "ffi/mxc_ffi",
     "mxc_telemetry",
 ]
 exclude = ["testing/fuzz"]
@@ -99,6 +101,8 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 roxmltree = "0.20"
 wxc_common = { path = "core/wxc_common" }
+mxc_engine = { path = "core/mxc_engine" }
+mxc-sdk = { path = "core/mxc-sdk" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
 isolation_session_common = { path = "backends/isolation_session/common" }

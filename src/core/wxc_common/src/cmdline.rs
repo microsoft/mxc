@@ -14,6 +14,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::models::ContainmentBackend;
+
 /// Command-line parser that will consume the rendered command string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandLineContext {
@@ -23,6 +25,30 @@ pub enum CommandLineContext {
     WindowsCommandProcessor,
     /// The rendered string is passed to a POSIX shell as `/bin/sh -c`.
     PosixShell,
+}
+
+impl CommandLineContext {
+    /// The command-line context for the parser that a given containment backend
+    /// feeds the rendered `commandLine` into.
+    ///
+    /// This is the single source of truth for the backend → quoting-context
+    /// mapping the executors use when turning trailing CLI argv into
+    /// `process.commandLine`.
+    pub fn for_backend(backend: &ContainmentBackend) -> Self {
+        match backend {
+            ContainmentBackend::IsolationSession | ContainmentBackend::WindowsSandbox => {
+                Self::WindowsCommandProcessor
+            }
+            ContainmentBackend::Wslc
+            | ContainmentBackend::Lxc
+            | ContainmentBackend::Seatbelt
+            | ContainmentBackend::Bubblewrap => Self::PosixShell,
+            ContainmentBackend::ProcessContainer
+            | ContainmentBackend::Vm
+            | ContainmentBackend::MicroVm
+            | ContainmentBackend::Hyperlight => Self::WindowsCreateProcess,
+        }
+    }
 }
 
 /// Error returned when argv cannot be safely represented in the requested

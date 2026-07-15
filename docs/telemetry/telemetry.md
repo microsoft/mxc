@@ -170,7 +170,7 @@ cargo build -p mxc_telemetry
 
 ## SDK License Override (EULA for npm Package)
 
-The public GitHub repo ships `sdk/LICENSE.md` as a plain MIT license. For
+The public GitHub repo ships `sdk/node/LICENSE.md` as a plain MIT license. For
 internal npm publishes, a separate EULA containing a **Section 2 — DATA**
 clause (covering telemetry disclosure, opt-out, and GDPR) will be updated at
 pack/publish time. 
@@ -185,13 +185,13 @@ pack/publish time.
 
 2. A license-override script (added in a follow-up build-integration PR) runs:
    ├── MXC_LICENSE_OVERRIDE is set:
-   │   ├── Back up sdk/LICENSE.md → sdk/LICENSE.md.public
-   │   └── Copy new EULA over sdk/LICENSE.md
+   │   ├── Back up sdk/node/LICENSE.md → sdk/node/LICENSE.md.public
+   │   └── Copy new EULA over sdk/node/LICENSE.md
    └── MXC_LICENSE_OVERRIDE is NOT set:
-       └── Restore sdk/LICENSE.md from .public backup (if exists)
+       └── Restore sdk/node/LICENSE.md from .public backup (if exists)
 
 3. npm pack / npm publish picks up the new EULA as the LICENSE.md
-   in the published package (sdk/package.json "files" includes LICENSE.md).
+   in the published package (sdk/node/package.json "files" includes LICENSE.md).
 
 4. After publish, the revert path restores the original EULA document.
 ```
