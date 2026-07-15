@@ -61,6 +61,10 @@ impl PathKey {
         self.0.len()
     }
 
+    /// Test-only: whether `self` is an ancestor of (or equal to) `other`. Only
+    /// the semantic-check oracle in the tests uses this, so it is gated to test
+    /// builds to keep the production surface free of dead code.
+    #[cfg(test)]
     fn is_prefix_of(&self, other: &Self) -> bool {
         self.0.len() <= other.0.len() && self.0.iter().zip(other.0.iter()).all(|(a, b)| a == b)
     }
@@ -76,9 +80,12 @@ struct Candidate {
 
 /// Resolve the three policy lists into a single shallow-to-deep ordered plan.
 ///
-/// Exact same-path conflicts (equal [`PathKey`], including entries that differ
-/// only by a trailing separator) collapse to the single most-restrictive
-/// intent; the surviving entry keeps that intent's original path spelling.
+/// Exact same-path conflicts are resolved *upstream* — the config parser's
+/// string-level `normalize_filesystem_paths` and each runner's object-identity
+/// `filesystem_object::normalize_object_conflicts` — so this function only
+/// **orders**. It emits shallow-to-deep and, for any same-path entries that still
+/// arrive, places the most-restrictive intent last, so a backend applying "the
+/// last mount at a path wins" resolves the tie most-restrictive-wins.
 pub fn resolve_path_plan(
     readwrite_paths: &[String],
     readonly_paths: &[String],
@@ -103,25 +110,20 @@ pub fn resolve_path_plan(
         }
     }
 
-    // Group equal paths together and, within each group, place the
-    // most-restrictive entry first (intent descending), then original sequence
-    // for stability.
-    candidates.sort_by(|a, b| {
-        a.key
-            .cmp(&b.key)
-            .then_with(|| b.intent.cmp(&a.intent))
-            .then_with(|| a.sequence.cmp(&b.sequence))
-    });
-    // Collapse each equal-path group to its most-restrictive entry. The sort
-    // above already surfaced that entry as the first of each consecutive-equal
-    // run, and `dedup_by` keeps the first element of a run and drops the rest.
-    // Note `dedup_by(|a, b| …)` passes the *later* element as `a` and the
-    // *retained* earlier element as `b`, so mutating `a` here would be dead
-    // code — we rely on the sort ordering rather than mutating the survivor.
-    candidates.dedup_by(|a, b| a.key == b.key);
-    // Re-order the survivors shallow-to-deep so a backend emitting them in order
-    // lets the deepest (most specific) intent win. Equal-depth ties keep their
-    // original category order (read-write, then read-only, then denied).
+    // Order shallow-to-deep so a backend that emits the plan in order lets the
+    // deepest (most specific) intent win at every path. Equal-depth ties keep
+    // their original category order (read-write, then read-only, then denied),
+    // so an exact same-path duplicate that survives upstream normalization is
+    // still resolved most-restrictive-wins by emission order: denied is added
+    // last, sorts last among equal-depth peers, and a backend applying "the last
+    // mount at a path wins" therefore lands on it.
+    //
+    // This resolver deliberately does *not* re-collapse exact same-path
+    // conflicts — that is already done upstream and duplicating it here adds no
+    // correctness: the config parser's `normalize_filesystem_paths` drops a
+    // string-equal path from a looser list, and each runner's
+    // `filesystem_object::normalize_object_conflicts` tightens same-object
+    // aliases to the strictest intent before this runs.
     candidates.sort_by(|a, b| {
         a.key
             .depth()
@@ -147,26 +149,6 @@ pub fn resolve_mount_order(policy: &ContainerPolicy) -> Vec<ResolvedMount> {
     )
 }
 
-/// Return the effective intent a resolved `plan` assigns to `path`: the intent
-/// of the deepest plan entry that is an ancestor of (or equal to) `path`, with
-/// most-restrictive-wins breaking an exact-depth tie. `None` if no entry covers
-/// the path.
-pub fn effective_intent(plan: &[ResolvedMount], path: &str) -> Option<FsIntent> {
-    let query = PathKey::from_path(path);
-    plan.iter()
-        .filter_map(|mount| {
-            let key = PathKey::from_path(&mount.path);
-            key.is_prefix_of(&query)
-                .then_some((key.depth(), mount.intent))
-        })
-        .max_by(|(left_depth, left_intent), (right_depth, right_intent)| {
-            left_depth
-                .cmp(right_depth)
-                .then_with(|| left_intent.cmp(right_intent))
-        })
-        .map(|(_, intent)| intent)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +166,28 @@ mod tests {
             .iter()
             .map(|mount| (mount.path.as_str(), mount.intent))
             .collect()
+    }
+
+    /// Test oracle: the effective intent a resolved `plan` assigns to `path` —
+    /// the intent of the deepest plan entry that is an ancestor of (or equal to)
+    /// `path`, with most-restrictive-wins breaking an exact-depth tie. `None` if
+    /// no entry covers the path. This models what a backend's "last mount at a
+    /// path wins" ultimately resolves to, so tests can assert semantics instead
+    /// of raw emission order.
+    fn effective_intent(plan: &[ResolvedMount], path: &str) -> Option<FsIntent> {
+        let query = PathKey::from_path(path);
+        plan.iter()
+            .filter_map(|mount| {
+                let key = PathKey::from_path(&mount.path);
+                key.is_prefix_of(&query)
+                    .then_some((key.depth(), mount.intent))
+            })
+            .max_by(|(left_depth, left_intent), (right_depth, right_intent)| {
+                left_depth
+                    .cmp(right_depth)
+                    .then_with(|| left_intent.cmp(right_intent))
+            })
+            .map(|(_, intent)| intent)
     }
 
     #[test]
@@ -212,9 +216,20 @@ mod tests {
     }
 
     #[test]
-    fn exact_path_conflict_uses_most_restrictive_intent() {
+    fn exact_path_duplicates_emit_most_restrictive_last() {
+        // Exact same-path conflicts are collapsed upstream (config-parser string
+        // normalization + object-identity normalization), so the resolver no
+        // longer re-collapses them. When identical paths do reach it, it orders
+        // them so the most-restrictive intent is emitted LAST — a backend
+        // applying "the last mount at a path wins" therefore lands on denied,
+        // and the semantic oracle agrees.
         let resolved = plan(&["/workspace"], &["/workspace"], &["/workspace"]);
-        assert_eq!(order(&resolved), vec![("/workspace", FsIntent::Denied)]);
+        assert_eq!(
+            resolved
+                .last()
+                .map(|mount| (mount.path.as_str(), mount.intent)),
+            Some(("/workspace", FsIntent::Denied))
+        );
         assert_eq!(
             effective_intent(&resolved, "/workspace/file"),
             Some(FsIntent::Denied)
@@ -222,26 +237,45 @@ mod tests {
     }
 
     #[test]
-    fn readonly_wins_exact_path_conflict_over_readwrite() {
+    fn readonly_emitted_after_readwrite_for_same_path() {
+        // Same path in read-write and read-only: read-only is emitted last so it
+        // wins by emission order, and the oracle resolves to read-only.
         let resolved = plan(&["/workspace/"], &["/workspace"], &[]);
-        assert_eq!(order(&resolved), vec![("/workspace", FsIntent::ReadOnly)]);
+        assert_eq!(
+            resolved.last().map(|mount| mount.intent),
+            Some(FsIntent::ReadOnly)
+        );
+        assert_eq!(
+            effective_intent(&resolved, "/workspace/file"),
+            Some(FsIntent::ReadOnly)
+        );
     }
 
     #[test]
-    fn exact_key_conflict_keeps_most_restrictive_path_string() {
-        // "/data" (read-write) and "/data/" (denied) collapse to the same
-        // PathKey because a trailing separator is not significant. The
-        // most-restrictive (denied) entry must survive, and the retained mount
-        // must carry *denied's* exact path spelling ("/data/"), not the
-        // read-write one — proving the collapse keeps the correct entry rather
-        // than relying on a mutation of the discarded element.
+    fn trailing_slash_variants_resolve_most_restrictive_by_order() {
+        // "/data" (read-write) and "/data/" (denied) are the same logical path
+        // but differ by a trailing slash, so the upstream string-level
+        // normalization does not merge them. The resolver does not collapse them
+        // either (that would duplicate the upstream / object-identity
+        // normalization); instead it emits denied last, so emission order yields
+        // most-restrictive-wins and the semantic oracle agrees.
         let resolved = plan(&["/data"], &[], &["/data/"]);
-        assert_eq!(order(&resolved), vec![("/data/", FsIntent::Denied)]);
+        assert_eq!(
+            resolved.last().map(|mount| mount.intent),
+            Some(FsIntent::Denied)
+        );
+        assert_eq!(
+            effective_intent(&resolved, "/data/file"),
+            Some(FsIntent::Denied)
+        );
 
-        // Same conflict with the trailing slash on the read-write spelling and
-        // the denied entry bare: denied still wins and keeps its own "/data".
+        // Swap the trailing slash onto the read-write spelling: denied still
+        // sorts last and wins.
         let resolved = plan(&["/data/"], &[], &["/data"]);
-        assert_eq!(order(&resolved), vec![("/data", FsIntent::Denied)]);
+        assert_eq!(
+            resolved.last().map(|mount| mount.intent),
+            Some(FsIntent::Denied)
+        );
     }
 
     #[test]

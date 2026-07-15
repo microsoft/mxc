@@ -32,6 +32,21 @@ fn validate_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Classify a denied **host** path as a regular file, to pick the LXC mask type.
+///
+/// Denied paths are host paths, so the mask is decided from host reality rather
+/// than from the container rootfs (which does not exist until mounts are
+/// applied): a regular file is masked with a read-only `/dev/null` bind
+/// (`create=file`) and everything else — a directory, a symlink, or a path that
+/// does not exist on the host — with an empty read-only tmpfs (`create=dir`).
+/// Uses `symlink_metadata` so a symlinked deny is never followed to an
+/// unintended target when choosing the mask.
+fn denied_path_is_file(host_path: &str) -> bool {
+    std::fs::symlink_metadata(host_path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
+}
+
 /// Configure filesystem bind mounts on the container based on the policy.
 ///
 /// Adds `lxc.mount.entry` config items for each path in the policy.
@@ -67,14 +82,15 @@ pub fn configure_filesystem_mounts(
                 container.set_config_item("lxc.mount.entry", &mount_entry)?;
             }
             FsIntent::Denied => {
-                // Determine if the path is a file or directory inside the
-                // container rootfs so we use the correct LXC `create=` type for
-                // the mount entry.
-                let rootfs_base = format!("{}/{}/rootfs", container.lxc_path(), container.name());
-                let full_path = format!("{}/{}", rootfs_base, container_path);
+                // Classify the denied path from the HOST path, not the container
+                // rootfs path. Denied paths are host paths, and the rootfs path
+                // (`<lxc_path>/<name>/rootfs/<container_path>`) does not exist
+                // until mounts are applied, so inspecting it would always look
+                // "missing" and mask every deny as a directory. Host reality
+                // decides the `create=` type instead.
+                let is_file = denied_path_is_file(host_path);
 
                 // Use /dev/null bind mount for files, tmpfs for directories.
-                let is_file = std::path::Path::new(&full_path).is_file();
                 let mount_entry = if is_file {
                     format!("/dev/null {} none bind,ro,create=file 0 0", container_path)
                 } else {
@@ -139,5 +155,29 @@ mod tests {
     #[test]
     fn test_validate_path_accepts_normal() {
         assert!(validate_path("/mnt/shared").is_ok());
+    }
+
+    #[test]
+    fn denied_path_is_file_reflects_host_reality() {
+        use std::io::Write;
+        let base = std::env::temp_dir();
+        let unique = format!("mxc_lxc_denied_{}", std::process::id());
+        let file_path = base.join(format!("{unique}.file"));
+        let dir_path = base.join(format!("{unique}.dir"));
+        let missing = base.join(format!("{unique}.missing"));
+
+        let mut file = std::fs::File::create(&file_path).expect("create temp file");
+        writeln!(file, "x").expect("write temp file");
+        std::fs::create_dir_all(&dir_path).expect("create temp dir");
+
+        // Regular host file → masked with /dev/null (create=file).
+        assert!(denied_path_is_file(&file_path.to_string_lossy()));
+        // Host directory → masked with an empty tmpfs (create=dir).
+        assert!(!denied_path_is_file(&dir_path.to_string_lossy()));
+        // Missing host path → not a file, so masked as an empty directory.
+        assert!(!denied_path_is_file(&missing.to_string_lossy()));
+
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_dir_all(&dir_path);
     }
 }
