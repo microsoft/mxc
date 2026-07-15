@@ -57,7 +57,7 @@ expectConst(
   /const CURRENT_SCHEMA_VERSION:\s*&str\s*=\s*"([^"]+)"/,
   maxSupported
 );
-// SUPPORTED_VERSION is a semver range like ">=0.4, <=0.7"; its bounds must
+// SUPPORTED_VERSION is a semver range like ">=0.6, <=0.8"; its bounds must
 // match the canonical min/maxSupported major.minor.
 const supMatch = /const SUPPORTED_VERSION:\s*&str\s*=\s*">=([^,]+),\s*<=([^"]+)"/.exec(
   parser
@@ -77,8 +77,8 @@ if (!supMatch) {
   }
 }
 
-// -- SDK (sdk/src/sandbox.ts, sdk/src/state-aware-helper.ts) --
-const sandboxTs = read("sdk", "src", "sandbox.ts");
+// -- SDK (sdk/node/src/sandbox.ts, sdk/node/src/state-aware-helper.ts) --
+const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
 expectConst(
   "sandbox.ts",
   sandboxTs,
@@ -93,7 +93,7 @@ expectConst(
   /const MIN_VERSION\s*=\s*'([^']+)'/,
   min
 );
-const stateAwareTs = read("sdk", "src", "state-aware-helper.ts");
+const stateAwareTs = read("sdk", "node", "src", "state-aware-helper.ts");
 expectConst(
   "state-aware-helper.ts",
   stateAwareTs,

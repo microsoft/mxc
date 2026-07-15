@@ -13,5 +13,5 @@ mxc_build_common.workspace = true
 
 [dependencies]
 wxc_common = { workspace = true }
-seatbelt_common = { path = "../../backends/seatbelt/common" }
+mxc_engine = { workspace = true }
 clap = { workspace = true }

@@ -121,7 +121,27 @@ backend-specific config block is needed.
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <path> <path>` | Read-write bind mount (overrides base RO) |
 | `readonlyPaths` | `--ro-bind <path> <path>` | Explicit read-only bind mount |
-| `deniedPaths` | `--tmpfs <path>` | Masked with empty tmpfs |
+| `deniedPaths` (directory) | `--tmpfs <path>` | Masked with an empty tmpfs |
+| `deniedPaths` (file) | `--ro-bind /dev/null <path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
+
+A denied path is classified by its own on-disk type (via `symlink_metadata`,
+no symlink-follow): a directory is masked with an empty `--tmpfs`, while a
+regular file is masked by binding `/dev/null` over it (masking a file with a
+tmpfs would replace it with an empty *directory*, changing its type). Paths that
+cannot be stat'd (missing/unreadable) fall back to `--tmpfs`.
+
+**Denied paths are resolved through symlinks before masking.** bwrap creates a
+mask by mounting over the destination path, and it cannot create a mount point
+when **any** component of that path — the leaf itself *or* an ancestor directory
+— is a pre-existing host symlink whose parent is bound into the sandbox (the
+mount then resolves through the host symlink and fails with `ENOENT`, aborting
+the sandbox). So both `/a/link` (symlinked leaf) and `/a/link/secret` (symlinked
+ancestor) would abort. A `deniedPaths` entry is therefore rewritten to its real
+filesystem path before mounting — canonicalizing the deepest existing ancestor
+(following symlinks at every level) and re-appending any not-yet-created trailing
+components — so the mask lands on the real object and its file/directory type is
+classified from that target. Fully unresolvable paths are left as-is — there is
+nothing behind them to leak.
 
 Example:
 ```json

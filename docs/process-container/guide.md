@@ -144,5 +144,5 @@ Verify the most-restrictive default is applied.
 | MXC generated bindings | mxc | `src/core/generated/base_container_specification/` (regenerated) |
 | MXC executor | mxc | `src/backends/appcontainer/common/src/base_container_runner.rs` |
 | MXC Config schema | mxc | `schemas/dev/mxc-config.schema.*.json` |
-| MXC SDK mapping | mxc | `sdk/src/sandbox.ts` |
-| MXC SDK types | mxc | `sdk/src/types.ts` |
+| MXC SDK mapping | mxc | `sdk/node/src/sandbox.ts` |
+| MXC SDK types | mxc | `sdk/node/src/types.ts` |

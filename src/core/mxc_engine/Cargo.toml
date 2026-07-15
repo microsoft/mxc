@@ -1,0 +1,52 @@
+[package]
+name = "mxc_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MXC execution engine: backend dispatch, host probing, and config building shared by the public SDK and the executor binaries."
+
+[lib]
+name = "mxc_engine"
+path = "src/lib.rs"
+
+[dependencies]
+wxc_common.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+# MicroVM runner — used by the Windows and Linux run-to-completion bodies under
+# the `microvm` feature. Never built on hosts/features that don't select it.
+nanvix_runner = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+hyperlight_common = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+appcontainer_common = { workspace = true }
+windows_sandbox_common = { workspace = true }
+isolation_session_common = { workspace = true, optional = true }
+isolation_session_bindings = { workspace = true, optional = true }
+wslc_common = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bwrap_common = { workspace = true }
+lxc_common = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+seatbelt_common = { workspace = true }
+
+[features]
+default = []
+# Enables constructing the run-to-completion runner for each experimental
+# backend. Mirrors the executor binaries' feature set so backend selection can
+# live in one place. The build-time binary-staging that some backends also need
+# (e.g. NanVix's `nanvix_binaries`) stays with the executor crates.
+microvm = ["dep:nanvix_runner"]
+wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
+hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
+isolation_session = [
+    "dep:isolation_session_bindings",
+    "dep:isolation_session_common",
+]
+# Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
+tier2_bfs = ["appcontainer_common/tier2_bfs"]
+
