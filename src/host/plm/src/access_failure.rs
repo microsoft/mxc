@@ -53,16 +53,18 @@ pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator<'_>, mut ev: Par
 
     // Skip self-events: the app accessing its own binary. The app path
     // is stored without a drive letter (HardDiskVolume form), so we
-    // compare against the file path minus its drive letter. `get(3..)`
-    // (rather than slicing) avoids a panic when the path contains non-
-    // ASCII bytes spanning indices 1-2 (e.g. `C:éx`).
+    // compare against the file path minus its `X:` drive prefix. The
+    // drive prefix is exactly two bytes (`C:`), so `get(2..)` — not
+    // `get(3..)` — keeps the leading separator/character of the path.
+    // Using `get(..)` (rather than slicing) avoids a panic when the
+    // path contains a non-ASCII byte spanning the split index.
     let app_path = ev
         .event_data
         .get_mut(APP_PATH_INDEX)
         .map(std::mem::take)
         .unwrap_or_default();
     if !app_path.is_empty() {
-        if let Some(tail) = file_path.get(3..) {
+        if let Some(tail) = file_path.get(2..) {
             if !tail.is_empty() && app_path.ends_with(tail) {
                 return;
             }
@@ -95,6 +97,17 @@ pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator<'_>, mut ev: Par
     }
 
     trim_backslashes_in_place(&mut file_path);
+
+    // Drop duplicate access failures: the provider emits the same
+    // (access_mask, path) pair repeatedly across a trace, and each
+    // duplicate would otherwise add a redundant entry to the generated
+    // config. Insert-and-check keeps the first occurrence only.
+    if !acc
+        .seen_access_events
+        .insert((access_mask, file_path.clone()))
+    {
+        return;
+    }
 
     acc.valid_access_events
         .push(crate::access_event::LearningModeAccessEvent {

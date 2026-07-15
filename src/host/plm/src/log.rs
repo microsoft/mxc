@@ -101,7 +101,7 @@ pub fn run(
         verbose,
     )?;
 
-    write_added_paths_summary(&added);
+    write_added_paths_summary(&added, verbose);
 
     println!();
     println!("Blank config after merge:");

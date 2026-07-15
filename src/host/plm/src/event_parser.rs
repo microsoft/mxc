@@ -26,6 +26,14 @@ use windows::Win32::System::EventLog::{
 
 use crate::access_event::LearningModeAccessEvent;
 
+/// EventID the PLM provider emits for a file/capability access that
+/// *would* have been denied. Decoded by `crate::access_failure`.
+pub(crate) const EVENT_ID_ACCESS_FAILURE: u32 = 14;
+/// EventID the PLM provider emits for a UI-subsystem violation.
+/// (Recognized by the XPath filter today; UI relaxation lands in a
+/// later PR.)
+pub(crate) const EVENT_ID_UI_VIOLATION: u32 = 27;
+
 /// RAII wrapper that calls `EvtClose` on drop. A panic or `?`-early
 /// return inside the rendering loop no longer leaks kernel ETW handles.
 #[cfg(target_os = "windows")]
@@ -34,6 +42,9 @@ struct EvtHandleOwned(EVT_HANDLE);
 #[cfg(target_os = "windows")]
 impl Drop for EvtHandleOwned {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is an `EVT_HANDLE` this wrapper took
+        // ownership of at construction and never handed out; `EvtClose`
+        // is the correct release call and runs exactly once (on drop).
         unsafe {
             let _ = EvtClose(self.0);
         }
@@ -55,11 +66,6 @@ impl ParseResult {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn to_wide_z(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// Stream every event matching the access-failure XPath query out of an
 /// .etl file, invoking `on_xml` once per rendered event XML string. The
 /// caller-supplied closure accumulates state; this keeps peak memory
@@ -69,18 +75,31 @@ fn to_wide_z(s: &str) -> Vec<u16> {
 /// `EvtNext` batch size is intentionally large (256) to reduce
 /// user→kernel transitions on traces with tens of thousands of events.
 /// End-of-stream is distinguished from real errors by matching
-/// `ERROR_NO_MORE_ITEMS`; any other `EvtNext` / `EvtRender` failure is
-/// propagated rather than silently dropped — silent failure would look
+/// `ERROR_NO_MORE_ITEMS`.
+///
+/// A failure to *render* a single event (`EvtRender`) is treated as an
+/// unparsable record: it is skipped and stream processing continues, so
+/// one malformed/corrupt event in the middle of a trace can't discard
+/// every subsequent valid access grant. A batch-level `EvtNext` failure
+/// (which yields no events at all, not just an unparsable one) is still
+/// propagated rather than silently dropped — swallowing it would look
 /// like a successful but short trace and cause PLM to under-grant on
 /// the next run.
 #[cfg(target_os = "windows")]
-fn for_each_event_xml<F>(trace_file: &Path, mut on_xml: F) -> Result<()>
+fn for_each_event_xml<F>(trace_file: &Path, verbose: bool, mut on_xml: F) -> Result<()>
 where
     F: FnMut(&str) -> Result<()>,
 {
-    let path_w = to_wide_z(&trace_file.to_string_lossy());
-    let query_w = to_wide_z("*[System[EventID=14 or EventID=27]]");
+    let path_w = wxc_common::string_util::to_wide(&trace_file.to_string_lossy());
+    let query_w = wxc_common::string_util::to_wide(&format!(
+        "*[System[EventID={EVENT_ID_ACCESS_FAILURE} or EventID={EVENT_ID_UI_VIOLATION}]]"
+    ));
 
+    // SAFETY: `path_w` and `query_w` are NUL-terminated wide buffers
+    // that outlive this call; the `PCWSTR`s borrow them for the
+    // duration of `EvtQuery`. The flags are valid `EvtQuery` bit
+    // constants. The returned handle is immediately adopted by
+    // `EvtHandleOwned` so it is closed on every exit path.
     let h_query = EvtHandleOwned(unsafe {
         EvtQuery(
             None,
@@ -94,10 +113,15 @@ where
     // allocate a fresh Vec<u8> per event.
     let mut render_buf: Vec<u16> = Vec::new();
     let mut rendered_count: usize = 0;
+    let mut render_failures: usize = 0;
     const BATCH: usize = 256;
     loop {
         let mut events: [isize; BATCH] = [0isize; BATCH];
         let mut returned: u32 = 0;
+        // SAFETY: `h_query.0` is a live query handle owned by
+        // `h_query`. `events` is a `BATCH`-element array we own and pass
+        // by mutable reference; `EvtNext` writes at most `BATCH` handles
+        // and reports the count through `returned`, which we own.
         let next_ok = unsafe {
             EvtNext(
                 h_query.0,
@@ -120,25 +144,46 @@ where
             break;
         }
 
-        // Wrap ALL returned slots into `EvtHandleOwned` up front so a
-        // mid-batch `?` propagation drops (and closes) the still-owned
-        // slots after the failing index.
+        // Wrap ALL returned slots into `EvtHandleOwned` up front so an
+        // early return from the loop body (an `on_xml` error, or a
+        // panic) drops — and closes — the still-owned slots after the
+        // current index. Render failures no longer early-return (they
+        // `continue`), but the up-front wrapping keeps every remaining
+        // handle owned so no ETW handle can leak on any exit path.
         let owned: Vec<EvtHandleOwned> = events
             .iter()
             .take(returned as usize)
             .map(|&slot| EvtHandleOwned(EVT_HANDLE(slot)))
             .collect();
         for handle in &owned {
-            let xml = render_event_xml(handle.0, &mut render_buf).map_err(|e| {
-                anyhow::anyhow!(
-                    "EvtRender failed at event {} of batch (rendered {} so far): {e}",
-                    rendered_count,
-                    rendered_count
-                )
-            })?;
+            // A single unrenderable event is skipped rather than
+            // aborting the whole trace: propagating here would discard
+            // every subsequent valid access grant and cause PLM to
+            // under-grant on the next run.
+            let xml = match render_event_xml(handle.0, &mut render_buf) {
+                Ok(xml) => xml,
+                Err(e) => {
+                    render_failures += 1;
+                    if verbose {
+                        eprintln!(
+                            "Skipping unrenderable event (index {}, {} rendered / {} skipped so far): {e}",
+                            rendered_count + render_failures,
+                            rendered_count,
+                            render_failures
+                        );
+                    }
+                    continue;
+                }
+            };
             on_xml(&xml)?;
             rendered_count += 1;
         }
+    }
+    if render_failures > 0 && verbose {
+        eprintln!(
+            "Event parsing finished: {} events rendered, {} unrenderable events skipped",
+            rendered_count, render_failures
+        );
     }
     Ok(())
 }
@@ -174,6 +219,11 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
 
     let mut needed: u32 = 0;
     let mut count: u32 = 0;
+    // SAFETY: `event` is a live rendered-event handle owned by the
+    // caller's `EvtHandleOwned`. `buf` has `capacity() == cap_u16` and
+    // `len == 0`; we pass its raw pointer with the matching byte size
+    // `cap_bytes`, so `EvtRender` writes only within the allocation.
+    // `needed`/`count` are owned out-params.
     let first = unsafe {
         EvtRender(
             None,
@@ -189,6 +239,9 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
     if first.is_err() {
         // ERROR_INSUFFICIENT_BUFFER means `needed` is now valid (in
         // bytes); grow and retry once. Any other error is fatal.
+        // SAFETY: `GetLastError` reads the calling thread's last-error
+        // code set by the `EvtRender` call immediately above; it has no
+        // preconditions and no memory-safety implications.
         let win_err = unsafe { GetLastError() };
         if win_err != ERROR_INSUFFICIENT_BUFFER {
             return Err(anyhow::anyhow!(
@@ -208,6 +261,9 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
         }
         let new_cap_u16 = buf.capacity();
         let new_cap_bytes = new_cap_u16 * std::mem::size_of::<u16>();
+        // SAFETY: identical contract to the first `EvtRender` call, now
+        // with a buffer grown to `new_cap_bytes` (≥ `needed`) so the
+        // render fits. `buf` is still at `len == 0`.
         let second = unsafe {
             EvtRender(
                 None,
@@ -226,6 +282,9 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
 
     // `needed` is bytes written including the terminating NUL.
     let init_u16 = (needed as usize / std::mem::size_of::<u16>()).min(buf.capacity());
+    // SAFETY: a successful `EvtRender` initialized `init_u16` u16s at
+    // the start of `buf` (clamped to `capacity()`), so extending `len`
+    // to `init_u16` exposes only initialized elements.
     unsafe {
         buf.set_len(init_u16);
     }
@@ -311,6 +370,12 @@ pub(crate) struct ParseAccumulator<'a> {
     pub(crate) cwd_lc_prefix: Option<String>,
     pub(crate) verbose: bool,
     pub(crate) valid_access_events: Vec<LearningModeAccessEvent>,
+    /// Set of `(access_mask, file_path)` keys already pushed into
+    /// `valid_access_events`, used to drop duplicate access-failure
+    /// events (the provider can emit the same denied access many times
+    /// across a trace). Keeps `valid_access_events` — and the generated
+    /// config — free of redundant entries.
+    pub(crate) seen_access_events: HashSet<(u32, String)>,
     pub(crate) requested_capabilities: HashSet<String>,
 }
 
@@ -342,6 +407,7 @@ impl<'a> ParseAccumulator<'a> {
             cwd_lc_prefix,
             verbose,
             valid_access_events: Vec::new(),
+            seen_access_events: HashSet::new(),
             requested_capabilities: HashSet::new(),
         }
     }
@@ -400,10 +466,11 @@ impl<'a> ParseAccumulator<'a> {
             return;
         };
         match ev.event_id {
-            27 => {
+            EVENT_ID_ACCESS_FAILURE => crate::access_failure::consume_access_failure(self, ev),
+            EVENT_ID_UI_VIOLATION => {
                 // UI-violation dispatch arrives in a later PR.
             }
-            _ => crate::access_failure::consume_access_failure(self, ev),
+            _ => {}
         }
     }
 
@@ -422,7 +489,7 @@ pub fn parse_events(
     verbose: bool,
 ) -> Result<ParseResult> {
     let mut acc = ParseAccumulator::new(current_directory, verbose);
-    for_each_event_xml(trace_file, |xml| {
+    for_each_event_xml(trace_file, verbose, |xml| {
         acc.consume(xml);
         Ok(())
     })?;

@@ -306,8 +306,6 @@ pub fn update_from_access_events(
 ) -> Result<AddedPaths> {
     let mut added_rw: Vec<String> = Vec::new();
     let mut added_ro: Vec<String> = Vec::new();
-    let mut seen_rw: HashSet<String> = HashSet::new();
-    let mut seen_ro: HashSet<String> = HashSet::new();
 
     // Pre-normalize every comparison input exactly once (here, outside the
     // per-event loop). The hot path then does pure byte-slice compares
@@ -409,10 +407,13 @@ pub fn update_from_access_events(
                     anyhow::anyhow!("`filesystem.readwritePaths` must be a JSON array")
                 })?;
             arr.push(Value::String(ev.file_path.clone()));
+            // The top-of-loop short-circuit already `continue`d on any
+            // `ev_norm` present in `rw_existing_set`, so this insert is
+            // always the first sighting: record the added path and keep
+            // the normalized prefix vector in sync. (`rw_existing_set`
+            // subsumes the old separate `seen_rw` dedup set.)
             if rw_existing_set.insert(ev_norm.clone()) {
-                rw_existing_norm.push(ev_norm.clone());
-            }
-            if seen_rw.insert(ev_norm) {
+                rw_existing_norm.push(ev_norm);
                 added_rw.push(ev.file_path.clone());
             }
             continue;
@@ -431,10 +432,11 @@ pub fn update_from_access_events(
                     anyhow::anyhow!("`filesystem.readonlyPaths` must be a JSON array")
                 })?;
             arr.push(Value::String(ev.file_path.clone()));
+            // Same reasoning as the readwrite branch: the `ro_existing_set`
+            // short-circuit above guarantees first sighting here, so
+            // `ro_existing_set` alone subsumes the old `seen_ro` set.
             if ro_existing_set.insert(ev_norm.clone()) {
-                ro_existing_norm.push(ev_norm.clone());
-            }
-            if seen_ro.insert(ev_norm) {
+                ro_existing_norm.push(ev_norm);
                 added_ro.push(ev.file_path.clone());
             }
         }
@@ -446,7 +448,13 @@ pub fn update_from_access_events(
     })
 }
 
-pub fn write_added_paths_summary(added: &AddedPaths) {
+pub fn write_added_paths_summary(added: &AddedPaths, verbose: bool) {
+    // The added-paths summary is diagnostic chatter on stdout; only emit
+    // it when the caller asked for verbose output so a normal run leaves
+    // stdout for the generated config alone.
+    if !verbose {
+        return;
+    }
     println!();
     if !added.readwrite.is_empty() {
         println!("Added to readwritePaths ({}):", added.readwrite.len());

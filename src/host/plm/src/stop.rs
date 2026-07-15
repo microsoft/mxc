@@ -193,7 +193,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         opts.verbose,
     )?;
 
-    write_added_paths_summary(&added);
+    write_added_paths_summary(&added, opts.verbose);
 
     // `adjusted_config_path` is accepted today so the wxc-exec --audit
     // harness can pass it through; the Adjusted_*.json writer arrives
