@@ -1,0 +1,32 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Network-Egress",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "wget -qO- https://api.github.com/zen"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "enforcementMode": "firewall",
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            { "cidr": "140.82.112.0/20" }
+          ],
+          "ports": [
+            { "protocol": "tcp", "port": 443 }
+          ]
+        }
+      ],
+      "deny": []
+    }
+  }
+}
