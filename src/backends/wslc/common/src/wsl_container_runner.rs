@@ -959,19 +959,30 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        // Route egress through the configured cooperative proxy. WSLc has no
-        // in-kernel iptables, so per-host policy is enforced cooperatively at
-        // the proxy layer: translate network.proxy into HTTP(S)_PROXY env vars
-        // (scrubbing any caller-supplied proxy vars so a workload cannot defeat
-        // the proxy). See wxc_common::proxy_env for the hygiene rules.
+        // Route egress through the cooperative proxy: WSLc has no in-kernel
+        // iptables, so per-host policy is enforced at the proxy layer by
+        // injecting HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
+        // See wxc_common::proxy_env.
         let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
-            let proxy_url = request
+            // url-only (also enforced at parse time). Fail fast rather than
+            // inject an empty HTTP_PROXY= for the localhost/builtinTestServer
+            // forms, which carry no routable URL.
+            let proxy_url = match request
                 .policy
                 .network_proxy
                 .address
                 .as_ref()
-                .map(|addr| addr.to_url())
-                .unwrap_or_default();
+                .and_then(|addr| addr.original_url.clone())
+            {
+                Some(url) => url,
+                None => {
+                    return ScriptResponse::error(
+                        "WSLC: network.proxy requires the 'url' form (a routable proxy URL); \
+                         the localhost and builtinTestServer forms are not supported because a \
+                         WSLc container runs in its own network namespace.",
+                    );
+                }
+            };
             let _ = writeln!(
                 logger,
                 "[WSLC] Cooperative network proxy configured: {}",

@@ -49,7 +49,7 @@ if ($WxcExecPath) {
     $WxcExec = $Candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
-    Write-Host "ERROR: wxc-exec.exe not found. Build with: cargo build --features wslc --release --target $Target" -ForegroundColor Red
+    Write-Host "ERROR: wxc-exec.exe not found. Build with: cd src; cargo build --features wslc --release --target $Target" -ForegroundColor Red
     exit 1
 }
 

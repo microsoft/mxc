@@ -774,12 +774,10 @@ fn convert_wire_config(
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
 
-            // WSLc runs each container in its own network namespace (a separate
-            // WSL system VM), so a host/loopback proxy is unreachable from
-            // inside the container. Only an external, routable proxy URL works.
-            // Reject the localhost / builtinTestServer forms (which imply an
-            // in-container or MXC-run proxy) with a clear message. A `url`-form
-            // proxy carries `original_url`; the other forms do not.
+            // WSLc containers run in their own network namespace, so an
+            // MXC-run host-loopback proxy is unreachable. Accept only the
+            // caller-supplied `url` form (which carries `original_url`); reject
+            // the `localhost` / `builtinTestServer` forms.
             if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
                 let is_url_form = proxy_config
                     .address
