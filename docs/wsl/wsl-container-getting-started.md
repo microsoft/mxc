@@ -226,6 +226,60 @@ no separate `--setup-wslc` step is required.
 | `"allowOutbound": true` | Bridged networking (full access) |
 | `"allowOutbound": false` | No networking (isolated) |
 
+### Network proxy (cooperative, unprivileged)
+
+WSLC supports a **cooperative HTTP/HTTPS proxy**: setting `network.proxy`
+routes a container's egress through a proxy you provide. WSLC's kernel has
+**no in-kernel `iptables`**, so — exactly like the Bubblewrap backend — there
+is no netfilter drop-floor; enforcement is *cooperative*, applied by handing
+the workload proxy environment variables that well-behaved clients honor.
+
+**How it works**
+
+1. When `network.proxy` is set, the runner translates it into the
+   `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy` environment
+   variables inside the container (via `WslcSetProcessSettingsEnvVariables`).
+   Any caller-supplied values for these keys — including `NO_PROXY` /
+   `no_proxy` — are **stripped** first, so a workload cannot override or
+   disable the configured proxy. The runner deliberately does **not** set
+   `NO_PROXY`.
+2. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.) honor
+   the env vars and their traffic flows through the proxy.
+
+**Only the `url` form is supported.** A WSLC container runs in its own network
+namespace (a separate WSL system VM), so a host- or distro-loopback proxy is
+**not reachable** from inside the container. The proxy must be a routable
+address the container can reach:
+
+```json
+{
+  "version": "0.6.0-alpha",
+  "containment": "wslc",
+  "process": { "commandLine": "curl -fsSL https://example.com && echo OK" },
+  "network": {
+    "defaultPolicy": "allow",
+    "proxy": { "url": "http://proxy.example:8080" }
+  },
+  "experimental": { "wslc": { "image": "alpine:latest" } }
+}
+```
+
+The `localhost` and `builtinTestServer` proxy forms are **rejected at
+config-parse time** for WSLC (they imply a host-loopback / MXC-run proxy that
+the container cannot reach).
+
+**Caveats**
+
+- **Cooperative model, not enforcement.** Only clients that honor the proxy
+  env vars are routed through the proxy. Tools that bypass them (raw sockets,
+  custom HTTP clients, statically-linked binaries that ignore the env) are
+  **not** contained. WSLC cannot provide a hard network floor because its
+  kernel lacks `iptables`. For strict network isolation, use
+  `"allowOutbound": false` (no networking) instead.
+- **Consumer-provided proxy.** MXC does not start a proxy for WSLC; you supply
+  a reachable one via `url`. Any host filtering is the proxy's responsibility —
+  the runner does not forward `allowedHosts` / `blockedHosts` to it.
+
 ### Filesystem mounts
 
 Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
@@ -248,6 +302,7 @@ the container.
 
 - [`tests/examples/wslc_hello_world.json`](../../tests/examples/wslc_hello_world.json) — Hello world with Alpine
 - [`tests/configs/wslc_network_isolated.json`](../../tests/configs/wslc_network_isolated.json) — Network isolation
+- [`tests/configs/wslc_network_proxy.json`](../../tests/configs/wslc_network_proxy.json) — Cooperative HTTP proxy (`network.proxy.url`)
 - [`tests/configs/wslc_custom_registry_ghcr.json`](../../tests/configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
 - [`tests/configs/wslc_custom_registry_quay.json`](../../tests/configs/wslc_custom_registry_quay.json) — Pull from Quay.io
 - [`tests/configs/wslc_tar_import_rootfs.json`](../../tests/configs/wslc_tar_import_rootfs.json) — Import rootfs tar

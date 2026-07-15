@@ -766,12 +766,36 @@ fn convert_wire_config(
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
+                && containment != ContainmentBackend::Wslc
             {
-                let msg = "Network proxy is only supported with the 'processcontainer' \
-                           or 'bubblewrap' containment backends";
+                let msg = "Network proxy is only supported with the 'processcontainer', \
+                           'bubblewrap', or 'wslc' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
+
+            // WSLc runs each container in its own network namespace (a separate
+            // WSL system VM), so a host/loopback proxy is unreachable from
+            // inside the container. Only an external, routable proxy URL works.
+            // Reject the localhost / builtinTestServer forms (which imply an
+            // in-container or MXC-run proxy) with a clear message. A `url`-form
+            // proxy carries `original_url`; the other forms do not.
+            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
+                let is_url_form = proxy_config
+                    .address
+                    .as_ref()
+                    .is_some_and(|addr| addr.original_url.is_some());
+                if !is_url_form {
+                    let msg = "WSLc: network.proxy must use the 'url' form pointing at a \
+                               routable proxy (e.g. \"url\": \"http://proxy.example:8080\"). \
+                               The 'localhost' and 'builtinTestServer' forms are not supported \
+                               because a WSLc container runs in its own network namespace and \
+                               cannot reach a host-loopback proxy.";
+                    logger.log_line(msg);
+                    return Err(WxcError::ConfigParse(msg.to_string()));
+                }
+            }
+
             policy.network_proxy = proxy_config;
         }
 
@@ -2385,6 +2409,68 @@ mod tests {
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
         // Warning is best-effort surfaced via the logger; the request still
         // succeeds.
+    }
+
+    #[test]
+    fn proxy_accepted_with_wslc_url_form() {
+        // WSLc supports the cooperative env-var proxy via a routable `url`.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://proxy.example:8080"},
+                "defaultPolicy": "allow"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.to_url(), "http://proxy.example:8080");
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_localhost_form() {
+        // The localhost form implies a host-loopback proxy, which a WSLc
+        // container (own network namespace) cannot reach. Must be rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"localhost": 8080}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_builtin_test_server() {
+        // builtinTestServer spins up an MXC-run in-host proxy, unreachable
+        // from a WSLc container. Must be rejected with the url-form message.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -959,9 +959,31 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        if !request.env.is_empty() {
-            let env_cstrings: Vec<Vec<u8>> = request
-                .env
+        // Route egress through the configured cooperative proxy. WSLc has no
+        // in-kernel iptables, so per-host policy is enforced cooperatively at
+        // the proxy layer: translate network.proxy into HTTP(S)_PROXY env vars
+        // (scrubbing any caller-supplied proxy vars so a workload cannot defeat
+        // the proxy). See wxc_common::proxy_env for the hygiene rules.
+        let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
+            let proxy_url = request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|addr| addr.to_url())
+                .unwrap_or_default();
+            let _ = writeln!(
+                logger,
+                "[WSLC] Cooperative network proxy configured: {}",
+                proxy_url
+            );
+            wxc_common::proxy_env::apply_cooperative_proxy_env(&request.env, &proxy_url)
+        } else {
+            request.env.clone()
+        };
+
+        if !effective_env.is_empty() {
+            let env_cstrings: Vec<Vec<u8>> = effective_env
                 .iter()
                 .map(|e| format!("{}\0", e).into_bytes())
                 .collect();
