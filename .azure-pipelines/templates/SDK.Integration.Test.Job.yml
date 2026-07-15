@@ -42,7 +42,7 @@ jobs:
         os: macOS
 
     variables:
-      integrationDirectory: $(Build.SourcesDirectory)/sdk/tests/integration
+      integrationDirectory: $(Build.SourcesDirectory)/sdk/node/tests/integration
       sdkPkgDirectory: $(Build.SourcesDirectory)/sdk-pkg
       # Cache npm package downloads across runs (see Package.NpmSdk.Job.yml).
       npm_config_cache: $(Pipeline.Workspace)/.npm
@@ -58,7 +58,7 @@ jobs:
       - task: Cache@2
         displayName: Cache npm
         inputs:
-          key: 'npm | "$(Agent.OS)" | sdk/tests/integration/package-lock.json'
+          key: 'npm | "$(Agent.OS)" | sdk/node/tests/integration/package-lock.json'
           restoreKeys: |
             npm | "$(Agent.OS)"
           path: $(npm_config_cache)

@@ -8,20 +8,11 @@ use std::time::Instant;
 use clap::Parser;
 use wxc_common::config_parser::load_request;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::script_runner::handle_dry_run_exit;
 use wxc_common::telemetry;
 
-#[cfg(target_os = "linux")]
-use bwrap_common::bwrap_runner::BubblewrapScriptRunner;
-#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-use hyperlight_common::HyperlightScriptRunner;
-use lxc_common::lxc_runner::LxcScriptRunner;
 use lxc_common::signal_cleanup;
-#[cfg(feature = "microvm")]
-use nanvix_runner::NanVixScriptRunner;
-#[cfg(target_os = "linux")]
-use wxc_common::sandbox_process::Runner;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -230,93 +221,28 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    // Dispatch by containment backend. On Linux, Bubblewrap is now the
-    // default for abstract intents (omitted `containment` and
-    // `containment: "process"` both resolve to Bubblewrap in
-    // `wxc_common::config_parser`). LXC is still available via explicit
-    // `containment: "lxc"`, and `containment: "processcontainer"` falls
-    // through to LXC via the catch-all below. Hyperlight is the embedded
-    // Hyperlight+Unikraft micro-VM (experimental, x86_64-only).
-    let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::Hyperlight => {
-            #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-            {
-                if !request.experimental_enabled {
-                    eprintln!(
-                        "Error: Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
-                         Use --experimental flag."
-                    );
-                    process::exit(1);
-                }
-                Box::new(HyperlightScriptRunner::new())
-            }
-            #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
-            {
-                eprintln!(
-                    "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
-                );
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
-                process::exit(1);
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Box::new(NanVixScriptRunner::new())
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Bubblewrap => {
-            #[cfg(target_os = "linux")]
-            {
-                Box::new(Runner::new(BubblewrapScriptRunner::new()))
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                eprintln!("Error: Bubblewrap backend is only available on Linux");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Lxc => Box::new(LxcScriptRunner::new(
-            &request.lxc_config,
-            &request.container_id,
-            &request.lifecycle,
-        )),
-        ref other => {
-            logger.log_line(&format!(
-                "Note: containment {other:?} unsupported on lxc-exec; falling back to LXC."
-            ));
-            Box::new(LxcScriptRunner::new(
-                &request.lxc_config,
-                &request.container_id,
-                &request.lifecycle,
-            ))
+    // Dispatch by containment backend. Backend selection and runner
+    // construction — Bubblewrap (the Linux default for abstract intents), LXC
+    // (explicit `containment: "lxc"`, plus the catch-all for anything else such
+    // as `processcontainer`), and the experimental Hyperlight / MicroVM
+    // backends — live in `mxc_engine::run`, the single home for one-shot backend
+    // dispatch. It runs the selected backend to completion and returns the
+    // response; experimental backends that require `--experimental` (or that
+    // aren't compiled in) surface an error here.
+    let run_start = Instant::now();
+    let response = match mxc_engine::run(&request, &mut logger) {
+        Ok(response) => response,
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            eprint!("{}", logger.get_buffer());
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::InitError,
+            );
+            process::exit(1);
         }
     };
-    let run_start = Instant::now();
-    let response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
