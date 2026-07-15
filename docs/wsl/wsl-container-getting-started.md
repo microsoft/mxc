@@ -144,7 +144,7 @@ fields before spawning:
 import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
 
 const policy = {
-  version: '0.5.0-alpha',
+  version: '0.6.0-alpha',
   network: { allowOutbound: true },
 };
 

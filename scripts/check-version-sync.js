@@ -2,7 +2,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Validates that the workspace Cargo.toml version and sdk/package.json version
+// Validates that the workspace Cargo.toml version and sdk/node/package.json version
 // are in sync.  Run from the repository root:
 //
 //   node scripts/check-version-sync.js
@@ -25,13 +25,33 @@ if (!cargoMatch) {
 const cargoVersion = cargoMatch[1];
 
 const packageJson = JSON.parse(
-  readFileSync(join(repoRoot, "sdk", "package.json"), "utf8")
+  readFileSync(join(repoRoot, "sdk", "node", "package.json"), "utf8")
 );
 const npmVersion = packageJson.version;
 
 if (cargoVersion !== npmVersion) {
   console.error(
-    `ERROR: Version mismatch — src/Cargo.toml has "${cargoVersion}" but sdk/package.json has "${npmVersion}"`
+    `ERROR: Version mismatch — src/Cargo.toml has "${cargoVersion}" but sdk/node/package.json has "${npmVersion}"`
+  );
+  process.exit(1);
+}
+
+// The C# SDK version must also track the workspace version.
+const csproj = readFileSync(
+  join(repoRoot, "sdk", "dotnet", "Microsoft.Mxc.Sdk", "Microsoft.Mxc.Sdk.csproj"),
+  "utf8"
+);
+const csharpMatch = csproj.match(/<Version>([^<]+)<\/Version>/);
+if (!csharpMatch) {
+  console.error(
+    "ERROR: Could not find <Version> in sdk/dotnet/Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj"
+  );
+  process.exit(1);
+}
+const csharpVersion = csharpMatch[1].trim();
+if (cargoVersion !== csharpVersion) {
+  console.error(
+    `ERROR: Version mismatch — src/Cargo.toml has "${cargoVersion}" but the C# SDK csproj has "${csharpVersion}"`
   );
   process.exit(1);
 }
