@@ -215,4 +215,126 @@ public class MxcSandboxProcessTests
         Assert.True(finished, "reader should finish after dispose");
         Assert.Null(readError);
     }
+
+    // A cmd builtin that blocks reading a line from stdin. Holding StandardInput
+    // open (never writing/closing it) keeps the child parked here, so tests can
+    // kill / cancel a genuinely-running process without depending on an external
+    // sleep (unavailable under the sandbox's invalid cwd on an un-prepped host).
+    private const string BlockerCommand =
+        @"C:\Windows\System32\cmd.exe /v:on /c set /p x= & echo BLOCKER_DONE";
+
+    [Fact]
+    public void Kill_TerminatesRunningChild()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+        var stdin = proc.StandardInput; // hold stdin open so the child blocks
+        Assert.NotNull(stdin);
+
+        proc.Kill();
+        var result = proc.Wait();
+        // The child was killed while blocked, so it did not reach the clean exit.
+        Assert.NotEqual(0, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task Kill_DuringWaitAsync_Unblocks()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // The poll-based Wait design exists so Kill stays responsive during a
+        // WaitAsync from another thread; prove the await completes after Kill.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+        var stdin = proc.StandardInput; // hold stdin open so the child blocks
+        Assert.NotNull(stdin);
+
+        var waitTask = proc.WaitAsync();
+        await Task.Delay(100); // let the wait loop park
+        Assert.False(waitTask.IsCompleted, "child should still be running");
+
+        proc.Kill();
+
+        var finished = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert.Same(waitTask, finished);
+        var result = await waitTask;
+        Assert.NotEqual(0, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task WaitAsync_Cancellation_AbandonsWithoutKilling()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // Cancelling WaitAsync abandons the wait (throwing) without killing the
+        // child — the exact path that previously triggered the stream UAF.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+        var stdin = proc.StandardInput; // hold stdin open so the child blocks
+        Assert.NotNull(stdin);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => proc.WaitAsync(cts.Token));
+
+        // The child is still alive (cancellation did not kill it); Kill cleans up.
+        proc.Kill();
+        Assert.NotEqual(0, proc.Wait().ExitCode);
+    }
+
+    [Fact]
+    public async Task StandardError_IsReadable()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        // Write one line to stdout and one to stderr (both cmd builtins).
+        var command = @"C:\Windows\System32\cmd.exe /c echo to-out& echo to-err 1>&2";
+        using var proc = MxcSandbox.Spawn(policy, command);
+
+        var (result, stdout, stderr) =
+            await proc.WaitForExitWithOutputAsync();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("to-out", Encoding.UTF8.GetString(stdout));
+        Assert.Contains("to-err", Encoding.UTF8.GetString(stderr));
+    }
+
+    [Fact]
+    public async Task OutputHeavyChild_DoesNotDeadlock()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // Emit well over a pipe buffer (~64KB) on BOTH stdout and stderr. If the
+        // streams were not drained concurrently the child would wedge on a full
+        // pipe; WaitForExitWithOutputAsync must return both in full.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var command =
+            @"C:\Windows\System32\cmd.exe /c for /L %i in (1,1,12000) do @(echo out-%i& echo err-%i 1>&2)";
+        using var proc = MxcSandbox.Spawn(policy, command);
+
+        var (result, stdout, stderr) = await proc.WaitForExitWithOutputAsync();
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(stdout.Length > 64 * 1024, $"stdout was {stdout.Length} bytes");
+        Assert.True(stderr.Length > 64 * 1024, $"stderr was {stderr.Length} bytes");
+        Assert.Contains("out-12000", Encoding.UTF8.GetString(stdout));
+        Assert.Contains("err-12000", Encoding.UTF8.GetString(stderr));
+    }
 }

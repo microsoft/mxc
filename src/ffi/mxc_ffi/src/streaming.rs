@@ -737,4 +737,108 @@ mod tests {
             mxc_sandbox_free(handle);
         }
     }
+
+    /// Real write→read round-trip: feed stdin via `mxc_stream_write` and read
+    /// the echoed line back via `mxc_stream_read`. Proves the FFI write path
+    /// (only exercised indirectly by the C# suite otherwise). Ignored like the
+    /// other real-host tests.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "windows")]
+    fn real_stdin_write_stdout_read_roundtrip() {
+        let policy = CString::new(r#"{"version":"0.8.0-alpha"}"#).unwrap();
+        // A cmd builtin that reads one stdin line and echoes it back.
+        let command =
+            CString::new("C:\\Windows\\System32\\cmd.exe /v:on /c set /p x= & echo GOT:!x!")
+                .unwrap();
+
+        let mut handle: *mut MxcSandbox = ptr::null_mut();
+        let mut err: *mut c_char = ptr::null_mut();
+        // SAFETY: valid strings and out pointers.
+        let status = unsafe { mxc_spawn(policy.as_ptr(), command.as_ptr(), &mut handle, &mut err) };
+        assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
+
+        // SAFETY: live handle.
+        let stdin = unsafe { mxc_sandbox_take_stdin(handle) };
+        let stdout = unsafe { mxc_sandbox_take_stdout(handle) };
+        assert!(!stdin.is_null() && !stdout.is_null());
+
+        let line = b"mxc_write_ok\r\n";
+        let mut written = 0usize;
+        // SAFETY: live stream + valid buffer.
+        let rc = unsafe { mxc_stream_write(stdin, line.as_ptr(), line.len(), &mut written) };
+        assert_eq!(rc, MXC_STATUS_SUCCESS);
+        assert!(written > 0);
+        // Close stdin so `set /p` completes.
+        unsafe { mxc_write_stream_free(stdin) };
+
+        let mut collected = Vec::new();
+        let mut buf = [0u8; 256];
+        loop {
+            let mut got = 0usize;
+            // SAFETY: live stream + valid buffer.
+            let rc = unsafe { mxc_stream_read(stdout, buf.as_mut_ptr(), buf.len(), &mut got) };
+            assert_eq!(rc, MXC_STATUS_SUCCESS);
+            if got == 0 {
+                break;
+            }
+            collected.extend_from_slice(&buf[..got]);
+        }
+        let text = String::from_utf8_lossy(&collected);
+        assert!(text.contains("GOT:mxc_write_ok"), "stdout was: {text:?}");
+
+        let mut exit = -1;
+        let mut timed_out = -1;
+        // SAFETY: live handle + out pointers.
+        let rc = unsafe { mxc_sandbox_wait(handle, &mut exit, &mut timed_out) };
+        assert_eq!(rc, MXC_STATUS_SUCCESS);
+        assert_eq!(exit, 0);
+
+        // SAFETY: live handles freed once.
+        unsafe {
+            mxc_read_stream_free(stdout);
+            mxc_sandbox_free(handle);
+        }
+    }
+
+    /// Real kill: spawn a child blocked on stdin, `mxc_sandbox_kill` it, and
+    /// confirm the wait then reports it gone. Proves the FFI kill path directly.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "windows")]
+    fn real_kill_terminates_blocked_child() {
+        let policy = CString::new(r#"{"version":"0.8.0-alpha"}"#).unwrap();
+        // Blocks reading a stdin line; we keep stdin open (never take it) so it
+        // stays parked until killed.
+        let command =
+            CString::new("C:\\Windows\\System32\\cmd.exe /v:on /c set /p x= & echo done").unwrap();
+
+        let mut handle: *mut MxcSandbox = ptr::null_mut();
+        let mut err: *mut c_char = ptr::null_mut();
+        // SAFETY: valid strings and out pointers.
+        let status = unsafe { mxc_spawn(policy.as_ptr(), command.as_ptr(), &mut handle, &mut err) };
+        assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
+
+        // Child should still be running.
+        let mut exit = 0;
+        let mut running = 0;
+        // SAFETY: live handle + out pointers.
+        let rc = unsafe { mxc_sandbox_try_wait(handle, &mut exit, &mut running) };
+        assert_eq!(rc, MXC_STATUS_SUCCESS);
+        assert_eq!(running, 1, "blocked child should still be running");
+
+        // SAFETY: live handle.
+        let rc = unsafe { mxc_sandbox_kill(handle) };
+        assert_eq!(rc, MXC_STATUS_SUCCESS);
+
+        // Wait reaps the killed child.
+        let mut timed_out = -1;
+        // SAFETY: live handle + out pointers.
+        let rc = unsafe { mxc_sandbox_wait(handle, &mut exit, &mut timed_out) };
+        assert_eq!(rc, MXC_STATUS_SUCCESS);
+        assert_ne!(exit, 0, "a killed child should not exit cleanly");
+
+        // SAFETY: live handle freed once.
+        unsafe { mxc_sandbox_free(handle) };
+    }
 }
