@@ -90,7 +90,7 @@ extends:
               inputs:
                 targetType: inline
                 script: |
-                  $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/package.json" | ConvertFrom-Json).version
+                  $sdkVersion = (Get-Content "$(System.DefaultWorkingDirectory)/sdk/node/package.json" | ConvertFrom-Json).version
                   $parts = $sdkVersion.Split('.')
                   Write-Host "##vso[task.setvariable variable=SdkMajor]$($parts[0])"
                   Write-Host "##vso[task.setvariable variable=SdkMinor]$($parts[1])"

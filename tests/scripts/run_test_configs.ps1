@@ -37,7 +37,10 @@ if (-not (Test-Path $TestDriver)) {
 $TempDirs = @(
     "C:\temp\wxc_test_allowed",
     "C:\temp\wxc_test_allowedreadonly",
-    "C:\temp\wxc_test_denied"
+    "C:\temp\wxc_test_denied",
+    "C:\temp\wxc_test_gitproj",
+    "C:\temp\wxc_test_gitexisting",
+    "C:\temp\wxc_test_outside"
 )
 
 try {
@@ -45,6 +48,11 @@ try {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
     Set-Content -Path "C:\temp\wxc_test_allowedreadonly\test_input.txt" -Value "Test Input"
+    # Pre-seed a protected child inside a writable parent (the `.git` protection
+    # regression scenario) and an out-of-policy secret for the deny tests.
+    New-Item -ItemType Directory -Path "C:\temp\wxc_test_gitexisting\.git" -Force | Out-Null
+    Set-Content -Path "C:\temp\wxc_test_gitexisting\.git\config" -Value "ORIGINAL"
+    Set-Content -Path "C:\temp\wxc_test_outside\secret.txt" -Value "SECRET"
 
     Write-Host "Running wxc-test-driver against tests/configs..." -ForegroundColor Cyan
     & $TestDriver $TestConfigsDir
