@@ -959,9 +959,42 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        if !request.env.is_empty() {
-            let env_cstrings: Vec<Vec<u8>> = request
-                .env
+        // Route egress through the cooperative proxy: WSLc has no in-kernel
+        // iptables, so per-host policy is enforced at the proxy layer by
+        // injecting HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
+        // See wxc_common::proxy_env.
+        let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
+            // url-only (also enforced at parse time). Fail fast rather than
+            // inject an empty HTTP_PROXY= for the localhost/builtinTestServer
+            // forms, which carry no routable URL.
+            let proxy_url = match request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .and_then(|addr| addr.original_url.clone())
+            {
+                Some(url) => url,
+                None => {
+                    return ScriptResponse::error(
+                        "WSLC: network.proxy requires the 'url' form (a routable proxy URL); \
+                         the localhost and builtinTestServer forms are not supported because a \
+                         WSLc container runs in its own network namespace.",
+                    );
+                }
+            };
+            let _ = writeln!(
+                logger,
+                "[WSLC] Cooperative network proxy configured: {}",
+                proxy_url
+            );
+            wxc_common::proxy_env::apply_cooperative_proxy_env(&request.env, &proxy_url)
+        } else {
+            request.env.clone()
+        };
+
+        if !effective_env.is_empty() {
+            let env_cstrings: Vec<Vec<u8>> = effective_env
                 .iter()
                 .map(|e| format!("{}\0", e).into_bytes())
                 .collect();

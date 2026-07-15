@@ -55,6 +55,9 @@ production configs and the dev schema when working on experimental features:
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
+                                           // WSLC supports the cooperative proxy too, but only via
+                                           // { "url": "http://proxy.example:8080" } (own-netns:
+                                           //  localhost/builtinTestServer are unreachable, rejected)
     },
 
     "processContainer": {                  // Process-based container-specific

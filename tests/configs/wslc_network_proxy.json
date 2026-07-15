@@ -1,0 +1,18 @@
+{
+  "version": "0.6.0-alpha",
+  "containerId": "wslc-network-proxy",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "set -e; ( while true; do printf 'HTTP/1.0 200 OK\\r\\nContent-Length: 9\\r\\nConnection: close\\r\\n\\r\\nPROXY_HIT' | nc -l -p 8888 -w 2 >/dev/null 2>&1; done ) & sleep 1; echo \"HTTP_PROXY=$HTTP_PROXY http_proxy=$http_proxy\"; BODY=$(wget -q -O - http://example.com/ 2>/dev/null || true); echo \"CLIENT_GOT=[$BODY]\"; case \"$BODY\" in *PROXY_HIT*) echo WSLC_PROXY_FUNCTIONAL_OK ;; *) echo WSLC_PROXY_FAIL ;; esac",
+    "env": ["HTTP_PROXY=http://attacker.invalid:1", "http_proxy=http://attacker.invalid:1"]
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "proxy": { "url": "http://127.0.0.1:8888" }
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

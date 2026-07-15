@@ -11,19 +11,7 @@ use std::collections::HashSet;
 
 use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
-
-/// Env var keys that the proxy block manages. Listed here so we can strip
-/// any conflicting entries the caller supplied via `request.env` (callers
-/// must not be able to defeat the cooperative proxy by injecting their own
-/// proxy env vars).
-const PROXY_ENV_KEYS: &[&str] = &[
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "NO_PROXY",
-    "no_proxy",
-];
+use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
 /// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
 /// deny-by-default baseline. Mirrors the seatbelt backend's
@@ -228,7 +216,7 @@ pub fn build_args_classified(
         if let Some((key, value)) = env_str.split_once('=') {
             // When the proxy is active, drop any caller-supplied proxy env
             // entries so they cannot override the values we set below.
-            if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {
+            if proxy_address.is_some() && is_managed_proxy_key(key) {
                 continue;
             }
             args.extend(["--setenv".into(), key.into(), value.into()]);
@@ -251,8 +239,8 @@ pub fn build_args_classified(
     // destinations.
     if let Some(addr) = proxy_address {
         let url = addr.to_url();
-        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-            args.extend(["--setenv".into(), key.into(), url.clone()]);
+        for key in PROXY_SET_KEYS {
+            args.extend(["--setenv".into(), (*key).into(), url.clone()]);
         }
     }
 

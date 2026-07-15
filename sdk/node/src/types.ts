@@ -200,10 +200,13 @@ export interface NetworkConfig {
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Proxy configuration (supported on Windows ProcessContainer and Linux Bubblewrap).
-   *  `builtinTestServer` activates a bundled, testing-only proxy; the SDK rejects it
-   *  unless `allowTestingFeatures: true` is set in SandboxSpawnOptions (which maps to
-   *  the native `--allow-testing-features` flag). */
+  /** Proxy configuration (supported on Windows ProcessContainer, Linux Bubblewrap,
+   *  and WSLC). `builtinTestServer` activates a bundled, testing-only proxy; the SDK
+   *  rejects it unless `allowTestingFeatures: true` is set in SandboxSpawnOptions
+   *  (which maps to the native `--allow-testing-features` flag).
+   *  WSLC accepts only the `{ url }` form (its containers run in their own network
+   *  namespace, so the `localhost` / `builtinTestServer` loopback forms are
+   *  unreachable and rejected); enforcement is cooperative (no in-kernel iptables). */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
