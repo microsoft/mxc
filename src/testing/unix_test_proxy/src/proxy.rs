@@ -5,9 +5,8 @@
 //! forwarding, with optional allow / block host filtering enforced at the
 //! proxy.
 //!
-//! Adapted from `wxc_test_proxy::proxy` and extended with host filtering so
-//! the Bubblewrap backend can enforce `allowedHosts` / `blockedHosts` at the
-//! proxy layer instead of via privileged iptables rules.
+//! Adapted from `wxc_test_proxy::proxy` and extended with host filtering for
+//! the cooperative proxy used by Bubblewrap and Seatbelt.
 
 use std::sync::Arc;
 
@@ -156,8 +155,7 @@ async fn handle_connect(
         .ok_or("CONNECT missing authority")?
         .to_string();
 
-    let host = strip_port(&authority);
-    if !filter.permits(host) {
+    if !filter.permits(&authority) {
         eprintln!("[unix-test-proxy] BLOCK CONNECT {}", authority);
         return Ok(empty_response(StatusCode::FORBIDDEN));
     }
@@ -165,10 +163,7 @@ async fn handle_connect(
     eprintln!("[unix-test-proxy] CONNECT {}", authority);
 
     let server = TcpStream::connect(&authority).await.map_err(|err| {
-        eprintln!(
-            "[unix-test-proxy] connect error for {}: {}",
-            authority, err
-        );
+        eprintln!("[unix-test-proxy] connect error for {}: {}", authority, err);
         err
     })?;
 

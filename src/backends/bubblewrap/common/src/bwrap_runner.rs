@@ -34,7 +34,6 @@ use std::time::Duration;
 
 use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
-use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::sandbox_process::{
@@ -42,6 +41,7 @@ use wxc_common::sandbox_process::{
     take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
     WaitError,
 };
+use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::validate_common;
 
 use crate::bwrap_command;

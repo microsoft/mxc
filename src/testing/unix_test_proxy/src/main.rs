@@ -5,18 +5,22 @@
 //!
 //! **Testing-only tool.** Launches a minimal HTTP CONNECT proxy on an
 //! OS-assigned port, atomically writes the port to a ready file, then waits
-//! for SIGTERM or parent death before shutting down.
+//! for SIGTERM, SIGINT, or EOF on its parent-lifetime pipe before shutting
+//! down.
 //!
 //! Designed to be spawned by `wxc_common::unix_proxy_coordinator` to provide
 //! cooperative, unprivileged proxy-based enforcement of `allowedHosts` /
-//! `blockedHosts` for the Bubblewrap backend.
+//! `blockedHosts`. Used by the Bubblewrap backend on Linux and the Seatbelt
+//! backend on macOS. It builds and runs on any Unix; the CONNECT proxy itself
+//! (`proxy`) is platform-neutral.
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod proxy;
 
-#[cfg(target_os = "linux")]
-mod linux_main {
+#[cfg(unix)]
+mod unix_main {
     use std::fs;
+    use std::io::Read;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -42,16 +46,15 @@ mod linux_main {
     #[derive(Parser)]
     #[command(
         name = "unix-test-proxy",
-        about = "Builtin test proxy for MXC Bubblewrap integration testing (NOT for production use)"
+        about = "Builtin test proxy for MXC Bubblewrap/Seatbelt integration testing (NOT for production use)"
     )]
     pub struct Cli {
         /// Path where the proxy atomically writes its port number once ready.
         #[arg(long = "ready-file")]
         pub ready_file: PathBuf,
 
-        /// Address to bind on. Defaults to loopback. Future LXC/Seatbelt
-        /// callers can pass the bridge gateway IP so the proxy is reachable
-        /// from inside a separate netns.
+        /// Address to bind on. Bubblewrap and Seatbelt use loopback; an LXC
+        /// caller can pass its bridge gateway to cross a separate netns.
         #[arg(long = "bind-address", default_value = "127.0.0.1")]
         pub bind_address: String,
 
@@ -75,57 +78,66 @@ mod linux_main {
         pub default_policy: DefaultPolicyArg,
     }
 
+    fn parent_disconnect_signal() -> Result<tokio::sync::oneshot::Receiver<()>, std::io::Error> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("mxc-proxy-parent-watch".into())
+            .spawn(move || {
+                let mut stdin = std::io::stdin();
+                let mut buffer = [0u8; 256];
+                loop {
+                    match stdin.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+                let _ = sender.send(());
+            })?;
+        Ok(receiver)
+    }
+
     pub async fn run() -> std::process::ExitCode {
-        // 1. Tie our lifetime to the parent so a crash of `lxc-exec` cannot
-        //    leave us behind. Must happen before any work — and we must check
-        //    for the parent-already-dead race immediately after.
-        //
-        //    NOTE: `PR_SET_PDEATHSIG` is a per-thread setting and applies to
-        //    the thread that invokes `prctl`. We rely on `#[tokio::main]`
-        //    keeping THIS thread (the runtime's driver) alive for the whole
-        //    process lifetime. Do NOT move this prctl call into a spawned
-        //    tokio task; that would silently break the parent-death guarantee
-        //    when the spawning thread parks or migrates.
-        unsafe {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
-            if libc::getppid() == 1 {
-                // Parent died before prctl took effect. Bail before binding
-                // anything to avoid leaking a listening socket.
-                return std::process::ExitCode::from(0);
-            }
-        }
-
-        eprintln!(
-            "[unix-test-proxy] *** SECURITY WARNING ***: testing-only proxy. Do NOT use in production."
-        );
-
-        let cli = Cli::parse();
-
-        let filter = Arc::new(proxy::HostFilter::new(
-            cli.allow_host.clone(),
-            cli.block_host.clone(),
-            cli.default_policy.into(),
-        ));
-
-        let port = match proxy::start(&cli.bind_address, filter).await {
-            Ok(port) => port,
-            Err(err) => {
-                eprintln!(
-                    "[unix-test-proxy] failed to bind {}: {}",
-                    cli.bind_address, err
-                );
+        let parent_disconnected = match parent_disconnect_signal() {
+            Ok(signal) => signal,
+            Err(error) => {
+                eprintln!("[unix-test-proxy] failed to start parent watcher: {error}");
                 return std::process::ExitCode::from(1);
             }
         };
 
         eprintln!(
-            "[unix-test-proxy] Listening on {}:{}",
-            cli.bind_address, port
+            "[unix-test-proxy] *** SECURITY WARNING ***: testing-only proxy. Do NOT use in production."
         );
+
+        let Cli {
+            ready_file,
+            bind_address,
+            allow_host,
+            block_host,
+            default_policy,
+        } = Cli::parse();
+
+        let filter = Arc::new(proxy::HostFilter::new(
+            allow_host,
+            block_host,
+            default_policy.into(),
+        ));
+
+        let port = match proxy::start(&bind_address, filter).await {
+            Ok(port) => port,
+            Err(err) => {
+                eprintln!("[unix-test-proxy] failed to bind {}: {}", bind_address, err);
+                return std::process::ExitCode::from(1);
+            }
+        };
+
+        eprintln!("[unix-test-proxy] Listening on {}:{}", bind_address, port);
 
         // 2. Atomic ready-file: write to `<file>.tmp`, then rename. This
         //    eliminates partial-read windows when the parent polls the file.
-        let tmp_path = cli.ready_file.with_extension("tmp");
+        let tmp_path = ready_file.with_extension("tmp");
         if let Err(err) = fs::write(&tmp_path, port.to_string()) {
             eprintln!(
                 "[unix-test-proxy] Failed to write ready tmp file {}: {}",
@@ -134,19 +146,18 @@ mod linux_main {
             );
             return std::process::ExitCode::from(1);
         }
-        if let Err(err) = fs::rename(&tmp_path, &cli.ready_file) {
+        if let Err(err) = fs::rename(&tmp_path, &ready_file) {
             eprintln!(
                 "[unix-test-proxy] Failed to rename ready file to {}: {}",
-                cli.ready_file.display(),
+                ready_file.display(),
                 err
             );
             let _ = fs::remove_file(&tmp_path);
             return std::process::ExitCode::from(1);
         }
 
-        // 3. Wait for SIGTERM (parent's explicit stop signal) or SIGINT
-        //    (ctrl-C during manual testing). PR_SET_PDEATHSIG above also
-        //    delivers SIGTERM if the parent dies.
+        // 3. Wait for the parent's explicit stop signal, ctrl-C during manual
+        //    testing, or EOF if the parent exits without running cleanup.
         let mut term =
             match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(s) => s,
@@ -173,22 +184,25 @@ mod linux_main {
         tokio::select! {
             _ = term.recv() => eprintln!("[unix-test-proxy] received SIGTERM, shutting down"),
             _ = interrupt.recv() => eprintln!("[unix-test-proxy] received SIGINT, shutting down"),
+            _ = parent_disconnected => {
+                eprintln!("[unix-test-proxy] parent disconnected, shutting down")
+            },
         }
 
         std::process::ExitCode::from(0)
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    linux_main::run().await
+    unix_main::run().await
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn main() {
     eprintln!(
-        "unix-test-proxy: this binary is only supported on Linux. Use wxc-test-proxy on Windows."
+        "unix-test-proxy: this binary is only supported on Unix (Linux/macOS). Use wxc-test-proxy on Windows."
     );
     std::process::exit(1);
 }

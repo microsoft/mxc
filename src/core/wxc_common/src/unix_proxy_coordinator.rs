@@ -1,20 +1,22 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Coordinator for the Unix network proxy used by the Bubblewrap backend.
+//! Coordinator for the cooperative network proxy used by the Bubblewrap
+//! (Linux) and Seatbelt (macOS) backends.
 //!
 //! # Why this exists
 //!
-//! The Bubblewrap backend wants to enforce `allowedHosts` / `blockedHosts`
+//! Both backends want to route sandboxed traffic through an HTTP proxy
 //! **without** root or `CAP_NET_ADMIN`. The Windows AppContainer proxy
 //! coordinator achieves enforcement through WinHTTP policy (set by an
-//! elevated shim). On Linux, the equivalent without privilege is a
+//! elevated shim). On Unix the equivalent without privilege is a
 //! **cooperative env-var proxy**:
 //!
 //! 1. The coordinator launches an unprivileged HTTP proxy process (either a
 //!    user-supplied address, or the bundled `unix-test-proxy` binary).
-//! 2. The Bubblewrap command builder sets `HTTP_PROXY` / `HTTPS_PROXY` /
-//!    `NO_PROXY` env vars inside the sandbox.
+//! 2. The backend's command builder / runner sets `HTTP_PROXY` /
+//!    `HTTPS_PROXY` env vars inside the sandbox (Bubblewrap via `--setenv`,
+//!    Seatbelt via the child's cleared-then-populated environment).
 //! 3. Cooperative apps (curl, requests, etc.) honor the env vars and the
 //!    proxy applies allow/block filtering; non-cooperative apps reaching
 //!    out via raw sockets bypass enforcement (documented limitation).
@@ -24,17 +26,18 @@
 //! - **Privilege-free**: no iptables, no namespaces, no setuid binaries.
 //! - **Bind address is configurable** to allow future LXC reuse (LXC has
 //!   its own netns, so the proxy needs to bind on the bridge gateway IP).
-//!   Bubblewrap shares the host netns and passes `"127.0.0.1"`.
+//!   Bubblewrap and Seatbelt share the host netns and pass `"127.0.0.1"`.
 //! - **Atomic ready-file**: `unix-test-proxy` writes `<file>.tmp` and
 //!   renames into place to eliminate partial-read races.
-//! - **PR_SET_PDEATHSIG** in the child ensures the proxy dies if
-//!   `lxc-exec` crashes (orphan reaping safety net).
+//! - **Parent pipe**: the child watches stdin for EOF so it exits if the
+//!   executor crashes, on both Linux and macOS.
 //! - **`Drop` is silent**: never writes to stderr or `Logger`, because
 //!   destructors can run at unpredictable times (e.g. during panic
-//!   propagation) and noisy drops would corrupt the JSON envelope on
-//!   `lxc-exec`'s stderr.
+//!   propagation) and noisy drops would corrupt the JSON envelope on the
+//!   executor's stderr.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,11 +84,7 @@ fn create_private_temp_dir(unique_id: &str) -> Result<PathBuf, WxcError> {
     })?;
 
     // Best-effort 0700 chmod so other users cannot snoop the ready file.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-    }
+    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
 
     Ok(dir)
 }
@@ -157,7 +156,7 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> bool {
     }
 }
 
-/// Coordinator for the network proxy used by the Bubblewrap backend.
+/// Coordinator for the network proxy used by Unix backends.
 ///
 /// Cooperative model: launches an unprivileged HTTP proxy (either external
 /// or the bundled `unix-test-proxy`), and the caller is responsible for
@@ -165,6 +164,7 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> bool {
 ///
 /// The coordinator is **not** active until [`start`](Self::start) succeeds,
 /// and is automatically cleaned up by [`stop`](Self::stop) or `Drop`.
+#[derive(Default)]
 pub struct UnixProxyCoordinator {
     proxy_address: Option<ProxyAddress>,
     test_proxy: Option<TestProxyChild>,
@@ -173,10 +173,7 @@ pub struct UnixProxyCoordinator {
 impl UnixProxyCoordinator {
     /// Create an inactive coordinator. Call [`start`](Self::start) to launch.
     pub fn new() -> Self {
-        Self {
-            proxy_address: None,
-            test_proxy: None,
-        }
+        Self::default()
     }
 
     /// Returns `true` once a proxy has been started.
@@ -245,12 +242,8 @@ impl UnixProxyCoordinator {
             ));
         };
 
+        logger.log_line(&format!("Unix network proxy active: {}", address.to_url(),));
         self.proxy_address = Some(address);
-
-        logger.log_line(&format!(
-            "Unix network proxy active: {}",
-            self.proxy_address.as_ref().unwrap().to_url(),
-        ));
 
         Ok(())
     }
@@ -303,10 +296,11 @@ impl UnixProxyCoordinator {
         for host in block_hosts {
             cmd.arg("--block-host").arg(host);
         }
-        // Use a null stderr to avoid corrupting the JSON envelope that
-        // lxc-exec writes on its own stderr stream (the proxy may emit
-        // diagnostic lines).
-        cmd.stdin(Stdio::null())
+        // Keep a private stdin pipe open for the child's parent-lifetime
+        // watcher. If the executor exits unexpectedly, EOF tells the proxy to
+        // shut down. Null stdout/stderr avoid corrupting the executor's JSON
+        // envelope with proxy diagnostics.
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
@@ -368,12 +362,6 @@ impl UnixProxyCoordinator {
             remove_temp_dir(&tp.temp_dir);
         }
         self.proxy_address = None;
-    }
-}
-
-impl Default for UnixProxyCoordinator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -606,7 +594,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("sleep is available on Linux test hosts");
+            .expect("sleep is available on Unix test hosts");
 
         // Override the timeout: use a short window for the test by
         // temporarily inlining the polling logic.
@@ -651,7 +639,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("true is available on Linux test hosts");
+            .expect("true is available on Unix test hosts");
 
         // Give the child a moment to exit.
         std::thread::sleep(Duration::from_millis(100));
