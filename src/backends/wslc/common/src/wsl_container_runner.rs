@@ -1326,4 +1326,35 @@ mod tests {
         let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn run_rejects_denied_path_overlap_before_sdk_load() {
+        // Wiring guard: a deniedPaths entry nested under a mounted parent must be
+        // rejected at the pre-flight overlap check (run_internal, before SDK
+        // load), so no container is ever started. The pure-function unit tests
+        // in policy_mapping do not cover this call-site ordering. Uses
+        // non-existent paths so D6 (Absent) and delegation (unknown) pass through
+        // to the overlap check.
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                readwrite_paths: vec![r"C:\mxc-nonexistent-parent".to_string()],
+                denied_paths: vec![r"C:\mxc-nonexistent-parent\secrets".to_string()],
+                ..Default::default()
+            },
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&WslcConfig::default());
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert!(
+            response.error_message.contains("cannot be enforced"),
+            "expected the overlap error, got: {}",
+            response.error_message
+        );
+    }
 }
