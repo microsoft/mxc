@@ -317,6 +317,24 @@ fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
     ScriptResponse::error(&msg)
 }
 
+fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
+    if missing as u32 & WslcComponentFlags::WslPackage as u32 != 0 {
+        return format!(
+            "WSLC runtime not available. Missing components: {:?}. The installed WSL \
+             package must be version 2.8.0 or newer. The WSLC SDK DLL is present, but \
+             the WSL runtime is missing or too old. Update WSL with `wsl --update` \
+             and verify the installed version with `wsl --version`.",
+            missing
+        );
+    }
+
+    format!(
+        "WSLC runtime not available. Missing components: {:?}. Ensure WSL2 and the \
+         WSLC SDK are installed.",
+        missing
+    )
+}
+
 impl ScriptRunner for WSLContainerRunner {
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         unsafe { self.run_internal(request, logger) }
@@ -356,11 +374,7 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcCanRun failed", hr, ""));
         }
         if can_run == 0 {
-            return Err(ScriptResponse::error(&format!(
-                "WSLC runtime not available. Missing components: {:?}. \
-                 Ensure WSL2 and the WSLC SDK are installed.",
-                missing
-            )));
+            return Err(ScriptResponse::error(&wslc_prerequisite_error(missing)));
         }
         let _ = writeln!(logger, "[WSLC] Runtime check passed");
 
@@ -1310,5 +1324,14 @@ mod tests {
     fn nonexistent_file_returns_error() {
         let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn wsl_package_prerequisite_error_explains_minimum_version() {
+        let message = wslc_prerequisite_error(WslcComponentFlags::WslPackage);
+
+        assert!(message.contains("2.8.0"));
+        assert!(message.contains("WSLC SDK DLL is present"));
+        assert!(message.contains("wsl --update"));
     }
 }
