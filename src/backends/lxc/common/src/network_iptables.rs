@@ -387,6 +387,17 @@ impl NetworkIptablesManager {
         args
     }
 
+    /// Build the allow/deny rule args for a container policy.
+    ///
+    /// NOTE — interim ordering (tracked by AB#62830341): rules are emitted in
+    /// allow-list, then block-list, then `egress_rules` (author) order, and
+    /// iptables/ip6tables apply first-match-wins within the chain. This
+    /// model-1 change therefore does **not** yet implement deny-precedence:
+    /// a destination present in both the allow and block lists is ACCEPTed,
+    /// and `egress_rules` carry no deny priority. Reconciling this to the
+    /// GA "deny-wins" ordering across the combined allow/deny model is owned
+    /// by net-model-2 (AB#62830341); until then callers must not assume
+    /// deny-precedence.
     fn build_policy_rule_args(chain_name: &str, policy: &ContainerPolicy) -> FirewallRuleArgs {
         let mut args = FirewallRuleArgs::default();
         for host in &policy.allowed_hosts {
@@ -417,6 +428,36 @@ impl NetworkIptablesManager {
     /// Run an ip6tables command and return success/failure.
     fn run_ip6tables(args: &[&str], logger: &mut Logger) -> Result<bool, String> {
         Self::run_firewall_command("ip6tables", args, logger)
+    }
+
+    /// Probe whether `ip6tables` can be used on this host.
+    ///
+    /// Runs a harmless, read-only `ip6tables -S` (list the filter table).
+    /// This fails both when the binary is missing (IPv4-only images) and when
+    /// the kernel has IPv6 disabled (`ip6tables` reports the table cannot be
+    /// initialized). In either case the caller skips the parallel v6 chain and
+    /// warns, instead of aborting an otherwise-valid IPv4 policy — a hard
+    /// dependency on ip6tables would break pure-IPv4 hosts that worked before
+    /// dual-stack support was added.
+    fn ip6tables_available(logger: &mut Logger) -> bool {
+        match Command::new("ip6tables").arg("-S").output() {
+            Ok(output) if output.status.success() => true,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                logger.log_line(&format!(
+                    "ip6tables unavailable ({}); skipping IPv6 firewall rules.",
+                    stderr.trim()
+                ));
+                false
+            }
+            Err(e) => {
+                logger.log_line(&format!(
+                    "ip6tables not found ({}); skipping IPv6 firewall rules.",
+                    e
+                ));
+                false
+            }
+        }
     }
 
     fn run_firewall_command(
@@ -456,6 +497,11 @@ impl NetworkIptablesManager {
     }
 
     /// Apply network firewall rules based on the container policy.
+    ///
+    /// On any failure after the per-container chains are created, the partially
+    /// applied state is torn down before the error is returned, so a retry does
+    /// not trip over a leftover `MXC-<name>` chain ("chain already exists") and
+    /// leak rules permanently.
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
@@ -471,18 +517,55 @@ impl NetworkIptablesManager {
             return Ok(true);
         }
 
+        match self.apply_firewall_rules_inner(policy, logger) {
+            Ok(()) => {
+                self.rules_applied = true;
+                Ok(true)
+            }
+            Err(e) => {
+                // Roll back whatever was created before the failure. Without
+                // this, `remove_firewall_rules` short-circuits on
+                // `rules_applied == false` and the orphan chain(s) survive, so
+                // the next attempt fails permanently on `-N` ("chain already
+                // exists") until someone cleans up by hand.
+                logger.log_line(&format!(
+                    "Firewall setup failed: {}. Cleaning up partial iptables state.",
+                    e
+                ));
+                self.teardown_chains(logger);
+                Err(e)
+            }
+        }
+    }
+
+    /// Fallible body of [`Self::apply_firewall_rules`]. Kept separate so the
+    /// public method can roll back partial state on the error path.
+    fn apply_firewall_rules_inner(
+        &self,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
         logger.log_line(&format!(
             "Creating iptables/ip6tables chain: {}",
             self.chain_name
         ));
 
+        // Probe ip6tables once. On IPv4-only hosts (binary absent or IPv6
+        // disabled in the kernel) enforce the v4 policy and skip the v6 chain
+        // rather than failing setup for a policy that worked before dual-stack.
+        let ipv6_enabled = Self::ip6tables_available(logger);
+
         // Create custom chains.
         Self::run_iptables(&["-N", &self.chain_name], logger)?;
-        Self::run_ip6tables(&["-N", &self.chain_name], logger)?;
+        if ipv6_enabled {
+            Self::run_ip6tables(&["-N", &self.chain_name], logger)?;
+        }
 
         let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
         Self::run_iptables_rule_args(&base_rules, logger)?;
-        Self::run_ip6tables_rule_args(&base_rules, logger)?;
+        if ipv6_enabled {
+            Self::run_ip6tables_rule_args(&base_rules, logger)?;
+        }
 
         for host in policy
             .allowed_hosts
@@ -496,7 +579,15 @@ impl NetworkIptablesManager {
 
         let policy_rules = Self::build_policy_rule_args(&self.chain_name, policy);
         Self::run_iptables_rule_args(&policy_rules.ipv4, logger)?;
-        Self::run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
+        if ipv6_enabled {
+            Self::run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
+        } else if !policy_rules.ipv6.is_empty() {
+            logger.log_line(&format!(
+                "Warning: {} IPv6 firewall rule(s) not applied because ip6tables \
+                 is unavailable; IPv6 egress is unfiltered on this host.",
+                policy_rules.ipv6.len()
+            ));
+        }
 
         // Append default policy at end of each chain.
         let default_rule = Self::build_default_policy_rule_arg(
@@ -507,7 +598,9 @@ impl NetworkIptablesManager {
         let default_action = default_args.last().copied().unwrap_or("ACCEPT");
         logger.log_line(&format!("Default network policy: {}", default_action));
         Self::run_iptables(&default_args, logger)?;
-        Self::run_ip6tables(&default_args, logger)?;
+        if ipv6_enabled {
+            Self::run_ip6tables(&default_args, logger)?;
+        }
 
         // Hook the chains into FORWARD for the container's egress traffic.
         // Packets originating in the container arrive at the host on the
@@ -518,10 +611,12 @@ impl NetworkIptablesManager {
                 &["-I", "FORWARD", "-i", iface, "-j", &self.chain_name],
                 logger,
             )?;
-            Self::run_ip6tables(
-                &["-I", "FORWARD", "-i", iface, "-j", &self.chain_name],
-                logger,
-            )?;
+            if ipv6_enabled {
+                Self::run_ip6tables(
+                    &["-I", "FORWARD", "-i", iface, "-j", &self.chain_name],
+                    logger,
+                )?;
+            }
         } else {
             // Without a veth interface, we cannot safely scope rules to the container.
             // Refuse to apply host-wide rules to avoid affecting all host traffic.
@@ -531,21 +626,14 @@ impl NetworkIptablesManager {
             );
         }
 
-        self.rules_applied = true;
-        Ok(true)
+        Ok(())
     }
 
-    /// Remove all iptables/ip6tables rules created by this manager.
-    pub fn remove_firewall_rules(&mut self, logger: &mut Logger) -> Result<(), String> {
-        if !self.rules_applied {
-            return Ok(());
-        }
-
-        logger.log_line(&format!(
-            "Removing iptables/ip6tables chain: {}",
-            self.chain_name
-        ));
-
+    /// Best-effort removal of the FORWARD hooks and per-container chains in
+    /// both tables. Safe to call even when only part of the state was created
+    /// (a missing rule/chain just makes the individual `-D`/`-F`/`-X` call
+    /// no-op), so it doubles as the rollback path for a failed apply.
+    fn teardown_chains(&self, logger: &mut Logger) {
         // Remove from FORWARD (only if we had a veth interface and hooked it).
         // Must match the `-i` direction used at insertion so the delete finds
         // the rule; a `-o` delete would leak the FORWARD hook.
@@ -565,6 +653,20 @@ impl NetworkIptablesManager {
         let _ = Self::run_iptables(&["-X", &self.chain_name], logger);
         let _ = Self::run_ip6tables(&["-F", &self.chain_name], logger);
         let _ = Self::run_ip6tables(&["-X", &self.chain_name], logger);
+    }
+
+    /// Remove all iptables/ip6tables rules created by this manager.
+    pub fn remove_firewall_rules(&mut self, logger: &mut Logger) -> Result<(), String> {
+        if !self.rules_applied {
+            return Ok(());
+        }
+
+        logger.log_line(&format!(
+            "Removing iptables/ip6tables chain: {}",
+            self.chain_name
+        ));
+
+        self.teardown_chains(logger);
 
         self.rules_applied = false;
         Ok(())

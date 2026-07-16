@@ -1,0 +1,29 @@
+{
+  "version": "0.4.0-alpha",
+  "containerId": "CLI-LXC-Network-IPv6-CIDR",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "wget -qO- https://api.github.com/zen"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": [
+      "140.82.112.0/20",
+      "2606:50c0::/32",
+      "2606:50c0:8000::153"
+    ],
+    "blockedHosts": [
+      "10.0.0.0/8",
+      "2001:db8::/32",
+      "fe80::1"
+    ]
+  }
+}
