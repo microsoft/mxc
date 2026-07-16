@@ -469,3 +469,483 @@ pub fn write_added_paths_summary(added: &AddedPaths, verbose: bool) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access_event::LearningModeAccessEvent;
+    use serde_json::json;
+
+    fn ev_write(path: &str) -> LearningModeAccessEvent {
+        LearningModeAccessEvent {
+            time_created: chrono::Utc::now(),
+            process_id: 0,
+            thread_id: 0,
+            learning_mode: String::new(),
+            resource_type: String::new(),
+            file_path: path.to_string(),
+            app_path: String::new(),
+            access_mask: FILE_WRITE_MASK,
+        }
+    }
+
+    fn ev_read(path: &str) -> LearningModeAccessEvent {
+        LearningModeAccessEvent {
+            time_created: chrono::Utc::now(),
+            process_id: 0,
+            thread_id: 0,
+            learning_mode: String::new(),
+            resource_type: String::new(),
+            file_path: path.to_string(),
+            app_path: String::new(),
+            access_mask: READ_DATA_MASK,
+        }
+    }
+
+    // ---- path_starts_with_any --------------------------------------------
+
+    fn norm(p: &str) -> String {
+        normalize_path(p).expect("test input must normalize")
+    }
+
+    #[test]
+    fn starts_with_any_rejects_sibling_with_shared_prefix() {
+        // The historical bug: "c:\foobar\baz".starts_with("c:\foo") was
+        // true, silently mishandling siblings sharing a name prefix.
+        assert!(!path_starts_with_any_norm(
+            &norm("C:\\foobar\\baz"),
+            [norm("C:\\foo")]
+        ));
+    }
+
+    #[test]
+    fn starts_with_any_matches_exact() {
+        assert!(path_starts_with_any_norm(
+            &norm("C:\\foo"),
+            [norm("C:\\foo")]
+        ));
+    }
+
+    #[test]
+    fn starts_with_any_matches_nested_child() {
+        assert!(path_starts_with_any_norm(
+            &norm("C:\\foo\\bar\\baz.txt"),
+            [norm("C:\\foo")]
+        ));
+    }
+
+    #[test]
+    fn starts_with_any_is_case_insensitive_and_separator_tolerant() {
+        assert!(path_starts_with_any_norm(
+            &norm("c:\\Foo\\bar"),
+            [norm("C:\\foo\\")]
+        ));
+    }
+
+    // ---- normalize_path / is_drive_root ----------------------------------
+
+    #[test]
+    fn is_drive_root_detects_variants() {
+        assert!(is_drive_root("C:\\"));
+        assert!(is_drive_root("C:"));
+        assert!(is_drive_root("c:/"));
+        assert!(!is_drive_root("C:\\foo"));
+        assert!(!is_drive_root(""));
+    }
+
+    #[test]
+    fn is_drive_root_handles_verbatim_and_device_prefix() {
+        // ETW emits these forms when a process opens
+        // \??\C:\... directly; the drive-root guard must catch them.
+        assert!(is_drive_root("\\\\?\\C:\\"));
+        assert!(is_drive_root("\\\\?\\C:"));
+        assert!(is_drive_root("\\\\.\\C:\\"));
+        assert!(!is_drive_root("\\\\?\\C:\\hiberfil.sys"));
+        // UNC verbatim is never a drive root.
+        assert!(!is_drive_root("\\\\?\\UNC\\server\\share"));
+    }
+
+    #[test]
+    fn normalize_path_strips_verbatim_prefix() {
+        assert_eq!(normalize_path("\\\\?\\C:\\Foo").as_deref(), Some("c:\\foo"));
+        assert_eq!(normalize_path("\\\\.\\C:\\Foo").as_deref(), Some("c:\\foo"));
+    }
+
+    #[test]
+    fn normalize_path_collapses_separators_and_lowercase() {
+        assert_eq!(
+            normalize_path("C:/Foo/Bar").as_deref(),
+            Some("c:\\foo\\bar")
+        );
+    }
+
+    #[test]
+    fn normalize_path_strips_trailing_dot_per_component() {
+        // trailing dots map to the same NTFS
+        // object as the base name, so deny matching must canonicalize.
+        assert_eq!(
+            normalize_path("C:\\Secrets.").as_deref(),
+            Some("c:\\secrets")
+        );
+        assert_eq!(
+            normalize_path("C:\\Secrets ").as_deref(),
+            Some("c:\\secrets")
+        );
+        assert_eq!(
+            normalize_path("C:\\Secrets\\token. ").as_deref(),
+            Some("c:\\secrets\\token")
+        );
+    }
+
+    #[test]
+    fn normalize_path_rejects_ads_outside_drive_separator() {
+        // ADS (alternate data stream) syntax on a directory resolves to
+        // the directory itself; deny must not be bypassable via this.
+        assert!(normalize_path("C:\\Secrets:hidden").is_none());
+        assert!(normalize_path("C:\\Secrets\\token.dat:s").is_none());
+    }
+
+    #[test]
+    fn normalize_path_rejects_unc_verbatim() {
+        assert!(normalize_path("\\\\?\\UNC\\server\\share\\x").is_none());
+    }
+
+    // lock current behavior on path-normalization
+    // corners that prior rounds did not cover. These are NOT
+    // necessarily the *correct* answers in every case (see comments)
+    // — they encode what `normalize_path` actually does today so a
+    // future change cannot silently widen / narrow the surface.
+
+    #[test]
+    fn normalize_path_strips_nt_object_prefix() {
+        // `\??\C:\foo` is the NT-object form
+        // ETW occasionally emits. `config::normalize_path` now
+        // explicitly strips the `\??\` prefix (mirroring `\\?\` /
+        // `\\.\` handling) so call sites that bypass
+        // `event_parser::normalize_file_path` still get a comparable
+        // drive-letter form. Without this, the self-event filter
+        // would miss `\??\C:\plm\plm.exe`.
+        assert_eq!(normalize_path("\\??\\C:\\foo").as_deref(), Some("c:\\foo"));
+    }
+
+    #[test]
+    fn normalize_path_passes_globalroot_through_unchanged() {
+        // `\\?\GLOBALROOT\Device\HarddiskVolume3\foo` strips the `\\?\`
+        // prefix and lowercases. The result is NOT a drive-letter
+        // form and won't match any drive-rooted deny entry, but the
+        // function currently returns Some(...) for it (no ADS-style
+        // `:` rejection triggers). Operators who want to deny
+        // GLOBALROOT volumes must add explicit deny entries.
+        let got = normalize_path("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\foo");
+        assert_eq!(
+            got.as_deref(),
+            Some("globalroot\\device\\harddiskvolume3\\foo")
+        );
+    }
+
+    #[test]
+    fn normalize_path_accepts_non_verbatim_unc() {
+        // `\\server\share\x` is NOT `\\?\UNC\…` so it doesn't get
+        // rejected. The leading `\\` survives lowercasing and the
+        // result starts with the same prefix. Whether UNC paths are
+        // policy-meaningful is a separate question — this test just
+        // pins the current pass-through behavior.
+        let got = normalize_path("\\\\server\\share\\x");
+        assert_eq!(got.as_deref(), Some("\\\\server\\share\\x"));
+    }
+
+    #[test]
+    fn normalize_path_passes_drive_relative_through() {
+        // `C:foo` (no separator after the colon) is Win32 drive-
+        // relative — Windows resolves it against the per-drive CWD.
+        // `normalize_path` does not currently reject these; the `:`
+        // at position 1 is the drive-letter separator so it passes
+        // the ADS guard. Caller's responsibility to either canonicalize
+        // upstream or accept that drive-relative events won't match
+        // drive-rooted deny entries.
+        let got = normalize_path("C:foo");
+        assert_eq!(got.as_deref(), Some("c:foo"));
+    }
+
+    // ---- update_from_access_events ---------------------------------------
+
+    fn run_update(
+        config: &mut Value,
+        events: &[LearningModeAccessEvent],
+        deny: &[&str],
+    ) -> AddedPaths {
+        initialize_filesystem(config).unwrap();
+        let deny_set: HashSet<String> = deny.iter().map(|s| (*s).to_string()).collect();
+        update_from_access_events(config, "__never_matches__", events, &deny_set, false).unwrap()
+    }
+
+    fn run_update_with_bin(
+        config: &mut Value,
+        bin_path: &str,
+        events: &[LearningModeAccessEvent],
+        deny: &[&str],
+    ) -> AddedPaths {
+        initialize_filesystem(config).unwrap();
+        let deny_set: HashSet<String> = deny.iter().map(|s| (*s).to_string()).collect();
+        update_from_access_events(config, bin_path, events, &deny_set, false).unwrap()
+    }
+
+    #[test]
+    fn write_to_denied_path_is_not_promoted() {
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets\\token.dat"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets\\token.dat")],
+            &["C:\\Secrets\\token.dat"],
+        );
+        assert!(added.readwrite.is_empty());
+        assert!(cfg["filesystem"]["readwritePaths"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    // ---- bin_path self-event filter -------------------
+    //
+    // The self-filter normalizes `bin_path` and compares both the raw
+    // (verbatim or plain) form via `eq_ignore_ascii_case` AND the
+    // normalized form against the event path. Every other test in this
+    // module passes `"__never_matches__"` as bin_path; these four lock
+    // the actual self-filter behavior so a regression isn't silent.
+
+    #[test]
+    fn self_event_filter_skips_raw_bin_path() {
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "C:\\bin\\plm.exe",
+            &[ev_read("C:\\bin\\plm.exe")],
+            &[],
+        );
+        assert!(
+            added.readonly.is_empty(),
+            "events referencing the PLM binary itself must be filtered"
+        );
+    }
+
+    #[test]
+    fn self_event_filter_skips_verbatim_bin_path_against_plain_event() {
+        // canonicalize() may return the
+        // verbatim form \\?\C:\..., while ETW emits the plain form.
+        // Both must self-filter.
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "\\\\?\\C:\\bin\\plm.exe",
+            &[ev_read("C:\\bin\\plm.exe")],
+            &[],
+        );
+        assert!(
+            added.readonly.is_empty(),
+            "verbatim bin_path must self-filter plain-form events"
+        );
+    }
+
+    #[test]
+    fn self_event_filter_case_insensitive() {
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "C:\\bin\\plm.exe",
+            &[ev_read("c:\\BIN\\PLM.EXE")],
+            &[],
+        );
+        assert!(
+            added.readonly.is_empty(),
+            "self-filter must be case-insensitive on Windows paths"
+        );
+    }
+
+    #[test]
+    fn non_self_event_passes_through_self_filter() {
+        let mut cfg = json!({});
+        let added = run_update_with_bin(
+            &mut cfg,
+            "C:\\bin\\plm.exe",
+            &[ev_read("C:\\Users\\foo\\bar.txt")],
+            &[],
+        );
+        assert_eq!(
+            added.readonly.len(),
+            1,
+            "non-self event must NOT be filtered: {added:?}"
+        );
+    }
+
+    #[test]
+    fn write_to_sibling_does_not_bypass_denied_via_parent() {
+        // Regression: write to a non-denied sibling inside a directory
+        // that holds a denied file must not promote the parent to
+        // readwrite (which would transitively grant write to the denied
+        // file).
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets\\scratch.txt")],
+            &["C:\\Secrets"],
+        );
+        assert!(
+            added.readwrite.is_empty(),
+            "expected no rw promotion, got: {:?}",
+            added.readwrite
+        );
+    }
+
+    // Windows-only because `normalize_path` uses Windows path
+    // parsing rules; on non-Windows hosts `\` is not a separator and
+    // these inputs would not normalize the way production expects.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn write_at_drive_root_does_not_grant_whole_volume() {
+        let mut cfg = json!({});
+        let added = run_update(&mut cfg, &[ev_write("C:\\hiberfil.sys")], &[]);
+        // Must be a file-scope grant, never the bare drive root.
+        assert_eq!(added.readwrite, vec!["C:\\hiberfil.sys".to_string()]);
+        assert!(
+            !added.readwrite.iter().any(|p| is_drive_root(p)),
+            "drive-root grant leaked: {:?}",
+            added.readwrite
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn write_grants_exact_file_not_parent_directory() {
+        // Regression: earlier passes widened writes to the parent
+        // directory. The reviewer asked us to keep the grant scoped
+        // to the file. This test locks that in.
+        let mut cfg = json!({});
+        let added = run_update(&mut cfg, &[ev_write("C:\\a\\b\\c.txt")], &[]);
+        assert_eq!(added.readwrite, vec!["C:\\a\\b\\c.txt".to_string()]);
+    }
+
+    #[test]
+    fn read_under_existing_readonly_parent_is_not_duplicated() {
+        let mut cfg = json!({
+            "filesystem": { "readonlyPaths": ["C:\\src"] }
+        });
+        let added = run_update(&mut cfg, &[ev_read("C:\\src\\main.rs")], &[]);
+        assert!(added.readonly.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn idempotent_on_already_writable_path() {
+        let mut cfg = json!({
+            "filesystem": { "readwritePaths": ["C:\\out"] }
+        });
+        let added = run_update(&mut cfg, &[ev_write("C:\\out\\foo.txt")], &[]);
+        assert!(added.readwrite.is_empty());
+    }
+
+    // ---- ------------------------------------
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn write_via_verbatim_drive_root_does_not_grant_volume() {
+        // `\\?\C:\` is the verbatim spelling of a drive root; the
+        // `is_drive_root` guard on the write branch must skip it just
+        // like `C:\`. Writes to files _under_ the verbatim root are
+        // still granted at file scope.
+        let mut cfg = json!({});
+        let added = run_update(&mut cfg, &[ev_write("\\\\?\\C:\\hiberfil.sys")], &[]);
+        for p in &added.readwrite {
+            assert!(
+                normalize_path(p).map(|n| n.len() > 2).unwrap_or(true),
+                "verbatim drive-root grant leaked: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_to_trailing_dot_variant_of_denied_dir_is_blocked() {
+        // "C:\Secrets." resolves to the same NTFS
+        // object as "C:\Secrets" but previously bypassed deny matching.
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets.\\token.txt")],
+            &["C:\\Secrets"],
+        );
+        assert!(
+            added.readwrite.is_empty(),
+            "deny bypass via trailing dot: {:?}",
+            added.readwrite
+        );
+    }
+
+    #[test]
+    fn write_to_ads_on_denied_dir_is_rejected() {
+        // ADS syntax on a directory resolves to the
+        // directory and must not bypass deny matching. `normalize_path`
+        // rejects the path entirely.
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\Secrets:hidden")],
+            &["C:\\Secrets"],
+        );
+        assert!(
+            added.readwrite.is_empty(),
+            "ADS on denied dir slipped through: {:?}",
+            added.readwrite
+        );
+    }
+
+    #[test]
+    fn mixed_separators_do_not_cause_duplicates() {
+        // `C:/foo` vs `C:\foo` previously broke dedup.
+        let mut cfg = json!({
+            "filesystem": { "readonlyPaths": ["C:\\src"] }
+        });
+        let added = run_update(&mut cfg, &[ev_read("C:/src/main.rs")], &[]);
+        assert!(
+            added.readonly.is_empty(),
+            "mixed separators created duplicate: {:?}",
+            added.readonly
+        );
+    }
+
+    // ---- typed-error behavior --------------------------------------------
+
+    #[test]
+    fn initialize_filesystem_rejects_non_object_root() {
+        let mut cfg = json!([]);
+        assert!(initialize_filesystem(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn initialize_filesystem_rejects_wrong_typed_filesystem() {
+        let mut cfg = json!({ "filesystem": "deny" });
+        assert!(initialize_filesystem(&mut cfg).is_err());
+    }
+
+    // R5-31: load_config rejects malformed JSON files with a useful
+    // error rather than panicking or silently returning the empty
+    // object.
+    #[test]
+    fn load_config_rejects_malformed_json() {
+        let tmp =
+            std::env::temp_dir().join(format!("plm_load_cfg_test_{}.json", std::process::id()));
+        std::fs::write(&tmp, b"{not valid json").unwrap();
+        let err = load_config(&tmp).unwrap_err();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            format!("{err}").to_ascii_lowercase().contains("json")
+                || format!("{err}").contains("parse")
+        );
+    }
+}
