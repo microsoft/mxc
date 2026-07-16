@@ -193,7 +193,7 @@ The workspace is organized into six top-level directories under `src/`:
 | `backends/` | Backend-specific code (one subfolder per containment backend) | `appcontainer/common`, `windows_sandbox/{daemon,guest,common,lifecycle}`, `isolation_session/{bindings,common}`, `hyperlight/common`, `nanvix/{common,build_common,binaries,runner}`, `lxc/common`, `bubblewrap/common`, `wslc/common`, `seatbelt/common` |
 | `ffi/` | Foreign-function-interface crates (C ABI for language bindings) | `mxc_ffi/` |
 | `host/` | Host-side utilities | `wxc_host_prep/`, `wxc_winhttp_proxy_shim/` |
-| `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `linux_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
+| `testing/` | Test infrastructure crates | `wxc_e2e_tests/`, `wxc_test_driver/`, `wxc_test_proxy/`, `unix_test_proxy/`, `wxc_ui_probe/`, `fuzz/` |
 | `tools/` | Developer/diagnostic tools | `mxc_diagnostic_console/` |
 
 - `wxc_common` is the **cross-platform foundation**: config parsing, models, errors, logger, `ScriptRunner` / `StatefulSandboxBackend` traits, state-aware dispatch helpers, validators, ids, ui-policy, encoding. Plus a few thin Windows API helpers shared by host tools and backends (`process_util`, `string_util`, `filesystem_dacl`, `diagnostic`). It must not depend on any `backends/*` crate.

@@ -53,9 +53,10 @@ pub mod string_util;
 #[cfg(unix)]
 pub mod interruptible_reader;
 
-// Linux-specific modules
-#[cfg(target_os = "linux")]
-pub mod linux_proxy_coordinator;
+// Unix cooperative network proxy coordinator, used by the Bubblewrap (Linux)
+// and Seatbelt (macOS) backends.
+#[cfg(unix)]
+pub mod unix_proxy_coordinator;
 
 /// Test-only helper for env-var serialization within this crate's
 /// `filesystem_dacl` tests. The same shape lives in
