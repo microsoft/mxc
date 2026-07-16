@@ -448,6 +448,19 @@ pub fn update_from_access_events(
 
         // Process Read Requests
         if (ev.access_mask & READ_MASK) != 0 {
+            // Refuse to emit a bare drive root — that would grant read
+            // of the entire volume. Mirrors the readwrite branch above.
+            // The upstream `is_skippable` `len < 4` filter drops the
+            // common `C:` / `C:\` spellings, but a root that reaches
+            // here in a longer form (e.g. `C:\\`, which
+            // `trim_backslashes_in_place` collapses to `C:`, or a
+            // verbatim `\\?\C:\`) would otherwise be added verbatim.
+            if is_drive_root(&ev.file_path) {
+                if verbose {
+                    println!("Skipping read event at bare drive root: {}", ev.file_path);
+                }
+                continue;
+            }
             // Same prefix-cache optimization as the readwrite branch:
             // exact hit first, then cache a positive prefix match so
             // repeats of the same read path short-circuit in O(1).
@@ -847,6 +860,47 @@ mod tests {
             "drive-root grant leaked: {:?}",
             added.readwrite
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn read_at_drive_root_does_not_grant_whole_volume() {
+        // A bare drive-root read must never widen the policy to the
+        // entire volume. `C:` is the form a `C:\\` root collapses to
+        // after `trim_backslashes_in_place` upstream.
+        for root in ["C:", "C:\\"] {
+            let mut cfg = json!({});
+            let added = run_update(&mut cfg, &[ev_read(root)], &[]);
+            assert!(
+                added.readonly.is_empty(),
+                "drive-root read grant leaked for {root:?}: {:?}",
+                added.readonly
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn read_via_verbatim_drive_root_does_not_grant_volume() {
+        // `\\?\C:\` is the verbatim spelling of a drive root; the read
+        // branch's `is_drive_root` guard must skip it just like `C:\`.
+        let mut cfg = json!({});
+        let added = run_update(&mut cfg, &[ev_read("\\\\?\\C:\\")], &[]);
+        assert!(
+            added.readonly.is_empty(),
+            "verbatim drive-root read grant leaked: {:?}",
+            added.readonly
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn read_of_file_under_drive_root_is_still_granted() {
+        // Guard must not over-filter: a read of an actual file under
+        // the drive root is still recorded at file scope.
+        let mut cfg = json!({});
+        let added = run_update(&mut cfg, &[ev_read("C:\\pagefile.sys")], &[]);
+        assert_eq!(added.readonly, vec!["C:\\pagefile.sys".to_string()]);
     }
 
     #[cfg(target_os = "windows")]
