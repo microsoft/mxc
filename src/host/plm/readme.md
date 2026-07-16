@@ -58,7 +58,7 @@ plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
 
 ### `plm log`
 
-Interactive iteration mode: press Enter to start a trace, run the workload, press Enter again to stop. The "diff against a blank config" preview arrives in later PRs.
+Interactive iteration mode: press Enter to start a trace, run the workload, press Enter again to stop. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview.
 
 ```powershell
 plm.exe log [--wprp <path>] [--verbose-logging]

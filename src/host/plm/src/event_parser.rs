@@ -377,6 +377,11 @@ pub(crate) struct ParseAccumulator<'a> {
     /// config — free of redundant entries.
     pub(crate) seen_access_events: HashSet<(u32, String)>,
     pub(crate) requested_capabilities: HashSet<String>,
+    /// Count of events whose XML failed to parse in `consume` (i.e.
+    /// `parse_event_xml` returned `None`). A malformed record is skipped
+    /// rather than aborting the trace, but the running total is surfaced
+    /// at the end of a parse so silent data loss is observable.
+    pub(crate) parse_failures: usize,
 }
 
 impl<'a> ParseAccumulator<'a> {
@@ -409,6 +414,7 @@ impl<'a> ParseAccumulator<'a> {
             valid_access_events: Vec::new(),
             seen_access_events: HashSet::new(),
             requested_capabilities: HashSet::new(),
+            parse_failures: 0,
         }
     }
 
@@ -418,22 +424,25 @@ impl<'a> ParseAccumulator<'a> {
     pub(crate) fn is_skippable(&self, file_path: &str) -> bool {
         if let (Some(cwd_lc), prefix_opt) = (&self.cwd_lc_trimmed, &self.cwd_lc_prefix) {
             let normalized = file_path.trim_end_matches('\\');
-            let nb = normalized.as_bytes();
-            let cwd_b = cwd_lc.as_bytes();
-            let cwd_eq = nb.len() == cwd_b.len()
-                && nb.iter().zip(cwd_b).all(|(a, b)| a.eq_ignore_ascii_case(b));
+            let normalized_bytes = normalized.as_bytes();
+            let cwd_bytes = cwd_lc.as_bytes();
+            let cwd_equals = normalized_bytes.len() == cwd_bytes.len()
+                && normalized_bytes
+                    .iter()
+                    .zip(cwd_bytes)
+                    .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs));
             let prefix_match = prefix_opt
                 .as_deref()
-                .map(|p| {
-                    let pb = p.as_bytes();
-                    nb.len() >= pb.len()
-                        && nb[..pb.len()]
+                .map(|prefix| {
+                    let prefix_bytes = prefix.as_bytes();
+                    normalized_bytes.len() >= prefix_bytes.len()
+                        && normalized_bytes[..prefix_bytes.len()]
                             .iter()
-                            .zip(pb)
-                            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                            .zip(prefix_bytes)
+                            .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs))
                 })
                 .unwrap_or(false);
-            if cwd_eq || prefix_match {
+            if cwd_equals || prefix_match {
                 if self.verbose {
                     println!("Skipping current-directory event: {file_path}");
                 }
@@ -463,6 +472,10 @@ impl<'a> ParseAccumulator<'a> {
     /// UI-policy PR.
     fn consume(&mut self, xml: &str) {
         let Some(ev) = parse_event_xml(xml) else {
+            self.parse_failures += 1;
+            if self.verbose {
+                eprintln!("Warning: skipping malformed event record (could not parse XML)");
+            }
             return;
         };
         match ev.event_id {
@@ -475,6 +488,12 @@ impl<'a> ParseAccumulator<'a> {
     }
 
     fn into_result(self) -> ParseResult {
+        if self.parse_failures > 0 {
+            eprintln!(
+                "Warning: skipped {} malformed event record(s) that could not be parsed",
+                self.parse_failures
+            );
+        }
         ParseResult {
             valid_access_events: self.valid_access_events,
             requested_capabilities: self.requested_capabilities,

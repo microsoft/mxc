@@ -97,7 +97,7 @@ fn resolve_wpr_path() -> Option<PathBuf> {
 ///
 /// Returns `Err` if `GetSystemDirectoryW` failed outright, or if the
 /// resolved path doesn't exist on disk — both indicate a
-/// broken/stripped Windows install (WPT not present or `System32`
+/// broken/stripped Windows install (WPR not present or `System32`
 /// unreadable), which the caller must surface with a clear message
 /// rather than let `CreateProcess` fail cryptically later.
 #[cfg(target_os = "windows")]
