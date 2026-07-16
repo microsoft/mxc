@@ -10,6 +10,8 @@
 
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::reader::Reader;
 use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "windows")]
 use std::path::Path;
@@ -437,52 +439,175 @@ pub(crate) struct ParsedEvent {
 }
 
 pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
-    let doc = roxmltree::Document::parse(xml).ok()?;
-    let root = doc.root_element();
+    let mut reader = Reader::from_str(xml);
+    let mut acc = StreamAcc::default();
 
-    let system = root.children().find(|n| n.has_tag_name("System"))?;
-    let event_id = system
-        .children()
-        .find(|n| n.has_tag_name("EventID"))
-        .and_then(|n| n.text())
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-
-    let time_created = system
-        .children()
-        .find(|n| n.has_tag_name("TimeCreated"))
-        .and_then(|n| n.attribute("SystemTime"))
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
-
-    let execution = system.children().find(|n| n.has_tag_name("Execution"));
-    let process_id = execution
-        .and_then(|n| n.attribute("ProcessID"))
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-    let thread_id = execution
-        .and_then(|n| n.attribute("ThreadID"))
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-
-    let mut event_data = Vec::new();
-    if let Some(ed) = root.children().find(|n| n.has_tag_name("EventData")) {
-        for child in ed.children().filter(|n| n.is_element()) {
-            let tag = child.tag_name().name();
-            if tag == "Data" || tag == "ComplexData" {
-                event_data.push(child.text().unwrap_or("").to_string());
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) => break,
+            // roxmltree rejected malformed input with `.ok()?`; mirror
+            // that by bailing to `None` on any reader error.
+            Err(_) => return None,
+            Ok(Event::Start(e)) => acc.open(&e, false),
+            Ok(Event::Empty(e)) => acc.open(&e, true),
+            Ok(Event::End(e)) => acc.close(e.local_name().as_ref()),
+            Ok(Event::Text(t)) => {
+                if acc.capture.is_some() {
+                    if let Ok(raw) = std::str::from_utf8(t.as_ref()) {
+                        if let Ok(s) = quick_xml::escape::unescape(raw) {
+                            acc.push_text(&s);
+                        }
+                    }
+                }
             }
+            Ok(Event::CData(t)) => {
+                if acc.capture.is_some() {
+                    acc.push_text(&String::from_utf8_lossy(t.as_ref()));
+                }
+            }
+            _ => {}
         }
     }
 
+    // `roxmltree` returned `None` when the `<System>` element was
+    // absent (the `?` on `root.children().find(System)`); every other
+    // field carried a default. Preserve that single hard requirement.
+    if !acc.saw_system {
+        return None;
+    }
+
     Some(ParsedEvent {
-        event_id,
-        time_created,
-        process_id,
-        thread_id,
-        event_data,
+        event_id: acc.event_id,
+        time_created: acc
+            .time_created
+            .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap()),
+        process_id: acc.process_id,
+        thread_id: acc.thread_id,
+        event_data: acc.event_data,
     })
+}
+
+/// Which leaf element's inner text the streaming parser is currently
+/// accumulating. `<TimeCreated>`/`<Execution>` are attribute-only and
+/// never captured here.
+enum Capture {
+    EventId,
+    Data,
+}
+
+/// Streaming replacement for the former per-event roxmltree DOM. Walks
+/// the WinEvent record with a `quick-xml` pull parser, extracting only
+/// the handful of fields the decoders consume and allocating a `String`
+/// solely for those captured leaf texts — no document tree, no
+/// intermediate node objects. Field semantics mirror the old DOM
+/// lookups exactly, including "first element wins" and the `unwrap_or`
+/// defaults.
+#[derive(Default)]
+struct StreamAcc {
+    saw_system: bool,
+    in_system: bool,
+    in_event_data: bool,
+    // `seen_*` guards reproduce roxmltree's `find(..)` first-match
+    // semantics: a second `<EventID>`/`<TimeCreated>`/`<Execution>`
+    // must not overwrite the first, even when the first failed to parse.
+    seen_event_id: bool,
+    seen_time_created: bool,
+    seen_execution: bool,
+    event_id: u32,
+    time_created: Option<DateTime<Utc>>,
+    process_id: u32,
+    thread_id: u32,
+    event_data: Vec<String>,
+    capture: Option<(Capture, String)>,
+}
+
+impl StreamAcc {
+    fn open(&mut self, e: &BytesStart<'_>, is_empty: bool) {
+        let name = e.name();
+        match name.local_name().as_ref() {
+            b"System" => {
+                self.saw_system = true;
+                if !is_empty {
+                    self.in_system = true;
+                }
+            }
+            b"EventData" => {
+                if !is_empty {
+                    self.in_event_data = true;
+                }
+            }
+            b"EventID" if self.in_system && !self.seen_event_id => {
+                self.seen_event_id = true;
+                if is_empty {
+                    // Empty `<EventID/>` -> no text -> parse fails -> 0.
+                    self.event_id = 0;
+                } else {
+                    self.capture = Some((Capture::EventId, String::new()));
+                }
+            }
+            b"TimeCreated" if self.in_system && !self.seen_time_created => {
+                self.seen_time_created = true;
+                if let Some(v) = attr_value(e, b"SystemTime") {
+                    if let Ok(dt) = DateTime::parse_from_rfc3339(&v) {
+                        self.time_created = Some(dt.with_timezone(&Utc));
+                    }
+                }
+            }
+            b"Execution" if self.in_system && !self.seen_execution => {
+                self.seen_execution = true;
+                if let Some(n) = attr_value(e, b"ProcessID").and_then(|v| v.parse().ok()) {
+                    self.process_id = n;
+                }
+                if let Some(n) = attr_value(e, b"ThreadID").and_then(|v| v.parse().ok()) {
+                    self.thread_id = n;
+                }
+            }
+            b"Data" | b"ComplexData" if self.in_event_data => {
+                if is_empty {
+                    self.event_data.push(String::new());
+                } else {
+                    self.capture = Some((Capture::Data, String::new()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_text(&mut self, s: &str) {
+        if let Some((_, buf)) = &mut self.capture {
+            buf.push_str(s);
+        }
+    }
+
+    fn close(&mut self, local: &[u8]) {
+        match local {
+            b"System" => self.in_system = false,
+            b"EventData" => self.in_event_data = false,
+            _ => {}
+        }
+        let matches = matches!(
+            (&self.capture, local),
+            (Some((Capture::EventId, _)), b"EventID")
+                | (Some((Capture::Data, _)), b"Data" | b"ComplexData")
+        );
+        if !matches {
+            return;
+        }
+        let (kind, text) = self.capture.take().unwrap();
+        match kind {
+            Capture::EventId => self.event_id = text.parse::<u32>().unwrap_or(0),
+            Capture::Data => self.event_data.push(text),
+        }
+    }
+}
+
+/// Read a single attribute's unescaped value as an owned `String`.
+fn attr_value(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
+    let a = e.try_get_attribute(name).ok().flatten()?;
+    let raw = std::str::from_utf8(a.value.as_ref()).ok()?;
+    quick_xml::escape::unescape(raw)
+        .ok()
+        .map(|v| v.into_owned())
 }
 
 /// Mutable per-trace accumulator. Fields are `pub(crate)` so the
