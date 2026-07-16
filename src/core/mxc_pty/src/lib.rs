@@ -312,6 +312,26 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         }
     });
 
+    // Kill the timed-out (or errored) child together with its whole process
+    // group. The child is its own process-group leader — its `pre_exec` calls
+    // `setsid`, so its PGID equals its PID — so signalling the group also
+    // reaps processes the timed-out command spawned that stayed in that group
+    // (e.g. a backgrounded job under a non-job-control shell). A bare
+    // `child.kill()` would only hit the `lxc-attach` wrapper and orphan those
+    // in-container processes. A process that started its own session escapes
+    // the group; the bounded drain below keeps such a straggler from hanging
+    // us instead.
+    fn kill_child_and_group(child: &mut std::process::Child) {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        // Negative pid targets the process group whose leader is `pid`.
+        if let Ok(pid) = i32::try_from(child.id()) {
+            let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     let outcome = match deadline {
         None => {
             let status = child.wait().map_err(|e| format!("wait: {}", e))?;
@@ -322,29 +342,67 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
                 Ok(Some(status)) => break PtyOutcome::Exited(status),
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        kill_child_and_group(&mut child);
                         break PtyOutcome::TimedOut;
                     }
                     thread::sleep(PtyOptions::POLL_INTERVAL);
                 }
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_child_and_group(&mut child);
                     return Err(format!("try_wait: {}", e));
                 }
             }
         },
     };
 
-    // Drain remaining output before returning. The secondary fds are closed
-    // on child exit, so primary_reader hits EOF and the thread exits.
-    let _ = output_thread.join();
+    // Drain remaining output before returning.
+    match outcome {
+        PtyOutcome::Exited(_) => {
+            // The child exited, so its secondary fds close, primary_reader hits
+            // EOF, and the drain thread finishes on its own. Join unbounded so
+            // every last byte of output is flushed.
+            let _ = output_thread.join();
+        }
+        PtyOutcome::TimedOut => {
+            // We killed the child's process group, but a process it left
+            // running inside the sandbox that escaped into its own session can
+            // still hold the pty secondary open — primary_reader would then
+            // never see EOF and an unbounded join would block forever,
+            // defeating the very timeout we just enforced. Give the drain a
+            // short grace to flush buffered output, then abandon the reader.
+            // The executor process exits right after a (state-aware) exec, so
+            // the OS reaps the detached thread.
+            const DRAIN_GRACE: Duration = Duration::from_secs(2);
+            let _ = join_with_timeout(output_thread, DRAIN_GRACE);
+        }
+    }
 
     Ok(outcome)
 }
 
-/// Background thread that watches for SIGWINCH on the outer pty
+/// Join `handle`, returning once the thread finishes or `grace` elapses —
+/// whichever comes first. Returns `true` if the thread finished within the
+/// grace period, `false` if it was abandoned.
+///
+/// [`run_with_pty`] uses this to drain a killed child's buffered output on the
+/// timeout path without risking a permanent hang: a process the timed-out
+/// child left running inside the sandbox can keep the pty open, so the reader
+/// thread never sees EOF and a plain `JoinHandle::join` would block forever.
+/// The abandoned reader thread dies when the (one-shot-per-invocation)
+/// executor process exits.
+///
+/// Implemented with a helper thread that performs the blocking join and
+/// signals a channel, since the standard library has no join-with-timeout.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+fn join_with_timeout(handle: std::thread::JoinHandle<()>, grace: Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(grace).is_ok()
+}
+
 /// (delivered to *some* thread because fd 0 is the outer secondary) and
 /// forwards the new window size to the inner pty primary via TIOCSWINSZ.
 ///
@@ -526,6 +584,31 @@ mod tests {
         assert_eq!(PtyOptions::POLL_INTERVAL, Duration::from_millis(500));
     }
 
+    #[test]
+    fn join_with_timeout_returns_true_when_thread_finishes() {
+        let handle = std::thread::spawn(|| {});
+        assert!(join_with_timeout(handle, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn join_with_timeout_gives_up_on_a_blocked_thread() {
+        // A thread that blocks far past the grace must not make
+        // join_with_timeout wait for it — this is what stops a leaked
+        // pty-holding child from hanging exec forever.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            // Blocks until the test drops `tx`, well past the grace below.
+            let _ = rx.recv();
+        });
+        let start = std::time::Instant::now();
+        assert!(!join_with_timeout(handle, Duration::from_millis(200)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "join_with_timeout must return near the grace, not block"
+        );
+        drop(tx); // let the abandoned thread exit before the test ends
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn echo_runs_under_pty() {
@@ -551,6 +634,36 @@ mod tests {
         };
         let outcome = run_with_pty(cmd, opts).expect("bridge spawns");
         assert!(matches!(outcome, PtyOutcome::TimedOut));
+    }
+
+    /// Regression for the exec-timeout hang: a timed-out command that left a
+    /// process running (here a backgrounded `sleep` sibling of the foreground
+    /// command) must not stall `run_with_pty`. The leaked process inherits the
+    /// pty secondary, so without the process-group kill + bounded drain the
+    /// output reader never sees EOF and the join blocks until the straggler
+    /// exits (~30s). With the fix the whole process group is killed and the
+    /// call returns right after the (sub-second) timeout.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn timeout_returns_promptly_despite_leaked_background_process() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cmd = Command::new("/bin/sh");
+        // Background one sleep, then become another via exec. `sleep 30`
+        // (not 300) bounds any worst-case leak if this ever regresses.
+        cmd.arg("-c").arg("sleep 30 & exec sleep 30");
+        let opts = PtyOptions {
+            timeout: Some(Duration::from_millis(750)),
+            ..PtyOptions::default()
+        };
+        let start = std::time::Instant::now();
+        let outcome = run_with_pty(cmd, opts).expect("bridge spawns");
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, PtyOutcome::TimedOut));
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "exec must return promptly after timeout, took {elapsed:?} (leaked \
+             process hung the drain?)"
+        );
     }
 
     /// Documents the libc invariant motivating the FD_CLOEXEC fixup

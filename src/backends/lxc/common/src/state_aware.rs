@@ -238,9 +238,14 @@ fn apply_network_policy(
     }
 }
 
-fn cleanup_network(container_name: &str, logger: &mut Logger) {
-    let veth = NetworkIptablesManager::discover_veth_interface(container_name);
-    NetworkIptablesManager::force_cleanup(container_name, veth.as_deref(), logger);
+/// Best-effort teardown of the iptables state installed for a container.
+///
+/// `veth` must be the host-side veth interface name discovered *while the
+/// container was still running* — it disappears once the container stops, but
+/// iptables can still delete a `FORWARD` rule that names it, so callers pass
+/// the previously-discovered name through here after stopping the container.
+fn cleanup_network(container_name: &str, veth: Option<&str>, logger: &mut Logger) {
+    NetworkIptablesManager::force_cleanup(container_name, veth, logger);
 }
 
 impl StatefulSandboxBackend for LxcStateAwareRunner {
@@ -311,8 +316,13 @@ impl StatefulSandboxBackend for LxcStateAwareRunner {
                 .start()
                 .map_err(|e| MxcError::backend_error(format!("Failed to start container: {e}")))?;
             if let Err(e) = apply_network_policy(&container, request, &mut logger) {
-                cleanup_network(container_name, &mut logger);
+                // Roll back: stop the container *before* removing any
+                // partially-applied firewall rules so it cannot run without
+                // egress filtering during rollback. Discover the veth first —
+                // it disappears once the container stops.
+                let veth = NetworkIptablesManager::discover_veth_interface(container_name);
                 let _ = container.stop();
+                cleanup_network(container_name, veth.as_deref(), &mut logger);
                 return Err(e);
             }
         }
@@ -384,12 +394,19 @@ impl StatefulSandboxBackend for LxcStateAwareRunner {
         }
 
         let mut logger = Logger::new(Mode::Buffer);
-        cleanup_network(container_name, &mut logger);
+        // Discover the veth while the container is still running; it disappears
+        // once stopped, but iptables can still delete a FORWARD rule that names
+        // it. Stop the container *before* tearing down its firewall rules so no
+        // process runs without egress filtering during the shutdown drain. If
+        // the stop fails, propagate the error and leave the rules in place
+        // rather than exposing a still-running container.
+        let veth = NetworkIptablesManager::discover_veth_interface(container_name);
         if container.is_running() {
             container
                 .stop()
                 .map_err(|e| MxcError::backend_error(format!("Failed to stop container: {e}")))?;
         }
+        cleanup_network(container_name, veth.as_deref(), &mut logger);
         Ok(StopResult { metadata: None })
     }
 
@@ -403,13 +420,21 @@ impl StatefulSandboxBackend for LxcStateAwareRunner {
         reject_start_policy_on_other_phase("deprovision", &request.policy)?;
 
         let mut logger = Logger::new(Mode::Buffer);
-        cleanup_network(container_name, &mut logger);
         let container = LxcContainer::new(container_name, None);
+        // Discover the veth before teardown while the container may still be
+        // running; it disappears once destroyed, but iptables can still delete
+        // a FORWARD rule that names it.
+        let veth = NetworkIptablesManager::discover_veth_interface(container_name);
         if container.is_defined() {
+            // `destroy` force-stops and removes the container, so once it
+            // returns no container process can run. Destroy *before* removing
+            // the firewall rules so nothing runs without egress filtering
+            // during teardown; if the destroy fails, leave the rules in place.
             container.destroy().map_err(|e| {
                 MxcError::backend_error(format!("Failed to destroy container: {e}"))
             })?;
         }
+        cleanup_network(container_name, veth.as_deref(), &mut logger);
         Ok(DeprovisionResult { metadata: None })
     }
 

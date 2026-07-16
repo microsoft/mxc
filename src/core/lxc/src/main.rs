@@ -8,12 +8,10 @@ use std::time::Instant;
 use clap::Parser;
 use wxc_common::config_parser::{load_mxc_request, ParseError};
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::handle_dry_run_exit;
-use wxc_common::state_aware_dispatch::{
-    dispatch_state_aware, resolve_backend, run_state_aware, DispatchOutcome,
-};
+use wxc_common::state_aware_dispatch::DispatchOutcome;
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::telemetry;
 
@@ -128,7 +126,7 @@ fn run_state_aware_main(
     parsed.request.testing_features_enabled = testing_features;
     parsed.request.dry_run = dry_run;
 
-    let outcome = dispatch_state_aware_request(parsed, dry_run);
+    let outcome = mxc_engine::run_state_aware(parsed, dry_run);
     let buffered = logger.get_buffer().to_string();
     if !buffered.is_empty() {
         eprint!("{}", buffered);
@@ -143,20 +141,6 @@ fn run_state_aware_main(
             print_error_envelope(&e);
             process::exit(1);
         }
-    }
-}
-
-fn dispatch_state_aware_request(
-    parsed: ParsedStateAwareRequest,
-    dry_run: bool,
-) -> Result<DispatchOutcome, MxcError> {
-    let backend = resolve_backend(&parsed)?;
-    match backend {
-        ContainmentBackend::Lxc => {
-            let mut runner = lxc_common::state_aware::LxcStateAwareRunner::new();
-            dispatch_state_aware(&mut runner, parsed, dry_run)
-        }
-        _ => run_state_aware(parsed, dry_run),
     }
 }
 

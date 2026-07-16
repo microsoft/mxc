@@ -234,6 +234,54 @@ impl LxcContainer {
             })
     }
 
+    /// Remove every configuration line for `key` from the container's config
+    /// file.
+    ///
+    /// [`set_config_item`](Self::set_config_item) *appends* a `key = value`
+    /// line, and list-type keys such as `lxc.mount.entry` accumulate one line
+    /// per call. liblxc replays every occurrence when it parses the file at
+    /// start, so a caller that re-derives a list from policy on each start must
+    /// clear the previous run's lines first — otherwise a restart inherits
+    /// stale entries (e.g. mounts a tightened policy meant to drop).
+    ///
+    /// A line matches when the token before its first `=` (trimmed) equals
+    /// `key`, so `lxc.mount.entry` is matched but neighbouring keys like
+    /// `lxc.mount` are left intact, and `=` inside a value (e.g.
+    /// `create=dir`) is irrelevant. A missing config file is treated as
+    /// already-clear (`Ok`).
+    pub fn clear_config_item(&self, key: &str) -> Result<(), String> {
+        let config_path = self.config_file_path();
+        let contents = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read config to clear {}: {} (config file: {})",
+                    key, e, config_path
+                ))
+            }
+        };
+
+        let mut out = String::with_capacity(contents.len());
+        for line in contents.lines() {
+            let matches_key = line
+                .split_once('=')
+                .map(|(lhs, _)| lhs.trim() == key)
+                .unwrap_or(false);
+            if !matches_key {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+
+        std::fs::write(&config_path, out).map_err(|e| {
+            format!(
+                "Failed to rewrite config to clear {}: {} (config file: {})",
+                key, e, config_path
+            )
+        })
+    }
+
     /// Start the container.
     pub fn start(&self) -> Result<(), String> {
         Self::run_status(self.lxc_command("lxc-start"), "lxc-start")
@@ -373,7 +421,7 @@ impl LxcContainer {
     }
 
     /// Get the path to the container's config file.
-    fn config_file_path(&self) -> String {
+    pub(crate) fn config_file_path(&self) -> String {
         format!("{}/{}/config", self.lxc_path, self.name)
     }
 
@@ -578,7 +626,64 @@ mod tests {
         );
     }
 
-    // ---- build_attach_args ----------------------------------------------
+    #[test]
+    fn clear_config_item_removes_only_matching_key_lines() {
+        // Set up a real config file with two `lxc.mount.entry` lines (the
+        // list-type key that accumulates across restarts), a similarly-named
+        // key that must be preserved, and unrelated keys.
+        let base = std::env::temp_dir().join(format!(
+            "mxc-clear-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let name = "box";
+        std::fs::create_dir_all(base.join(name)).unwrap();
+        let container = LxcContainer::new(name, Some(base.to_str().unwrap()));
+
+        let original = "lxc.arch = amd64\n\
+             lxc.mount.entry = /host/a a none bind,create=dir 0 0\n\
+             lxc.mount = /some/fstab\n\
+             lxc.mount.entry = /host/b b none bind,ro,create=dir 0 0\n\
+             lxc.uts.name = box\n";
+        std::fs::write(container.config_file_path(), original).unwrap();
+
+        container.clear_config_item("lxc.mount.entry").unwrap();
+
+        let after = std::fs::read_to_string(container.config_file_path()).unwrap();
+        assert!(
+            !after.contains("lxc.mount.entry"),
+            "all lxc.mount.entry lines must be removed, got:\n{after}"
+        );
+        // The prefix-sharing `lxc.mount` key and unrelated keys survive.
+        assert!(after.contains("lxc.mount = /some/fstab"));
+        assert!(after.contains("lxc.arch = amd64"));
+        assert!(after.contains("lxc.uts.name = box"));
+
+        // Re-clearing is idempotent.
+        container.clear_config_item("lxc.mount.entry").unwrap();
+        let after2 = std::fs::read_to_string(container.config_file_path()).unwrap();
+        assert_eq!(after, after2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clear_config_item_missing_file_is_ok() {
+        // A container whose config file does not exist is already "clear".
+        let bogus_base = std::env::temp_dir().join(format!(
+            "mxc-clear-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let container = LxcContainer::new("ghost", Some(bogus_base.to_str().unwrap()));
+        assert!(container.clear_config_item("lxc.mount.entry").is_ok());
+    }
 
     #[test]
     fn build_attach_args_no_env_no_cwd_is_unchanged_legacy_shape() {
