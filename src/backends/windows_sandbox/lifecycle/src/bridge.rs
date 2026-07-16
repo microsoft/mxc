@@ -28,6 +28,26 @@ const POST_EXIT_DRAIN_SECS: Duration = Duration::from_secs(15);
 
 const PREAMBLE_HANDSHAKE_TIMEOUT_SECS: Duration = Duration::from_secs(10);
 
+/// Per-stream cap on captured guest output in the one-shot protocol. The guest
+/// is untrusted, so unbounded buffering lets a runaway script OOM the host.
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Grace added to the guest's own `timeout_ms` to form the host watchdog
+/// deadline: covers guest process teardown and final output drain. If the guest
+/// freezes and never reports, the host stops waiting after `timeout_ms + grace`.
+const HOST_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
+
+/// Host watchdog deadline for one guest execution. `None` for an infinite guest
+/// budget (`u32::MAX`, the normalized "no timeout"); otherwise `timeout_ms +
+/// grace`, saturating against overflow.
+fn host_watchdog_deadline(timeout_ms: u32, grace: Duration) -> Option<Duration> {
+    if timeout_ms == u32::MAX {
+        None
+    } else {
+        Some(Duration::from_millis(u64::from(timeout_ms)).saturating_add(grace))
+    }
+}
+
 /// Four TCP connections to the guest agent.
 pub struct GuestConnection {
     pub control: TcpStream,
@@ -158,6 +178,28 @@ pub async fn execute_on_guest(
     timeout_ms: u32,
     host_stdin: &[u8],
 ) -> Result<ExecResult> {
+    execute_on_guest_with_grace(
+        conn,
+        exec_id,
+        script_code,
+        working_directory,
+        timeout_ms,
+        host_stdin,
+        HOST_WATCHDOG_GRACE,
+    )
+    .await
+}
+
+/// [`execute_on_guest`] with an explicit host-watchdog grace period, for tests.
+async fn execute_on_guest_with_grace(
+    conn: &mut GuestConnection,
+    exec_id: &str,
+    script_code: &str,
+    working_directory: &str,
+    timeout_ms: u32,
+    host_stdin: &[u8],
+    grace: Duration,
+) -> Result<ExecResult> {
     let exec_msg = ControlMessage::Exec(ExecRequest {
         exec_id: exec_id.to_string(),
         script_code: script_code.to_string(),
@@ -186,48 +228,8 @@ pub async fn execute_on_guest(
         }
     };
 
-    // Preserve partial output on failure. A reset before any bytes is an empty
-    // stream; a reset after data is a transport error.
-    let stdout_task = {
-        let stream = &mut conn.stdout_stream;
-        async move {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
-            let mut seen: u64 = 0;
-            loop {
-                let r = stream.read(&mut tmp).await;
-                match classify_data_read(r, seen, "stdout") {
-                    Ok(Some(n)) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        seen += n as u64;
-                    }
-                    Ok(None) => break,
-                    Err(e) => return (buf, Some(e)),
-                }
-            }
-            (buf, None)
-        }
-    };
-    let stderr_task = {
-        let stream = &mut conn.stderr_stream;
-        async move {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
-            let mut seen: u64 = 0;
-            loop {
-                let r = stream.read(&mut tmp).await;
-                match classify_data_read(r, seen, "stderr") {
-                    Ok(Some(n)) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        seen += n as u64;
-                    }
-                    Ok(None) => break,
-                    Err(e) => return (buf, Some(e)),
-                }
-            }
-            (buf, None)
-        }
-    };
+    let stdout_task = drain_capped_stream(&mut conn.stdout_stream, "stdout");
+    let stderr_task = drain_capped_stream(&mut conn.stderr_stream, "stderr");
 
     // Wait for the EXIT notification on the control channel.
     // Returns (exit_code, error_message, residual_bytes) where residual
@@ -268,16 +270,45 @@ pub async fn execute_on_guest(
         }
     };
 
-    // Run stdin forwarding, stdout/stderr reads, and the exit notification all
-    // concurrently.
-    let (stdin_err, (stdout, stdout_err), (stderr, stderr_err), exit_result) =
-        tokio::join!(stdin_task, stdout_task, stderr_task, exit_task);
+    // Concurrently pump stdin/stdout/stderr and the exit notification, bounded
+    // by a host watchdog so a frozen guest (or one that never closes its data
+    // streams) cannot hang the host indefinitely.
+    let joined = async { tokio::join!(stdin_task, stdout_task, stderr_task, exit_task) };
+    let (
+        stdin_err,
+        (stdout, stdout_truncated, stdout_err),
+        (stderr, stderr_truncated, stderr_err),
+        exit_result,
+    ) = match host_watchdog_deadline(timeout_ms, grace) {
+        Some(deadline) => match tokio::time::timeout(deadline, joined).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                eprintln!(
+                    "[daemon] WARNING: guest did not report completion within the host watchdog \
+                     ({timeout_ms}ms guest timeout + {}s grace); the sandbox may be frozen",
+                    grace.as_secs()
+                );
+                return Ok(ExecResult {
+                    exit_code: -1,
+                    error_message: format!(
+                        "guest did not report completion within the host watchdog ({timeout_ms}ms \
+                         guest timeout + {}s grace); the sandbox may be frozen",
+                        grace.as_secs()
+                    ),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    control_residual: Vec::new(),
+                });
+            }
+        },
+        None => joined.await,
+    };
 
     if let Some(e) = stdin_err {
         eprintln!("[daemon] WARNING: forwarding stdin to guest failed (continuing): {e:#}");
     }
 
-    let (exit_code, error_message, control_residual) = exit_result?;
+    let (exit_code, mut error_message, control_residual) = exit_result?;
 
     // A read error on stdout/stderr means the captured output may be truncated.
     // Do NOT present a truncated run as a clean success: if the guest reported
@@ -302,6 +333,29 @@ pub async fn execute_on_guest(
         }
     }
 
+    // Never present a capped run as a clean, complete capture.
+    if stdout_truncated || stderr_truncated {
+        let which = match (stdout_truncated, stderr_truncated) {
+            (true, true) => "stdout and stderr",
+            (true, false) => "stdout",
+            (false, true) => "stderr",
+            (false, false) => unreachable!(),
+        };
+        eprintln!(
+            "[daemon] WARNING: guest {which} exceeded the {MAX_CAPTURED_OUTPUT_BYTES}-byte capture \
+             cap and was truncated; use the state-aware backend (which streams) for large output."
+        );
+        let note = format!(
+            "guest {which} exceeded the {MAX_CAPTURED_OUTPUT_BYTES}-byte capture cap and was \
+             truncated"
+        );
+        error_message = if error_message.is_empty() {
+            note
+        } else {
+            format!("{error_message}; {note}")
+        };
+    }
+
     Ok(ExecResult {
         exit_code,
         error_message,
@@ -309,6 +363,54 @@ pub async fn execute_on_guest(
         stderr,
         control_residual,
     })
+}
+
+/// Drain one guest data stream into a buffer capped at
+/// [`MAX_CAPTURED_OUTPUT_BYTES`], returning the bytes, a truncation flag, and
+/// any transport error. Reads continue to EOF past the cap (excess discarded).
+async fn drain_capped_stream<R>(
+    stream: &mut R,
+    label: &str,
+) -> (Vec<u8>, bool, Option<anyhow::Error>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    drain_capped_stream_with_cap(stream, label, MAX_CAPTURED_OUTPUT_BYTES).await
+}
+
+/// [`drain_capped_stream`] with an explicit cap for testing.
+async fn drain_capped_stream_with_cap<R>(
+    stream: &mut R,
+    label: &str,
+    cap: usize,
+) -> (Vec<u8>, bool, Option<anyhow::Error>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 8192];
+    let mut seen: u64 = 0;
+    let mut truncated = false;
+    loop {
+        let r = stream.read(&mut tmp).await;
+        match classify_data_read(r, seen, label) {
+            Ok(Some(n)) => {
+                seen += n as u64;
+                if buf.len() < cap {
+                    let take = (cap - buf.len()).min(n);
+                    buf.extend_from_slice(&tmp[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return (buf, truncated, Some(e)),
+        }
+    }
+    (buf, truncated, None)
 }
 
 /// Wait for `StreamsReady`, then reconnect stdin/stdout/stderr.
@@ -422,17 +524,6 @@ pub struct StreamExecOutcome {
     pub exit_code: i32,
     /// The guest's error message accompanying the exit (empty on success).
     pub error_message: String,
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct ExitFramePermit {
-    _private: (),
-}
-
-impl ExitFramePermit {
-    pub fn after_guest_slot_release() -> Self {
-        Self { _private: () }
-    }
 }
 
 /// Run one guest execution and stream stdout/stderr to the IPC client.
@@ -616,12 +707,7 @@ where
 /// Write the terminal exit frame to the IPC client.
 ///
 /// Write the final exit frame after the guest slot is reusable.
-pub async fn write_exit_frame<W>(
-    ipc: &mut W,
-    _permit: ExitFramePermit,
-    exit_code: i32,
-    error_message: &str,
-) -> Result<bool>
+pub async fn write_exit_frame<W>(ipc: &mut W, exit_code: i32, error_message: &str) -> Result<bool>
 where
     W: AsyncWrite + Unpin,
 {
@@ -749,19 +835,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_capped_stream_captures_full_output_under_cap() {
+        let payload = vec![b'x'; 1000];
+        let mut src: &[u8] = &payload;
+        let (buf, truncated, err) =
+            drain_capped_stream_with_cap(&mut src, "stdout", 64 * 1024).await;
+        assert!(err.is_none());
+        assert!(!truncated);
+        assert_eq!(buf, payload);
+    }
+
+    #[tokio::test]
+    async fn drain_capped_stream_truncates_output_over_cap() {
+        let cap = 4096usize;
+        let payload = vec![b'y'; cap * 8];
+        let mut src: &[u8] = &payload;
+        let (buf, truncated, err) = drain_capped_stream_with_cap(&mut src, "stdout", cap).await;
+        assert!(err.is_none());
+        assert!(truncated);
+        assert_eq!(buf.len(), cap);
+        assert!(buf.iter().all(|&b| b == b'y'));
+    }
+
+    #[tokio::test]
+    async fn drain_capped_stream_truncates_exactly_at_boundary() {
+        let cap = 8192usize;
+        let exact = vec![b'z'; cap];
+        let mut exact_src: &[u8] = &exact;
+        let (buf, truncated, _) = drain_capped_stream_with_cap(&mut exact_src, "stderr", cap).await;
+        assert_eq!(buf.len(), cap);
+        assert!(!truncated);
+
+        let over = vec![b'z'; cap + 1];
+        let mut over_src: &[u8] = &over;
+        let (buf, truncated, _) = drain_capped_stream_with_cap(&mut over_src, "stderr", cap).await;
+        assert_eq!(buf.len(), cap);
+        assert!(truncated);
+    }
+
+    #[tokio::test]
     async fn write_exit_frame_emits_single_decodable_exit_frame() {
         // The terminal exit frame is written by the caller (after releasing
         // the single-flight slot). Verify the extracted helper
         // emits exactly one decodable exit frame and reports the client alive.
         let mut buf: Vec<u8> = Vec::new();
-        let alive = write_exit_frame(
-            &mut buf,
-            ExitFramePermit::after_guest_slot_release(),
-            7,
-            "boom",
-        )
-        .await
-        .unwrap();
+        let alive = write_exit_frame(&mut buf, 7, "boom").await.unwrap();
         assert!(alive, "an in-memory writer never errors");
 
         let mut cur = std::io::Cursor::new(buf);
@@ -775,6 +893,58 @@ mod tests {
         assert!(
             ipc_exec::read_frame(&mut cur).unwrap().is_none(),
             "no trailing frames after the terminal exit frame"
+        );
+    }
+
+    #[test]
+    fn host_watchdog_deadline_infinite_is_none() {
+        // u32::MAX = "no timeout": no watchdog.
+        assert_eq!(
+            host_watchdog_deadline(u32::MAX, Duration::from_secs(30)),
+            None
+        );
+    }
+
+    #[test]
+    fn host_watchdog_deadline_finite_adds_grace() {
+        assert_eq!(
+            host_watchdog_deadline(5_000, Duration::from_secs(30)),
+            Some(Duration::from_millis(5_000) + Duration::from_secs(30))
+        );
+    }
+
+    #[tokio::test]
+    async fn host_watchdog_fires_when_guest_never_reports_exit() {
+        // The fake guest handshakes but never sends EXIT nor closes its data
+        // streams; without the watchdog this would block forever. `_fake` keeps
+        // the sockets open for the call.
+        let nonce = generate_nonce().expect("generate nonce");
+        let (addr, fake_rx) = spawn_fake_guest(nonce.clone()).await;
+        let mut conn = connect_to_guest(addr, Duration::from_secs(5), &nonce)
+            .await
+            .expect("connect_to_guest must succeed");
+        let _fake = fake_rx
+            .await
+            .expect("fake-guest oneshot")
+            .expect("fake-guest accept");
+
+        let result = execute_on_guest_with_grace(
+            &mut conn,
+            "exec-frozen",
+            "sleep forever",
+            "",
+            200,
+            b"",
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("execute_on_guest returns Ok with a watchdog result");
+
+        assert_eq!(result.exit_code, -1);
+        assert!(
+            result.error_message.contains("host watchdog"),
+            "unexpected watchdog message: {}",
+            result.error_message
         );
     }
 

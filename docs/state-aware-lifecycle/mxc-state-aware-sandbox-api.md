@@ -178,12 +178,21 @@ opaque to MXC.
 
 The prefix is required: backend authors register their tag alongside the backend's
 `ContainmentBackend` variant, and the dispatcher uses it to route non-provision calls
-without a separate `containment` field on the wire (§7.1). An unrecognised prefix
-surfaces as `unsupported_containment`; a recognised prefix with a malformed body surfaces
-as `malformed_id` (§8). The same prefix is exposed on the `StatefulSandboxBackend` trait
-as `const ID_PREFIX: &'static str` (§9.2) so the default `provision` body can mint
+without a separate `containment` field on the wire (§7.1).
+
+The wire spec and the SDK observably disagree on *which* error fires for an
+unrecognised prefix, and this is by design:
+
+| Source                  | Behaviour for an unrecognised `sandboxId` prefix |
+| ----------------------- | ------------------------------------------------ |
+| SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` **before** the request reaches `wxc-exec`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id (not as a runtime dispatch failure). See `sdk/node/src/state-aware-helper.ts`. |
+| Wire (`wxc-exec` directly) | Returns `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
+
+A recognised prefix with a malformed body is `malformed_id` from both sources
+(§8). The same prefix is exposed on the `StatefulSandboxBackend` trait as
+`const ID_PREFIX: &'static str` (§9.2) so the default `provision` body can mint
 synthetic ids with the right prefix; the trait const and the dispatcher's routing table
-read from the same source, eliminating drift.
+read from the same source, eliminating drift within Rust.
 
 A second const, `const BACKEND_KEY: &'static str`, lives alongside `ID_PREFIX` on the
 trait (§9.2). It carries the wire-format `containment` value for the backend (e.g.,
@@ -248,7 +257,7 @@ type SandboxId<C extends StateAwareContainmentBackend> =
 
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
-type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
+type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session' | 'windows_sandbox'>;
 // extended as state-aware-capable backends are added
 
 // Per-(backend, phase) Configs. Each declares only the fields valid for that backend
@@ -286,6 +295,34 @@ interface IsolationSessionProvisionMetadata {
   agentUserName: string;
 }
 
+// WindowsSandbox holds a single active sandbox behind a persistent host-side
+// daemon. It has no Entra/user bundle. Filesystem policy is honored at
+// provision and is immutable thereafter (see §10.3).
+
+interface WindowsSandboxProvisionConfig {
+  version?: string;
+  filesystem?: FilesystemConfig;
+}
+
+interface WindowsSandboxStartConfig {
+  version?: string;
+}
+
+interface WindowsSandboxExecConfig {
+  version?: string;
+  process: ProcessConfig;
+}
+
+interface WindowsSandboxStopConfig {
+  version?: string;
+}
+
+interface WindowsSandboxDeprovisionConfig {
+  version?: string;
+}
+
+// WindowsSandbox returns no metadata for any phase.
+
 // Backend Config bundle — outer keys are state-aware-capable backends; inner per-phase
 // entries carry the typed per-(backend, phase) Config. Used by the generic per-phase
 // helpers below.
@@ -296,6 +333,12 @@ type ConfigsForBackend<C extends StateAwareContainmentBackend> =
     exec: IsolationSessionExecConfig;
     stop: IsolationSessionStopConfig;
     deprovision: IsolationSessionDeprovisionConfig;
+  } : C extends 'windows_sandbox' ? {
+    provision: WindowsSandboxProvisionConfig;
+    start: WindowsSandboxStartConfig;
+    exec: WindowsSandboxExecConfig;
+    stop: WindowsSandboxStopConfig;
+    deprovision: WindowsSandboxDeprovisionConfig;
   } : never;
 
 type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
@@ -315,7 +358,9 @@ interface StateAwareMetadata {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, deprovision
   };
-  // future state-aware-capable backends add typed entries here
+  windows_sandbox?: Record<never, never>;
+  // WindowsSandbox returns no metadata for any phase (keyof never -> undefined).
+  // Future state-aware-capable backends add typed entries here.
 }
 
 type ProvisionMetadataFor<C extends StateAwareContainmentBackend> =
@@ -917,10 +962,10 @@ other state-aware backend, so caller error-handling code is portable across back
 | Code | Meaning |
 |---|---|
 | `malformed_request` | Envelope-level error: missing required field, unknown phase, malformed JSON |
-| `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build |
+| `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build. **SDK callers**: the SDK type-checks unknown `sandboxId` prefixes against the closed `StateAwareContainmentBackend` union *before* dispatching and instead throws `malformed_id` for an unknown prefix; `unsupported_containment` is reachable from the SDK only on the provision path. See §6.4 |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
 | `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
-| `malformed_id` | The `sandboxId` does not have a recognised backend prefix, or has a recognised prefix but does not deserialise into the backend's native form |
+| `malformed_id` | The `sandboxId` does not have a recognised backend prefix, or has a recognised prefix but does not deserialise into the backend's native form. **SDK callers** also see this error code for any non-provision call whose `sandboxId` prefix is not in `StateAwareContainmentBackend` |
 | `stale_id` | The `sandboxId` deserialised but refers to a resource the backend no longer recognises |
 | `not_provisioned` | Phase requires a provisioned sandbox; none provided, or the id is in a pre-provision state |
 | `not_started` | Phase requires a started sandbox; the id is provisioned but not started |
@@ -1489,7 +1534,21 @@ documented in the backend's plan doc):
 | `network` | applied | rejected | rejected | rejected | rejected |
 | `ui` | applied | rejected | rejected | rejected | rejected |
 
-The matrix lands at two layers, each enforcing it independently:
+For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
+applied at provision and frozen for the life of the sandbox; later phases reject it.
+`network` and `ui` are not yet honored at any phase (network isolation is enforced
+unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundle.
+
+> **Known gap (`deniedPaths`).** WindowsSandbox honors `deniedPaths` only as a
+> best-effort provision-time rejection (a `.wsb` mapped share cannot express a Deny
+> ACE), not as a hardened security boundary. See the "Known gap (`deniedPaths`)"
+> caveat in [`docs/windows-sandbox/windows-sandbox.md`](../windows-sandbox/windows-sandbox.md).
+
+| Field | provision | start | exec | stop | deprovision |
+|---|---|---|---|---|---|
+| `filesystem` | applied | rejected | rejected | rejected | rejected |
+| `network` | rejected | rejected | rejected | rejected | rejected |
+| `ui` | rejected | rejected | rejected | rejected | rejected |
 
 - **Compile-time enforcement at the SDK.** Each per-(backend, phase) Config (§6.1)
   declares only the cross-cutting fields the matrix marks as `applied` for that phase

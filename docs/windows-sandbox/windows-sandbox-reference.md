@@ -1,36 +1,35 @@
-# Windows Sandbox One-Shot Backend - Reference
+# Windows Sandbox Backend - Reference
 
-This document describes the one-shot implementation. For the high-level
-overview, see [windows-sandbox.md](windows-sandbox.md).
+For the overview and policy matrix, see
+[windows-sandbox.md](windows-sandbox.md).
 
-## Host-to-Guest Protocol
+## Guest Protocol
 
-The host opens four TCP connections to the guest:
+The host opens four TCP connections on boot:
 
 | Channel | Purpose |
 |---|---|
-| Control | Protocol preamble and JSON control messages |
+| Control | Preamble and JSON control messages |
 | Stdin | Child standard input |
 | Stdout | Child standard output |
 | Stderr | Child standard error |
 
+State-aware execution reconnects the three data channels after each
+`StreamsReady`; the control channel remains attached to the daemon.
+
 ### Authentication and channel roles
 
-Before any protocol data, each connection sends:
+Every connection starts with:
 
 ```text
 [32-byte per-launch nonce][1-byte ChannelRole]
 ```
 
-The nonce is generated for each VM launch, written into the secured rendezvous
-directory, consumed and deleted by the guest, and compared without
-data-dependent early exit. The role byte identifies control, stdin, stdout, or
-stderr, so sockets are paired by declaration rather than TCP accept order.
+The guest consumes and deletes the nonce file, authenticates each socket, and
+pairs it by the declared control/stdin/stdout/stderr role. Invalid,
+duplicate-role, unexpected-role, and stalled connections are dropped.
 
-Unauthenticated, duplicate-role, stalled, or unexpected-role connections are
-dropped. Same-user processes remain within the backend's trust boundary.
-
-### Control preamble
+### Control preamble and messages
 
 The guest begins the control channel with:
 
@@ -38,36 +37,48 @@ The guest begins the control channel with:
 ["WSBP"][protocol version: u32 little-endian]
 ```
 
-The version is incremented only for incompatible framing, preamble, or required
-message changes. A magic or version mismatch rejects the connection before
-framed messages are processed.
-
-### Control messages
-
-Control messages use a four-byte little-endian length followed by JSON.
+A magic or version mismatch rejects the connection before framed messages.
+Control messages then use a four-byte little-endian length followed by JSON.
 
 | Message | Direction | Purpose |
 |---|---|---|
-| `Ready` | Guest to host | Guest is ready for execution |
-| `Exec(ExecRequest)` | Host to guest | Execute one command |
+| `Ready` | Guest to host | Guest is ready |
+| `Exec(ExecRequest)` | Host to guest | Execute a command |
 | `Exit(ExitNotification)` | Guest to host | Report completion |
-| `StreamsReady` | Guest to host | Protocol support for reconnectable data streams; unused for one-shot reuse |
+| `StreamsReady` | Guest to host | Data channels may reconnect |
 | `Ping` / `Pong` | Either | Liveness |
 
-The one-shot host pumps stdin, stdout, stderr, and control concurrently to avoid
-opposing TCP-window deadlocks. A reset before any output is treated as an empty
-stream; a reset after output is a transport failure so partial output is not
-silently truncated.
+## State-Aware Daemon IPC
 
-## Per-Run Host State
+The daemon listens on an OS-assigned localhost port recorded in `daemon.json`.
+A phase process sends:
 
-Each invocation creates:
+```text
+<VERB> <daemon-nonce>\n
+```
+
+| Verb | Following data | Reply |
+|---|---|---|
+| `PING` | None | `PONG\n` |
+| `STOP` | None | `OK\n`, followed by daemon teardown |
+| `EXEC` | Binary `ExecStart` frame | `OK\n`, output frames, then one exit frame |
+
+`EXEC` output uses the codec in `windows_sandbox_lifecycle::ipc_exec`.
+Single-flight admission returns `ERR busy` while another execution owns the
+guest slot and `ERR not_ready` while the VM is booting.
+
+The daemon restores or poisons the guest slot and releases its mutex before
+writing the terminal exit frame. This makes terminal completion the point at
+which a new execution may be admitted.
+
+## Host State
+
+### One-shot
 
 ```text
 %TEMP%\wxc-wsb\oneshot\<run-id>\
   oneshot.marker
-  config\
-    wxc-windows-sandbox.wsb
+  config\wxc-windows-sandbox.wsb
   rendezvous\
     bootstrap.cmd
     bootstrap.log
@@ -75,174 +86,218 @@ Each invocation creates:
     rendezvous.txt
 ```
 
-The root and run directory receive owner-only ACLs. A directory owned by
-another user is rejected because its owner retains implicit `WRITE_DAC` even
-after an ACL replacement.
+### State-aware
 
-The marker records:
+```text
+%TEMP%\wxc-wsb\state-aware\
+  daemon.json
+  <sandbox-token>\
+    record.json
+    config\wxc-windows-sandbox.wsb
+    rendezvous\
+      bootstrap.cmd
+      bootstrap.log
+      nonce.bin
+      rendezvous.txt
+```
 
-- the `wxc-exec` PID and process creation time;
-- VM host-process PID and creation-time proof captured after launch.
+Directories are owner-only and ownership-verified before trusted state is read.
+Records are written through same-directory atomic rename.
 
-PID plus creation time prevents a recycled PID from authorising cleanup of an
-unrelated process.
+Process identities pair PID with creation time. This prevents a recycled PID
+from authorising teardown of another process.
 
 ## VM Configuration
 
-The generated `.wsb` file always maps:
+The `.wsb` file always maps:
 
 | Host path | Guest path | Access |
 |---|---|---|
-| Directory containing `wxc-windows-sandbox-guest.exe` | `C:\Sandbox-Guest` | Read-only |
+| Guest binary directory | `C:\Sandbox-Guest` | Read-only |
 | Per-run rendezvous directory | `C:\Sandbox-Rendezvous` | Read-write |
 
-Filesystem policy can add existing directories at the same absolute path
-inside the guest. Read-only and read-write access follow the corresponding
-policy lists.
+Filesystem policy adds existing directories at the same absolute path inside
+the guest. The generated configuration disables vGPU, enables networking for
+the bridge, and runs `C:\Sandbox-Rendezvous\bootstrap.cmd`.
 
-The generated configuration disables vGPU, enables networking for the
-host-to-guest bridge, and runs:
+No host runtime, including Python, is implicitly discovered or mapped.
 
-```text
-C:\Sandbox-Rendezvous\bootstrap.cmd
-```
+## One-Shot Launch
 
-The bootstrap script truncates `bootstrap.log` and starts the guest agent. No
-host runtime, including Python, is implicitly discovered or mapped.
-
-## Launch Sequence
-
-1. Validate policy and acquire the per-session host VM mutex.
-2. Secure `%TEMP%\wxc-wsb\oneshot`.
-3. Reconcile any prior marker and running `WindowsSandbox*` processes.
-4. Create the per-run directories and initial launcher marker.
+1. Reject an ambient Tokio runtime before side effects.
+2. Validate policy and acquire the host VM mutex.
+3. Reconcile stale one-shot markers and live VM processes.
+4. Create secured run state and write the initial launcher marker.
 5. Generate the nonce, bootstrap script, and `.wsb` file.
 6. Launch `WindowsSandbox.exe`.
-7. Capture PID-plus-creation-time ownership proof and persist it.
-8. Wait for `rendezvous.txt`.
-9. Connect and authenticate the four guest channels.
-10. Validate the control preamble and wait for `Ready`.
-11. Send one execution request and relay stdio.
+7. Capture and persist VM ownership proof.
+8. Wait for rendezvous and authenticate the four guest channels.
+9. Send one execution request and relay stdio.
+10. Tear down the owned VM and clear the marker after confirmed exit.
 
-A failed process-enumeration probe is treated conservatively: the runner refuses
-to launch over an unknown potentially-live singleton VM.
+## State-Aware Lifecycle
+
+### Provision
+
+Provision generates a strict `wsb:<8-lowercase-hex>` ID and writes a
+`Provisioned` record containing the immutable mapped-folder policy. It does not
+launch a VM.
+
+### Start
+
+Start acquires the transition lock, validates state, and launches
+`wxc-windows-sandbox-daemon.exe --token <token>` as a detached process. The
+daemon authentication nonce is written to stdin and the pipe is closed.
+
+The daemon:
+
+1. Creates `daemon.json` with `ready:false`.
+2. Acquires the host VM mutex.
+3. Reconciles any provably-owned orphan.
+4. Launches the VM and persists ownership proof.
+5. Connects to the guest and marks `ready:true`.
+6. Serves `PING`, `EXEC`, and `STOP`.
+
+Start polls the record until readiness or timeout. A stale daemon or VM is
+reclaimed only when recorded process identities intersect the live set.
+
+### Exec
+
+Exec authenticates to the daemon and requests single-flight admission. The
+daemon streams stdin, stdout, and stderr while reading the guest exit message.
+It then reconnects the data channels, restores the reusable guest slot, releases
+the slot lock, and writes the terminal exit frame.
+
+If an exec fails, or the post-exec data-channel reconnect fails, the daemon
+marks the held guest slot **unusable** and records the reason. This is terminal
+for the sandbox's session: the daemon cannot safely re-establish its single held
+guest connection mid-session, so there is no automatic recovery back to a ready
+state. Every subsequent exec fails fast with the recorded reason, while `stop`
+and `deprovision` continue to work. To run again, tear the sandbox down
+(`stop`/`deprovision`) and provision a fresh one.
+
+### Stop and deprovision
+
+Stop sends `STOP`, waits for the daemon and VM to exit, and returns the record
+to `Provisioned`. Deprovision stops if needed and removes the sandbox directory.
+Failed probes or incomplete teardown preserve records for a later retry.
 
 ## Policy Validation
 
 ### Filesystem
 
-`readwritePaths` and `readonlyPaths` must contain absolute existing directories.
-The backend rejects:
+Mapped roots must be absolute existing directories. The backend rejects:
 
-- files rather than directories;
-- one path listed with conflicting access;
-- nested or overlapping mapped roots;
-- a `deniedPaths` entry equal to, inside, or containing a mapped share.
+- files;
+- conflicting read-only/read-write entries;
+- nested mapped roots;
+- a denied path equal to, inside, or containing a mapped share.
 
-Windows Sandbox has no per-path deny primitive. A denied path outside all
-mapped shares is therefore already inaccessible and requires no additional
-rule.
+A denied path outside all shares is already inaccessible because Windows
+Sandbox shares nothing by default.
 
-### Network
+State-aware filesystem policy is accepted only at provision and is immutable
+afterward.
 
-The guest firewall supports only the default `block` policy. The backend
-rejects:
+### Network and UI
 
-- default network policy `allow`;
-- `allowedHosts` or `blockedHosts`;
-- network proxy configuration.
+One-shot supports only default network policy `block`; `allow`, host filters,
+and proxies are rejected.
 
-Before binding, the guest temporarily pre-authorises its executable to avoid an
-interactive firewall prompt. After the host connects, it replaces that rule
-with host-IP/listener-port rules and sets both default directions to block.
+State-aware phases reject network and UI policy. The guest firewall still
+enforces unconditional network lockdown.
 
-## Teardown and Crash Recovery
+## Teardown and Recovery
 
-The host permits one Windows Sandbox VM per logon session. A named mutex
-serialises one-shot execution with other MXC Windows Sandbox owners.
+One-shot and state-aware modes share `Local\wxc-wsb-vm`, serialising ownership
+of the host's single Windows Sandbox VM.
 
-Normal return and panic use an ownership-scoped teardown guard. Console
-shutdown paths take the same parked ownership state and issue termination
-without waiting.
+Cleanup rules:
 
-Cleanup follows these rules:
+- a live owner prevents another launch;
+- prior ownership proof intersecting the live set authorises reclaim;
+- a live VM without intersecting proof is foreign and left untouched (but see
+  `--force-reclaim` below);
+- PID creation time is rechecked on the same process handle before
+  `TerminateProcess`;
+- durable records are removed only after host processes are confirmed gone;
+- probe failure or timeout preserves records.
 
-- a live launcher means another one-shot invocation owns the VM, so launch is
-  refused;
-- prior ownership proof intersecting the live VM set authorises orphan reclaim;
-- a live VM without intersecting proof is treated as foreign and is never
-  enumerated into ownership;
-- markers are removed only after teardown confirms all `WindowsSandbox*`
-  processes have exited;
-- a probe failure or timeout preserves the marker for a later reclaim attempt.
+Lingering SYSTEM-owned `vmmem*` processes are not ownership targets and do not
+block a new launch after the `WindowsSandbox*` host processes exit.
 
-Markerless scratch directories can remain temporarily while Hyper-V processes
-hold mapped-folder handles. A later invocation garbage-collects old markerless
-directories.
+### Hard-kill orphans and `--force-reclaim`
+
+Teardown-on-exit is best-effort, **not** kernel-guaranteed. Between launching
+the VM and capturing its process-identity proof, a hard-kill of the launcher
+(`TerminateProcess`/OOM/power-loss — no destructor or console handler runs) can
+leave a live VM with no ownership proof. Because Windows Sandbox is a
+machine-wide singleton, one such unprovable orphan wedges the backend: every
+later launch classifies it as foreign and refuses.
+
+Recover by closing the leftover sandbox window, or re-running with
+`--force-reclaim`, which tears down an unprovable VM using the live process
+snapshot as the kill set. Being proofless, it may also kill a foreign or
+manual sandbox; it never overrides an active mxc run or an unreadable probe. It
+reaches the detached daemon via the inherited `WXC_WSB_FORCE_RECLAIM` env var.
 
 ## Legacy Configuration
 
-The following fields remain parseable for schema compatibility but do not
-affect the one-shot backend:
+These fields remain parseable but do not control either live execution path:
 
 - `experimental.windows_sandbox.idleTimeoutMs`
+- `experimental.windows_sandbox.idleTimeout`
 - `experimental.windows_sandbox.daemonPipeName`
 
-A targeted warning is emitted only when either value differs from its default.
-The one-shot path does not connect to `wxc-windows-sandbox-daemon.exe`.
+State-aware lifecycle has no idle watchdog.
 
 ## Debugging
 
-Per-run files are normally removed after confirmed teardown. While a run is
-active, inspect the newest directory under:
+Inspect one-shot state under:
 
 ```powershell
 $root = Join-Path $env:TEMP "wxc-wsb\oneshot"
-$run = Get-ChildItem $root -Directory |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-
-Get-Content (Join-Path $run.FullName "rendezvous\bootstrap.log")
-Get-Content (Join-Path $run.FullName "rendezvous\rendezvous.txt")
-Get-Content (Join-Path $run.FullName "config\wxc-windows-sandbox.wsb")
 ```
 
-Check host processes with:
+Inspect state-aware records under:
+
+```powershell
+$root = Join-Path $env:TEMP "wxc-wsb\state-aware"
+Get-Content (Join-Path $root "daemon.json")
+```
+
+Check host processes:
 
 ```powershell
 Get-Process | Where-Object { $_.ProcessName -like "WindowsSandbox*" }
 ```
 
-Do not terminate processes by name during normal cleanup; the backend uses
-PID-plus-creation-time ownership proof to avoid killing an unrelated VM.
+Do not terminate processes by name during normal cleanup; use the recorded
+PID-plus-creation-time ownership proof.
 
 ## Key Source Files
 
 | File | Purpose |
 |---|---|
-| `src/core/mxc_engine/src/run.rs` | Selects the one-shot runner |
+| `src/core/mxc_engine/src/run.rs` | One-shot backend selection |
+| `src/core/mxc_engine/src/state_aware.rs` | State-aware backend selection |
 | `src/backends/windows_sandbox/lifecycle/src/one_shot.rs` | One-shot orchestration |
-| `src/backends/windows_sandbox/lifecycle/src/policy.rs` | Filesystem and network validation |
-| `src/backends/windows_sandbox/lifecycle/src/vm.rs` | `.wsb` generation, launch, and ownership capture |
-| `src/backends/windows_sandbox/lifecycle/src/rendezvous.rs` | Guest address discovery |
-| `src/backends/windows_sandbox/lifecycle/src/bridge.rs` | Host-to-guest channels and stdio relay |
-| `src/backends/windows_sandbox/lifecycle/src/teardown.rs` | Markers, reconcile, and guaranteed cleanup |
-| `src/backends/windows_sandbox/lifecycle/src/control_plane.rs` | Ownership decisions and process identity |
-| `src/backends/windows_sandbox/common/src/auth.rs` | Nonce and role handshake |
-| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Control-channel framing |
-| `src/backends/windows_sandbox/guest/src/main.rs` | Guest startup |
-| `src/backends/windows_sandbox/guest/src/listener.rs` | Authenticated socket acceptance |
-| `src/backends/windows_sandbox/guest/src/executor.rs` | Process execution and stdio bridge |
-| `src/backends/windows_sandbox/guest/src/firewall.rs` | Guest firewall policy |
-| `src/backends/windows_sandbox/guest/src/job.rs` | Process-tree cleanup |
+| `src/backends/windows_sandbox/lifecycle/src/state_aware.rs` | State-aware phase implementation |
+| `src/backends/windows_sandbox/lifecycle/src/control_plane.rs` | Records, state decisions, IPC constants, and locks |
+| `src/backends/windows_sandbox/lifecycle/src/teardown.rs` | One-shot markers and cleanup |
+| `src/backends/windows_sandbox/lifecycle/src/bridge.rs` | Guest bridge and stream relay |
+| `src/backends/windows_sandbox/lifecycle/src/ipc_exec.rs` | Daemon exec frame codec |
+| `src/backends/windows_sandbox/lifecycle/src/vm.rs` | VM generation, launch, proof, and teardown |
+| `src/backends/windows_sandbox/lifecycle/src/policy.rs` | Policy mapping and validation |
+| `src/backends/windows_sandbox/daemon/src/main.rs` | State-aware daemon ownership and launch |
+| `src/backends/windows_sandbox/daemon/src/control_server.rs` | Daemon IPC and single-flight execution |
+| `src/backends/windows_sandbox/common/src/auth.rs` | Nonce and role authentication |
+| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Guest control framing |
+| `src/backends/windows_sandbox/guest/src/` | Guest startup, execution, firewall, and job object |
 
 ## E2E Tests
 
-The one-shot test suite requires Windows Sandbox and Hyper-V:
-
 ```powershell
 .\tests\scripts\run_windows_sandbox_one_shot_tests.ps1
+.\tests\scripts\run_windows_sandbox_state_aware_tests.ps1
 ```
-
-It covers command execution, PowerShell, stderr, exit-code propagation,
-timeouts, and repeated independent fresh-VM invocations.

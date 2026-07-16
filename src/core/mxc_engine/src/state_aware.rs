@@ -32,12 +32,53 @@ pub fn run_state_aware(
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
+    if matches!(
+        backend,
+        wxc_common::models::ContainmentBackend::WindowsSandbox
+            | wxc_common::models::ContainmentBackend::IsolationSession
+    ) && !parsed.request.experimental_enabled
+    {
+        return Err(MxcError::backend_unavailable(format!(
+            "{backend:?} is an experimental backend; pass --experimental to enable state-aware \
+             dispatch against it"
+        )));
+    }
     match backend {
+        #[cfg(target_os = "windows")]
+        wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let mut runner = windows_sandbox_lifecycle::WindowsSandboxRunner::new();
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
             wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
         _ => run_state_aware_fallback(parsed, dry_run),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wxc_common::models::{ContainmentBackend, ExecutionRequest};
+    use wxc_common::mxc_error::MxcErrorCode;
+    use wxc_common::state_aware_request::Phase;
+
+    #[test]
+    fn experimental_backend_requires_flag() {
+        let parsed = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Provision,
+            containment: Some(ContainmentBackend::WindowsSandbox),
+            sandbox_id: None,
+            correlation_vector: None,
+            experimental_raw: None,
+        };
+
+        let error = run_state_aware(parsed, false).unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("--experimental"));
     }
 }

@@ -106,12 +106,23 @@ pub enum StartupAction {
     ReclaimOrphan {
         proof: Vec<VmProcId>,
     },
+    /// Tear down an unprovable VM (the live snapshot is the kill set).
+    ForceReclaimForeign {
+        snapshot: Vec<VmProcId>,
+    },
     /// A VM is running, but ownership is not proven.
     RefuseForeign,
 }
 
 /// Reclaim only when a stale record's proof intersects the live VM process set.
-pub fn classify_startup(prior: Option<&DaemonRecord>, current_vm: &[VmProcId]) -> StartupAction {
+///
+/// With `force_reclaim`, an otherwise-unprovable live VM is torn down instead
+/// (see [`force_reclaim_requested`]).
+pub fn classify_startup(
+    prior: Option<&DaemonRecord>,
+    current_vm: &[VmProcId],
+    force_reclaim: bool,
+) -> StartupAction {
     if current_vm.is_empty() {
         return StartupAction::Proceed;
     }
@@ -126,8 +137,30 @@ pub fn classify_startup(prior: Option<&DaemonRecord>, current_vm: &[VmProcId]) -
             };
         }
     }
+    if force_reclaim {
+        return StartupAction::ForceReclaimForeign {
+            snapshot: current_vm.to_vec(),
+        };
+    }
     StartupAction::RefuseForeign
 }
+
+/// `--force-reclaim`: authorises tearing down a running Windows Sandbox VM that
+/// mxc cannot prove it launched, using the live process snapshot as the kill
+/// set, instead of refusing and wedging the machine-wide singleton. Precedence:
+/// it never overrides a proven reclaim, an active run, or a probe failure, and
+/// cannot manufacture liveness (an empty snapshot still proceeds). DANGER: with
+/// no proof, it may also kill a foreign or manually-launched sandbox.
+///
+/// Transported via the `WXC_WSB_FORCE_RECLAIM` env var so it reaches both the
+/// in-process one-shot reconcile and the detached daemon (which inherits the
+/// launcher's env).
+pub fn force_reclaim_requested() -> bool {
+    std::env::var_os(FORCE_RECLAIM_ENV_VAR).is_some()
+}
+
+/// Env var backing [`force_reclaim_requested`].
+pub const FORCE_RECLAIM_ENV_VAR: &str = "WXC_WSB_FORCE_RECLAIM";
 
 /// How far VM ownership has progressed within one daemon process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,12 +195,30 @@ pub fn decide_cleanup(ownership: &VmOwnership) -> CleanupAction {
 }
 
 /// Compute the process identities safe to terminate for a proven VM owner.
+///
+/// # Windows Sandbox singleton invariant
+///
+/// Windows Sandbox is a **machine-wide singleton**: at most one VM runs per
+/// host. So when our recorded proof still intersects the live `WindowsSandbox*`
+/// snapshot, the one running VM is provably *ours*, and every process in the
+/// snapshot — including post-launch helpers not in the proof seed — belongs to
+/// it. Widening the kill set to the whole snapshot therefore reaps our full
+/// process tree without reaching another user's VM, since a second concurrent
+/// VM cannot exist.
+///
+/// Widening is gated strictly on that intersection (PID+creation-time, so PID
+/// reuse cannot forge a hit): with no live proof PID we return only the proof
+/// and never adopt snapshot processes, keeping a foreign sandbox out of the
+/// kill set. The unproven `--force-reclaim` path in `teardown.rs` is the one
+/// deliberate opt-in exception.
 pub fn plan_kill_set(ownership: &VmOwnership, snapshot: &[VmProcId]) -> Option<Vec<VmProcId>> {
     match ownership {
         VmOwnership::NotLaunched | VmOwnership::LaunchInFlight => None,
         VmOwnership::Owned(proof) => {
-            let intersects = proof.iter().any(|p| snapshot.contains(p));
-            if intersects {
+            // Intersection proves the live VM is ours (see the singleton
+            // invariant above); only then widen to catch post-launch helpers.
+            let proof_confirms_our_vm_is_live = proof.iter().any(|p| snapshot.contains(p));
+            if proof_confirms_our_vm_is_live {
                 let mut kill = proof.clone();
                 for p in snapshot {
                     if !kill.contains(p) {
@@ -590,8 +641,11 @@ mod tests {
             pid: 10,
             creation_time: 100,
         }]);
-        assert_eq!(classify_startup(Some(&prior), &[]), StartupAction::Proceed);
-        assert_eq!(classify_startup(None, &[]), StartupAction::Proceed);
+        assert_eq!(
+            classify_startup(Some(&prior), &[], false),
+            StartupAction::Proceed
+        );
+        assert_eq!(classify_startup(None, &[], false), StartupAction::Proceed);
     }
 
     #[test]
@@ -601,7 +655,7 @@ mod tests {
             creation_time: 100,
         }];
         assert_eq!(
-            classify_startup(None, &current),
+            classify_startup(None, &current, false),
             StartupAction::RefuseForeign
         );
     }
@@ -614,7 +668,7 @@ mod tests {
             creation_time: 100,
         }];
         assert_eq!(
-            classify_startup(Some(&prior), &current),
+            classify_startup(Some(&prior), &current, false),
             StartupAction::RefuseForeign
         );
     }
@@ -631,8 +685,50 @@ mod tests {
             creation_time: 999,
         }];
         assert_eq!(
-            classify_startup(Some(&prior), &current),
+            classify_startup(Some(&prior), &current, false),
             StartupAction::RefuseForeign
+        );
+    }
+
+    #[test]
+    fn classify_force_reclaim_tears_down_unprovable_vm() {
+        let current = [
+            VmProcId {
+                pid: 10,
+                creation_time: 100,
+            },
+            VmProcId {
+                pid: 11,
+                creation_time: 101,
+            },
+        ];
+        assert_eq!(
+            classify_startup(None, &current, true),
+            StartupAction::ForceReclaimForeign {
+                snapshot: current.to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_force_reclaim_cannot_manufacture_liveness() {
+        assert_eq!(classify_startup(None, &[], true), StartupAction::Proceed);
+    }
+
+    #[test]
+    fn classify_force_reclaim_does_not_override_proven_reclaim() {
+        let shared = VmProcId {
+            pid: 10,
+            creation_time: 100,
+        };
+        let prior = daemon_record_with(vec![shared]);
+        let current = [shared];
+        // A proven reclaim path is already safe; force must not change it.
+        assert_eq!(
+            classify_startup(Some(&prior), &current, true),
+            StartupAction::ReclaimOrphan {
+                proof: vec![shared]
+            }
         );
     }
 
@@ -659,7 +755,7 @@ mod tests {
         // the live snapshot. Seeding with the snapshot would promote any
         // foreign WindowsSandbox* process observed at startup into "proof".
         assert_eq!(
-            classify_startup(Some(&prior), &current),
+            classify_startup(Some(&prior), &current, false),
             StartupAction::ReclaimOrphan {
                 proof: vec![shared, other_prior]
             }
@@ -722,10 +818,10 @@ mod tests {
 
     #[test]
     fn plan_kill_set_owned_disjoint_returns_only_proof() {
-        // The live VM is NOT ours; never enumerate-kill foreign. We still
-        // return the recorded proof so any of our still-alive recorded
-        // processes get cleaned up, but PID+creation_time matching makes a
-        // dead-recorded-PID kill a safe no-op.
+        // No proof PID intersects the snapshot: the live VM isn't ours, so we
+        // never widen — a foreign/other-user sandbox is left untouched. We still
+        // return the proof (a dead-recorded-PID kill is a safe no-op via
+        // PID+creation_time matching).
         let proof = vec![pid(10, 100)];
         let foreign = vec![pid(99, 999)];
         assert_eq!(

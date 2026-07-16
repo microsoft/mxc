@@ -246,8 +246,10 @@ pub trait LaunchObserver: Send {
         eprintln!(
             "[wsb-vm] WARNING: no WindowsSandbox* host processes appeared within \
              capture_launch_proof's budget; staying at LaunchSucceededNoProof. Teardown will \
-             enumerate-kill if any host processes are visible at exit. If the launcher hard-dies \
-             before exit, the VM may require manual cleanup."
+             enumerate-kill any host processes visible at exit, but teardown-on-exit is NOT \
+             guaranteed: a launcher hard-kill in this window (TerminateProcess/OOM/power-loss) can \
+             orphan the VM with no proof, wedging the machine-wide-singleton backend. Clear it by \
+             closing the sandbox window or re-running with --force-reclaim."
         );
     }
 }

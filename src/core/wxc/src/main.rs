@@ -111,6 +111,13 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
+    /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
+    /// launched, instead of refusing — clears a host wedged by an orphan left
+    /// after a launcher hard-kill. DANGER: proofless, so it may also kill a
+    /// foreign sandbox. Never overrides an active mxc run or an unreadable probe.
+    #[arg(long = "force-reclaim")]
+    force_reclaim: bool,
+
     /// Audit mode: inject the `permissiveLearningMode` capability into the
     /// AppContainer policy so denied operations are logged but allowed.
     /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
@@ -697,6 +704,13 @@ fn install_dacl_ctrl_handler() {
 fn main() {
     let cli = Cli::parse().normalize_named_config_command();
 
+    // Propagate --force-reclaim via the environment so it reaches both the
+    // in-process one-shot reconcile and the detached daemon. Set before any
+    // backend dispatch or daemon spawn.
+    if cli.force_reclaim {
+        std::env::set_var("WXC_WSB_FORCE_RECLAIM", "1");
+    }
+
     // Best-effort: reap any orphaned DACL state files left behind by
     // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
     // `wxc-exec --probe` is the canonical recovery trigger consumers
@@ -942,6 +956,16 @@ fn main() {
                 command_override.as_deref(),
                 &mut logger,
             );
+            // Mirror what the one-shot path does at the post-dispatch stage
+            // below: copy the CLI `--experimental` flag into the parsed
+            // request so backends that gate on it (e.g. Windows Sandbox
+            // experimental features) see the same value regardless of which
+            // dispatch branch the request entered through. Without this, the
+            // state-aware path runs without the gate -- a phase-envelope request
+            // could provision/start/exec experimental backends with no
+            // `--experimental` on the CLI.
+            parsed.request.experimental_enabled = cli.experimental;
+            parsed.request.dry_run = cli.dry_run;
             run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
         }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {

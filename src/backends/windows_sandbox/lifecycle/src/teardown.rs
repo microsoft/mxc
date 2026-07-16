@@ -97,6 +97,8 @@ enum ReconcileDecision {
     Proceed,
     /// Reclaim an orphan using prior recorded proof, never the live snapshot.
     ReclaimThenProceed { proof: Vec<VmProcId> },
+    /// Tear down an unprovable VM (the live snapshot is the kill set).
+    ForceReclaimThenProceed { snapshot: Vec<VmProcId> },
     /// Refuse to launch.
     Busy(BusyReason),
 }
@@ -110,10 +112,14 @@ enum ReconcileDecision {
 /// Reclaim is authorised only by prior proof intersecting the live snapshot;
 /// the snapshot itself must never become proof.
 /// Probe failure and a live launcher take precedence over reclaim.
+///
+/// With `force_reclaim`, the otherwise-wedging `ForeignUnprovable` case is torn
+/// down instead (see [`crate::control_plane::force_reclaim_requested`]).
 fn classify_reconcile(
     running: Option<bool>,
     current_vm: &[VmProcId],
     markers: &[MarkerState],
+    force_reclaim: bool,
 ) -> ReconcileDecision {
     let running = match running {
         None => return ReconcileDecision::Busy(BusyReason::ProbeFailed),
@@ -142,6 +148,10 @@ fn classify_reconcile(
     }
     if any_intersect {
         ReconcileDecision::ReclaimThenProceed { proof }
+    } else if force_reclaim {
+        ReconcileDecision::ForceReclaimThenProceed {
+            snapshot: current_vm.to_vec(),
+        }
     } else {
         ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
     }
@@ -169,8 +179,12 @@ impl OneShotTeardown {
                         // Preserve ambiguous ownership for the next reconcile.
                     }
                     VmOwnership::Owned(_) => {
-                        // plan_kill_set(Owned, _) is always Some.
-                        unreachable!("Owned with any snapshot always returns Some kill plan");
+                        // plan_kill_set(Owned, _) is always Some; log instead of
+                        // panicking if that ever breaks, preserving the marker.
+                        eprintln!(
+                            "[one-shot] WARNING: no kill plan for an Owned VM during teardown \
+                             (unexpected); preserving marker for the next reconcile"
+                        );
                     }
                 }
             }
@@ -414,7 +428,12 @@ pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
         }
     }
 
-    match classify_reconcile(running, &current_vm, &states) {
+    match classify_reconcile(
+        running,
+        &current_vm,
+        &states,
+        crate::control_plane::force_reclaim_requested(),
+    ) {
         ReconcileDecision::Busy(reason) => Reconcile::Busy(reason.message()),
         ReconcileDecision::Proceed => {
             // No VM: clean dead-launcher dirs only. A strongly-live launcher dir
@@ -460,6 +479,39 @@ pub(crate) fn reconcile_existing_vm(root: &Path) -> Reconcile {
                 TeardownOutcome::ProbeFailed => Reconcile::Busy(
                     "failed to tear down an orphaned disposable Windows Sandbox VM (liveness \
                      probe failed)"
+                        .to_string(),
+                ),
+            }
+        }
+        ReconcileDecision::ForceReclaimThenProceed { snapshot } => {
+            eprintln!(
+                "[one-shot] WARNING: --force-reclaim: tearing down an unprovable Windows Sandbox \
+                 VM ({} host process(es)); may kill a foreign sandbox",
+                snapshot.len()
+            );
+            // No proof exists, so the live snapshot is the kill set; the WSB
+            // singleton means every WindowsSandbox* process is the one orphan.
+            let kill_plan =
+                plan_kill_set(&VmOwnership::Owned(snapshot), &current_vm).unwrap_or_default();
+            match teardown_owned_blocking(&kill_plan, TEARDOWN_POLL_TIMEOUT) {
+                TeardownOutcome::ConfirmedGone => {
+                    for dir in &dead_dirs {
+                        clear_marker_dir(dir);
+                    }
+                    Reconcile::Proceed(Some(
+                        "force-reclaimed an unprovable Windows Sandbox VM (--force-reclaim)"
+                            .to_string(),
+                    ))
+                }
+                TeardownOutcome::StillRunning(remaining) => Reconcile::Busy(format!(
+                    "--force-reclaim failed to tear down the Windows Sandbox VM ({} host \
+                     process(es) still alive: {:?})",
+                    remaining.len(),
+                    remaining
+                )),
+                TeardownOutcome::ProbeFailed => Reconcile::Busy(
+                    "--force-reclaim failed to tear down the Windows Sandbox VM (liveness probe \
+                     failed)"
                         .to_string(),
                 ),
             }
@@ -772,7 +824,16 @@ mod tests {
     #[test]
     fn classify_probe_failure_is_busy() {
         assert_eq!(
-            classify_reconcile(None, &[], &[]),
+            classify_reconcile(None, &[], &[], false),
+            ReconcileDecision::Busy(BusyReason::ProbeFailed)
+        );
+    }
+
+    #[test]
+    fn classify_probe_failure_is_busy_even_with_force() {
+        // Force-reclaim cannot act on unknown state: a probe failure still wedges.
+        assert_eq!(
+            classify_reconcile(None, &[], &[], true),
             ReconcileDecision::Busy(BusyReason::ProbeFailed)
         );
     }
@@ -784,7 +845,7 @@ mod tests {
             vm_processes: vec![proc(1, 1)],
         }];
         assert_eq!(
-            classify_reconcile(Some(false), &[], &markers),
+            classify_reconcile(Some(false), &[], &markers, false),
             ReconcileDecision::Proceed
         );
     }
@@ -797,7 +858,20 @@ mod tests {
             vm_processes: vec![proc(100, 5)],
         }];
         assert_eq!(
-            classify_reconcile(Some(true), &current, &markers),
+            classify_reconcile(Some(true), &current, &markers, false),
+            ReconcileDecision::Busy(BusyReason::ActiveRun)
+        );
+    }
+
+    #[test]
+    fn classify_force_does_not_override_active_run() {
+        let current = [proc(100, 5)];
+        let markers = [MarkerState {
+            launcher_strongly_alive: true,
+            vm_processes: vec![proc(100, 5)],
+        }];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &markers, true),
             ReconcileDecision::Busy(BusyReason::ActiveRun)
         );
     }
@@ -815,7 +889,7 @@ mod tests {
         // reconcile time into "proof" once plan_kill_set's intersection check
         // is applied downstream.
         assert_eq!(
-            classify_reconcile(Some(true), &current, &markers),
+            classify_reconcile(Some(true), &current, &markers, false),
             ReconcileDecision::ReclaimThenProceed {
                 proof: vec![proc(100, 5)]
             }
@@ -842,7 +916,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            classify_reconcile(Some(true), &current, &markers),
+            classify_reconcile(Some(true), &current, &markers, false),
             ReconcileDecision::ReclaimThenProceed {
                 proof: vec![shared, extra]
             }
@@ -858,8 +932,33 @@ mod tests {
             vm_processes: vec![proc(999, 1)],
         }];
         assert_eq!(
-            classify_reconcile(Some(true), &current, &markers),
+            classify_reconcile(Some(true), &current, &markers, false),
             ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
+        );
+    }
+
+    #[test]
+    fn classify_force_reclaims_unprovable_vm_via_snapshot() {
+        // The wedge case: live VM, no intersecting proof. Force turns the
+        // ForeignUnprovable refusal into a snapshot-based teardown.
+        let current = [proc(100, 5), proc(200, 6)];
+        let markers = [MarkerState {
+            launcher_strongly_alive: false,
+            vm_processes: vec![proc(999, 1)],
+        }];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &markers, true),
+            ReconcileDecision::ForceReclaimThenProceed {
+                snapshot: current.to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_force_cannot_manufacture_liveness() {
+        assert_eq!(
+            classify_reconcile(Some(false), &[], &[], true),
+            ReconcileDecision::Proceed
         );
     }
 
@@ -873,7 +972,7 @@ mod tests {
             vm_processes: vec![proc(100, 5)],
         }];
         assert_eq!(
-            classify_reconcile(Some(true), &current, &markers),
+            classify_reconcile(Some(true), &current, &markers, false),
             ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
         );
     }
@@ -882,8 +981,19 @@ mod tests {
     fn classify_running_no_markers_is_foreign() {
         let current = [proc(100, 5)];
         assert_eq!(
-            classify_reconcile(Some(true), &current, &[]),
+            classify_reconcile(Some(true), &current, &[], false),
             ReconcileDecision::Busy(BusyReason::ForeignUnprovable)
+        );
+    }
+
+    #[test]
+    fn classify_running_no_markers_force_reclaims() {
+        let current = [proc(100, 5)];
+        assert_eq!(
+            classify_reconcile(Some(true), &current, &[], true),
+            ReconcileDecision::ForceReclaimThenProceed {
+                snapshot: current.to_vec()
+            }
         );
     }
 }

@@ -3338,6 +3338,22 @@ name = "wxc_ui_probe"
 version = "0.1.0"
 
 [[package]]
+name = "wxc_windows_sandbox_daemon"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "mxc_build_common",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
+ "wxc_common",
+]
+
+[[package]]
 name = "wxc_windows_sandbox_guest"
 version = "0.7.0"
 dependencies = [

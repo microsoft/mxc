@@ -158,7 +158,7 @@ force a particular backend.
 | Value | Description |
 |-------|-------------|
 | `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
-| `"windows_sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
+| `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-sandbox daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
@@ -167,6 +167,54 @@ force a particular backend.
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
+
+### State-aware lifecycle envelope
+
+The dev schema additionally documents a multi-phase envelope shape for the
+state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
+`deprovision`). Where the one-shot config above is a self-contained
+`ExecutionRequest` to run once, a state-aware envelope identifies which
+phase is being driven against an existing provisioned sandbox.
+
+The envelope follows the same supported version range as one-shot requests:
+`>=0.6, <=0.8`. The example uses `0.6.0-alpha`, which is accepted throughout
+that range. The state-aware field shape is documented by the current dev
+schema:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json",
+    "version": "0.6.0-alpha",
+    "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
+    "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
+                                           // Prefix routes to the backend (wsb: -> windows_sandbox,
+                                           // iso: -> isolation_session).
+    "containment": "windows_sandbox",      // Required for `provision`; ignored for other phases
+                                           // (the backend is inferred from sandboxId).
+    "process": { "commandLine": "echo hi" }
+    // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
+    // level, exactly as in a one-shot request -- there is no wrapping `config`
+    // object. Backend- and phase-specific config, when a phase has any, nests
+    // under `experimental.<backendKey>.<phase>`, e.g.:
+    //   "experimental": { "isolation_session": { "start": { "user": { ... } } } }
+}
+```
+
+Phase / sandboxId / containment validation:
+
+| Phase | `sandboxId` | `containment` |
+|---|---|---|
+| `provision`     | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
+| `start`         | **Required** (`<prefix>:<token>`) | Ignored if present |
+| `exec`          | **Required** | Ignored if present |
+| `stop`          | **Required** | Ignored if present |
+| `deprovision`   | **Required** | Ignored if present |
+
+State-aware-capable backends today: `isolation_session` and `windows_sandbox`
+(both Windows-only, both still experimental). The dispatcher rejects
+state-aware envelopes for backends that have not opted in.
+
+Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
 
 ### Schema Versioning
 

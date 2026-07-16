@@ -4,11 +4,16 @@
 
 The Windows Sandbox backend provides VM-level isolation using
 [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview).
-The one-shot surface launches a fresh disposable VM for each invocation, runs
-one command, and tears the VM down before returning. It does not use the
-host-side daemon or reuse a warm VM.
+It is experimental and requires `--experimental`.
 
-Windows Sandbox is experimental and requires `--experimental`.
+The backend has two execution surfaces:
+
+- **One-shot:** each invocation launches a fresh disposable VM, runs one
+  command, and tears the VM down before returning. Teardown is best-effort, not
+  kernel-guaranteed — a launcher hard-kill can leave a wedged orphan; see the
+  reference doc's "Hard-kill orphans and `--force-reclaim`" section.
+- **State-aware:** `provision`, `start`, repeated `exec`, `stop`, and
+  `deprovision` calls share one VM through a detached host daemon.
 
 ## Architecture
 
@@ -17,56 +22,78 @@ wxc-exec.exe
   |
   `-- mxc_engine
         |
-        `-- WindowsSandboxRunner (windows_sandbox_lifecycle)
-              |-- validates policy and acquires the host VM slot
-              |-- writes a per-launch nonce and generates the .wsb file
-              |-- launches WindowsSandbox.exe and records ownership proof
-              |-- waits for guest rendezvous
-              |-- opens authenticated control/stdin/stdout/stderr channels
-              |-- executes one command
-              `-- tears down the owned VM
+        `-- windows_sandbox_lifecycle::WindowsSandboxRunner
+              |-- one-shot ScriptRunner
+              `-- state-aware StatefulSandboxBackend
                     |
-                    `-- wxc-windows-sandbox-guest.exe
-                          |-- consumes the launch nonce
-                          |-- publishes its TCP address
-                          |-- authenticates and pairs channels by role
-                          |-- locks down the guest firewall
-                          `-- runs the command through cmd.exe /C
-```
+                    `-- wxc-windows-sandbox-daemon.exe
+                          (owns the VM between phase processes)
 
-The `src/backends/windows_sandbox/daemon/` crate remains in the repository for
-future state-aware lifecycle work, but the one-shot path does not start or
-connect to it.
+WindowsSandbox.exe
+  |
+  `-- wxc-windows-sandbox-guest.exe
+        |-- consumes the launch nonce
+        |-- publishes its TCP address
+        |-- authenticates and pairs channels by role
+        |-- locks down the guest firewall
+        `-- runs commands through cmd.exe /C
+```
 
 ### Components
 
 | Component | Location | Purpose |
 |---|---|---|
-| Execution engine | `src/core/mxc_engine/src/run.rs` | Selects the one-shot runner and reports ignored legacy settings |
-| Lifecycle crate | `src/backends/windows_sandbox/lifecycle/` | Policy validation, VM launch, authenticated bridge, ownership, and teardown |
-| Shared protocol | `src/backends/windows_sandbox/common/` | Nonce authentication and control-channel wire format |
-| Guest agent | `src/backends/windows_sandbox/guest/` | Runs inside the VM and bridges the child process |
+| Execution engine | `src/core/mxc_engine/` | Selects one-shot and state-aware backends |
+| Lifecycle crate | `src/backends/windows_sandbox/lifecycle/` | Policy, launch, bridge, records, ownership, and teardown |
+| Host daemon | `src/backends/windows_sandbox/daemon/` | State-aware VM and guest-connection owner |
+| Shared protocol | `src/backends/windows_sandbox/common/` | Nonce authentication and control framing |
+| Guest agent | `src/backends/windows_sandbox/guest/` | Runs commands and bridges stdio inside the VM |
 
-## Execution Flow
+## One-Shot Execution
 
-1. `mxc_engine` validates that Windows Sandbox is experimental-enabled.
-2. The runner validates filesystem and network policy.
-3. A per-session mutex reserves the host's single Windows Sandbox VM slot.
-4. Stale one-shot markers and any provably-owned orphan are reconciled.
-5. The runner creates a secured per-run directory, nonce, bootstrap script, and
-   `.wsb` configuration.
-6. `WindowsSandbox.exe` starts, and the runner records PID-plus-creation-time
-   ownership proof for its host processes.
-7. The guest publishes its address and accepts four authenticated channels:
-   control, stdin, stdout, and stderr.
-8. The guest executes `process.commandLine` through `cmd.exe /C`.
-9. Output and the exit status are returned, then ownership-scoped teardown
-   terminates the VM and confirms it has exited.
+1. Validate policy and reject an existing Tokio runtime before side effects.
+2. Acquire the per-session mutex for the host's single Windows Sandbox VM.
+3. Reconcile any stale one-shot marker and provably-owned orphan.
+4. Create secured per-run state, a launch nonce, bootstrap script, and `.wsb`
+   configuration.
+5. Launch `WindowsSandbox.exe` and record PID-plus-creation-time ownership proof.
+6. Wait for guest rendezvous and open authenticated control, stdin, stdout, and
+   stderr channels.
+7. Execute one command and capture the exit status and output.
+8. Tear down the owned VM and remove the marker after confirmed exit.
 
-Every invocation follows this complete lifecycle; there is no one-shot
-multi-exec or warm-VM reuse.
+Every invocation follows the complete lifecycle; one-shot execution never
+reuses a warm VM.
+
+## State-Aware Lifecycle
+
+The state-aware surface keeps the VM alive across separate `wxc-exec` phase
+processes. The backend is inferred from the `wsb:` sandbox ID after provision.
+
+| Phase | Behaviour |
+|---|---|
+| `provision` | Creates a `wsb:<8-hex>` ID and stores immutable filesystem policy; no VM is launched |
+| `start` | Spawns the detached daemon, launches the VM, and waits until the guest is ready |
+| `exec` | Runs one command through the existing guest connection; only one exec is admitted at a time |
+| `stop` | Requests daemon teardown and waits for the VM and daemon to exit |
+| `deprovision` | Stops if necessary and removes the sandbox records |
+
+The daemon persists its PID, creation time, authentication nonce, active
+sandbox ID, readiness, and VM ownership proof under
+`%TEMP%\wxc-wsb\state-aware`. It receives its authentication nonce over stdin,
+not the command line.
+
+The host supports only one Windows Sandbox VM per logon session. One-shot and
+state-aware owners share the same host-slot mutex. Orphan reclaim requires
+recorded PID-plus-creation-time proof intersecting the live process set;
+unproven VMs are treated as foreign and left untouched.
+
+There is no idle watchdog. A started state-aware sandbox remains active until
+`stop` or `deprovision`.
 
 ## Configuration
+
+### One-shot
 
 ```json
 {
@@ -79,76 +106,99 @@ multi-exec or warm-VM reuse.
 }
 ```
 
-The legacy `experimental.windows_sandbox.idleTimeoutMs` and
-`daemonPipeName` fields are still accepted for schema compatibility but are
-ignored by the one-shot backend. A warning is emitted only when either field
-is explicitly changed from its default.
+### State-aware provision
+
+```json
+{
+  "version": "0.6.0-alpha",
+  "phase": "provision",
+  "containment": "windows_sandbox",
+  "filesystem": {
+    "readwritePaths": ["C:\\workspace"],
+    "readonlyPaths": ["C:\\inputs"]
+  }
+}
+```
+
+Subsequent phases use the returned `sandboxId`.
+
+The legacy `experimental.windows_sandbox.idleTimeoutMs`, `idleTimeout`, and
+`daemonPipeName` fields remain parseable for schema compatibility but do not
+affect either execution surface. One-shot emits a targeted warning only for
+non-default values.
 
 ## Policy Support
 
+### One-shot
+
 | Policy | Behaviour |
 |---|---|
-| `filesystem.readwritePaths` | Existing host directories are mapped read-write at the same path inside the guest |
-| `filesystem.readonlyPaths` | Existing host directories are mapped read-only at the same path inside the guest |
-| `filesystem.deniedPaths` | Accepted when outside mapped shares; rejected when equal to, inside, or containing a mapped share |
-| Default network policy `block` | Supported through guest firewall lockdown |
+| `filesystem.readwritePaths` | Existing directories mapped read-write at the same path |
+| `filesystem.readonlyPaths` | Existing directories mapped read-only at the same path |
+| `filesystem.deniedPaths` | Accepted outside shares; rejected when overlapping a mapped share |
+| Default network policy `block` | Enforced by the guest firewall |
 | Default network policy `allow` | Rejected |
-| `allowedHosts` / `blockedHosts` | Rejected; per-host filtering is not supported |
+| `allowedHosts` / `blockedHosts` | Rejected |
 | Network proxy | Rejected |
 
-Mapped paths must be absolute existing directories. Files, overlapping mapped
-roots, and a path listed as both read-only and read-write are rejected.
+Mapped paths must be absolute existing directories. Files, nested mapped roots,
+and conflicting read-only/read-write entries are rejected.
+
+### State-aware
+
+Filesystem policy is accepted only during `provision` and is immutable
+afterward. Later phases reject filesystem policy. Network and UI policy are not
+accepted by state-aware phases; the guest still enforces its unconditional
+network lockdown. Windows Sandbox does not accept an Entra `user` bundle.
 
 ## Security Model
 
 - **VM boundary:** workload code runs in a separate Windows instance.
-- **Authenticated channels:** every TCP connection presents a random
-  per-launch 32-byte nonce and a channel-role byte before protocol traffic.
-- **Role-based pairing:** the guest pairs sockets by declared role rather than
-  TCP accept order.
-- **Network isolation:** the guest permits only the established host
-  connection and blocks other inbound and outbound traffic.
-- **Secured host state:** nonce, rendezvous, and ownership-marker directories
+- **Authenticated channels:** every guest TCP connection presents a random
+  per-launch 32-byte nonce and a channel-role byte.
+- **Role-based pairing:** sockets are paired by declared role, not TCP accept
+  order.
+- **Network isolation:** only the established host connection is permitted.
+- **Secured records:** nonce, rendezvous, marker, and state-aware directories
   use owner-only ACLs and reject roots owned by another user.
 - **Ownership-scoped teardown:** PID-plus-creation-time proof prevents PID reuse
-  or an unrelated Windows Sandbox instance from being treated as owned.
-- **Ephemeral execution:** the VM and per-run marker are removed only after
-  teardown confirms the owned VM has exited.
+  or a foreign VM from being treated as owned.
+- **Single-flight state-aware exec:** the daemon admits only one execution at a
+  time and restores the guest slot before reporting terminal completion.
 
-Same-user processes are within the backend's trust boundary.
+Same-user processes remain within the backend's trust boundary.
 
 ## Prerequisites
 
 | Requirement | Check |
 |---|---|
-| Windows 11 Pro, Enterprise, or another edition supporting Windows Sandbox | `winver` |
+| Windows edition supporting Windows Sandbox | `winver` |
 | Windows Sandbox optional feature enabled | `Test-Path "$env:WINDIR\System32\WindowsSandbox.exe"` |
 | Hardware virtualisation and Hyper-V support | `systeminfo` |
 
 Enabling the optional feature requires a reboot. No host Python installation is
-required; workloads can use runtimes already present in the Windows Sandbox
-image or directories explicitly mapped by policy.
+required.
 
 ## Known Limitations
 
-1. Every invocation pays the Windows Sandbox cold-boot cost.
-2. The host supports only one active Windows Sandbox VM per logon session.
+1. One-shot execution pays the full VM cold-boot cost on every invocation.
+2. Only one Windows Sandbox VM can be active per logon session.
 3. One-shot stdin is buffered and capped at 64 MiB.
 4. Filesystem sharing supports directories only.
-5. Network policy is block-only; allow-lists, block-lists, proxies, and
+5. Network access is block-only; allow-lists, block-lists, proxies, and
    unrestricted outbound access are unsupported.
-6. Output is captured and returned after execution rather than streamed live to
-   the caller.
+6. State-aware lifecycle has no idle timeout.
 
 ## Testing
 
-The end-to-end suite requires a Windows host with the Windows Sandbox feature:
-
 ```powershell
 .\tests\scripts\run_windows_sandbox_one_shot_tests.ps1
+.\tests\scripts\run_windows_sandbox_state_aware_tests.ps1
 ```
+
+Both suites require a Windows host with the Windows Sandbox optional feature.
 
 ## Further Reading
 
-See [windows-sandbox-reference.md](windows-sandbox-reference.md) for protocol,
-VM setup, teardown, debugging, and source-level details.
+- [Windows Sandbox backend reference](windows-sandbox-reference.md)
+- [State-aware lifecycle API](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
