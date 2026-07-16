@@ -15,3 +15,6 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
