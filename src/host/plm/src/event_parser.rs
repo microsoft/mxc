@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[cfg(target_os = "windows")]
-use windows::core::PCWSTR;
+use windows::core::{w, PCWSTR};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 #[cfg(target_os = "windows")]
@@ -91,20 +91,23 @@ where
     F: FnMut(&str) -> Result<()>,
 {
     let path_w = wxc_common::string_util::to_wide(&trace_file.to_string_lossy());
-    let query_w = wxc_common::string_util::to_wide(&format!(
-        "*[System[EventID={EVENT_ID_ACCESS_FAILURE} or EventID={EVENT_ID_UI_VIOLATION}]]"
-    ));
+    // The event-id filter is a compile-time constant, so bake it into
+    // the binary as a wide, NUL-terminated literal with `w!` rather than
+    // formatting + re-encoding it on every call. The literal must stay
+    // in sync with the `EVENT_ID_*` constants above.
+    const _: () = assert!(EVENT_ID_ACCESS_FAILURE == 14 && EVENT_ID_UI_VIOLATION == 27);
+    let query = w!("*[System[EventID=14 or EventID=27]]");
 
-    // SAFETY: `path_w` and `query_w` are NUL-terminated wide buffers
-    // that outlive this call; the `PCWSTR`s borrow them for the
-    // duration of `EvtQuery`. The flags are valid `EvtQuery` bit
-    // constants. The returned handle is immediately adopted by
-    // `EvtHandleOwned` so it is closed on every exit path.
+    // SAFETY: `path_w` is a NUL-terminated wide buffer that outlives
+    // this call and `query` is a `'static` wide literal; the `PCWSTR`s
+    // borrow them for the duration of `EvtQuery`. The flags are valid
+    // `EvtQuery` bit constants. The returned handle is immediately
+    // adopted by `EvtHandleOwned` so it is closed on every exit path.
     let h_query = EvtHandleOwned(unsafe {
         EvtQuery(
             None,
             PCWSTR(path_w.as_ptr()),
-            PCWSTR(query_w.as_ptr()),
+            query,
             EvtQueryFilePath.0 | EvtQueryForwardDirection.0,
         )
     }?);
@@ -297,7 +300,6 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
 
 /// Decoded XML view of a single event's interesting fields.
 pub(crate) struct ParsedEvent {
-    #[allow(dead_code)]
     pub(crate) event_id: u32,
     pub(crate) time_created: DateTime<Utc>,
     pub(crate) process_id: u32,
@@ -358,11 +360,9 @@ pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 /// Mutable per-trace accumulator. Fields are `pub(crate)` so the
 /// sibling event-type decoders can write into them directly without an
 /// inflated method surface.
-pub(crate) struct ParseAccumulator<'a> {
-    #[allow(dead_code)]
-    pub(crate) current_directory: Option<&'a str>,
-    /// Cached lowercase form of `current_directory` with trailing `\\`
-    /// trimmed (computed once at construction so the hot
+pub(crate) struct ParseAccumulator {
+    /// Cached lowercase form of the trace's current directory with
+    /// trailing `\\` trimmed (computed once at construction so the hot
     /// `is_skippable` path doesn't allocate two `String`s per event).
     /// `None` when `current_directory` is `None` or is a bare drive
     /// root.
@@ -388,8 +388,8 @@ pub(crate) struct ParseAccumulator<'a> {
     pub(crate) parse_failures: usize,
 }
 
-impl<'a> ParseAccumulator<'a> {
-    fn new(current_directory: Option<&'a str>, verbose: bool) -> Self {
+impl ParseAccumulator {
+    fn new(current_directory: Option<&str>, verbose: bool) -> Self {
         let (cwd_lc_trimmed, cwd_lc_prefix) = match current_directory {
             Some(cwd) => {
                 let trimmed = cwd.trim_end_matches('\\');
@@ -411,7 +411,6 @@ impl<'a> ParseAccumulator<'a> {
             None => (None, None),
         };
         Self {
-            current_directory,
             cwd_lc_trimmed,
             cwd_lc_prefix,
             verbose,

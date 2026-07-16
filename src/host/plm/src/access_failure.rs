@@ -33,7 +33,7 @@ const ACCESS_MASK_INDEX: usize = 5;
 /// Per-event consume helper for `EventID=14`. Applies the post-XPath
 /// filters and pushes a `LearningModeAccessEvent` into
 /// `acc.valid_access_events` on success.
-pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator<'_>, mut ev: ParsedEvent) {
+pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedEvent) {
     // Pull the file path. Absent paths typically mean capability-only
     // resource accesses; the capability-extraction PR will use the
     // DACL ACE blob for those, but this PR drops them.
