@@ -20,7 +20,6 @@ mod proxy;
 #[cfg(unix)]
 mod unix_main {
     use std::fs;
-    use std::io::Read;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -100,39 +99,40 @@ mod unix_main {
     /// - **startup race**: the watcher runs on its own thread, so there is a
     ///   brief window in which the child can bind and publish its port before
     ///   an already-dead parent's EOF is observed. [`run`] narrows this with a
-    ///   non-blocking [`parent_already_disconnected`] check before binding and
+    ///   non-blocking [`exit_if_parent_disconnected`] check before binding and
     ///   before publishing; the `select!` closes any residual window.
     fn parent_disconnect_signal() -> Result<tokio::sync::oneshot::Receiver<()>, std::io::Error> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("mxc-proxy-parent-watch".into())
             .spawn(move || {
-                let mut stdin = std::io::stdin();
-                let mut buffer = [0u8; 256];
-                loop {
-                    match stdin.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(_) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(_) => break,
-                    }
-                }
+                // Drain stdin until the parent closes its write end (EOF) or
+                // the read hard-errors; either way the parent is gone. `copy`
+                // retries `Interrupted` and discards any bytes to the sink.
+                let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
                 let _ = sender.send(());
             })?;
         Ok(receiver)
     }
 
-    /// Best-effort, non-blocking check of whether the parent has already
-    /// disconnected (stdin EOF observed by the watcher thread).
+    /// If the parent has already disconnected — stdin EOF observed by the
+    /// watcher thread — return a success exit code so [`run`] can bail out at
+    /// `stage` (before binding a socket or publishing the ready file) instead
+    /// of leaving an orphaned listener behind.
     ///
     /// This is the portable analog of the old Linux-only `getppid() == 1`
-    /// guard: it lets [`run`] bail out before binding a socket or publishing
-    /// the ready file when the parent dies during startup. It is inherently
-    /// racy — the watcher thread may not have observed EOF yet — so the
-    /// authoritative shutdown still happens on the `parent_disconnected` arm
-    /// of the run loop's `select!`.
-    fn parent_already_disconnected(receiver: &mut tokio::sync::oneshot::Receiver<()>) -> bool {
-        matches!(receiver.try_recv(), Ok(()))
+    /// guard. It is inherently racy — the watcher thread may not have observed
+    /// EOF yet — so the authoritative shutdown still happens on the
+    /// `parent_disconnected` arm of the run loop's `select!`.
+    fn exit_if_parent_disconnected(
+        receiver: &mut tokio::sync::oneshot::Receiver<()>,
+        stage: &str,
+    ) -> Option<std::process::ExitCode> {
+        if !matches!(receiver.try_recv(), Ok(())) {
+            return None;
+        }
+        eprintln!("[unix-test-proxy] parent disconnected before {stage}, exiting");
+        Some(std::process::ExitCode::from(0))
     }
 
     pub async fn run() -> std::process::ExitCode {
@@ -162,12 +162,8 @@ mod unix_main {
             default_policy.into(),
         ));
 
-        // Portable analog of the old Linux `getppid() == 1` guard: if the
-        // parent already disconnected before we bind, bail out before opening
-        // a listening socket so we never leak one.
-        if parent_already_disconnected(&mut parent_disconnected) {
-            eprintln!("[unix-test-proxy] parent disconnected before bind, exiting");
-            return std::process::ExitCode::from(0);
+        if let Some(code) = exit_if_parent_disconnected(&mut parent_disconnected, "bind") {
+            return code;
         }
 
         let port = match proxy::start(&bind_address, filter).await {
@@ -184,9 +180,8 @@ mod unix_main {
         //    eliminates partial-read windows when the parent polls the file.
         //    Re-check the parent first so a parent that died during bind does
         //    not get a published port for a proxy that is about to exit.
-        if parent_already_disconnected(&mut parent_disconnected) {
-            eprintln!("[unix-test-proxy] parent disconnected before publish, exiting");
-            return std::process::ExitCode::from(0);
+        if let Some(code) = exit_if_parent_disconnected(&mut parent_disconnected, "publish") {
+            return code;
         }
         let tmp_path = ready_file.with_extension("tmp");
         if let Err(err) = fs::write(&tmp_path, port.to_string()) {
