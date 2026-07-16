@@ -27,6 +27,7 @@
 
 #[cfg(target_os = "windows")]
 mod provider {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::sync::OnceLock;
 
@@ -60,6 +61,25 @@ mod provider {
     /// provider's real state out of sync (e.g. flag set to registered after a
     /// `register()` that actually failed, or a double register/unregister).
     static REGISTERED: Mutex<bool> = Mutex::new(false);
+
+    /// Lock-free "is the provider currently registered" flag.
+    ///
+    /// Mirrors [`REGISTERED`] but is readable without acquiring the mutex, so
+    /// out-of-band emit paths that run in delicate contexts — the global panic
+    /// hook (unwinding) and the console control handler (about to be torn down
+    /// by the OS) — can cheaply skip work when telemetry is inactive without
+    /// risking a mutex acquisition. It is written **inside** the `REGISTERED`
+    /// critical section so the two never disagree about the final state.
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    /// Returns `true` if the ETW provider is currently registered.
+    ///
+    /// Cheap and lock-free — intended for guarding best-effort emit paths such
+    /// as [`emit_panic`](crate)-style hooks. May momentarily lag a concurrent
+    /// `init`/`shutdown`, which is acceptable for best-effort telemetry.
+    pub fn is_active() -> bool {
+        ACTIVE.load(Ordering::Acquire)
+    }
 
     /// Register the ETW provider and cache version/channel strings.
     ///
@@ -96,6 +116,7 @@ mod provider {
         }
 
         *registered = true;
+        ACTIVE.store(true, Ordering::Release);
         true
     }
 
@@ -105,16 +126,32 @@ mod provider {
         if *registered {
             MXC_PROVIDER.unregister();
             *registered = false;
+            ACTIVE.store(false, Ordering::Release);
         }
     }
 
     /// Emit an `MXC.Execution` ETW event.
+    ///
+    /// `phase` is the state-aware lifecycle phase that produced this event —
+    /// one of `provision|start|exec|stop|deprovision`. It is empty for one-shot
+    /// (non-state-aware) executions, which have no lifecycle phase.
+    ///
+    /// `correlation_vector` is the Microsoft Correlation Vector (MS-CV) for this
+    /// event, emitted under the reserved TraceLogging field name `__TlgCV__` (the
+    /// same field WIL TraceLogging uses). It is seeded from random bytes at
+    /// `provision` and spun per phase, so `provision`→…→`deprovision` events can
+    /// be joined across the separate `wxc-exec` processes that emit them (join on
+    /// the shared base prefix). Carries no `sandbox_id` / UPN or other caller
+    /// identity — privacy-safe by construction. Empty for one-shot executions
+    /// (which are a single process already correlated by `AppSessionGuid`).
     pub fn log_execution(
         backend: &str,
         exit_code: i32,
         outcome: &str,
         duration_ms: u64,
         failure_reason: &str,
+        phase: &str,
+        correlation_vector: &str,
     ) {
         let state = match STATE.get() {
             Some(s) => s,
@@ -146,6 +183,15 @@ mod provider {
             str8("mxc.outcome", outcome),
             u64("mxc.duration_ms", &duration_ms),
             str8("mxc.failure_reason", failure_reason),
+            // State-aware lifecycle phase (provision|start|exec|stop|
+            // deprovision); empty for one-shot executions.
+            str8("mxc.phase", phase),
+            // Microsoft Correlation Vector (MS-CV), under WIL TraceLogging's
+            // reserved `__TlgCV__` field. Seeded at provision and spun per phase;
+            // share a base prefix across all phases of one state-aware lifecycle.
+            // Empty for one-shot executions. Join on the base prefix to
+            // reconstruct a full provision→…→deprovision timeline.
+            str8("__TlgCV__", correlation_vector),
         );
     }
 
@@ -155,7 +201,19 @@ mod provider {
     /// bounded `error_type` category and the process `exit_code`. This keeps
     /// telemetry free of PII (paths, usernames, credentials) that error
     /// strings can contain.
-    pub fn log_error(backend: &str, error_type: &str, exit_code: i32) {
+    ///
+    /// `phase` is the state-aware lifecycle phase that produced this event
+    /// (`provision|start|exec|stop|deprovision`); empty for one-shot executions.
+    ///
+    /// `correlation_vector` is the Microsoft Correlation Vector (MS-CV), emitted
+    /// under `__TlgCV__` (see [`log_execution`]); empty for one-shot executions.
+    pub fn log_error(
+        backend: &str,
+        error_type: &str,
+        exit_code: i32,
+        phase: &str,
+        correlation_vector: &str,
+    ) {
         let state = match STATE.get() {
             Some(s) => s,
             None => return,
@@ -184,6 +242,11 @@ mod provider {
             str8("mxc.backend", backend),
             str8("mxc.error_type", error_type),
             i32("mxc.exit_code", &exit_code),
+            // State-aware lifecycle phase (provision|start|exec|stop|
+            // deprovision); empty for one-shot executions.
+            str8("mxc.phase", phase),
+            // MS-CV under `__TlgCV__` (see MXC.Execution); empty for one-shot.
+            str8("__TlgCV__", correlation_vector),
         );
     }
 }
@@ -200,16 +263,29 @@ mod provider {
 
     pub fn shutdown() {}
 
+    pub fn is_active() -> bool {
+        false
+    }
+
     pub fn log_execution(
         _backend: &str,
         _exit_code: i32,
         _outcome: &str,
         _duration_ms: u64,
         _failure_reason: &str,
+        _phase: &str,
+        _correlation_vector: &str,
     ) {
     }
 
-    pub fn log_error(_backend: &str, _error_type: &str, _exit_code: i32) {}
+    pub fn log_error(
+        _backend: &str,
+        _error_type: &str,
+        _exit_code: i32,
+        _phase: &str,
+        _correlation_vector: &str,
+    ) {
+    }
 }
 
 pub use provider::*;
@@ -254,10 +330,29 @@ mod tests {
     }
 
     #[test]
+    fn is_active_tracks_registration() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ok = init("0.0.0-test", "dev");
+        // `is_active` reflects whether registration actually succeeded, which
+        // matches `init`'s return on every platform (always false off Windows).
+        assert_eq!(is_active(), ok);
+        shutdown();
+        assert!(!is_active(), "provider must be inactive after shutdown");
+    }
+
+    #[test]
     fn log_execution_after_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
-        log_execution("test_backend", 0, "success", 100, "");
+        log_execution(
+            "test_backend",
+            0,
+            "success",
+            100,
+            "",
+            "provision",
+            "iso:wxc-abcd",
+        );
         shutdown();
     }
 
@@ -265,15 +360,21 @@ mod tests {
     fn log_error_after_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
-        log_error("test_backend", "config_error", 1);
+        log_error(
+            "test_backend",
+            "config_error",
+            1,
+            "provision",
+            "iso:wxc-abcd",
+        );
         shutdown();
     }
 
     #[test]
     fn log_without_init() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        log_execution("test_backend", 0, "success", 50, "none");
-        log_error("test_backend", "unknown", 1);
+        log_execution("test_backend", 0, "success", 50, "none", "", "");
+        log_error("test_backend", "unknown", 1, "", "");
     }
 
     #[test]
@@ -281,16 +382,24 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
         shutdown();
-        log_execution("test_backend", 1, "failure", 200, "timeout");
-        log_error("test_backend", "process_error", 1);
+        log_execution(
+            "test_backend",
+            1,
+            "failure",
+            200,
+            "timeout",
+            "exec",
+            "iso:wxc-abcd",
+        );
+        log_error("test_backend", "process_error", 1, "exec", "iso:wxc-abcd");
     }
 
     #[test]
     fn handles_empty_strings() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("", "");
-        log_execution("", 0, "", 0, "");
-        log_error("", "", 0);
+        log_execution("", 0, "", 0, "", "", "");
+        log_error("", "", 0, "", "");
         shutdown();
     }
 }
