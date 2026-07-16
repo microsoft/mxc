@@ -185,12 +185,23 @@ fn normalize_path(p: &str) -> Option<String> {
     //    pure-segment. Callers fall back to "no match" semantics,
     //    which for a deny rule is the safe failure mode (the policy
     //    won't widen on an event we can't prove safe).
+    // Rebuild the normalized path in a single pre-allocated buffer
+    // instead of collecting an owned `String` per component and then
+    // `join`-ing them. `normalize_path` runs once per event on the hot
+    // path, so the old `Vec<String>` + `join` cost roughly one heap
+    // allocation per path component plus the join allocation; writing
+    // straight into `out` reduces that to a single allocation. We emit
+    // the `\` separator before every component after the first, which
+    // reproduces `join("\\")` byte-for-byte (including the leading empty
+    // UNC segments, which contribute an empty component each).
     let trimmed = s.trim_end_matches('\\');
-    let mut parts: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(trimmed.len());
     let mut in_leading_unc = true;
+    let mut emitted = 0usize;
     for (i, part) in trimmed.split('\\').enumerate() {
         if i == 0 && part.len() == 2 && part.as_bytes()[1] == b':' {
-            parts.push(part.to_string());
+            out.push_str(part);
+            emitted += 1;
             in_leading_unc = false;
             continue;
         }
@@ -200,7 +211,10 @@ fn normalize_path(p: &str) -> Option<String> {
         // non-empty segment, leave the leading-UNC mode and any
         // future empty segment is an error (doubled backslash etc).
         if part.is_empty() && in_leading_unc && i < 2 {
-            parts.push(String::new());
+            if emitted > 0 {
+                out.push('\\');
+            }
+            emitted += 1;
             continue;
         }
         in_leading_unc = false;
@@ -211,9 +225,13 @@ fn normalize_path(p: &str) -> Option<String> {
         if part == "." || part == ".." || stripped.is_empty() {
             return None;
         }
-        parts.push(stripped.to_string());
+        if emitted > 0 {
+            out.push('\\');
+        }
+        out.push_str(stripped);
+        emitted += 1;
     }
-    Some(parts.join("\\"))
+    Some(out)
 }
 
 /// Returns true iff `file_path_norm` is equal to, or strictly nested
@@ -375,10 +393,19 @@ pub fn update_from_access_events(
             continue;
         }
 
-        // Already-covered short-circuit for readwrite policy.
-        if rw_existing_set.contains(&ev_norm)
-            || path_starts_with_any_norm(&ev_norm, &rw_existing_norm)
-        {
+        // Already-covered short-circuit for readwrite policy. The exact
+        // set hit is O(1); the prefix scan is O(N) over the grant
+        // vector. Cache a positive prefix match by inserting `ev_norm`
+        // into `rw_existing_set`, so a later event for the same path
+        // short-circuits on the cheap set lookup instead of re-scanning
+        // `rw_existing_norm`. We deliberately do NOT extend
+        // `rw_existing_norm`: the path is already subsumed by an
+        // existing prefix, so it never needs to act as a prefix itself.
+        if rw_existing_set.contains(&ev_norm) {
+            continue;
+        }
+        if path_starts_with_any_norm(&ev_norm, &rw_existing_norm) {
+            rw_existing_set.insert(ev_norm.clone());
             continue;
         }
 
@@ -421,9 +448,14 @@ pub fn update_from_access_events(
 
         // Process Read Requests
         if (ev.access_mask & READ_MASK) != 0 {
-            if ro_existing_set.contains(&ev_norm)
-                || path_starts_with_any_norm(&ev_norm, &ro_existing_norm)
-            {
+            // Same prefix-cache optimization as the readwrite branch:
+            // exact hit first, then cache a positive prefix match so
+            // repeats of the same read path short-circuit in O(1).
+            if ro_existing_set.contains(&ev_norm) {
+                continue;
+            }
+            if path_starts_with_any_norm(&ev_norm, &ro_existing_norm) {
+                ro_existing_set.insert(ev_norm.clone());
                 continue;
             }
             let arr = config["filesystem"]["readonlyPaths"]

@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "windows")]
 use std::path::Path;
 
@@ -370,12 +370,16 @@ pub(crate) struct ParseAccumulator<'a> {
     pub(crate) cwd_lc_prefix: Option<String>,
     pub(crate) verbose: bool,
     pub(crate) valid_access_events: Vec<LearningModeAccessEvent>,
-    /// Set of `(access_mask, file_path)` keys already pushed into
-    /// `valid_access_events`, used to drop duplicate access-failure
-    /// events (the provider can emit the same denied access many times
-    /// across a trace). Keeps `valid_access_events` — and the generated
-    /// config — free of redundant entries.
-    pub(crate) seen_access_events: HashSet<(u32, String)>,
+    /// Maps a normalized (lowercased) file path to the index of its
+    /// entry in `valid_access_events`, so repeated access failures for
+    /// the same file collapse to a single entry whose `access_mask` is
+    /// the OR of every observed mask. The provider emits the same denied
+    /// access many times across a trace, and a file is frequently
+    /// touched with different masks (read, then write); without this a
+    /// long trace balloons `valid_access_events` — and the generated
+    /// config — with hundreds of thousands of redundant near-identical
+    /// entries.
+    pub(crate) access_event_index: HashMap<String, usize>,
     pub(crate) requested_capabilities: HashSet<String>,
     /// Count of events whose XML failed to parse in `consume` (i.e.
     /// `parse_event_xml` returned `None`). A malformed record is skipped
@@ -412,7 +416,7 @@ impl<'a> ParseAccumulator<'a> {
             cwd_lc_prefix,
             verbose,
             valid_access_events: Vec::new(),
-            seen_access_events: HashSet::new(),
+            access_event_index: HashMap::new(),
             requested_capabilities: HashSet::new(),
             parse_failures: 0,
         }
