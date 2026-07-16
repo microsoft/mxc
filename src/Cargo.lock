@@ -1426,19 +1426,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "linux_test_proxy"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "clap",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "tokio",
-]
-
-[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2602,6 +2589,19 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unix_test_proxy"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "tokio",
+]
 
 [[package]]
 name = "untrusted"

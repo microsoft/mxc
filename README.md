@@ -109,7 +109,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Linux Rust (from src/; matches build.sh's platform-compatible crate set)
 
-cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p linux_test_proxy --all-targets -- -D warnings
+cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy --all-targets -- -D warnings
 
 # macOS Rust (from src/)
 

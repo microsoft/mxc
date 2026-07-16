@@ -127,7 +127,7 @@ pub async fn start(bind_addr: &str, filter: Arc<HostFilter>) -> std::io::Result<
                     });
                 }
                 Err(err) => {
-                    eprintln!("[linux-test-proxy] accept error: {}", err);
+                    eprintln!("[unix-test-proxy] accept error: {}", err);
                 }
             }
         }
@@ -158,15 +158,15 @@ async fn handle_connect(
 
     let host = strip_port(&authority);
     if !filter.permits(host) {
-        eprintln!("[linux-test-proxy] BLOCK CONNECT {}", authority);
+        eprintln!("[unix-test-proxy] BLOCK CONNECT {}", authority);
         return Ok(empty_response(StatusCode::FORBIDDEN));
     }
 
-    eprintln!("[linux-test-proxy] CONNECT {}", authority);
+    eprintln!("[unix-test-proxy] CONNECT {}", authority);
 
     let server = TcpStream::connect(&authority).await.map_err(|err| {
         eprintln!(
-            "[linux-test-proxy] connect error for {}: {}",
+            "[unix-test-proxy] connect error for {}: {}",
             authority, err
         );
         err
@@ -177,7 +177,7 @@ async fn handle_connect(
         let upgraded = match hyper::upgrade::on(req).await {
             Ok(upgraded) => upgraded,
             Err(err) => {
-                eprintln!("[linux-test-proxy] upgrade failed for {}: {}", target, err);
+                eprintln!("[unix-test-proxy] upgrade failed for {}: {}", target, err);
                 return;
             }
         };
@@ -188,7 +188,7 @@ async fn handle_connect(
             tokio::io::copy_bidirectional(&mut client, &mut server).await
         {
             eprintln!(
-                "[linux-test-proxy] tunnel closed {} (client: {} bytes, server: {} bytes)",
+                "[unix-test-proxy] tunnel closed {} (client: {} bytes, server: {} bytes)",
                 target, from_client, from_server
             );
         }
@@ -206,18 +206,18 @@ async fn handle_forward(
 
     let host = uri.host().ok_or("missing host in URI")?;
     if !filter.permits(host) {
-        eprintln!("[linux-test-proxy] BLOCK {} {}", method, uri);
+        eprintln!("[unix-test-proxy] BLOCK {} {}", method, uri);
         return Ok(empty_response(StatusCode::FORBIDDEN));
     }
 
     let port = uri.port_u16().unwrap_or(80);
     let addr = format!("{}:{}", host, port);
 
-    eprintln!("[linux-test-proxy] {} {}", method, uri);
+    eprintln!("[unix-test-proxy] {} {}", method, uri);
 
     let stream = TcpStream::connect(&addr).await.map_err(|err| {
         eprintln!(
-            "[linux-test-proxy] forward connect error for {}: {}",
+            "[unix-test-proxy] forward connect error for {}: {}",
             addr, err
         );
         err
@@ -228,7 +228,7 @@ async fn handle_forward(
 
     tokio::spawn(async move {
         if let Err(err) = conn.await {
-            eprintln!("[linux-test-proxy] forward connection error: {}", err);
+            eprintln!("[unix-test-proxy] forward connection error: {}", err);
         }
     });
 

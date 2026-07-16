@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Standalone binary for the Linux builtin test proxy.
+//! Standalone binary for the Unix builtin test proxy.
 //!
 //! **Testing-only tool.** Launches a minimal HTTP CONNECT proxy on an
 //! OS-assigned port, atomically writes the port to a ready file, then waits
 //! for SIGTERM or parent death before shutting down.
 //!
-//! Designed to be spawned by `wxc_common::linux_proxy_coordinator` to provide
+//! Designed to be spawned by `wxc_common::unix_proxy_coordinator` to provide
 //! cooperative, unprivileged proxy-based enforcement of `allowedHosts` /
 //! `blockedHosts` for the Bubblewrap backend.
 
@@ -41,7 +41,7 @@ mod linux_main {
 
     #[derive(Parser)]
     #[command(
-        name = "linux-test-proxy",
+        name = "unix-test-proxy",
         about = "Builtin test proxy for MXC Bubblewrap integration testing (NOT for production use)"
     )]
     pub struct Cli {
@@ -96,7 +96,7 @@ mod linux_main {
         }
 
         eprintln!(
-            "[linux-test-proxy] *** SECURITY WARNING ***: testing-only proxy. Do NOT use in production."
+            "[unix-test-proxy] *** SECURITY WARNING ***: testing-only proxy. Do NOT use in production."
         );
 
         let cli = Cli::parse();
@@ -111,7 +111,7 @@ mod linux_main {
             Ok(port) => port,
             Err(err) => {
                 eprintln!(
-                    "[linux-test-proxy] failed to bind {}: {}",
+                    "[unix-test-proxy] failed to bind {}: {}",
                     cli.bind_address, err
                 );
                 return std::process::ExitCode::from(1);
@@ -119,7 +119,7 @@ mod linux_main {
         };
 
         eprintln!(
-            "[linux-test-proxy] Listening on {}:{}",
+            "[unix-test-proxy] Listening on {}:{}",
             cli.bind_address, port
         );
 
@@ -128,7 +128,7 @@ mod linux_main {
         let tmp_path = cli.ready_file.with_extension("tmp");
         if let Err(err) = fs::write(&tmp_path, port.to_string()) {
             eprintln!(
-                "[linux-test-proxy] Failed to write ready tmp file {}: {}",
+                "[unix-test-proxy] Failed to write ready tmp file {}: {}",
                 tmp_path.display(),
                 err
             );
@@ -136,7 +136,7 @@ mod linux_main {
         }
         if let Err(err) = fs::rename(&tmp_path, &cli.ready_file) {
             eprintln!(
-                "[linux-test-proxy] Failed to rename ready file to {}: {}",
+                "[unix-test-proxy] Failed to rename ready file to {}: {}",
                 cli.ready_file.display(),
                 err
             );
@@ -152,7 +152,7 @@ mod linux_main {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!(
-                        "[linux-test-proxy] failed to install SIGTERM handler: {}",
+                        "[unix-test-proxy] failed to install SIGTERM handler: {}",
                         err
                     );
                     return std::process::ExitCode::from(1);
@@ -163,7 +163,7 @@ mod linux_main {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!(
-                        "[linux-test-proxy] failed to install SIGINT handler: {}",
+                        "[unix-test-proxy] failed to install SIGINT handler: {}",
                         err
                     );
                     return std::process::ExitCode::from(1);
@@ -171,8 +171,8 @@ mod linux_main {
             };
 
         tokio::select! {
-            _ = term.recv() => eprintln!("[linux-test-proxy] received SIGTERM, shutting down"),
-            _ = interrupt.recv() => eprintln!("[linux-test-proxy] received SIGINT, shutting down"),
+            _ = term.recv() => eprintln!("[unix-test-proxy] received SIGTERM, shutting down"),
+            _ = interrupt.recv() => eprintln!("[unix-test-proxy] received SIGINT, shutting down"),
         }
 
         std::process::ExitCode::from(0)
@@ -188,7 +188,7 @@ async fn main() -> std::process::ExitCode {
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!(
-        "linux-test-proxy: this binary is only supported on Linux. Use wxc-test-proxy on Windows."
+        "unix-test-proxy: this binary is only supported on Linux. Use wxc-test-proxy on Windows."
     );
     std::process::exit(1);
 }

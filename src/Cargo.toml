@@ -30,7 +30,7 @@ members = [
     "testing/wxc_e2e_tests",
     "testing/wxc_test_driver",
     "testing/wxc_test_proxy",
-    "testing/linux_test_proxy",
+    "testing/unix_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",

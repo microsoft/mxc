@@ -56,7 +56,7 @@ export const EXPECTED_WINDOWS_BINARIES = [
 
 export const EXPECTED_LINUX_BINARIES = [
   'lxc-exec',
-  'linux-test-proxy',
+  'unix-test-proxy',
 ];
 
 export const EXPECTED_MACOS_BINARIES = [
@@ -383,31 +383,31 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
   return { port, proxyProcess };
 }
 
-// Linux-only: linux-test-proxy helpers
+// Linux-only: unix-test-proxy helpers
 
-/** Locate linux-test-proxy in the SDK package bin directory. */
-function findLinuxTestProxyBinary(): string {
+/** Locate unix-test-proxy in the SDK package bin directory. */
+function findUnixTestProxyBinary(): string {
   const binDir = getSdkBinDir();
-  const proxyPath = path.join(binDir, 'linux-test-proxy');
+  const proxyPath = path.join(binDir, 'unix-test-proxy');
   if (fs.existsSync(proxyPath)) {
     return proxyPath;
   }
-  throw new Error(`linux-test-proxy not found at expected SDK package location: ${proxyPath}`);
+  throw new Error(`unix-test-proxy not found at expected SDK package location: ${proxyPath}`);
 }
 
 /**
- * Start linux-test-proxy in a child process.
+ * Start unix-test-proxy in a child process.
  *
  * Binds to an OS-assigned port on `127.0.0.1` and writes it atomically to a
  * ready file. The proxy uses `PR_SET_PDEATHSIG` so it dies when the test
  * process exits — no cleanup-event mechanism is needed on Linux.
  */
-export function startLinuxTestProxy(
+export function startUnixTestProxy(
   dir: string,
   opts: { allowHosts?: string[]; blockHosts?: string[] } = {},
 ): { port: number; proxyProcess: ChildProcess } {
-  const proxyPath = findLinuxTestProxyBinary();
-  const readyFile = path.join(dir, 'linux-proxy-ready.txt');
+  const proxyPath = findUnixTestProxyBinary();
+  const readyFile = path.join(dir, 'unix-proxy-ready.txt');
 
   const args: string[] = ['--ready-file', readyFile, '--bind-address', '127.0.0.1'];
   for (const host of opts.allowHosts ?? []) {
@@ -426,7 +426,7 @@ export function startLinuxTestProxy(
 
   if (!fs.existsSync(readyFile)) {
     proxyProcess.kill('SIGTERM');
-    throw new Error('linux-test-proxy did not write ready file within 15 seconds');
+    throw new Error('unix-test-proxy did not write ready file within 15 seconds');
   }
 
   const portStr = fs.readFileSync(readyFile, 'utf-8').trim();

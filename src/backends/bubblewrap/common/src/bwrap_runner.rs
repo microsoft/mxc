@@ -13,7 +13,7 @@
 //! supports two paths:
 //! - **Cooperative env-var proxy** (default, no privilege required): when
 //!   `network.proxy` is configured the runner launches an unprivileged HTTP
-//!   proxy via [`wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator`]
+//!   proxy via [`wxc_common::unix_proxy_coordinator::UnixProxyCoordinator`]
 //!   and the command builder injects `HTTP_PROXY` / `HTTPS_PROXY` /
 //!   `NO_PROXY` env vars into the sandbox.
 //! - **iptables firewall** (requires `CAP_NET_ADMIN` / root): when
@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
-use wxc_common::linux_proxy_coordinator::LinuxProxyCoordinator;
+use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
 use wxc_common::sandbox_process::{
@@ -171,7 +171,7 @@ impl BubblewrapScriptRunner {
         // 1. Start the network proxy if configured. Must happen before
         //    arg-building so the proxy's loopback address can be injected as
         //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
-        let mut proxy = LinuxProxyCoordinator::new();
+        let mut proxy = UnixProxyCoordinator::new();
         if request.policy.network_proxy.is_enabled() {
             if let Err(err) = proxy.start(
                 &request.policy.network_proxy,
@@ -340,7 +340,7 @@ struct BwrapChild {
     /// termination signals the whole group; `false` for `Inherit` mode, where
     /// killing bwrap (pid 1 of the namespace) alone tears the sandbox down.
     group: bool,
-    proxy: LinuxProxyCoordinator,
+    proxy: UnixProxyCoordinator,
     fw_manager: Option<NetworkIptablesManager>,
     timeout: Option<Duration>,
 }
