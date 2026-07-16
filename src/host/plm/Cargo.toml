@@ -45,8 +45,3 @@ embed-manifest = "1.4"
 
 [dev-dependencies]
 tempfile.workspace = true
-# Only the `#[test]` in `start.rs` (well-formedness gate for the
-# embedded WPR profile) still uses roxmltree; the per-event hot path
-# now streams via quick-xml, so roxmltree no longer ships in the
-# release binary.
-roxmltree.workspace = true

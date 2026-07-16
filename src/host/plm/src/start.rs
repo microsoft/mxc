@@ -222,6 +222,17 @@ mod tests {
         assert!(s.contains("stop"), "verb must appear: {s}");
     }
 
+    /// Whether `element` carries an attribute `name` whose (unescaped)
+    /// value equals `value`. The embedded WPRP attribute values are plain
+    /// ASCII with no XML entities, so a raw byte comparison is sufficient.
+    fn attr_equals(element: &quick_xml::events::BytesStart<'_>, name: &[u8], value: &[u8]) -> bool {
+        element
+            .try_get_attribute(name)
+            .ok()
+            .flatten()
+            .is_some_and(|a| a.value.as_ref() == value)
+    }
+
     /// Pin that the embedded WPR profile (`profile_gen::EMBEDDED_WPRP`)
     /// is well-formed XML and still declares the `AccessFailureProfile`
     /// recording referenced by `start_plm_trace_with`. The profile is
@@ -230,15 +241,39 @@ mod tests {
     #[test]
     fn plm_wprp_resource_is_well_formed_and_declares_access_failure_profile() {
         let wprp = crate::profile_gen::EMBEDDED_WPRP;
-        let doc =
-            roxmltree::Document::parse(wprp).expect("EMBEDDED_WPRP must parse as well-formed XML");
 
-        // The recording name must stay `AccessFailureProfile` —
-        // `start_plm_trace_with` builds `<wprp_path>!AccessFailureProfile`.
-        let has_profile = doc
-            .descendants()
-            .filter(|n| n.has_tag_name("Profile"))
-            .any(|n| n.attribute("Name") == Some("AccessFailureProfile"));
+        // Single streaming pass over the embedded profile: reading through
+        // to EOF without a parse error proves the document is well-formed
+        // (mismatched or unclosed tags surface as an `Err`), while we
+        // simultaneously record whether the two required elements appear.
+        let mut reader = quick_xml::reader::Reader::from_str(wprp);
+        let mut has_profile = false;
+        let mut has_kernel_collector = false;
+        loop {
+            match reader
+                .read_event()
+                .expect("EMBEDDED_WPRP must parse as well-formed XML")
+            {
+                quick_xml::events::Event::Start(e) | quick_xml::events::Event::Empty(e) => {
+                    match e.name().local_name().as_ref() {
+                        // The recording name must stay `AccessFailureProfile`
+                        // — `start_plm_trace_with` builds
+                        // `<wprp_path>!AccessFailureProfile`.
+                        b"Profile" if attr_equals(&e, b"Name", b"AccessFailureProfile") => {
+                            has_profile = true;
+                        }
+                        // The AccessFailureProfile recording references the
+                        // SC_Kernel system collector for process/loader events.
+                        b"SystemCollector" if attr_equals(&e, b"Id", b"SC_Kernel") => {
+                            has_kernel_collector = true;
+                        }
+                        _ => {}
+                    }
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+        }
         assert!(
             has_profile,
             "EMBEDDED_WPRP must declare a <Profile Name=\"AccessFailureProfile\"> \
@@ -264,10 +299,6 @@ mod tests {
         // events the parser uses to attribute access failures to a
         // specific application binary. Verify the collector reference
         // still exists.
-        let has_kernel_collector = doc
-            .descendants()
-            .filter(|n| n.has_tag_name("SystemCollector"))
-            .any(|n| n.attribute("Id") == Some("SC_Kernel"));
         assert!(
             has_kernel_collector,
             "EMBEDDED_WPRP must declare the SC_Kernel SystemCollector that the \

@@ -97,7 +97,6 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-roxmltree = "0.20"
 quick-xml = "0.41"
 wxc_common = { path = "core/wxc_common" }
 appcontainer_common = { path = "backends/appcontainer/common" }
