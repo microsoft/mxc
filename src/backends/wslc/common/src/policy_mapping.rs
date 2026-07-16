@@ -5,9 +5,12 @@
 //! WSLC SDK volume mounts and networking mode.
 //!
 //! This module contains pure functions with no SDK dependency, making it
-//! fully unit-testable without the WSLC runtime.
+//! fully unit-testable without the WSLC runtime. The denied-path overlap check
+//! has an optional I/O-backed tier (alias canonicalization) whose resolver is
+//! injected, so its logic stays testable without touching disk.
 
 use crate::wslc_bindings::WslcContainerNetworkingMode;
+use wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
 
 /// A resolved volume mount ready to be passed to `WslcSetContainerSettingsVolumes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,45 +218,129 @@ impl NormalizedPath {
 /// object via symlink/hard link/bind) are additionally tightened at the runner
 /// by [`wxc_common::filesystem_object::normalize_object_conflicts`].
 ///
-/// This is a **structural, lexical** pre-check (no disk access): paths are
-/// parsed with drive prefix and root kept distinct, case-folded (full Unicode),
-/// and `.`/`..` folded, so traversal spellings (`C:\proj\sub\..`), whole-drive
-/// mounts (`C:\`, `\`), and drive-relative spellings (`C:secrets`) are caught.
-/// It does **not** fold Unicode normalization forms, nor canonicalize on-disk
-/// aliases: symlinks, junctions, hard links, 8.3 short names, or `\\?\` prefixes
-/// that redirect a mounted subtree are not resolved here. Same-object aliasing
-/// *between two policy entries* is tightened separately by the D6 pass
-/// ([`wxc_common::filesystem_object::normalize_object_conflicts`]), which fails
-/// closed on unresolvable paths when `deniedPaths` are present; but a mounted
-/// parent whose subtree *reaches* a denied object via such an alias is covered
-/// by neither layer (full canonicalization is deferred). Treat this as
-/// defense-in-depth for the flat-mount overlay gap, not a traversal-and-alias
-/// complete deny.
+/// This is a **two-tier** check. Tier 1 is a structural, lexical pre-check (no
+/// disk access): paths are parsed with drive prefix and root kept distinct,
+/// case-folded (full Unicode), and `.`/`..` folded, so traversal spellings
+/// (`C:\proj\sub\..`), whole-drive mounts (`C:\`, `\`), and drive-relative
+/// spellings (`C:secrets`) are caught. Tier 2 canonicalizes each path on disk
+/// ([`wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail`]) to
+/// collapse symlinks, junctions, 8.3 short names, and `\\?\` prefixes, then
+/// re-runs the structural compare on the resolved forms — closing the alias gap
+/// Tier 1 cannot see. A denied leaf that does not exist yet but sits under an
+/// aliased parent is resolved by canonicalizing the deepest existing ancestor
+/// and re-appending the missing tail, so a not-yet-created deny under a
+/// junctioned mount is still caught. With `deniedPaths` present, a path that
+/// exists but cannot be resolved **fails closed** (config rejected) rather than
+/// falling back to the weaker textual compare, matching the D6 pass
+/// ([`wxc_common::filesystem_object::normalize_object_conflicts`]).
+///
+/// Tier 2 does not fold Unicode normalization forms and compares path endpoints,
+/// not object identity: a hard link inside a mounted tree pointing at a denied
+/// file resolves to its own in-tree name (not the denied one), so it is not
+/// caught here or by D6 (the two are distinct objects). Creating such a link
+/// requires write access to the denied target the guest does not have, so this
+/// is out of scope under the trusted-author threat model. A residual TOCTOU
+/// window also remains between canonicalization and the SDK mount (an alias
+/// could be swapped in between); fully closing it needs handle-based mounting
+/// the WSLC SDK does not expose, so it is likewise accepted.
 pub fn validate_denied_path_overlap(
     readwrite_paths: &[String],
     readonly_paths: &[String],
     denied_paths: &[String],
 ) -> Result<(), String> {
+    validate_denied_path_overlap_with(
+        readwrite_paths,
+        readonly_paths,
+        denied_paths,
+        canonicalize_allowing_absent_tail,
+    )
+}
+
+/// Overlap message for a denied path nested under a mounted parent.
+fn overlap_error(denied: &str, mounted: &str, list_name: &str, via_alias: bool) -> String {
+    let lead = if via_alias {
+        format!(
+            "WSLC: deniedPaths entry '{denied}' resolves (via a symlink, junction, or short \
+             name) inside {list_name} entry '{mounted}'"
+        )
+    } else {
+        format!("WSLC: deniedPaths entry '{denied}' is nested under {list_name} entry '{mounted}'")
+    };
+    format!(
+        "{lead}. WSLC mounts host paths as flat volumes and has no overlay primitive to mask a \
+         subtree of a mounted path, so this deny cannot be enforced — the path would remain \
+         accessible through the parent mount. Remove the denied path, or stop mounting its parent."
+    )
+}
+
+/// Inner overlap validator with an injected path resolver (for testability).
+fn validate_denied_path_overlap_with(
+    readwrite_paths: &[String],
+    readonly_paths: &[String],
+    denied_paths: &[String],
+    resolve: impl Fn(&str) -> PathCanonical,
+) -> Result<(), String> {
     if denied_paths.is_empty() {
         return Ok(());
     }
 
+    let mounts: Vec<(&String, &str)> = readwrite_paths
+        .iter()
+        .map(|path| (path, "readwritePaths"))
+        .chain(readonly_paths.iter().map(|path| (path, "readonlyPaths")))
+        .collect();
+
+    // No mounts means nothing a deny could be nested under — skip the on-disk
+    // resolution (and its fail-closed-on-Unknown) entirely.
+    if mounts.is_empty() {
+        return Ok(());
+    }
+
+    // Tier 1: lexical fold (no I/O).
     for denied in denied_paths {
         let denied_path = NormalizedPath::parse(denied);
-
-        for (mounted, list_name) in readwrite_paths
-            .iter()
-            .map(|path| (path, "readwritePaths"))
-            .chain(readonly_paths.iter().map(|path| (path, "readonlyPaths")))
-        {
+        for (mounted, list_name) in &mounts {
             if NormalizedPath::parse(mounted).contains_strictly(&denied_path) {
-                return Err(format!(
-                    "WSLC: deniedPaths entry '{denied}' is nested under {list_name} entry \
-                     '{mounted}'. WSLC mounts host paths as flat volumes and has no overlay \
-                     primitive to mask a subtree of a mounted path, so this deny cannot be \
-                     enforced — the path would remain accessible through the parent mount. \
-                     Remove the denied path, or stop mounting its parent."
-                ));
+                return Err(overlap_error(denied, mounted, list_name, false));
+            }
+        }
+    }
+
+    // Tier 2: canonicalize on disk to collapse alias spellings, then re-compare.
+    // Fail closed on an unresolvable path (Unknown) since deniedPaths are present.
+    let denied_canon: Vec<(&String, PathCanonical)> =
+        denied_paths.iter().map(|d| (d, resolve(d))).collect();
+    let mount_canon: Vec<(&String, &str, PathCanonical)> = mounts
+        .iter()
+        .map(|(m, list)| (*m, *list, resolve(m)))
+        .collect();
+
+    for (path, canon) in denied_canon
+        .iter()
+        .map(|(p, c)| (*p, c))
+        .chain(mount_canon.iter().map(|(p, _, c)| (*p, c)))
+    {
+        if matches!(canon, PathCanonical::Unknown) {
+            return Err(format!(
+                "WSLC: cannot verify deniedPaths against mounts because '{path}' could not be \
+                 resolved to a canonical location (it exists but is not examinable). With \
+                 deniedPaths present, MXC fails closed rather than risk an unenforced deny. \
+                 Ensure the path is accessible, or remove the deniedPaths entry."
+            ));
+        }
+    }
+
+    for (denied, denied_canon) in &denied_canon {
+        let PathCanonical::Canonical(denied_resolved) = denied_canon else {
+            continue; // Absent: no on-disk ancestor resolved, so nothing to alias.
+        };
+        let denied_norm = NormalizedPath::parse(denied_resolved);
+        for (mounted, list_name, mount_canon) in &mount_canon {
+            let PathCanonical::Canonical(mount_resolved) = mount_canon else {
+                continue;
+            };
+            if NormalizedPath::parse(mount_resolved).contains_strictly(&denied_norm) {
+                return Err(overlap_error(denied, mounted, list_name, true));
             }
         }
     }
@@ -517,6 +604,145 @@ mod tests {
 
     fn strings(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|path| (*path).to_string()).collect()
+    }
+
+    /// Build a fake path resolver from explicit mappings; unmapped paths resolve
+    /// to `Absent` (cleanly missing), so tier 2 skips them.
+    fn resolver(map: Vec<(&'static str, PathCanonical)>) -> impl Fn(&str) -> PathCanonical {
+        move |path: &str| {
+            map.iter()
+                .find(|(key, _)| *key == path)
+                .map(|(_, value)| value.clone())
+                .unwrap_or(PathCanonical::Absent)
+        }
+    }
+
+    fn canonical(path: &str) -> PathCanonical {
+        PathCanonical::Canonical(path.to_string())
+    }
+
+    #[test]
+    fn canonical_rejects_denied_alias_resolving_into_mount() {
+        // Deny `C:\link` is a symlink whose target lands inside the mounted tree.
+        let resolve = resolver(vec![
+            (r"C:\project", canonical(r"C:\project")),
+            (r"C:\link", canonical(r"C:\project\secret")),
+        ]);
+        let err = validate_denied_path_overlap_with(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\link"]),
+            resolve,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+        assert!(err.contains("symlink, junction"), "{err}");
+    }
+
+    #[test]
+    fn canonical_rejects_mounted_alias_containing_denied() {
+        // Mount `C:\junction` resolves to `C:\real`, whose subtree holds the deny.
+        let resolve = resolver(vec![
+            (r"C:\junction", canonical(r"C:\real")),
+            (r"C:\real\secret", canonical(r"C:\real\secret")),
+        ]);
+        let err = validate_denied_path_overlap_with(
+            &strings(&[r"C:\junction"]),
+            &[],
+            &strings(&[r"C:\real\secret"]),
+            resolve,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn canonical_fails_closed_on_unresolvable_denied_path() {
+        let resolve = resolver(vec![
+            (r"C:\mount", canonical(r"C:\mount")),
+            (r"C:\denied", PathCanonical::Unknown),
+        ]);
+        let err = validate_denied_path_overlap_with(
+            &strings(&[r"C:\mount"]),
+            &[],
+            &strings(&[r"C:\denied"]),
+            resolve,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("fails closed"), "{err}");
+    }
+
+    #[test]
+    fn canonical_fails_closed_on_unresolvable_mount() {
+        let resolve = resolver(vec![
+            (r"C:\mount", PathCanonical::Unknown),
+            (r"C:\denied", canonical(r"C:\denied")),
+        ]);
+        let err = validate_denied_path_overlap_with(
+            &strings(&[r"C:\mount"]),
+            &[],
+            &strings(&[r"C:\denied"]),
+            resolve,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("fails closed"), "{err}");
+    }
+
+    #[test]
+    fn canonical_allows_non_overlapping_resolved_paths() {
+        let resolve = resolver(vec![
+            (r"C:\a", canonical(r"C:\a")),
+            (r"C:\b", canonical(r"C:\b")),
+        ]);
+        validate_denied_path_overlap_with(&strings(&[r"C:\a"]), &[], &strings(&[r"C:\b"]), resolve)
+            .expect("non-overlapping resolved paths must pass");
+    }
+
+    #[test]
+    fn canonical_skips_absent_denied_path() {
+        // Absent now means no on-disk ancestor resolved (e.g. a missing drive),
+        // which cannot overlap any mount, so tier 2 lets it pass.
+        let resolve = resolver(vec![(r"C:\mount", canonical(r"C:\mount"))]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\mount"]),
+            &[],
+            &strings(&[r"C:\ghost"]),
+            resolve,
+        )
+        .expect("absent denied path must pass");
+    }
+
+    #[test]
+    fn canonical_rejects_absent_leaf_resolving_under_aliased_mount() {
+        // A not-yet-created deny whose parent alias resolves inside the mount:
+        // the tail-tolerant resolver hands back the in-tree canonical form, so
+        // the overlap must still be rejected (finding B).
+        let resolve = resolver(vec![
+            (r"C:\junction", canonical(r"C:\real")),
+            (r"C:\junction\secret", canonical(r"C:\real\secret")),
+        ]);
+        let err = validate_denied_path_overlap_with(
+            &strings(&[r"C:\junction"]),
+            &[],
+            &strings(&[r"C:\junction\secret"]),
+            resolve,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn empty_mounts_never_fail_closed() {
+        // With no mounts nothing can overlap, so an unresolvable deny must NOT
+        // be rejected (finding C).
+        let resolve = resolver(vec![(r"C:\denied", PathCanonical::Unknown)]);
+        validate_denied_path_overlap_with(&[], &[], &strings(&[r"C:\denied"]), resolve)
+            .expect("no mounts means no possible overlap");
     }
 
     #[test]

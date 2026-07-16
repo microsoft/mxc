@@ -893,9 +893,12 @@ impl WSLContainerRunner {
         // Denied-path overlap validation: WSLC's flat volume-mount surface has no
         // overlay primitive, so a deniedPaths entry nested under a mounted
         // (readwrite/readonly) parent cannot be masked and would stay accessible
-        // through the parent mount. Reject such configs rather than silently
-        // leaving the subtree exposed. Runs after object normalization so it sees
-        // the already-tightened intents.
+        // through the parent mount. A lexical tier catches `..`/case/whole-drive
+        // spellings; a canonicalizing tier resolves symlink/junction/8.3/`\\?\`
+        // aliases (including a not-yet-created deny under an aliased parent) and
+        // fails closed on unresolvable paths. Reject such configs rather than
+        // silently leaving the subtree exposed. Runs after object normalization
+        // so it sees the already-tightened intents.
         if let Err(msg) = policy_mapping::validate_denied_path_overlap(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,
@@ -1351,6 +1354,107 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert!(
+            response.error_message.contains("cannot be enforced"),
+            "expected the overlap error, got: {}",
+            response.error_message
+        );
+    }
+
+    #[test]
+    fn run_rejects_denied_alias_via_junction() {
+        // Tier-2 wiring guard: a deniedPaths entry that only lands inside a
+        // mounted parent AFTER junction resolution must still be rejected at the
+        // pre-flight overlap check. Tier 1 (lexical) cannot see this alias; tier
+        // 2 canonicalizes on disk. Uses a real directory junction (no admin).
+        use std::process::Command;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        let secret = real.join("secret");
+        std::fs::create_dir_all(&secret).unwrap();
+        let link = tmp.path().join("link");
+
+        let status = Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .status()
+            .unwrap();
+        if !status.success() {
+            eprintln!("skipping run_rejects_denied_alias_via_junction: mklink /J failed");
+            return;
+        }
+
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                readwrite_paths: vec![real.to_string_lossy().into_owned()],
+                denied_paths: vec![link.join("secret").to_string_lossy().into_owned()],
+                ..Default::default()
+            },
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&WslcConfig::default());
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(
+            response.exit_code, -1,
+            "junction-aliased deny must fail the run"
+        );
+        assert!(
+            response.error_message.contains("cannot be enforced"),
+            "expected the overlap error, got: {}",
+            response.error_message
+        );
+    }
+
+    #[test]
+    fn run_rejects_absent_denied_leaf_via_junction() {
+        // Finding B: a not-yet-created deny under a junctioned mount. The leaf
+        // does not exist, so tier 2 must resolve the deepest existing ancestor
+        // (the junction) and re-append the missing tail before comparing.
+        use std::process::Command;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("link");
+
+        let status = Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .status()
+            .unwrap();
+        if !status.success() {
+            eprintln!("skipping run_rejects_absent_denied_leaf_via_junction: mklink /J failed");
+            return;
+        }
+
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                readwrite_paths: vec![real.to_string_lossy().into_owned()],
+                // `real\newsecret` never created — only reachable via the junction.
+                denied_paths: vec![link.join("newsecret").to_string_lossy().into_owned()],
+                ..Default::default()
+            },
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&WslcConfig::default());
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(
+            response.exit_code, -1,
+            "absent junction-aliased deny must fail the run"
+        );
         assert!(
             response.error_message.contains("cannot be enforced"),
             "expected the overlap error, got: {}",

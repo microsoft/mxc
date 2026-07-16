@@ -8,6 +8,7 @@ pub mod config_parser;
 pub mod encoding;
 pub mod error;
 pub mod filesystem_access;
+pub mod filesystem_canonical;
 pub mod filesystem_object;
 pub mod filesystem_resolve;
 pub mod id;
