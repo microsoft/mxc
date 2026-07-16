@@ -66,104 +66,108 @@ impl ParseResult {
     }
 }
 
-/// Stream every event matching the access-failure XPath query out of an
-/// .etl file, invoking `on_xml` once per rendered event XML string. The
-/// caller-supplied closure accumulates state; this keeps peak memory
-/// bounded (a `Vec<String>` buffer could run into multi-GB on hour-long
-/// traces).
+/// Abstraction over the native ETW query used by `for_each_event_xml`.
 ///
-/// `EvtNext` batch size is intentionally large (256) to reduce
-/// user→kernel transitions on traces with tens of thousands of events.
-/// End-of-stream is distinguished from real errors by matching
-/// `ERROR_NO_MORE_ITEMS`.
+/// Splitting the batch/render/handle-release control flow (in
+/// `drive_event_stream`) from the raw `Evt*` FFI (in `NativeEtwSource`)
+/// lets the loop's real behavior — multi-batch iteration, end-of-stream
+/// vs. error distinction, render-failure skipping, and handle release
+/// on every exit path — be exercised by a fake source in unit tests
+/// without a live `.etl` trace. See the `etw_stream_tests` module.
 ///
-/// A failure to *render* a single event (`EvtRender`) is treated as an
-/// unparsable record: it is skipped and stream processing continues, so
-/// one malformed/corrupt event in the middle of a trace can't discard
-/// every subsequent valid access grant. A batch-level `EvtNext` failure
-/// (which yields no events at all, not just an unparsable one) is still
-/// propagated rather than silently dropped — swallowing it would look
-/// like a successful but short trace and cause PLM to under-grant on
-/// the next run.
-#[cfg(target_os = "windows")]
-fn for_each_event_xml<F>(trace_file: &Path, verbose: bool, mut on_xml: F) -> Result<()>
+/// A handle returned by `next_batch` is owned by the driver until the
+/// driver calls `close` on it exactly once (which the driver guarantees
+/// even on early return or panic, via a batch-scoped drop guard).
+#[cfg(any(target_os = "windows", test))]
+trait EtwEventSource {
+    /// Opaque per-event handle. `Copy` so the driver can hold a batch in
+    /// a `Vec` and still hand each handle to `render`/`close` by value.
+    type Handle: Copy;
+
+    /// Pull the next batch of up to `max` event handles. An empty `Vec`
+    /// signals end-of-stream (the native impl maps both a zero count and
+    /// `ERROR_NO_MORE_ITEMS` to this). Any `Err` is a real mid-stream
+    /// failure the driver propagates rather than treating as EOF.
+    fn next_batch(&mut self, max: usize) -> Result<Vec<Self::Handle>>;
+
+    /// Render one event handle to its XML form, reusing `buf` as scratch
+    /// so the driver can amortize the allocation across the whole trace.
+    fn render(&self, handle: Self::Handle, buf: &mut Vec<u16>) -> Result<String>;
+
+    /// Release one event handle. Called exactly once for every handle
+    /// `next_batch` returned, including on the error/panic unwind paths.
+    fn close(&self, handle: Self::Handle);
+}
+
+/// Drive an [`EtwEventSource`] to completion, invoking `on_xml` once per
+/// successfully rendered event. This is the platform-independent core of
+/// `for_each_event_xml`; the Windows path wraps a [`NativeEtwSource`],
+/// and tests wrap a scripted fake.
+///
+/// Semantics preserved from the original inlined loop:
+/// * `next_batch` is called repeatedly until it yields an empty batch
+///   (end of stream); traces larger than one batch are fully drained.
+/// * A `next_batch` `Err` is a batch-level failure (no events at all)
+///   and is propagated with context, since silently treating it as EOF
+///   would look like a short-but-successful trace and under-grant.
+/// * A `render` `Err` is a single unparsable record: it is counted and
+///   skipped so one corrupt event can't discard every later access grant.
+/// * An `on_xml` `Err` aborts the walk, but the batch drop guard still
+///   releases every remaining handle in the current batch first.
+#[cfg(any(target_os = "windows", test))]
+fn drive_event_stream<S, F>(
+    mut source: S,
+    batch_size: usize,
+    verbose: bool,
+    mut on_xml: F,
+) -> Result<()>
 where
+    S: EtwEventSource,
     F: FnMut(&str) -> Result<()>,
 {
-    let path_w = wxc_common::string_util::to_wide(&trace_file.to_string_lossy());
-    // The event-id filter is a compile-time constant, so bake it into
-    // the binary as a wide, NUL-terminated literal with `w!` rather than
-    // formatting + re-encoding it on every call. The literal must stay
-    // in sync with the `EVENT_ID_*` constants above.
-    const _: () = assert!(EVENT_ID_ACCESS_FAILURE == 14 && EVENT_ID_UI_VIOLATION == 27);
-    let query = w!("*[System[EventID=14 or EventID=27]]");
+    /// Owns a batch of handles and closes each one on drop, so an early
+    /// return from the loop body (an `on_xml` error) or a panic still
+    /// releases every handle in the current batch exactly once.
+    struct BatchGuard<'s, S: EtwEventSource> {
+        source: &'s S,
+        handles: Vec<S::Handle>,
+    }
+    impl<S: EtwEventSource> Drop for BatchGuard<'_, S> {
+        fn drop(&mut self) {
+            for &h in &self.handles {
+                self.source.close(h);
+            }
+        }
+    }
 
-    // SAFETY: `path_w` is a NUL-terminated wide buffer that outlives
-    // this call and `query` is a `'static` wide literal; the `PCWSTR`s
-    // borrow them for the duration of `EvtQuery`. The flags are valid
-    // `EvtQuery` bit constants. The returned handle is immediately
-    // adopted by `EvtHandleOwned` so it is closed on every exit path.
-    let h_query = EvtHandleOwned(unsafe {
-        EvtQuery(
-            None,
-            PCWSTR(path_w.as_ptr()),
-            query,
-            EvtQueryFilePath.0 | EvtQueryForwardDirection.0,
-        )
-    }?);
-
-    // Reusable scratch buffer for `render_event_xml` so we don't
-    // allocate a fresh Vec<u8> per event.
+    // Reusable scratch buffer for `render` so we don't allocate a fresh
+    // Vec<u16> per event.
     let mut render_buf: Vec<u16> = Vec::new();
     let mut rendered_count: usize = 0;
     let mut render_failures: usize = 0;
-    const BATCH: usize = 256;
     loop {
-        let mut events: [isize; BATCH] = [0isize; BATCH];
-        let mut returned: u32 = 0;
-        // SAFETY: `h_query.0` is a live query handle owned by
-        // `h_query`. `events` is a `BATCH`-element array we own and pass
-        // by mutable reference; `EvtNext` writes at most `BATCH` handles
-        // and reports the count through `returned`, which we own.
-        let next_ok = unsafe {
-            EvtNext(
-                h_query.0,
-                &mut events,
-                u32::MAX, // INFINITE
-                0,
-                &mut returned as *mut _,
-            )
-        };
-        if let Err(e) = &next_ok {
-            if e.code() == ERROR_NO_MORE_ITEMS.to_hresult() {
-                break;
-            }
-            return Err(anyhow::anyhow!(
+        let handles = source.next_batch(batch_size).map_err(|e| {
+            anyhow::anyhow!(
                 "EvtNext failed mid-stream (rendered {} events so far): {e}",
                 rendered_count
-            ));
-        }
-        if returned == 0 {
+            )
+        })?;
+        if handles.is_empty() {
             break;
         }
 
-        // Wrap ALL returned slots into `EvtHandleOwned` up front so an
-        // early return from the loop body (an `on_xml` error, or a
-        // panic) drops — and closes — the still-owned slots after the
-        // current index. Render failures no longer early-return (they
-        // `continue`), but the up-front wrapping keeps every remaining
-        // handle owned so no ETW handle can leak on any exit path.
-        let owned: Vec<EvtHandleOwned> = events
-            .iter()
-            .take(returned as usize)
-            .map(|&slot| EvtHandleOwned(EVT_HANDLE(slot)))
-            .collect();
-        for handle in &owned {
+        // Own all returned handles up front so every one is released on
+        // any exit path (normal completion, `on_xml` error, or panic).
+        let guard = BatchGuard {
+            source: &source,
+            handles,
+        };
+        for &handle in &guard.handles {
             // A single unrenderable event is skipped rather than
             // aborting the whole trace: propagating here would discard
             // every subsequent valid access grant and cause PLM to
             // under-grant on the next run.
-            let xml = match render_event_xml(handle.0, &mut render_buf) {
+            let xml = match source.render(handle, &mut render_buf) {
                 Ok(xml) => xml,
                 Err(e) => {
                     render_failures += 1;
@@ -189,6 +193,133 @@ where
         );
     }
     Ok(())
+}
+
+/// Live ETW source backing `for_each_event_xml`: owns the `EvtQuery`
+/// handle and translates the driver's `next_batch`/`render`/`close`
+/// calls into the corresponding `Evt*` FFI.
+#[cfg(target_os = "windows")]
+struct NativeEtwSource {
+    query: EvtHandleOwned,
+}
+
+#[cfg(target_os = "windows")]
+impl EtwEventSource for NativeEtwSource {
+    type Handle = EVT_HANDLE;
+
+    fn next_batch(&mut self, max: usize) -> Result<Vec<EVT_HANDLE>> {
+        let mut events: Vec<isize> = vec![0isize; max];
+        let mut returned: u32 = 0;
+        // SAFETY: `self.query.0` is a live query handle owned by this
+        // source. `events` is a `max`-element buffer we own and pass by
+        // mutable slice; `EvtNext` writes at most `max` handles and
+        // reports the count through `returned`, which we own.
+        let next_ok = unsafe {
+            EvtNext(
+                self.query.0,
+                &mut events,
+                u32::MAX, // INFINITE
+                0,
+                &mut returned as *mut _,
+            )
+        };
+        if let Err(e) = &next_ok {
+            // End-of-stream is reported as an error with this code; map
+            // it to an empty batch. Any other error is a real failure.
+            if e.code() == ERROR_NO_MORE_ITEMS.to_hresult() {
+                return Ok(Vec::new());
+            }
+            return Err(anyhow::anyhow!("{e}"));
+        }
+        Ok(events
+            .iter()
+            .take(returned as usize)
+            .map(|&slot| EVT_HANDLE(slot))
+            .collect())
+    }
+
+    fn render(&self, handle: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
+        render_event_xml(handle, buf)
+    }
+
+    fn close(&self, handle: EVT_HANDLE) {
+        // SAFETY: `handle` is an event handle the driver received from
+        // `next_batch` and hands back to `close` exactly once; `EvtClose`
+        // is the correct release call for it.
+        unsafe {
+            let _ = EvtClose(handle);
+        }
+    }
+}
+
+/// Stream every event matching the access-failure XPath query out of an
+/// .etl file, invoking `on_xml` once per rendered event XML string. The
+/// caller-supplied closure accumulates state; this keeps peak memory
+/// bounded (the previous `Vec<String>` buffer could run into multi-GB
+/// on hour-long traces). The batch/render/handle-release semantics live
+/// in [`drive_event_stream`]; this function only builds the live
+/// [`NativeEtwSource`] the driver walks.
+#[cfg(target_os = "windows")]
+fn for_each_event_xml<F>(trace_file: &Path, verbose: bool, on_xml: F) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>,
+{
+    let path_w = wxc_common::string_util::to_wide(&trace_file.to_string_lossy());
+    // The event-id filter is a compile-time constant, so bake it into
+    // the binary as a wide, NUL-terminated literal with `w!` rather than
+    // formatting + re-encoding it on every call. The literal must stay
+    // in sync with the `EVENT_ID_*` constants above.
+    const _: () = assert!(EVENT_ID_ACCESS_FAILURE == 14 && EVENT_ID_UI_VIOLATION == 27);
+    let query = w!("*[System[EventID=14 or EventID=27]]");
+
+    // SAFETY: `path_w` is a NUL-terminated wide buffer that outlives
+    // this call and `query` is a `'static` wide literal; the `PCWSTR`s
+    // borrow them for the duration of `EvtQuery`. The flags are valid
+    // `EvtQuery` bit constants. The returned handle is immediately
+    // adopted by `EvtHandleOwned` so it is closed on every exit path.
+    let h_query = EvtHandleOwned(unsafe {
+        EvtQuery(
+            None,
+            PCWSTR(path_w.as_ptr()),
+            query,
+            EvtQueryFilePath.0 | EvtQueryForwardDirection.0,
+        )
+    }?);
+
+    // `EvtNext` batch size is intentionally large to reduce user→kernel
+    // transitions on traces with tens of thousands of events.
+    const BATCH: usize = 256;
+    drive_event_stream(NativeEtwSource { query: h_query }, BATCH, verbose, on_xml)
+}
+
+/// Convert a byte count reported by `EvtRender`'s `BufferUsed` /
+/// `BufferSize` out-params into a u16 element count, rounding **up** so
+/// a trailing odd byte still gets a slot rather than being truncated.
+/// (`EvtRender` sizes are byte counts; our backing buffer is `Vec<u16>`.)
+#[cfg(any(target_os = "windows", test))]
+fn bytes_to_u16_ceil(bytes: usize) -> usize {
+    bytes.div_ceil(std::mem::size_of::<u16>())
+}
+
+/// Number of initialized u16s to expose (via `set_len`) after a
+/// successful render: the reported byte count converted to whole u16s,
+/// clamped to the buffer's capacity so we never claim more initialized
+/// elements than the allocation holds.
+#[cfg(any(target_os = "windows", test))]
+fn rendered_len_u16(needed_bytes: usize, capacity_u16: usize) -> usize {
+    (needed_bytes / std::mem::size_of::<u16>()).min(capacity_u16)
+}
+
+/// Trim a rendered UTF-16 buffer at the first NUL. `EvtRender`
+/// NUL-terminates its XML output and reports the size *including* the
+/// terminator, so the trailing NUL (and anything after it) must be
+/// dropped before decoding.
+#[cfg(any(target_os = "windows", test))]
+fn trim_utf16_nul(buf: &[u16]) -> &[u16] {
+    match buf.iter().position(|&c| c == 0) {
+        Some(n) => &buf[..n],
+        None => buf,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -255,7 +386,7 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
         if needed == 0 {
             return Err(anyhow::anyhow!("EvtRender returned zero size"));
         }
-        let needed_u16 = (needed as usize).div_ceil(std::mem::size_of::<u16>());
+        let needed_u16 = bytes_to_u16_ceil(needed as usize);
         if buf.capacity() < needed_u16 {
             // `Vec::reserve(additional)` measures from `len`, not
             // `capacity` — since `buf` is empty (cleared above),
@@ -284,17 +415,14 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
     }
 
     // `needed` is bytes written including the terminating NUL.
-    let init_u16 = (needed as usize / std::mem::size_of::<u16>()).min(buf.capacity());
+    let init_u16 = rendered_len_u16(needed as usize, buf.capacity());
     // SAFETY: a successful `EvtRender` initialized `init_u16` u16s at
     // the start of `buf` (clamped to `capacity()`), so extending `len`
     // to `init_u16` exposes only initialized elements.
     unsafe {
         buf.set_len(init_u16);
     }
-    let trimmed = match buf.iter().position(|&c| c == 0) {
-        Some(n) => &buf[..n],
-        None => &buf[..],
-    };
+    let trimmed = trim_utf16_nul(buf);
     Ok(String::from_utf16_lossy(trimmed))
 }
 
@@ -584,5 +712,269 @@ mod tests {
         let result = parse_events_from_xml(vec![xml], None, false);
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\app\\foo.txt");
+    }
+}
+
+/// Coverage for the ETW stream driver ([`drive_event_stream`]) and the
+/// buffer-sizing arithmetic in the render path — the pieces MGudgin
+/// flagged as having zero test coverage because every other test feeds
+/// synthetic XML straight into `parse_events_from_xml`, bypassing the
+/// live `EvtQuery`/`EvtNext`/`EvtRender` walk.
+///
+/// The native `Evt*` FFI can't run without a real `.etl` trace, so the
+/// loop is exercised through a scripted [`FakeEtwSource`] that stands in
+/// for the ETW query: it reproduces multi-batch traces (>256 events),
+/// end-of-stream detection, batch-level `EvtNext` failures, per-event
+/// `EvtRender` failures, and — critically — lets the test assert every
+/// handle is released even when the consumer errors partway through a
+/// batch. The pure buffer-sizing helpers are tested directly.
+#[cfg(test)]
+mod etw_stream_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::{HashMap, VecDeque};
+    use std::rc::Rc;
+
+    type Recorder = Rc<RefCell<Vec<u64>>>;
+
+    /// A scripted stand-in for the native ETW query. `batches` is the
+    /// sequence returned by successive `next_batch` calls (an empty
+    /// `Vec` — or exhausting the queue — signals end-of-stream; an `Err`
+    /// simulates a mid-stream `EvtNext` failure). `render_outcomes` maps
+    /// a handle id to the XML it renders, or to a simulated `EvtRender`
+    /// failure. `closed`/`rendered` are shared with the test via `Rc`,
+    /// so handle-release and render ordering can be asserted even though
+    /// `drive_event_stream` consumes the source by value.
+    struct FakeEtwSource {
+        batches: VecDeque<std::result::Result<Vec<u64>, String>>,
+        render_outcomes: HashMap<u64, std::result::Result<String, String>>,
+        closed: Recorder,
+        rendered: Recorder,
+    }
+
+    impl FakeEtwSource {
+        /// Returns the source plus the shared `(rendered, closed)`
+        /// recorders the test reads after the walk completes.
+        fn new(
+            batches: Vec<std::result::Result<Vec<u64>, String>>,
+            render_outcomes: HashMap<u64, std::result::Result<String, String>>,
+        ) -> (Self, Recorder, Recorder) {
+            let rendered: Recorder = Rc::new(RefCell::new(Vec::new()));
+            let closed: Recorder = Rc::new(RefCell::new(Vec::new()));
+            let source = Self {
+                batches: batches.into(),
+                render_outcomes,
+                closed: Rc::clone(&closed),
+                rendered: Rc::clone(&rendered),
+            };
+            (source, rendered, closed)
+        }
+    }
+
+    impl EtwEventSource for FakeEtwSource {
+        type Handle = u64;
+
+        fn next_batch(&mut self, _max: usize) -> Result<Vec<u64>> {
+            match self.batches.pop_front() {
+                None => Ok(Vec::new()),
+                Some(Ok(handles)) => Ok(handles),
+                Some(Err(msg)) => Err(anyhow::anyhow!(msg)),
+            }
+        }
+
+        fn render(&self, handle: u64, _buf: &mut Vec<u16>) -> Result<String> {
+            self.rendered.borrow_mut().push(handle);
+            match self.render_outcomes.get(&handle) {
+                Some(Ok(xml)) => Ok(xml.clone()),
+                Some(Err(msg)) => Err(anyhow::anyhow!(msg.clone())),
+                None => Ok(format!("<Event id=\"{handle}\"/>")),
+            }
+        }
+
+        fn close(&self, handle: u64) {
+            self.closed.borrow_mut().push(handle);
+        }
+    }
+
+    #[test]
+    fn drains_multiple_batches_over_256_events() {
+        // Two batches totalling 300 events, then end-of-stream. The
+        // original inlined loop used a fixed 256-element array; this
+        // proves the driver keeps calling `next_batch` until it drains a
+        // trace larger than a single batch, and releases every handle.
+        let first: Vec<u64> = (0..256).collect();
+        let second: Vec<u64> = (256..300).collect();
+        let (source, _rendered, closed) =
+            FakeEtwSource::new(vec![Ok(first), Ok(second)], HashMap::new());
+
+        let seen = RefCell::new(Vec::<String>::new());
+        let result = drive_event_stream(source, 256, false, |xml| {
+            seen.borrow_mut().push(xml.to_string());
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(
+            seen.borrow().len(),
+            300,
+            "every event across both batches renders"
+        );
+        assert_eq!(seen.borrow()[0], "<Event id=\"0\"/>");
+        assert_eq!(seen.borrow()[299], "<Event id=\"299\"/>");
+        assert_eq!(closed.borrow().len(), 300, "every handle is released");
+    }
+
+    #[test]
+    fn empty_first_batch_is_end_of_stream() {
+        let (source, _rendered, closed) = FakeEtwSource::new(vec![Ok(Vec::new())], HashMap::new());
+        let mut calls = 0usize;
+        let result = drive_event_stream(source, 256, false, |_xml| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 0, "no events delivered for an empty trace");
+        assert!(closed.borrow().is_empty(), "no handles to release");
+    }
+
+    #[test]
+    fn next_batch_error_propagates_with_context_and_closes_prior_handles() {
+        // First batch succeeds, second batch fails mid-stream. The error
+        // must propagate (not be treated as EOF) and carry the
+        // rendered-so-far count, and the first batch's handles must have
+        // been released before the failure surfaces.
+        let (source, _rendered, closed) = FakeEtwSource::new(
+            vec![
+                Ok(vec![10, 11]),
+                Err("simulated EvtNext failure".to_string()),
+            ],
+            HashMap::new(),
+        );
+
+        let result = drive_event_stream(source, 256, false, |_xml| Ok(()));
+
+        let err = result.expect_err("mid-stream EvtNext failure must propagate");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("EvtNext failed mid-stream"),
+            "unexpected error message: {msg}"
+        );
+        assert!(
+            msg.contains("rendered 2 events so far"),
+            "error should report the rendered-so-far count: {msg}"
+        );
+        let mut closed_ids = closed.borrow().clone();
+        closed_ids.sort_unstable();
+        assert_eq!(
+            closed_ids,
+            vec![10, 11],
+            "first batch's handles are released before the failure propagates"
+        );
+    }
+
+    #[test]
+    fn render_failure_is_skipped_and_stream_continues() {
+        // A single unrenderable event in the middle of a batch must be
+        // skipped, not abort the whole trace — and all three handles
+        // (including the one that failed to render) must still be closed.
+        let mut outcomes = HashMap::new();
+        outcomes.insert(20u64, Ok("<Event id=\"20\"/>".to_string()));
+        outcomes.insert(21u64, Err("simulated EvtRender failure".to_string()));
+        outcomes.insert(22u64, Ok("<Event id=\"22\"/>".to_string()));
+        let (source, _rendered, closed) = FakeEtwSource::new(vec![Ok(vec![20, 21, 22])], outcomes);
+
+        let seen = RefCell::new(Vec::<String>::new());
+        let result = drive_event_stream(source, 256, false, |xml| {
+            seen.borrow_mut().push(xml.to_string());
+            Ok(())
+        });
+
+        assert!(result.is_ok(), "one bad render must not fail the walk");
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "<Event id=\"20\"/>".to_string(),
+                "<Event id=\"22\"/>".to_string()
+            ],
+            "the unrenderable middle event is skipped, the rest survive"
+        );
+        let mut closed_ids = closed.borrow().clone();
+        closed_ids.sort_unstable();
+        assert_eq!(
+            closed_ids,
+            vec![20, 21, 22],
+            "the unrenderable event's handle is still released"
+        );
+    }
+
+    #[test]
+    fn on_xml_error_releases_every_handle_in_the_batch() {
+        // The reviewer's key case: the consumer errors partway through a
+        // batch. The walk must abort, but the batch drop guard must still
+        // release EVERY handle in the batch (including the one that
+        // errored and the ones after it) — no ETW handle leak on the
+        // error path.
+        let (source, _rendered, closed) =
+            FakeEtwSource::new(vec![Ok(vec![30, 31, 32])], HashMap::new());
+
+        let result = drive_event_stream(source, 256, false, |xml| {
+            if xml.contains("id=\"31\"") {
+                Err(anyhow::anyhow!("consumer rejected event 31"))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_err(), "an on_xml error aborts the walk");
+        let mut closed_ids = closed.borrow().clone();
+        closed_ids.sort_unstable();
+        assert_eq!(
+            closed_ids,
+            vec![30, 31, 32],
+            "every handle in the batch is released even though on_xml errored on 31"
+        );
+    }
+
+    // ---- pure buffer-sizing arithmetic (the `EvtRender` growth path) ----
+
+    #[test]
+    fn bytes_to_u16_ceil_rounds_up_odd_trailing_byte() {
+        assert_eq!(bytes_to_u16_ceil(0), 0);
+        assert_eq!(bytes_to_u16_ceil(1), 1);
+        assert_eq!(bytes_to_u16_ceil(2), 1);
+        assert_eq!(bytes_to_u16_ceil(3), 2);
+        assert_eq!(bytes_to_u16_ceil(4), 2);
+        // A large "oversized render" byte count still converts cleanly.
+        assert_eq!(bytes_to_u16_ceil(16_384), 8_192);
+    }
+
+    #[test]
+    fn rendered_len_u16_clamps_to_capacity() {
+        // Reported bytes fit inside the buffer: expose exactly that many
+        // whole u16s.
+        assert_eq!(rendered_len_u16(100, 4096), 50);
+        // Reported bytes exceed capacity (defensive clamp so `set_len`
+        // never claims uninitialized elements past the allocation).
+        assert_eq!(rendered_len_u16(16_384, 4096), 4096);
+        // Exact fit.
+        assert_eq!(rendered_len_u16(8192, 4096), 4096);
+    }
+
+    #[test]
+    fn trim_utf16_nul_stops_at_first_terminator() {
+        let no_nul: Vec<u16> = "abc".encode_utf16().collect();
+        assert_eq!(trim_utf16_nul(&no_nul), no_nul.as_slice());
+
+        let mut with_nul: Vec<u16> = "ab".encode_utf16().collect();
+        with_nul.push(0);
+        with_nul.extend("garbage".encode_utf16());
+        assert_eq!(
+            trim_utf16_nul(&with_nul),
+            "ab".encode_utf16().collect::<Vec<u16>>().as_slice(),
+            "everything from the NUL onward is dropped"
+        );
+
+        let leading_nul = [0u16, b'x' as u16];
+        assert!(trim_utf16_nul(&leading_nul).is_empty());
     }
 }
