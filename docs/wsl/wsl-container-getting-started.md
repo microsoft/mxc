@@ -11,13 +11,13 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 | Requirement | Details |
 |---|---|
 | **Windows 11** | Required for WSL2 and the WSLC SDK |
-| **WSL 2.8.0+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
-| **WSLC SDK** | `wslcsdk.dll` is a separate client SDK and must be in the same directory as `wxc-exec.exe` |
+| **WSL 2.8.1+** | See Step 1 below for installation |
+| **WSLC SDK** | `wslcsdk.dll` must be in the same directory as `wxc-exec.exe` |
 | **Container images** | Pre-pulled or available from a registry with network access |
 
-## Step 1 — Install WSL 2.8.0+
+## Step 1 — Install WSL 2.8.1+
 
-The WSLC SDK requires WSL version 2.8.0 or later. Update WSL to the latest
+The WSLC SDK requires WSL version 2.8.1 or later. Update WSL to the latest
 version:
 
 ```powershell
@@ -30,7 +30,7 @@ Verify your WSL version after updating:
 wsl --version
 ```
 
-The WSL version should be **2.8.0.0 or later**. If `wsl --update` does not
+The WSL version should be **2.8.1.0 or later**. If `wsl --update` does not
 bring you to the required version, build WSL from the `master`
 branch:
 
@@ -238,7 +238,7 @@ the container.
 |---|---|---|
 | `WSLC backend not compiled` | Binary built without `--features wslc` | Rebuild with `build.bat --with-wslc` |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
-| `WSLC runtime not available` | WSL runtime package is missing, older than 2.8.0, or a required component is disabled | Update WSL with `wsl --update`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
+| `WSLC runtime not available` | WSL is too old or missing components | Update WSL with `wsl --update` and verify the version with `wsl --version` |
 | `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
 | `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
 | `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |

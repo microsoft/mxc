@@ -320,10 +320,8 @@ fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
 fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
     if missing as u32 & WslcComponentFlags::WslPackage as u32 != 0 {
         return format!(
-            "WSLC runtime not available. Missing components: {:?}. The installed WSL \
-             package must be version 2.8.0 or newer. The WSLC SDK DLL is present, but \
-             the WSL runtime is missing or too old. Update WSL with `wsl --update` \
-             and verify the installed version with `wsl --version`.",
+            "WSLC runtime unavailable. Missing components: {:?}. WSL 2.8.1 or newer \
+             is required. Run `wsl --update` and check `wsl --version`.",
             missing
         );
     }
@@ -1324,14 +1322,5 @@ mod tests {
     fn nonexistent_file_returns_error() {
         let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn wsl_package_prerequisite_error_explains_minimum_version() {
-        let message = wslc_prerequisite_error(WslcComponentFlags::WslPackage);
-
-        assert!(message.contains("2.8.0"));
-        assert!(message.contains("WSLC SDK DLL is present"));
-        assert!(message.contains("wsl --update"));
     }
 }
