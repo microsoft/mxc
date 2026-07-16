@@ -61,6 +61,7 @@ export const EXPECTED_LINUX_BINARIES = [
 
 export const EXPECTED_MACOS_BINARIES = [
   'mxc-exec-mac',
+  'unix-test-proxy',
 ];
 
 // Binaries that are optional (feature-gated or only present in certain builds)
@@ -383,7 +384,7 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
   return { port, proxyProcess };
 }
 
-// Linux-only: unix-test-proxy helpers
+// unix-test-proxy helpers (currently only exercised by the Linux Bubblewrap test)
 
 /** Locate unix-test-proxy in the SDK package bin directory. */
 function findUnixTestProxyBinary(): string {

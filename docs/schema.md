@@ -52,7 +52,7 @@ production configs and the dev schema when working on experimental features:
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap)
+        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
     },
