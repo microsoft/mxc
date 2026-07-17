@@ -14,6 +14,22 @@ The team triages new issues regularly. During triage, the team uses labels to ca
 
 If you file issues or create PRs, please keep an eye on your GitHub notifications. Issues and PRs that remain unanswered for several days after a request for information may be closed.
 
+### Maintainer issue investigation
+
+Repository administrators, maintainers, and writers can comment `/investigate`
+on an issue to request an evidence-backed classification. The workflow posts one
+public comment identifying the issue as a bug, documentation gap, or design
+decision, with a recommended next step.
+
+For a small, unambiguous documentation or test-only change, it may also create
+one draft PR. It never merges, releases, assigns owners, changes labels, or
+updates an existing PR. It does not create PRs for production code, schemas,
+generated SDK files, containment behavior, CI, dependencies, versioning, or
+security-sensitive work.
+
+Do not use `/investigate` for a security report. Follow
+[SECURITY.md](./SECURITY.md) instead.
+
 ---
 
 ## Reporting Security Issues
