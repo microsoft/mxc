@@ -66,7 +66,7 @@ const PROXY_ENV_KEYS: &[&str] = &[
 ///   (`/etc/shadow`, `/etc/sudoers`, `/etc/ssh/ssh_host_*_key`) are mode
 ///   `0400` / `0640` root and remain unreadable to a non-root caller —
 ///   user-namespace UID mapping does not bypass kernel DAC.
-const BASELINE_RO_BIND_PATHS: &[&str] = &[
+pub(crate) const BASELINE_RO_BIND_PATHS: &[&str] = &[
     // Top-level executable / library dirs (symlinks under /usr on
     // merged-usr distros, real directories on Alpine and older Debian).
     "/bin",

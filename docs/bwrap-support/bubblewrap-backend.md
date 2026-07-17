@@ -94,8 +94,10 @@ Common consequences of this default:
   not readable from the sandbox.
 - `/opt` and `/usr/local` tooling is not on PATH; list either path under
   `readonlyPaths` if the script depends on it.
-- `working_directory` must live under the baseline or a policy path — a
-  `cwd` of `~/project` without a matching `readonlyPaths` entry will fail.
+- `process.cwd` must live under the baseline or a policy path. The runner
+  checks this before launching `bwrap` and returns an actionable error naming
+  `filesystem.readonlyPaths` / `filesystem.readwritePaths` when the directory
+  is not visible.
 - DNS works on systemd-resolved, NetworkManager, and resolvconf hosts
   because the corresponding `/run/...` directories are bound. The common
   symlink targets *outside* `/run` are covered too: `/var/run/...`-routed
@@ -103,7 +105,8 @@ Common consequences of this default:
   compat symlink, and WSL's `/mnt/wsl/resolv.conf` is bound directly.
   Neither exposes host `/var` or `/mnt` contents. Hosts that point
   `/etc/resolv.conf` at some other custom location still need that target
-  listed in `readonlyPaths`.
+  listed in `readonlyPaths`; the runner emits a preflight warning naming the
+  hidden target and the required policy field.
 
 Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
 `/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain

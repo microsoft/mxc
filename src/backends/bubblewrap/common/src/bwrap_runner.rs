@@ -33,6 +33,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
 
 use lxc_common::network_iptables::NetworkIptablesManager;
+use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
@@ -45,6 +46,10 @@ use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::validate_common;
 
 use crate::bwrap_command;
+
+const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
+const SYNTHETIC_DIRECTORY_PATHS: &[&str] = &["/", "/tmp", "/var"];
+const VIRTUAL_FILESYSTEM_PATHS: &[&str] = &["/dev", "/proc"];
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -78,6 +83,8 @@ impl SandboxBackend for BubblewrapScriptRunner {
                 "script_code is empty — nothing to execute.",
             ));
         }
+
+        validate_working_directory(request).map_err(|message| ScriptResponse::error(&message))?;
 
         // `network.proxy.builtinTestServer` is gated centrally in
         // `validate_common` (ahead of every `ScriptRunner::run`), so no
@@ -150,9 +157,211 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
             None => request,
         };
+        // Re-check against the final policy: object normalization and denied
+        // symlink resolution can change which mount wins at the cwd.
+        if let Err(message) = validate_working_directory(request) {
+            return Err(ScriptResponse::error(&message));
+        }
+        warn_if_resolver_target_is_hidden(request, Path::new(RESOLV_CONF_PATH), logger);
         let child = self.spawn_bwrap(request, &plan.files, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
+}
+
+fn validate_working_directory(request: &ExecutionRequest) -> Result<(), String> {
+    if request.working_directory.is_empty() {
+        return Ok(());
+    }
+
+    let cwd = Path::new(&request.working_directory);
+    if !cwd.is_absolute() {
+        return Err(format!(
+            "Bubblewrap: process.cwd '{}' must be an absolute path.",
+            request.working_directory
+        ));
+    }
+    if working_directory_is_visible(request, cwd) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Bubblewrap: process.cwd '{}' is outside the deny-by-default filesystem baseline and \
+         configured filesystem policy paths. Add the working directory (or an ancestor) to \
+         filesystem.readonlyPaths or filesystem.readwritePaths.",
+        request.working_directory
+    ))
+}
+
+/// Whether `cwd` will exist in the namespace assembled by the bwrap command.
+///
+/// A bind mount makes both its source-backed subtree and any synthetic parent
+/// directories needed for the mount destination available. Empty synthetic
+/// filesystems such as `/tmp` guarantee only their root until policy mounts are
+/// layered beneath them.
+fn working_directory_is_visible(request: &ExecutionRequest, cwd: &Path) -> bool {
+    let Some(cwd) = normalize_absolute_path(cwd) else {
+        return false;
+    };
+    let cwd = resolve_var_run_compat_path(cwd);
+
+    let mut visible = SYNTHETIC_DIRECTORY_PATHS
+        .iter()
+        .any(|path| cwd == Path::new(path))
+        || VIRTUAL_FILESYSTEM_PATHS
+            .iter()
+            .any(|path| cwd.starts_with(path));
+
+    if !visible {
+        for path in bwrap_command::BASELINE_RO_BIND_PATHS {
+            let mount = Path::new(path);
+            if mount.exists() && paths_overlap(&cwd, mount) {
+                visible = true;
+                break;
+            }
+        }
+    }
+
+    if !visible {
+        visible = request
+            .policy
+            .readonly_paths
+            .iter()
+            .chain(&request.policy.readwrite_paths)
+            .filter_map(|path| normalize_absolute_path(Path::new(path)))
+            .any(|mount| paths_overlap(&cwd, &mount));
+    }
+
+    apply_policy_visibility(request, &cwd, visible)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+fn resolve_var_run_compat_path(path: PathBuf) -> PathBuf {
+    let var_run = Path::new("/var/run");
+    match path.strip_prefix(var_run) {
+        Ok(suffix) => Path::new("/run").join(suffix),
+        Err(_) => path,
+    }
+}
+
+fn warn_if_resolver_target_is_hidden(
+    request: &ExecutionRequest,
+    resolv_conf: &Path,
+    logger: &mut Logger,
+) {
+    let target = match resolver_symlink_target(resolv_conf) {
+        Ok(Some(target)) => target,
+        Ok(None) => return,
+        Err(error) => {
+            let _ = writeln!(
+                logger,
+                "WARNING: Bubblewrap: could not inspect symlinked '{}': {}; DNS may fail inside \
+                 the sandbox.",
+                resolv_conf.display(),
+                error
+            );
+            return;
+        }
+    };
+
+    if path_is_readable_in_sandbox(request, &target) {
+        return;
+    }
+
+    let _ = writeln!(
+        logger,
+        "WARNING: Bubblewrap: '{}' resolves to '{}', which is outside the deny-by-default \
+         filesystem baseline and configured filesystem policy paths; DNS may fail inside the \
+         sandbox. Add '{}' (or an ancestor) to filesystem.readonlyPaths.",
+        resolv_conf.display(),
+        target.display(),
+        target.display()
+    );
+}
+
+fn resolver_symlink_target(resolv_conf: &Path) -> std::io::Result<Option<PathBuf>> {
+    let metadata = std::fs::symlink_metadata(resolv_conf)?;
+    if !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+
+    let link_target = std::fs::read_link(resolv_conf)?;
+    let target = if link_target.is_absolute() {
+        link_target
+    } else {
+        resolv_conf
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .join(link_target)
+    };
+    if let Ok(target) = std::fs::canonicalize(&target) {
+        return Ok(Some(target));
+    }
+
+    let target = normalize_absolute_path(&target).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "resolver target '{}' is not an absolute path",
+                target.display()
+            ),
+        )
+    })?;
+
+    // The sandbox recreates `/var/run` as a symlink to `/run`. Mirror that
+    // translation for a dangling target that the host cannot canonicalize.
+    Ok(Some(resolve_var_run_compat_path(target)))
+}
+
+fn path_is_readable_in_sandbox(request: &ExecutionRequest, path: &Path) -> bool {
+    let Some(path) = normalize_absolute_path(path) else {
+        return false;
+    };
+
+    let readable = VIRTUAL_FILESYSTEM_PATHS
+        .iter()
+        .any(|mount| path.starts_with(mount))
+        || bwrap_command::BASELINE_RO_BIND_PATHS
+            .iter()
+            .map(Path::new)
+            .filter(|mount| mount.exists())
+            .any(|mount| path.starts_with(mount));
+
+    apply_policy_visibility(request, &path, readable)
+}
+
+fn apply_policy_visibility(request: &ExecutionRequest, path: &Path, mut visible: bool) -> bool {
+    for mount in wxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
+        let Some(mount_path) = normalize_absolute_path(Path::new(&mount.path)) else {
+            continue;
+        };
+        if path.starts_with(mount_path) {
+            visible = mount.intent != FsIntent::Denied;
+        }
+    }
+
+    visible
 }
 
 impl BubblewrapScriptRunner {
@@ -675,6 +884,120 @@ mod tests {
         let runner = BubblewrapScriptRunner::new();
         let err = runner.validate(&req).unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
+    }
+
+    #[test]
+    fn validate_rejects_uncovered_working_directory_before_environment_probe() {
+        let mut req = base_request();
+        req.working_directory = "/home/user/project".to_string();
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner.validate(&req).unwrap_err();
+        assert!(err
+            .error_message
+            .contains("process.cwd '/home/user/project'"));
+        assert!(err.error_message.contains("filesystem.readonlyPaths"));
+        assert!(err.error_message.contains("filesystem.readwritePaths"));
+    }
+
+    #[test]
+    fn working_directory_visibility_tracks_baseline_and_policy_mounts() {
+        let mut req = base_request();
+
+        assert!(working_directory_is_visible(&req, Path::new("/")));
+        assert!(working_directory_is_visible(&req, Path::new("/tmp")));
+        assert!(!working_directory_is_visible(
+            &req,
+            Path::new("/tmp/unmounted")
+        ));
+        assert!(working_directory_is_visible(&req, Path::new("/etc/ssl")));
+        assert!(!working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project")
+        ));
+
+        req.policy.readonly_paths = vec!["/home/user/project".to_string()];
+        assert!(working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project/src")
+        ));
+        assert!(working_directory_is_visible(&req, Path::new("/home/user")));
+
+        req.policy.denied_paths = vec!["/home/user/project/secrets".to_string()];
+        assert!(!working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project/secrets/config")
+        ));
+
+        req.policy
+            .readonly_paths
+            .push("/home/user/project/secrets/config".to_string());
+        assert!(working_directory_is_visible(
+            &req,
+            Path::new("/home/user/project/secrets/config")
+        ));
+    }
+
+    #[test]
+    fn working_directory_visibility_follows_var_run_compat_symlink() {
+        let mut req = base_request();
+        req.policy.readonly_paths = vec!["/run/custom".to_string()];
+
+        assert!(working_directory_is_visible(
+            &req,
+            Path::new("/var/run/custom")
+        ));
+    }
+
+    #[test]
+    fn working_directory_visibility_normalizes_parent_components() {
+        let req = base_request();
+        assert!(!working_directory_is_visible(
+            &req,
+            Path::new("/usr/bin/../../home/user")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_warning_names_unmounted_symlink_target() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("custom-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.1\n").unwrap();
+        let link = dir.path().join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let req = base_request();
+        let mut logger = Logger::new(Mode::Buffer);
+        warn_if_resolver_target_is_hidden(&req, &link, &mut logger);
+
+        let target = std::fs::canonicalize(target).unwrap();
+        assert!(logger.get_buffer().contains("DNS may fail"));
+        assert!(logger
+            .get_buffer()
+            .contains(&target.to_string_lossy().into_owned()));
+        assert!(logger.get_buffer().contains("filesystem.readonlyPaths"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_warning_is_suppressed_for_policy_mounted_target() {
+        use wxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("custom-resolv.conf");
+        std::fs::write(&target, "nameserver 127.0.0.1\n").unwrap();
+        let link = dir.path().join("resolv.conf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut req = base_request();
+        req.policy.readonly_paths = vec![dir.path().to_string_lossy().into_owned()];
+        let mut logger = Logger::new(Mode::Buffer);
+        warn_if_resolver_target_is_hidden(&req, &link, &mut logger);
+
+        assert!(logger.get_buffer().is_empty());
     }
 
     /// A denied symlink pointing at a **directory** is rewritten to its canonical
