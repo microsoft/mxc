@@ -20,11 +20,13 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] a
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
+export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
 // Mapping from a sandboxId's leading prefix segment to the wire-format
 // backend key. Extended as more state-aware backends opt in.
 export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
   [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
+  [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
 };
 
 /**
@@ -203,11 +205,26 @@ export function spawnAndCollect(
     const child = spawnImpl(executablePath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as {
+      stdin: NodeJS.WritableStream | null;
       stdout: NodeJS.ReadableStream | null;
       stderr: NodeJS.ReadableStream | null;
       kill: (signal?: NodeJS.Signals | number) => boolean;
       on: (event: string, cb: (...a: unknown[]) => void) => unknown;
     };
+
+    // Buffered (non-streaming) exec supplies no stdin, so close the child's
+    // write end immediately. The Rust state-aware exec path treats non-TTY
+    // stdin as a pipe and blocks forwarding guest stdin until it sees EOF on
+    // this handle; without the explicit end() a stdin-reading command (e.g.
+    // `cat`) would hang until the phase timeout. EOF == "no input".
+    //
+    // Guard the stdin pipe with its own 'error' handler first: the child may
+    // have already exited by the time we end(), in which case the write end
+    // emits EPIPE. The child.on('error') below is on the process, not this
+    // stream, so without this listener an unhandled 'error' would crash the
+    // whole process instead of just failing this one call.
+    child.stdin?.on('error', () => {});
+    child.stdin?.end();
 
     let stdoutData = '';
     let stderrData = '';
