@@ -52,6 +52,7 @@ export interface BuildEnvelopeArgs {
   backendKey: StateAwareContainmentBackend;
   containment?: StateAwareContainmentBackend; // provision only
   sandboxId?: string;                        // non-provision only
+  correlationVector?: string;                // non-provision relay (from provision)
   config?: Record<string, unknown>;
 }
 
@@ -62,7 +63,7 @@ export interface BuildEnvelopeArgs {
  * remaining backend-specific fields under `experimental.<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
-  const { phase, backendKey, containment, sandboxId, config } = args;
+  const { phase, backendKey, containment, sandboxId, correlationVector, config } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
@@ -75,6 +76,12 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
+  }
+  // Correlation vector (MS-CV) seeded at provision and relayed by the client
+  // into every later phase so the whole lifecycle shares a telemetry base
+  // prefix. Provision omits it (the executor seeds its own).
+  if (correlationVector) {
+    envelope.correlationVector = correlationVector;
   }
 
   for (const field of CROSS_CUTTING_FIELDS) {

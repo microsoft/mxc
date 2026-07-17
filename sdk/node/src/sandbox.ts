@@ -287,26 +287,17 @@ export function createConfigFromPolicy(
                 );
             }
         }
-        if (policy.network.proxy && platform === 'darwin') {
-            throw new Error('Proxy configuration is not supported on macOS');
-        }
-
-        // WSLC supports block + allowedHosts via iptables (Bridged networking
-        // with per-host filtering). macOS sandbox supports it natively via
-        // per-host Seatbelt rules. Bubblewrap and LXC support it via iptables.
-        // Abstract `'process'` on Linux resolves to Bubblewrap server-side, and
-        // on macOS resolves to Seatbelt, so treat both the same as their
-        // explicit backend counterparts here.
-        // Other backends require allowOutbound for host filtering since it
-        // maps to AppContainer capabilities.
-        const resolvesToHostFilteringBackend =
+        // Unix backends accept host lists without allowOutbound. Bubblewrap,
+        // LXC, and WSLC enforce them; Seatbelt accepts them for SDK compatibility
+        // and leaves its limitations to native validation.
+        const acceptsHostRulesWithoutOutbound =
             containment === 'wslc' ||
             containment === 'seatbelt' ||
             containment === 'bubblewrap' ||
             containment === 'lxc' ||
             (containment === 'process' && platform === 'linux') ||
             (containment === 'process' && platform === 'darwin');
-        if (!resolvesToHostFilteringBackend) {
+        if (!acceptsHostRulesWithoutOutbound) {
             if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
                 throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
             }
@@ -417,6 +408,17 @@ export interface SandboxSpawnOptions {
    * `--allow-testing-features` flag).
    */
   allowTestingFeatures?: boolean;
+
+  /**
+   * State-aware lifecycle only: the correlation vector (MS-CV) returned by
+   * {@link provisionSandbox} as `correlationVector`. Relay it verbatim on every
+   * later phase (`start` / `exec` / `stop` / `deprovision`) so all phases of one
+   * lifecycle share a telemetry base prefix. The client relays it unchanged; the
+   * executor derives each phase's own vector from it (spinning a mutable base or
+   * reseeding a missing/malformed value). Ignored by one-shot spawns and by
+   * `provision` (which seeds its own).
+   */
+  correlationVector?: string;
 
   /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.

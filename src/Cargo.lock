@@ -1426,19 +1426,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "linux_test_proxy"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "clap",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "tokio",
-]
-
-[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1632,7 +1619,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
- "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
  "wslc_common",
  "wxc_common",
 ]
@@ -2605,6 +2592,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "unix_test_proxy"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3072,8 +3072,25 @@ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 name = "windows_sandbox_common"
 version = "0.7.0"
 dependencies = [
+ "getrandom 0.2.17",
  "serde",
  "serde_json",
+ "tokio",
+ "wxc_common",
+]
+
+[[package]]
+name = "windows_sandbox_lifecycle"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows",
+ "windows_sandbox_common",
  "wxc_common",
 ]
 
@@ -3333,6 +3350,7 @@ dependencies = [
  "tokio",
  "uuid",
  "windows_sandbox_common",
+ "windows_sandbox_lifecycle",
  "wxc_common",
 ]
 
@@ -3344,6 +3362,7 @@ dependencies = [
  "mxc_build_common",
  "serde_json",
  "tokio",
+ "windows",
  "windows_sandbox_common",
  "wxc_common",
 ]

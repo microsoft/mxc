@@ -276,6 +276,14 @@ fn main() {
         false
     };
 
+    // Install a crash-telemetry panic hook once telemetry is active, chaining
+    // the previously-installed hook so the default stderr backtrace still
+    // prints. The hook body is panic-free and emits no message text.
+    if telemetry_active {
+        telemetry::set_process_context(&request.containment);
+        telemetry::install_panic_hook();
+    }
+
     log_request(&request, &mut logger);
 
     // Dispatch by containment backend. Backend selection and runner
@@ -319,5 +327,12 @@ fn main() {
 
     print!("{}", response.standard_out);
     eprint!("{}", response.standard_err);
+
+    // Never exit non-zero on an infrastructure failure without a diagnostic:
+    // `display_script_results` only writes the error into the (buffered,
+    // non-debug-suppressed) logger, so surface it on stderr here for parity
+    // with wxc-exec (issue #564).
+    wxc_common::script_runner::emit_backend_error_envelope(&response);
+
     process::exit(response.exit_code);
 }

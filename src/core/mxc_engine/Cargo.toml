@@ -22,7 +22,7 @@ hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 appcontainer_common = { workspace = true }
-windows_sandbox_common = { workspace = true }
+windows_sandbox_lifecycle = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
 wslc_common = { workspace = true, optional = true }
@@ -49,4 +49,3 @@ isolation_session = [
 ]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["appcontainer_common/tier2_bfs"]
-

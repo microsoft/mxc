@@ -128,6 +128,24 @@ describe('buildStateAwareEnvelope', () => {
     });
   });
 
+  it('relays correlationVector onto non-provision envelopes and omits it from provision', () => {
+    const nonProvision = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:abc',
+      correlationVector: 'BASEbaseBASEbaseBASEba.1',
+    });
+    assert.strictEqual(nonProvision.correlationVector, 'BASEbaseBASEbaseBASEba.1');
+
+    // Provision seeds its own cV in the executor; the builder never emits one.
+    const provision = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+    });
+    assert.strictEqual(provision.correlationVector, undefined);
+  });
+
 });
 
 describe('parseNonExecResponse', () => {
@@ -207,6 +225,19 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.ok(fake.captured.args?.includes('--experimental'));
   });
 
+  it('surfaces the correlationVector from the provision result envelope', async () => {
+    const fake = fakeSpawn({
+      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","correlationVector":"BASEbaseBASEbaseBASEba.42"}}',
+      exitCode: 0,
+    });
+    activeFake = fake;
+    _setSpawnImpl(fake.spawn);
+    const result = await provisionSandbox('isolation_session', undefined, testOptions());
+    assert.strictEqual(result.correlationVector, 'BASEbaseBASEbaseBASEba.42');
+    // Provision itself never sends a correlationVector on the wire.
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+  });
+
   it('throws an MxcError carrying backend_unavailable when the executor reports it', async () => {
     const fake = fakeSpawn({
       stdout: '{"error":{"code":"backend_unavailable","message":"IsoSessionApp.dll not registered"}}',
@@ -250,6 +281,14 @@ describe('startSandbox', { skip: platformSkip }, () => {
       isolation_session: { start: { configurationId: 'small' } },
     });
   });
+
+  it('relays the correlationVector from options onto the start envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
+    await startSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.7' }));
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.7');
+  });
 });
 
 describe('stopSandbox', { skip: platformSkip }, () => {
@@ -275,6 +314,14 @@ describe('stopSandbox', { skip: platformSkip }, () => {
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
     );
   });
+
+  it('relays the correlationVector from options onto the stop envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await stopSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.9' }));
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.9');
+  });
 });
 
 describe('deprovisionSandbox', { skip: platformSkip }, () => {
@@ -287,6 +334,14 @@ describe('deprovisionSandbox', { skip: platformSkip }, () => {
     await deprovisionSandbox(id, undefined, testOptions());
     assert.strictEqual(fake.captured.envelope?.phase, 'deprovision');
     assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:abc');
+  });
+
+  it('relays the correlationVector from options onto the deprovision envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await deprovisionSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.11' }));
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.11');
   });
 });
 
@@ -329,5 +384,17 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
       () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, testOptions()),
       (err: unknown) => err instanceof MxcError && err.code === 'stale_id',
     );
+  });
+
+  it('relays the correlationVector from options onto the exec envelope', async () => {
+    const fake = fakeSpawn({ stdout: 'hi\n', stderr: '', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await execInSandboxAsync(
+      id,
+      { process: { commandLine: 'echo hi' } },
+      testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.13' }),
+    );
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.13');
   });
 });

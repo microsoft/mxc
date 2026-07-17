@@ -63,7 +63,7 @@ jobs:
         cargoFeatures: hyperlight
         signPattern: |
           lxc-exec
-          linux-test-proxy
+          unix-test-proxy
 
       # Paths
       targetTriple: $(triplet)
@@ -124,13 +124,13 @@ jobs:
             ${{ else }}:
               enableTest: 'false'
 
-      # linux_test_proxy is a separate workspace member (not a dep of lxc), so
+      # unix_test_proxy is a separate workspace member (not a dep of lxc), so
       # the workspace-member-scoped build above doesn't pick it up. Build it
       # explicitly here so it lands alongside lxc-exec in the target dir and
       # gets copied into the artifact via signPattern.
       - script: |
-          cargo build --release --target $(triplet) -p linux_test_proxy --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
-        displayName: Build linux-test-proxy
+          cargo build --release --target $(triplet) -p unix_test_proxy --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
+        displayName: Build unix-test-proxy
         condition: eq('${{ item.os }}', 'linux')
 
       # plm (Permissive Learning Mode) is functionally Windows-only, but it
