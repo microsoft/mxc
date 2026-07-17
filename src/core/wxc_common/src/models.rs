@@ -260,9 +260,9 @@ pub struct IsolationSessionConfig {
     /// Optional Entra cloud-agent credentials. Honored on the state-aware
     /// `start` phase; rejected by the one-shot path.
     pub user: Option<IsolationSessionUser>,
-    /// Optional app-scoped registration id (appId). Explicit value is used
-    /// verbatim; when absent, the backend auto-detects the invoking (parent)
-    /// process's Package Family Name as "PFN:<pfn>".
+    /// Optional app-scoped registration id. Used verbatim when present; when
+    /// absent, the backend attempts to auto-detect the invoking process's 
+    /// Package Family Name as "PFN:<pfn>".
     pub app_id: Option<String>,
 }
 
@@ -301,9 +301,9 @@ impl From<crate::wire::IsolationUser> for IsolationSessionUser {
 #[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
     pub user: Option<IsolationSessionUser>,
-    /// Optional app-scoped registration id (appId). Explicit value is used
-    /// verbatim; when absent, the backend auto-detects the invoking (parent)
-    /// process's Package Family Name as "PFN:<pfn>".
+    /// Optional app-scoped registration id. Used verbatim when present; when
+    /// absent, the backend attempts to auto-detect the invoking process's 
+    /// Package Family Name as "PFN:<pfn>".
     pub app_id: Option<String>,
 }
 

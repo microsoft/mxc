@@ -56,7 +56,7 @@ impl ScriptRunner for IsolationSessionRunner {
         // Entra). An explicit appId from config is passed verbatim; when
         // absent, the manager auto-detects the invoking (parent) process's
         // PFN, if the process is packaged. Provision returns the OS-assigned
-        // account name; the manager is then pegged to it for the rest of the 
+        // account name; the manager is then pegged to it for the rest of the
         // lifecycle.
         let app_id = request
             .experimental

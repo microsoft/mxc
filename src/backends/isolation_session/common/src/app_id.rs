@@ -117,7 +117,10 @@ mod tests {
 
     #[test]
     fn explicit_app_id_is_passed_through_unchanged() {
-        assert_eq!(resolve_app_id("PFN:Contoso.App_8wekyb3d8bbwe"), "PFN:Contoso.App_8wekyb3d8bbwe");
+        assert_eq!(
+            resolve_app_id("PFN:Contoso.App_8wekyb3d8bbwe"),
+            "PFN:Contoso.App_8wekyb3d8bbwe"
+        );
         assert_eq!(resolve_app_id("my-literal-id"), "my-literal-id");
     }
 

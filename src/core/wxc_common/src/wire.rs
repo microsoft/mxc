@@ -493,8 +493,8 @@ pub struct IsolationSession {
     /// Optional Entra cloud-agent user bundle (one-shot).
     pub user: Option<IsolationUser>,
     /// Optional app-scoped registration id. Used verbatim when present; when
-    /// absent, the backend auto-detects the invoking process's Package Family
-    /// Name as "PFN:<pfn>".
+    /// absent, the backend attempts to auto-detect the invoking process's 
+    /// Package Family Name as "PFN:<pfn>".
     pub app_id: Option<String>,
     /// State-aware provision-phase configuration.
     pub provision: Option<IsolationSessionPhase>,
@@ -514,8 +514,8 @@ pub struct IsolationSessionPhase {
     /// Entra cloud-agent user bundle for this phase.
     pub user: Option<IsolationUser>,
     /// Optional app-scoped registration id. Used verbatim when present; when
-    /// absent, the backend auto-detects the invoking process's Package Family
-    /// Name as "PFN:<pfn>".
+    /// absent, the backend attempts to auto-detect the invoking process's 
+    /// Package Family Name as "PFN:<pfn>".
     pub app_id: Option<String>,
 }
 

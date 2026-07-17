@@ -143,9 +143,9 @@ impl IsolationSessionManager {
             return Err(format_iso_error("AddUserAsync2", &err));
         }
 
-        let agent_user_name = user_result
-            .AgentUserName()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get AgentUserName failed: {}", e)))?;
+        let agent_user_name = user_result.AgentUserName().map_err(|e| {
+            lifecycle_err(format!("AddUserAsync2: get AgentUserName failed: {}", e))
+        })?;
         let agent_user_sid = user_result
             .AgentUserSid()
             .map_err(|e| lifecycle_err(format!("AddUserAsync2: get AgentUserSid failed: {}", e)))?;
