@@ -44,6 +44,18 @@ through the shared parser. The returned [`SandboxRequest`] has an empty
 command line — set the command with [`SandboxRequest::set_script`] (and any
 working directory / env) before spawning.
 
+On Windows, add custom ProcessContainer AppContainer capabilities by reading
+the generated list, extending it, and setting the combined list:
+
+```rust,no_run
+let mut capabilities = request.process_container_capabilities().to_vec();
+capabilities.push("registryRead".to_string());
+request.set_process_container_capabilities(capabilities);
+```
+
+Reading first preserves capabilities derived from the cross-platform policy,
+such as `internetClient`.
+
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
