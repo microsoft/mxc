@@ -890,6 +890,21 @@ impl WSLContainerRunner {
             return ScriptResponse::error(&msg);
         }
 
+        // Denied-path overlap validation: WSLC's flat volume-mount surface has no
+        // overlay primitive, so a deniedPaths entry nested under a mounted
+        // (readwrite/readonly) parent cannot be masked and would stay accessible
+        // through the parent mount. Reject such configs rather than silently
+        // leaving the subtree exposed. Runs after object normalization so it sees
+        // the already-tightened intents.
+        if let Err(msg) = policy_mapping::validate_denied_path_overlap(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+            &request.policy.denied_paths,
+        ) {
+            let _ = writeln!(logger, "[WSLC] {}", msg);
+            return ScriptResponse::error(&msg);
+        }
+
         // -- Init: COM + SDK + preflight --
         let sdk = match Self::init_and_load_sdk(logger) {
             Ok(r) => r,
@@ -1310,5 +1325,36 @@ mod tests {
     fn nonexistent_file_returns_error() {
         let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_rejects_denied_path_overlap_before_sdk_load() {
+        // Wiring guard: a deniedPaths entry nested under a mounted parent must be
+        // rejected at the pre-flight overlap check (run_internal, before SDK
+        // load), so no container is ever started. The pure-function unit tests
+        // in policy_mapping do not cover this call-site ordering. Uses
+        // non-existent paths so D6 (Absent) and delegation (unknown) pass through
+        // to the overlap check.
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                readwrite_paths: vec![r"C:\mxc-nonexistent-parent".to_string()],
+                denied_paths: vec![r"C:\mxc-nonexistent-parent\secrets".to_string()],
+                ..Default::default()
+            },
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&WslcConfig::default());
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert!(
+            response.error_message.contains("cannot be enforced"),
+            "expected the overlap error, got: {}",
+            response.error_message
+        );
     }
 }
