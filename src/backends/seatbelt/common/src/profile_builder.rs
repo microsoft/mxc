@@ -519,7 +519,7 @@ fn darwin_temp_container_grant(path: &str) -> Option<String> {
     }
     // `<a>`/`<b>` must be ordinary segments; `.`/`..` would let a widened
     // container escape upward (e.g. `/var/folders/ab/../T` -> `/var/folders`).
-    let ordinary = |s: &&str| !s.is_empty() && *s != "." && *s != "..";
+    let ordinary = |s: &&str| !s.is_empty() && !matches!(*s, "." | "..");
     let a = segments.next().filter(ordinary)?;
     let b = segments.next().filter(ordinary)?;
     let leaf = segments.next()?;
