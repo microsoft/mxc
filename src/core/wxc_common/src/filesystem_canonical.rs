@@ -120,14 +120,14 @@ pub fn canonicalize_path(_path: &str) -> PathCanonical {
 
 /// Like [`canonicalize_path`] but tolerates a not-yet-created leaf: when the
 /// full path is missing it resolves the deepest existing ancestor (collapsing
-/// its aliases) and re-appends the missing components. This lets callers compare
+/// its aliases) and replays the missing tail onto it. This lets callers compare
 /// a denied path that does not exist yet but whose parent is an alias
 /// (symlink/junction) into a mounted tree. Mirrors the bubblewrap runner's
 /// `resolve_through_symlinks`. Returns [`PathCanonical::Absent`] only when no
 /// ancestor resolves.
 #[cfg(windows)]
 pub fn canonicalize_allowing_absent_tail(path: &str) -> PathCanonical {
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
 
     match canonicalize_path(path) {
         PathCanonical::Canonical(resolved) => return PathCanonical::Canonical(resolved),
@@ -135,16 +135,32 @@ pub fn canonicalize_allowing_absent_tail(path: &str) -> PathCanonical {
         PathCanonical::Absent => {}
     }
 
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    // Capture tail components verbatim (as `Component`, not `file_name`, which
+    // returns `None` for `.`/`..`) so they survive to the replay below; the OS
+    // already folds any `.`/`..` in the existing-ancestor portion.
+    let mut tail: Vec<Component> = Vec::new();
     let mut cur = Path::new(path);
     while let Some(parent) = cur.parent() {
-        if let Some(name) = cur.file_name() {
-            tail.push(name);
+        if let Some(comp) = cur.components().next_back() {
+            tail.push(comp);
         }
         match canonicalize_path(&parent.to_string_lossy()) {
             PathCanonical::Canonical(base) => {
+                // Replay the absent tail onto the resolved ancestor, folding
+                // `.`/`..` by push/pop so e.g. `X\..\Z` collapses to `Z` rather
+                // than being mis-reconstructed as `X\Z`.
                 let mut result = PathBuf::from(base);
-                result.extend(tail.iter().rev());
+                for comp in tail.iter().rev() {
+                    match comp {
+                        Component::Normal(name) => result.push(name),
+                        Component::ParentDir => {
+                            result.pop();
+                        }
+                        Component::CurDir => {}
+                        // A prefix/root below an existing ancestor is impossible.
+                        _ => {}
+                    }
+                }
                 return PathCanonical::Canonical(result.to_string_lossy().into_owned());
             }
             PathCanonical::Unknown => return PathCanonical::Unknown,
@@ -255,6 +271,59 @@ mod tests {
         assert_eq!(
             canonicalize_allowing_absent_tail(missing),
             PathCanonical::Absent
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absent_tail_folds_dotdot_across_aliased_ancestor() {
+        // Regression: an aliased (junction) ancestor + multiple non-existent
+        // components + `..`. The deepest existing ancestor is the junction,
+        // resolved by the OS; the absent tail `sub\..\Z` must fold to `Z` on the
+        // real target, not be mis-reconstructed as `sub\Z`.
+        use std::process::Command;
+
+        let tmp = std::env::temp_dir();
+        let base = format!(
+            r"{}\mxc-dotdot-{}",
+            tmp.to_string_lossy().trim_end_matches('\\'),
+            std::process::id()
+        );
+        let real = format!(r"{base}\real");
+        let link = format!(r"{base}\link");
+        std::fs::create_dir_all(&real).unwrap();
+
+        let status = Command::new("cmd")
+            .args(["/c", "mklink", "/J", &link, &real])
+            .status()
+            .unwrap();
+        if !status.success() {
+            eprintln!(
+                "skipping absent_tail_folds_dotdot_across_aliased_ancestor: mklink /J failed"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+
+        // `link` exists (→ real); `sub` and `Z` do not. `sub\..\Z` must fold to
+        // `real\Z`, so the resolved form ends with `real\Z` and omits `sub`.
+        let denied = format!(r"{link}\sub\..\Z");
+        let resolved = match canonicalize_allowing_absent_tail(&denied) {
+            PathCanonical::Canonical(r) => r,
+            other => {
+                let _ = std::fs::remove_dir_all(&base);
+                panic!("expected Canonical, got {other:?}");
+            }
+        };
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            resolved.to_lowercase().ends_with(r"\real\z"),
+            "tail `sub\\..\\Z` must fold to `real\\Z`, got {resolved}"
+        );
+        assert!(
+            !resolved.to_lowercase().contains(r"\sub\"),
+            "`..` must cancel `sub`, got {resolved}"
         );
     }
 

@@ -234,6 +234,22 @@ $null = $results.Add(@{
     Reason  = $(if ($objPass) { "" } else { "object-validation test failed" })
 })
 
+# Denied-path `..`-through-junction pre-flight validation (comment 1): a deny
+# that only lands inside a mounted tree after following a junction AND folding
+# `..` across not-yet-created components must be rejected at pre-flight. Owns its
+# own directory+junction fixture, like the object test above.
+$ddtScript = Join-Path $PSScriptRoot "run_wslc_dotdot_alias_test.ps1"
+$ddtArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $ddtArgs.Debug = $true }
+& $ddtScript @ddtArgs
+$ddtPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_denied_dotdot_alias.json"
+    Pass    = $ddtPass
+    Skipped = $false
+    Reason  = $(if ($ddtPass) { "" } else { "dotdot-alias validation test failed" })
+})
+
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_tcp.json" -OutputContains "PORT_MAPPING_TCP_OK"))

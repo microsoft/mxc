@@ -225,24 +225,35 @@ impl NormalizedPath {
 /// spellings (`C:secrets`) are caught. Tier 2 canonicalizes each path on disk
 /// ([`wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail`]) to
 /// collapse symlinks, junctions, 8.3 short names, and `\\?\` prefixes, then
-/// re-runs the structural compare on the resolved forms — closing the alias gap
-/// Tier 1 cannot see. A denied leaf that does not exist yet but sits under an
-/// aliased parent is resolved by canonicalizing the deepest existing ancestor
-/// and re-appending the missing tail, so a not-yet-created deny under a
-/// junctioned mount is still caught. With `deniedPaths` present, a path that
-/// exists but cannot be resolved **fails closed** (config rejected) rather than
-/// falling back to the weaker textual compare, matching the D6 pass
+/// re-runs the structural compare on the resolved forms — closing the gap where
+/// a **policy path itself** is an alias that resolves into a mounted tree. A
+/// denied leaf that does not exist yet but sits under an aliased parent is
+/// resolved by canonicalizing the deepest existing ancestor and replaying the
+/// missing tail (folding `.`/`..`), so a not-yet-created deny under a junctioned
+/// mount is still caught. With `deniedPaths` present, a path that exists but
+/// cannot be resolved **fails closed** (config rejected) rather than falling
+/// back to the weaker textual compare, matching the D6 pass
 /// ([`wxc_common::filesystem_object::normalize_object_conflicts`]).
 ///
-/// Tier 2 does not fold Unicode normalization forms and compares path endpoints,
-/// not object identity: a hard link inside a mounted tree pointing at a denied
-/// file resolves to its own in-tree name (not the denied one), so it is not
-/// caught here or by D6 (the two are distinct objects). Creating such a link
-/// requires write access to the denied target the guest does not have, so this
-/// is out of scope under the trusted-author threat model. A residual TOCTOU
-/// window also remains between canonicalization and the SDK mount (an alias
-/// could be swapped in between); fully closing it needs handle-based mounting
-/// the WSLC SDK does not expose, so it is likewise accepted.
+/// **Scope / known limitations.** Tier 2 canonicalizes only the paths *listed in
+/// the policy*; it does not scan *inside* a mounted directory for reparse
+/// points. A junction planted within a mounted tree that points at a denied (or
+/// otherwise out-of-tree) location — e.g. mount `C:\project`, deny `C:\secrets`,
+/// with `C:\project\link -> C:\secrets` — is **not** caught: canonicalizing the
+/// two policy entries yields non-overlapping paths, yet the guest could reach
+/// `C:\secrets` through `C:\project\link` if the runtime follows the reparse
+/// point. Detecting this would require walking the mounted subtree for reparse
+/// points (expensive and still racy) or controlling traversal beneath the mount,
+/// which the WSLC SDK does not expose. Likewise, Tier 2 does not fold Unicode
+/// normalization forms and compares path endpoints, not object identity: a hard
+/// link inside a mounted tree pointing at a denied file resolves to its own
+/// in-tree name (not the denied one), so it is not caught here or by D6 (the two
+/// are distinct objects). Creating either alias requires write access to a
+/// location the guest does not have, so both are out of scope under the
+/// trusted-author threat model. A residual TOCTOU window also remains between
+/// canonicalization and the SDK mount (an alias could be swapped in between);
+/// fully closing it needs handle-based mounting the WSLC SDK does not expose, so
+/// it is likewise accepted.
 pub fn validate_denied_path_overlap(
     readwrite_paths: &[String],
     readonly_paths: &[String],
