@@ -757,6 +757,29 @@ impl SandboxRequest {
         self.set_env(entries)
     }
 
+    /// The ProcessContainer (Windows) AppContainer capabilities granted to the
+    /// child. This includes capabilities derived from the cross-platform policy,
+    /// such as `internetClient`.
+    ///
+    /// Read these before
+    /// [`set_process_container_capabilities`](Self::set_process_container_capabilities)
+    /// when adding custom capabilities without dropping the generated ones.
+    pub fn process_container_capabilities(&self) -> &[String] {
+        &self.inner.policy.capabilities
+    }
+
+    /// Replace the complete ProcessContainer (Windows) AppContainer capability
+    /// list.
+    ///
+    /// To retain capabilities derived from the cross-platform policy, read the
+    /// current list with
+    /// [`process_container_capabilities`](Self::process_container_capabilities),
+    /// add the custom entries, and set the combined list.
+    pub fn set_process_container_capabilities(&mut self, capabilities: Vec<String>) -> &mut Self {
+        self.inner.policy.capabilities = capabilities;
+        self
+    }
+
     /// The Seatbelt (macOS) extra Mach service names the sandbox profile lets the
     /// child look up. Empty when the request carries no Seatbelt config (i.e. a
     /// non-Seatbelt backend). Read these — e.g. to union with your own — before
@@ -1873,6 +1896,28 @@ mod tests {
                 "{entry_point} unexpected error: {error:?}"
             );
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn process_container_capabilities_round_trip() {
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            ..Default::default()
+        });
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
+
+        let mut capabilities = request.process_container_capabilities().to_vec();
+        assert!(capabilities.contains(&"internetClient".to_string()));
+        capabilities.push("registryRead".to_string());
+        request.set_process_container_capabilities(capabilities.clone());
+
+        assert_eq!(
+            request.process_container_capabilities(),
+            capabilities.as_slice()
+        );
+        assert_eq!(request.inner.policy.capabilities, capabilities);
     }
 
     #[cfg(target_os = "macos")]

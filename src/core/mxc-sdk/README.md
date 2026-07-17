@@ -48,6 +48,18 @@ Telemetry remains off unless `SandboxRequest::set_telemetry_opt_in(true)` is
 called. Enabling that per-invocation switch still requires persisted user
 consent and a permitting administrative policy.
 
+On Windows, add custom ProcessContainer AppContainer capabilities by reading
+the generated list, extending it, and setting the combined list:
+
+```rust,no_run
+let mut capabilities = request.process_container_capabilities().to_vec();
+capabilities.push("registryRead".to_string());
+request.set_process_container_capabilities(capabilities);
+```
+
+Reading first preserves capabilities derived from the cross-platform policy,
+such as `internetClient`.
+
 To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`].
 

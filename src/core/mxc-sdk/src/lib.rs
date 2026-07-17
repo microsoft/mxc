@@ -62,6 +62,26 @@
 //! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
 //! binaries for those.
 //!
+//! On Windows, callers can add custom AppContainer capabilities without
+//! dropping capabilities derived from the policy:
+//!
+//! ```no_run
+//! use mxc_sdk::{build_request, SandboxPolicy};
+//!
+//! let policy = SandboxPolicy {
+//!     version: "0.7.0-alpha".to_string(),
+//!     filesystem: None,
+//!     network: None,
+//!     ui: None,
+//!     timeout_ms: None,
+//! };
+//! let mut request = build_request(&policy, "echo hi", None)?;
+//! let mut capabilities = request.process_container_capabilities().to_vec();
+//! capabilities.push("registryRead".to_string());
+//! request.set_process_container_capabilities(capabilities);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # Diagnosing a failure
 //!
 //! [`Error`] carries a closed [`ErrorCode`] and a message, and — when the
