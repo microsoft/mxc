@@ -32,12 +32,15 @@
 //! separate objects and are unaffected by this rule.
 //!
 //! Each stream handle is likewise single-owner: [`mxc_stream_read`] /
-//! [`mxc_stream_write`] borrow the stream mutably, so a read/write and a
-//! [`mxc_read_stream_free`] / [`mxc_write_stream_free`] on the **same** stream
-//! must not run concurrently — freeing a stream while a read/write is in flight
-//! is undefined behaviour (a use-after-free). Free a stream only once its reads
-//! and writes have returned. (The C# binding enforces this by refcounting the
-//! handle across each native call via `SafeHandle`.)
+//! [`mxc_stream_write`] / [`mxc_stream_flush`] borrow the stream mutably, so
+//! **no two of them may run concurrently on the same stream**, and none may run
+//! concurrently with [`mxc_read_stream_free`] / [`mxc_write_stream_free`].
+//! Overlapping calls alias a `&mut` — undefined behaviour, not merely interleaved
+//! bytes — so a concurrent read-vs-read or write-vs-write is as illegal as a
+//! read-vs-free. Drive each stream from a single thread, and free it only once
+//! its reads and writes have returned. (The C# binding upholds this by holding a
+//! per-handle lock across each native call, which also refcounts the handle via
+//! `SafeHandle` so a free can never race an in-flight call.)
 //!
 //! ## Panics & errors
 //!

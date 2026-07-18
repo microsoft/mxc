@@ -50,8 +50,9 @@ public static class MxcLifecycle
     /// <exception cref="MxcException">Provisioning failed.</exception>
     public static ProvisionResult ProvisionSandbox(ProvisionSandboxOptions? options = null)
     {
-        var result = RunEnvelopePhase(BuildProvisionEnvelope(options));
-        var sandboxId = result?["sandboxId"]?.GetValue<string>()
+        var result = RunEnvelopePhase(BuildProvisionEnvelope(options))
+            ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no result object");
+        var sandboxId = result["sandboxId"]?.GetValue<string>()
             ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no sandboxId");
         var metadata = result["metadata"];
         return new ProvisionResult
@@ -83,17 +84,27 @@ public static class MxcLifecycle
     /// <exception cref="MxcException">Starting failed.</exception>
     public static void StartSandbox(SandboxId id, StartSandboxOptions? options = null)
     {
+        RunEnvelopePhase(BuildStartEnvelope(id, options));
+    }
+
+    // Build the start request envelope: sandboxId + optional sizing profile /
+    // user nested under experimental.isolation_session.start.
+    internal static JsonObject BuildStartEnvelope(SandboxId id, StartSandboxOptions? options)
+    {
         var envelope = NewEnvelope("start");
         envelope["sandboxId"] = id.Value;
         if (options?.Size is { } size)
         {
-            SetBackendConfig(envelope, "start", "size", size);
+            // The wire model reads the sizing profile from `configurationId`
+            // (a typed small/medium/large/composable enum). Emitting any other
+            // key would be silently dropped by the permissive experimental block.
+            SetBackendConfig(envelope, "start", "configurationId", size);
         }
         if (options?.User is { } user)
         {
             SetBackendConfig(envelope, "start", "user", SerializeToNode(user));
         }
-        RunEnvelopePhase(envelope);
+        return envelope;
     }
 
     /// <summary>

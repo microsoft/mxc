@@ -35,8 +35,10 @@ public sealed class ProvisionSandboxOptions
 public sealed class StartSandboxOptions
 {
     /// <summary>
-    /// Selected IsoSession size profile. Unknown values are warned and
-    /// downgraded to <c>composable</c> on the native side.
+    /// Selected IsoSession size profile — one of <c>small</c>, <c>medium</c>,
+    /// <c>large</c>, or <c>composable</c>. Emitted as the typed
+    /// <c>configurationId</c> the wire model validates; an unrecognized value is
+    /// rejected natively rather than silently downgraded.
     /// </summary>
     public string? Size { get; set; }
 

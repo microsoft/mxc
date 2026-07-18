@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Diagnostics;
 using Microsoft.Mxc.Sdk.Native;
 
 namespace Microsoft.Mxc.Sdk;
@@ -13,8 +14,10 @@ namespace Microsoft.Mxc.Sdk;
 /// Stream the child's stdio with <see cref="StandardInput"/> /
 /// <see cref="StandardOutput"/> / <see cref="StandardError"/>, wait for it with
 /// <see cref="Wait"/> / <see cref="WaitAsync"/>, or kill it (and its whole tree)
-/// with <see cref="Kill"/>. Each standard stream is a separate object and may be
-/// read/written concurrently on different threads.
+/// with <see cref="Kill"/>. Each standard stream is a separate object; different
+/// streams may be used concurrently on different threads, but a single stream
+/// must be driven from one thread at a time (its native reads/writes are
+/// serialized internally, since the underlying handle is not concurrency-safe).
 /// </para>
 /// <para>
 /// <b>Draining.</b> Like the underlying Rust <c>Sandbox</c>, <see cref="Wait"/>
@@ -28,10 +31,11 @@ namespace Microsoft.Mxc.Sdk;
 /// <b>Threading.</b> The process-control operations (<see cref="Id"/>,
 /// <see cref="Wait"/>, <see cref="WaitAsync"/>, <see cref="Kill"/>,
 /// <see cref="Dispose"/>) are serialized internally, so <see cref="Kill"/> may be
-/// called from another thread while <see cref="WaitAsync"/> is in flight. The
-/// standard streams refcount their native handle, so reading/writing a stream
-/// concurrently with <see cref="Dispose"/> is safe — an in-flight read/write
-/// completes and the handle is freed afterwards, never underneath it.
+/// called from another thread while <see cref="WaitAsync"/> is in flight. Each
+/// standard stream serializes its own native reads/writes and refcounts its
+/// native handle, so reading/writing a stream concurrently with
+/// <see cref="Dispose"/> is safe — an in-flight read/write completes and the
+/// handle is freed afterwards, never underneath it.
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="Dispose"/> kills the child tree if it is still
@@ -53,18 +57,37 @@ public sealed class MxcSandboxProcess : IDisposable
     private readonly MxcSandboxHandle _handle;
     private bool _disposed;
 
+    // Tracks whether each readable standard stream is still available, has been
+    // handed to the caller, or is being consumed by an internal drain task. A
+    // draining stream must never be handed back out (see TakeReadStream), or the
+    // caller would read the same handle concurrently with the drainer.
+    private enum ReadStreamState
+    {
+        Untaken,
+        CallerOwned,
+        Draining,
+    }
+
     private MxcStdinStream? _stdin;
     private MxcReadPipeStream? _stdout;
     private MxcReadPipeStream? _stderr;
     private bool _stdinTaken;
-    private bool _stdoutTaken;
-    private bool _stderrTaken;
+    private ReadStreamState _stdoutState;
+    private ReadStreamState _stderrState;
 
     private readonly List<Task> _drainTasks = new();
 
-    internal MxcSandboxProcess(MxcSandboxHandle handle)
+    // The policy timeout (if any) and a monotonic start stamp. The polling wait
+    // path enforces this deadline itself: mxc_sandbox_try_wait never kills, and
+    // spawn starts no native watchdog, so without this SandboxPolicy.TimeoutMs
+    // would be silently ignored on Wait()/WaitAsync().
+    private readonly uint? _timeoutMs;
+    private readonly long _startTimestamp = Stopwatch.GetTimestamp();
+
+    internal MxcSandboxProcess(MxcSandboxHandle handle, uint? timeoutMs = null)
     {
         _handle = handle;
+        _timeoutMs = timeoutMs;
     }
 
     /// <summary>
@@ -121,31 +144,43 @@ public sealed class MxcSandboxProcess : IDisposable
     /// The child's stdout as a readable <see cref="Stream"/>. A read of zero
     /// bytes signals EOF. Returns <see langword="null"/> if stdout was not piped.
     /// </summary>
-    public Stream? StandardOutput => TakeReadStream(ref _stdoutTaken, ref _stdout, stdout: true);
+    public Stream? StandardOutput => TakeReadStream(ref _stdoutState, ref _stdout, stdout: true);
 
     /// <summary>
     /// The child's stderr as a readable <see cref="Stream"/>. Returns
     /// <see langword="null"/> if stderr was not piped.
     /// </summary>
-    public Stream? StandardError => TakeReadStream(ref _stderrTaken, ref _stderr, stdout: false);
+    public Stream? StandardError => TakeReadStream(ref _stderrState, ref _stderr, stdout: false);
 
-    private Stream? TakeReadStream(ref bool taken, ref MxcReadPipeStream? slot, bool stdout)
+    private Stream? TakeReadStream(ref ReadStreamState state, ref MxcReadPipeStream? slot, bool stdout)
     {
         lock (_controlLock)
         {
             ThrowIfDisposed();
-            if (!taken)
+            switch (state)
             {
-                taken = true;
-                unsafe
-                {
-                    var s = stdout
-                        ? NativeMethods.mxc_sandbox_take_stdout(_handle.Ptr)
-                        : NativeMethods.mxc_sandbox_take_stderr(_handle.Ptr);
-                    slot = s is null ? null : new MxcReadPipeStream(MxcReadStreamHandle.FromRaw(s));
-                }
+                case ReadStreamState.Untaken:
+                    state = ReadStreamState.CallerOwned;
+                    unsafe
+                    {
+                        var s = stdout
+                            ? NativeMethods.mxc_sandbox_take_stdout(_handle.Ptr)
+                            : NativeMethods.mxc_sandbox_take_stderr(_handle.Ptr);
+                        slot = s is null ? null : new MxcReadPipeStream(MxcReadStreamHandle.FromRaw(s));
+                    }
+                    return slot;
+                case ReadStreamState.CallerOwned:
+                    return slot;
+                default:
+                    // Draining: a Wait()/WaitAsync() drain task already owns this
+                    // stream. Handing it back would let the caller read the same
+                    // native handle concurrently with the drainer (undefined
+                    // behaviour). Take the stream before waiting, or use
+                    // WaitForExitWithOutputAsync, which takes it for you.
+                    throw new InvalidOperationException(
+                        "this standard stream is being drained internally by a wait; " +
+                        "take StandardOutput/StandardError before calling Wait/WaitAsync");
             }
-            return slot;
         }
     }
 
@@ -196,11 +231,17 @@ public sealed class MxcSandboxProcess : IDisposable
                 return new SandboxWaitResult { ExitCode = exit, TimedOut = false };
             }
 
-            // try_wait cannot report a timeout (only exited / still-running), so
-            // once the child is gone we return Exited. A policy timeout is
-            // enforced natively by killing the tree, which try_wait then sees as
-            // an exit. Callers that need the timeout distinction should use the
-            // blocking WaitBlocking() path.
+            // try_wait only reports exited / still-running, never a timeout, and
+            // spawn starts no native watchdog — so once the policy deadline passes
+            // we hand off to the native blocking wait, which enforces the same
+            // deadline by killing the tree and reporting the timeout distinctly.
+            // We are already at/past the deadline, so it returns promptly.
+            if (_timeoutMs is { } timeoutMs &&
+                Stopwatch.GetElapsedTime(_startTimestamp).TotalMilliseconds >= timeoutMs)
+            {
+                return WaitBlocking();
+            }
+
             cancellationToken.WaitHandle.WaitOne(poll);
             var next = poll + poll;
             poll = next > MaxPollInterval ? MaxPollInterval : next;
@@ -261,12 +302,32 @@ public sealed class MxcSandboxProcess : IDisposable
         }
         catch
         {
-            // On cancellation/failure, still observe the reader tasks so they do
-            // not run detached. The stream handles are refcounted, so this is
-            // safe regardless of when the caller disposes.
+            // On cancellation/failure the reader tasks may be parked in a blocking
+            // native read that only returns once the child's pipes reach EOF. Kill
+            // the child first so those write ends close and the reads return;
+            // awaiting them before killing would deadlock (and leak the native
+            // child), because the reads can never otherwise complete.
+            KillQuietly();
             await Task.WhenAll(SwallowAsync(stdoutTask), SwallowAsync(stderrTask))
                 .ConfigureAwait(false);
             throw;
+        }
+    }
+
+    // Best-effort kill for cleanup paths: swallow ObjectDisposedException (already
+    // disposed) and MxcException (child already gone) so it never masks the
+    // original error being unwound.
+    private void KillQuietly()
+    {
+        try
+        {
+            Kill();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (MxcException)
+        {
         }
     }
 
@@ -316,18 +377,18 @@ public sealed class MxcSandboxProcess : IDisposable
         lock (_controlLock)
         {
             ThrowIfDisposed();
-            DrainIfUntaken(ref _stdoutTaken, ref _stdout, stdout: true);
-            DrainIfUntaken(ref _stderrTaken, ref _stderr, stdout: false);
+            DrainIfUntaken(ref _stdoutState, ref _stdout, stdout: true);
+            DrainIfUntaken(ref _stderrState, ref _stderr, stdout: false);
         }
     }
 
-    private void DrainIfUntaken(ref bool taken, ref MxcReadPipeStream? slot, bool stdout)
+    private void DrainIfUntaken(ref ReadStreamState state, ref MxcReadPipeStream? slot, bool stdout)
     {
-        if (taken)
+        if (state != ReadStreamState.Untaken)
         {
+            // CallerOwned: the caller reads it. Draining: already draining.
             return;
         }
-        taken = true;
         unsafe
         {
             var s = stdout
@@ -335,10 +396,13 @@ public sealed class MxcSandboxProcess : IDisposable
                 : NativeMethods.mxc_sandbox_take_stderr(_handle.Ptr);
             if (s is null)
             {
+                // Not piped: nothing to drain, and nothing to hand out later.
+                state = ReadStreamState.CallerOwned;
                 return;
             }
             slot = new MxcReadPipeStream(MxcReadStreamHandle.FromRaw(s));
         }
+        state = ReadStreamState.Draining;
         var stream = slot;
         _drainTasks.Add(Task.Run(() =>
         {
@@ -408,6 +472,11 @@ internal sealed class MxcReadPipeStream : Stream
 {
     private readonly MxcReadStreamHandle _handle;
 
+    // Serializes native reads on this handle. mxc_stream_read borrows the stream
+    // mutably, so two concurrent reads on one handle would alias a &mut (undefined
+    // behaviour, not merely interleaved bytes). Held only across the P/Invoke.
+    private readonly object _ioLock = new();
+
     internal MxcReadPipeStream(MxcReadStreamHandle handle) => _handle = handle;
 
     public override bool CanRead => true;
@@ -423,41 +492,54 @@ internal sealed class MxcReadPipeStream : Stream
     public override int Read(byte[] buffer, int offset, int count)
     {
         ArgumentNullException.ThrowIfNull(buffer);
-        if (offset < 0 || count < 0 || offset + count > buffer.Length)
+        if (offset < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
+        }
+        if (count < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(count));
+        }
+        if (offset + count > buffer.Length)
+        {
+            throw new ArgumentException("offset + count exceeds the buffer length");
         }
         if (count == 0)
         {
             return 0;
         }
 
-        // Hold a reference across the blocking native read so a concurrent
-        // Dispose cannot free the handle underneath it (the SafeHandle defers
-        // the actual free until every reference is released).
-        var added = false;
-        try
+        // Serialize the native read and hold a reference across it so a concurrent
+        // read cannot alias the &mut and a concurrent Dispose cannot free the
+        // handle underneath it (the SafeHandle defers the free until every
+        // reference is released). The lock spans only the P/Invoke, so it cannot
+        // deadlock with unrelated work — and Dispose does not take it.
+        lock (_ioLock)
         {
-            _handle.DangerousAddRef(ref added);
-            unsafe
+            var added = false;
+            try
             {
-                nuint read = 0;
-                fixed (byte* p = &buffer[offset])
+                _handle.DangerousAddRef(ref added);
+                unsafe
                 {
-                    var status = NativeMethods.mxc_stream_read(_handle.Ptr, p, (nuint)count, &read);
-                    if (status != (int)ErrorCode.Success)
+                    nuint read = 0;
+                    fixed (byte* p = &buffer[offset])
                     {
-                        throw new MxcException((ErrorCode)status, "reading from the sandbox stream failed");
+                        var status = NativeMethods.mxc_stream_read(_handle.Ptr, p, (nuint)count, &read);
+                        if (status != (int)ErrorCode.Success)
+                        {
+                            throw new MxcException((ErrorCode)status, "reading from the sandbox stream failed");
+                        }
                     }
+                    return (int)read;
                 }
-                return (int)read;
             }
-        }
-        finally
-        {
-            if (added)
+            finally
             {
-                _handle.DangerousRelease();
+                if (added)
+                {
+                    _handle.DangerousRelease();
+                }
             }
         }
     }
@@ -482,6 +564,11 @@ internal sealed class MxcStdinStream : Stream
 {
     private readonly MxcWriteStreamHandle _handle;
 
+    // Serializes native writes/flushes on this handle (see MxcReadPipeStream):
+    // mxc_stream_write / mxc_stream_flush borrow the stream mutably, so concurrent
+    // calls would alias a &mut. Held only across the P/Invoke.
+    private readonly object _ioLock = new();
+
     internal MxcStdinStream(MxcWriteStreamHandle handle) => _handle = handle;
 
     public override bool CanRead => false;
@@ -497,42 +584,53 @@ internal sealed class MxcStdinStream : Stream
     public override void Write(byte[] buffer, int offset, int count)
     {
         ArgumentNullException.ThrowIfNull(buffer);
-        if (offset < 0 || count < 0 || offset + count > buffer.Length)
+        if (offset < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
+        }
+        if (count < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(count));
         }
-
-        var written = 0;
-        while (written < count)
+        if (offset + count > buffer.Length)
         {
-            // Reference the handle across each native write (see MxcReadPipeStream).
-            var added = false;
-            try
+            throw new ArgumentException("offset + count exceeds the buffer length");
+        }
+
+        lock (_ioLock)
+        {
+            var written = 0;
+            while (written < count)
             {
-                _handle.DangerousAddRef(ref added);
-                unsafe
+                // Reference the handle across each native write (see MxcReadPipeStream).
+                var added = false;
+                try
                 {
-                    nuint n = 0;
-                    fixed (byte* p = &buffer[offset + written])
+                    _handle.DangerousAddRef(ref added);
+                    unsafe
                     {
-                        var status = NativeMethods.mxc_stream_write(_handle.Ptr, p, (nuint)(count - written), &n);
-                        if (status != (int)ErrorCode.Success)
+                        nuint n = 0;
+                        fixed (byte* p = &buffer[offset + written])
                         {
-                            throw new MxcException((ErrorCode)status, "writing to the sandbox stream failed");
+                            var status = NativeMethods.mxc_stream_write(_handle.Ptr, p, (nuint)(count - written), &n);
+                            if (status != (int)ErrorCode.Success)
+                            {
+                                throw new MxcException((ErrorCode)status, "writing to the sandbox stream failed");
+                            }
                         }
+                        if (n == 0)
+                        {
+                            throw new IOException("the sandbox stdin stream accepted no bytes (pipe closed?)");
+                        }
+                        written += (int)n;
                     }
-                    if (n == 0)
-                    {
-                        throw new IOException("the sandbox stdin stream accepted no bytes (pipe closed?)");
-                    }
-                    written += (int)n;
                 }
-            }
-            finally
-            {
-                if (added)
+                finally
                 {
-                    _handle.DangerousRelease();
+                    if (added)
+                    {
+                        _handle.DangerousRelease();
+                    }
                 }
             }
         }
@@ -540,28 +638,31 @@ internal sealed class MxcStdinStream : Stream
 
     public override void Flush()
     {
-        var added = false;
-        try
+        lock (_ioLock)
         {
-            _handle.DangerousAddRef(ref added);
-            unsafe
+            var added = false;
+            try
             {
-                var status = NativeMethods.mxc_stream_flush(_handle.Ptr);
-                if (status != (int)ErrorCode.Success)
+                _handle.DangerousAddRef(ref added);
+                unsafe
                 {
-                    throw new MxcException((ErrorCode)status, "flushing the sandbox stream failed");
+                    var status = NativeMethods.mxc_stream_flush(_handle.Ptr);
+                    if (status != (int)ErrorCode.Success)
+                    {
+                        throw new MxcException((ErrorCode)status, "flushing the sandbox stream failed");
+                    }
                 }
             }
-        }
-        catch (ObjectDisposedException)
-        {
-            // Flushing an already-closed stdin is a no-op.
-        }
-        finally
-        {
-            if (added)
+            catch (ObjectDisposedException)
             {
-                _handle.DangerousRelease();
+                // Flushing an already-closed stdin is a no-op.
+            }
+            finally
+            {
+                if (added)
+                {
+                    _handle.DangerousRelease();
+                }
             }
         }
     }

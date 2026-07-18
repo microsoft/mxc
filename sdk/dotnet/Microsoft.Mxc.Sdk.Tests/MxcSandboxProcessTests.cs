@@ -337,4 +337,72 @@ public class MxcSandboxProcessTests
         Assert.Contains("out-12000", Encoding.UTF8.GetString(stdout));
         Assert.Contains("err-12000", Encoding.UTF8.GetString(stderr));
     }
+
+    [Fact]
+    public void Wait_EnforcesPolicyTimeout()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // A short policy timeout must be honoured by the polling Wait() path:
+        // try_wait never kills and spawn starts no native watchdog, so without
+        // managed enforcement the blocked child would hang Wait() indefinitely.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha", TimeoutMs = 1000 };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+        var stdin = proc.StandardInput; // hold stdin open so the child blocks
+        Assert.NotNull(stdin);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = proc.Wait();
+        sw.Stop();
+
+        Assert.True(result.TimedOut, "Wait should report the policy timeout");
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(20), $"Wait took {sw.Elapsed}");
+    }
+
+    [Fact]
+    public void StandardOutput_AfterWaitDrains_Throws()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // Wait() drains any untaken standard stream on an internal task. Handing
+        // that same stream back to the caller afterwards would race the drainer on
+        // one native handle, so StandardOutput/Error must refuse it.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var command = @"C:\Windows\System32\cmd.exe /c echo drained";
+        using var proc = MxcSandbox.Spawn(policy, command);
+
+        proc.Wait(); // drains stdout/stderr internally
+        Assert.Throws<InvalidOperationException>(() => proc.StandardOutput);
+        Assert.Throws<InvalidOperationException>(() => proc.StandardError);
+    }
+
+    [Fact]
+    public async Task WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock()
+    {
+        if (!HostCanSpawn)
+        {
+            return; // skipped: no host backend available
+        }
+
+        // Cancelling while the child is blocked (its pipes never reach EOF) must
+        // not deadlock: the cancellation path kills the child so the parked native
+        // reads return, then surfaces the cancellation. Previously it awaited the
+        // reads before killing and hung forever, leaking the native child.
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
+        var stdin = proc.StandardInput; // hold stdin open so the child blocks
+        Assert.NotNull(stdin);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        var call = proc.WaitForExitWithOutputAsync(cts.Token);
+        var finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert.Same(call, finished);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => call);
+    }
 }

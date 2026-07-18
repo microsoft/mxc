@@ -151,4 +151,35 @@ public class MxcLifecycleTests
         Assert.Equal("cmd /c echo hi",
             root.GetProperty("process").GetProperty("commandLine").GetString());
     }
+
+    [Fact]
+    public void BuildStartEnvelope_EmitsSizeAsConfigurationId()
+    {
+        // The sizing profile must reach the wire under `configurationId` — the
+        // key the IsolationSessionPhase wire model actually reads. Emitting it as
+        // `size` (the historical bug) is silently dropped by the permissive
+        // experimental block, discarding every StartSandboxOptions.Size value.
+        var options = new StartSandboxOptions { Size = "large" };
+        var json = MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options).ToJsonString();
+        using var doc = JsonDocument.Parse(json);
+        var start = doc.RootElement
+            .GetProperty("experimental")
+            .GetProperty("isolation_session")
+            .GetProperty("start");
+
+        Assert.Equal("large", start.GetProperty("configurationId").GetString());
+        Assert.False(start.TryGetProperty("size", out _), "size profile must not be emitted under the ignored 'size' key");
+    }
+
+    [Fact]
+    public void BuildStartEnvelope_Minimal_HasNoExperimental()
+    {
+        var json = MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), null).ToJsonString();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal("start", root.GetProperty("phase").GetString());
+        Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
+        Assert.False(root.TryGetProperty("experimental", out _));
+    }
 }
