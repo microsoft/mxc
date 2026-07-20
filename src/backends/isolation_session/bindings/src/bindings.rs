@@ -398,6 +398,78 @@ pub struct IIsoSessionOps_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    IIsoSessionOpsPreview2,
+    IIsoSessionOpsPreview2_Vtbl,
+    0x2e26214d_02c1_5dc5_9ce7_f9a41cddd5b1
+);
+impl windows_core::RuntimeType for IIsoSessionOpsPreview2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionOpsPreview2 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.Preview.IIsoSessionOpsPreview2";
+}
+pub trait IIsoSessionOpsPreview2_Impl: windows_core::IUnknownImpl {
+    fn AddUserAsync2(
+        &self,
+        optAppId: &windows_core::HSTRING,
+        optEntraAccountName: &windows_core::HSTRING,
+        optWamToken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>>;
+}
+impl IIsoSessionOpsPreview2_Vtbl {
+    pub const fn new<Identity: IIsoSessionOpsPreview2_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn AddUserAsync2<
+            Identity: IIsoSessionOpsPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            optappid: *mut core::ffi::c_void,
+            optentraaccountname: *mut core::ffi::c_void,
+            optwamtoken: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview2_Impl::AddUserAsync2(
+                    this,
+                    core::mem::transmute(&optappid),
+                    core::mem::transmute(&optentraaccountname),
+                    core::mem::transmute(&optwamtoken),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionOpsPreview2, OFFSET>(
+            ),
+            AddUserAsync2: AddUserAsync2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionOpsPreview2 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionOpsPreview2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub AddUserAsync2: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IIsoSessionProcess,
     IIsoSessionProcess_Vtbl,
     0x1cccc074_ce04_527c_8b2f_d367930af570
@@ -1415,6 +1487,25 @@ impl IsoSessionOps {
             (windows_core::Interface::vtable(this).StopSessionAsync)(
                 windows_core::Interface::as_raw(this),
                 core::mem::transmute_copy(agentusername),
+                &mut result__,
+            )
+            .and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub fn AddUserAsync2(
+        &self,
+        optappid: &windows_core::HSTRING,
+        optentraaccountname: &windows_core::HSTRING,
+        optwamtoken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).AddUserAsync2)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(optappid),
+                core::mem::transmute_copy(optentraaccountname),
+                core::mem::transmute_copy(optwamtoken),
                 &mut result__,
             )
             .and_then(|| windows_core::Type::from_abi(result__))

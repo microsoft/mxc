@@ -53,9 +53,18 @@ impl ScriptRunner for IsolationSessionRunner {
         let _ = writeln!(logger, "Isolation Session: interactive={}", interactive);
 
         // One-shot runs are local agent users only (state-aware handles
-        // Entra). Provision returns the OS-assigned account name; the
-        // manager is then pegged to it for the rest of the lifecycle.
-        let agent_user_name = match IsolationSessionManager::add_user("", "") {
+        // Entra). An explicit appId from config is passed verbatim; when
+        // absent, the manager auto-detects the invoking (parent) process's
+        // PFN, if the process is packaged. Provision returns the OS-assigned
+        // account name; the manager is then pegged to it for the rest of the
+        // lifecycle.
+        let app_id = request
+            .experimental
+            .isolation_session
+            .as_ref()
+            .and_then(|c| c.app_id.clone())
+            .unwrap_or_default();
+        let agent_user_name = match IsolationSessionManager::add_user(app_id.as_str(), "", "") {
             Ok(provisioned) => {
                 let _ = writeln!(
                     logger,
@@ -128,6 +137,7 @@ mod tests {
             experimental: ExperimentalConfig {
                 isolation_session: Some(IsolationSessionConfig {
                     user: Some(well_formed_user()),
+                    app_id: None,
                 }),
                 ..Default::default()
             },

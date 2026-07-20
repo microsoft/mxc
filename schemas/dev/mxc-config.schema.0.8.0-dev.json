@@ -262,6 +262,13 @@
     "IsolationSession": {
       "description": "IsolationSession backend config. Carries the one-shot `user` field and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).",
       "properties": {
+        "appId": {
+          "description": "Optional app-scoped registration id. Used verbatim when present; when absent, the backend attempts to auto-detect the invoking process's Package Family Name as \"PFN:<pfn>\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "deprovision": {
           "anyOf": [
             {
@@ -323,6 +330,13 @@
     "IsolationSessionPhase": {
       "description": "Per-phase IsolationSession configuration (state-aware lifecycle).",
       "properties": {
+        "appId": {
+          "description": "Optional app-scoped registration id. Used verbatim when present; when absent, the backend attempts to auto-detect the invoking process's Package Family Name as \"PFN:<pfn>\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "user": {
           "anyOf": [
             {

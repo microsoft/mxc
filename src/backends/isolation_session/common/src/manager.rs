@@ -18,6 +18,7 @@ use windows::Win32::System::Console::{
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows_core::{HSTRING, PCWSTR};
 
+use super::app_id::resolve_app_id;
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
 use super::error::{check_result, format_iso_error, lifecycle_err, IsolationSessionError};
@@ -99,48 +100,58 @@ impl IsolationSessionManager {
     /// OS-assigned account name — which addresses every subsequent lifecycle
     /// op — plus the agent SID and the shared ephemeral workspace path).
     ///
-    /// Pass empty strings for a local agent user, or the Entra account name
-    /// and its WAM token for an Entra-backed agent; the OS validates
-    /// token/identity consistency. Because the account name is not known
-    /// until this returns, the caller constructs the manager via `new`
-    /// afterward — hence an associated function rather than a method.
+    /// `opt_app_id` is the app-scoped registration id. Pass an explicit value
+    /// to use it verbatim, or an empty string to auto-detect the invoking
+    /// (parent) process's Package Family Name as "PFN:<pfn>"; an unpackaged
+    /// parent falls back to the OS default registration. Pass empty strings
+    /// for `opt_entra_account_name` / `opt_wam_token` for a local agent user,
+    /// or the Entra account name and its WAM token for an Entra-backed agent;
+    /// the OS validates token/identity consistency. Because the account name
+    /// is not known until this returns, the caller constructs the manager via
+    /// `new` afterward — hence an associated function rather than a method.
     ///
     /// Note: `lifecycle.destroyOnExit` is silently ignored on this backend.
     /// The in-proc API hardcodes `Indefinite` lifetime.
     pub(super) fn add_user(
+        opt_app_id: &str,
         opt_entra_account_name: &str,
         opt_wam_token: &str,
     ) -> Result<ProvisionedUser, IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
+        // Resolve the app-scoped registration id: an explicit value is used
+        // verbatim; an empty value triggers parent-PFN detection ("PFN:<pfn>")
+        // or falls back to the OS default registration.
+        let app_id = resolve_app_id(opt_app_id);
         let async_op = ops
-            .AddUserAsync(
+            .AddUserAsync2(
+                &HSTRING::from(app_id.as_str()),
                 &HSTRING::from(opt_entra_account_name),
                 &HSTRING::from(opt_wam_token),
             )
-            .map_err(|e| lifecycle_err(format!("AddUserAsync call failed: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2 call failed: {}", e)))?;
         let user_result: IsoSessionUserResult = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync wait failed: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2 wait failed: {}", e)))?;
 
         let err = user_result
             .Error()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get Error failed: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get Error failed: {}", e)))?;
         let is_error = err
             .IsError()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get IsError failed: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get IsError failed: {}", e)))?;
         if is_error {
-            return Err(format_iso_error("AddUserAsync", &err));
+            return Err(format_iso_error("AddUserAsync2", &err));
         }
 
-        let agent_user_name = user_result
-            .AgentUserName()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserName failed: {}", e)))?;
+        let agent_user_name = user_result.AgentUserName().map_err(|e| {
+            lifecycle_err(format!("AddUserAsync2: get AgentUserName failed: {}", e))
+        })?;
         let agent_user_sid = user_result
             .AgentUserSid()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserSid failed: {}", e)))?;
+            .map_err(|e| lifecycle_err(format!("AddUserAsync2: get AgentUserSid failed: {}", e)))?;
         let ephemeral_workspace_path = user_result.EphemeralWorkspacePath().map_err(|e| {
             lifecycle_err(format!(
-                "AddUserAsync: get EphemeralWorkspacePath failed: {}",
+                "AddUserAsync2: get EphemeralWorkspacePath failed: {}",
                 e
             ))
         })?;

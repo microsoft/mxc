@@ -83,7 +83,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _request: &ExecutionRequest,
         config: Option<IsolationSessionProvisionConfig>,
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
-        let user = config.and_then(|c| c.user);
+        let (user, app_id) = match config {
+            Some(c) => (c.user, c.app_id),
+            None => (None, None),
+        };
         // Local agent users pass empty strings; Entra agents pass the UPN +
         // WAM token. Either way the OS assigns an opaque agent account name,
         // which becomes the sandboxId tail — start cannot infer Entra-ness
@@ -92,8 +95,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
             Some(u) => (u.upn.as_str(), u.wam_token.as_str()),
             None => ("", ""),
         };
-        let provisioned = IsolationSessionManager::add_user(entra_account, wam_token)
-            .map_err(map_lifecycle_error)?;
+        // An explicit appId is passed verbatim; an empty value lets the
+        // manager auto-detect the invoking (parent) process's PFN.
+        let app_id = app_id.unwrap_or_default();
+        let provisioned =
+            IsolationSessionManager::add_user(app_id.as_str(), entra_account, wam_token)
+                .map_err(map_lifecycle_error)?;
 
         Ok(ProvisionResult {
             sandbox_id: format!("{}:{}", Self::ID_PREFIX, provisioned.agent_user_name),
@@ -415,6 +422,7 @@ mod tests {
         let runner = IsolationSessionRunner::new();
         let cfg = IsolationSessionProvisionConfig {
             user: Some(well_formed_user()),
+            app_id: None,
         };
         runner
             .validate_provision(&ExecutionRequest::default(), Some(&cfg))
@@ -429,11 +437,30 @@ mod tests {
                 upn: "no-at-sign".to_string(),
                 wam_token: "tok".to_string(),
             }),
+            app_id: None,
         };
         let err = runner
             .validate_provision(&ExecutionRequest::default(), Some(&cfg))
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn provision_config_deserializes_camel_case_app_id() {
+        // The dispatcher deserializes ProvisionConfig directly from the
+        // camelCase envelope, so `appId` must map to `app_id`.
+        let cfg: IsolationSessionProvisionConfig =
+            serde_json::from_value(serde_json::json!({ "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }))
+                .unwrap();
+        assert_eq!(cfg.app_id.as_deref(), Some("PFN:Contoso.App_8wekyb3d8bbwe"));
+        assert!(cfg.user.is_none());
+    }
+
+    #[test]
+    fn provision_config_app_id_absent_when_omitted() {
+        let cfg: IsolationSessionProvisionConfig =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(cfg.app_id.is_none());
     }
 
     #[test]
@@ -443,6 +470,7 @@ mod tests {
         let runner = IsolationSessionRunner::new();
         let cfg = IsolationSessionConfig {
             user: Some(well_formed_user()),
+            app_id: None,
         };
         runner
             .validate_start("iso:wxc-abcd1234", &ExecutionRequest::default(), Some(&cfg))
@@ -457,6 +485,7 @@ mod tests {
                 upn: "no-at-sign".to_string(),
                 wam_token: "tok".to_string(),
             }),
+            app_id: None,
         };
         let err = runner
             .validate_start("iso:wxc-abcd1234", &ExecutionRequest::default(), Some(&cfg))

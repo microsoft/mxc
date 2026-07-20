@@ -111,6 +111,10 @@ export interface Filesystem {
  */
 export interface IsolationSession {
   /**
+   * Optional app-scoped registration id. Used verbatim when present; when absent, the backend attempts to auto-detect the invoking process's Package Family Name as "PFN:<pfn>".
+   */
+  appId?: string | null;
+  /**
    * State-aware deprovision-phase configuration.
    */
   deprovision?: IsolationSessionPhase | null;
@@ -137,6 +141,10 @@ export interface IsolationSession {
  * Per-phase IsolationSession configuration (state-aware lifecycle).
  */
 export interface IsolationSessionPhase {
+  /**
+   * Optional app-scoped registration id. Used verbatim when present; when absent, the backend attempts to auto-detect the invoking process's Package Family Name as "PFN:<pfn>".
+   */
+  appId?: string | null;
   /**
    * Entra cloud-agent user bundle for this phase.
    */

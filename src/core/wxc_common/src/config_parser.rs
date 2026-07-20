@@ -1003,6 +1003,7 @@ fn convert_wire_config(
             .isolation_session
             .map(|as_cfg| IsolationSessionConfig {
                 user: as_cfg.user.map(Into::into),
+                app_id: as_cfg.app_id,
             });
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
@@ -3619,6 +3620,32 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let cfg = req.experimental.isolation_session.unwrap();
         assert!(cfg.user.is_none());
+    }
+
+    #[test]
+    fn isolation_session_app_id_round_trips_through_one_shot_parser() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"appId": "PFN:Contoso.App_8wekyb3d8bbwe"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert_eq!(
+            cfg.app_id.as_deref(),
+            Some("PFN:Contoso.App_8wekyb3d8bbwe"),
+            "appId should round-trip through the one-shot parser"
+        );
+    }
+
+    #[test]
+    fn isolation_session_app_id_absent_when_field_omitted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.unwrap();
+        assert!(cfg.app_id.is_none());
     }
 
     #[test]
