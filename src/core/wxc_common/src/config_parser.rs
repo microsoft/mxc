@@ -137,18 +137,37 @@ pub fn load_mxc_request_with_options(
 ) -> Result<MxcRequest, ParseError> {
     let json_str =
         decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
+    parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+}
 
+/// Parse an MXC request from a **raw JSON string** (already decoded — not a file
+/// path or base64). Discriminates one-shot vs state-aware by the `phase` key,
+/// the same as [`load_mxc_request`], but skips the file/base64 decode step so an
+/// in-memory JSON string can be parsed directly.
+pub fn load_mxc_request_from_json(
+    json_str: &str,
+    logger: &mut Logger,
+) -> Result<MxcRequest, ParseError> {
+    parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false)
+}
+
+/// Shared parse core over an already-decoded JSON string.
+fn parse_mxc_request_json(
+    json_str: &str,
+    logger: &mut Logger,
+    allow_missing_command: bool,
+) -> Result<MxcRequest, ParseError> {
     // Parse once into a generic JSON value so we can (a) discriminate one-shot
     // vs state-aware by presence of the `phase` key and (b) capture the raw
     // `experimental` block for the state-aware path, where it is typed
     // per-backend at dispatch time rather than at parse time.
-    let parsed_json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+    let parsed_json: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
     })?;
 
     if parsed_json.get("phase").is_some() {
-        convert_wire_state_aware(parsed_json, logger, opts.allow_missing_command)
+        convert_wire_state_aware(parsed_json, logger, allow_missing_command)
             .map(MxcRequest::StateAware)
             .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
@@ -156,11 +175,11 @@ pub fn load_mxc_request_with_options(
         // `parsed_json`) so serde's line/column context is preserved in error
         // messages on this trust boundary; `from_value` discards it, turning a
         // typo or out-of-range field into an unlocalised "expected u16"-style dump.
-        let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
+        let cfg: wire::MxcConfig = serde_json::from_str(json_str).map_err(|e| {
             logger.log_line("Error parsing JSON");
             ParseError::OneShot(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
         })?;
-        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
