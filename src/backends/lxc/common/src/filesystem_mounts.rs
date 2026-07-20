@@ -9,7 +9,7 @@
 //! - `readonlyPaths` → `bind,ro` mount
 //! - `deniedPaths` → masked (inaccessible inside container)
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use wxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use wxc_common::logger::Logger;
@@ -54,30 +54,45 @@ fn denied_path_is_file(host_path: &str) -> bool {
 ///
 /// `std::fs::canonicalize` resolves symlinks at every level but requires the
 /// **whole** path to exist. To also cover a denied path that does not yet exist
-/// under a symlinked ancestor, this walks up to the deepest existing ancestor,
-/// canonicalizes it, then re-appends the non-existent tail. Returns `None` only
-/// when no ancestor can be canonicalized. Mirrors the Bubblewrap backend's
-/// `resolve_through_symlinks` so both backends mask the same real target.
+/// under a symlinked ancestor, this walks the components from the root:
+/// every existing prefix is canonicalized (following symlinks exactly like the
+/// kernel), while `.` and `..` in the not-yet-existent tail are folded
+/// lexically. Folding `..` this way is safe because a component that does not
+/// exist cannot be a symlink, so the result matches the target the kernel's
+/// path resolution would reach. Returns `None` only for an empty path. Mirrors
+/// the Bubblewrap backend's `resolve_through_symlinks` so both backends mask the
+/// same real target.
+///
+/// A naive backward walk that collected `file_name()` silently dropped `..`
+/// components (Rust returns `None` for a `..` file name) and reconstructed the
+/// wrong target: `/link/missing/../secret` became `/real/missing/secret`
+/// instead of `/real/secret`, so the mask landed on a bystander path and the
+/// real denied target stayed exposed.
 fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return Some(real);
-    }
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut cur = path;
-    while let Some(parent) = cur.parent() {
-        if let Some(name) = cur.file_name() {
-            tail.push(name);
-        }
-        if let Ok(real_parent) = std::fs::canonicalize(parent) {
-            let mut result = real_parent;
-            for name in tail.iter().rev() {
-                result.push(name);
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => result.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
             }
-            return Some(result);
+            Component::Normal(name) => {
+                result.push(name);
+                // Canonicalize the prefix so far so symlinks are followed while
+                // it still exists; once a component is missing, canonicalize
+                // fails and the remaining tail is folded lexically above.
+                if let Ok(real) = std::fs::canonicalize(&result) {
+                    result = real;
+                }
+            }
         }
-        cur = parent;
     }
-    None
+    if result.as_os_str().is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Resolve a denied host path to the real host target that must be masked.
@@ -355,6 +370,38 @@ mod tests {
         // A path with no symlink component is returned as its canonical self.
         let plain = resolve_denied_host_path(real_file.to_str().unwrap()).unwrap();
         assert_eq!(plain, real_file.canonicalize().unwrap().to_str().unwrap());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A denied path that traverses `..` under a symlinked ancestor with a
+    /// missing intermediate directory must fold the `..` and resolve to the
+    /// real target the kernel would reach, so the mask lands on the denied path
+    /// itself. Regression test for a `..`-dropping bug that reconstructed a
+    /// bystander target (`/real/missing/secret`) and left the real denied path
+    /// (`/real/secret`) exposed.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_denied_host_path_folds_dotdot_under_symlinked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("mxc_lxc_dotdot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        let link = base.join("link");
+        std::fs::create_dir_all(&real).expect("create real dir");
+        symlink(&real, &link).expect("symlink ancestor to real");
+
+        // `<link>/missing/../secret`: `missing` does not exist and the `..`
+        // cancels it, so the real target is `<real>/secret`.
+        let denied = format!("{}/missing/../secret", link.to_str().unwrap());
+        let resolved = resolve_denied_host_path(&denied).unwrap();
+        let expected = real.canonicalize().unwrap().join("secret");
+        assert_eq!(
+            resolved,
+            expected.to_str().unwrap(),
+            "`..` must fold so the mask targets the real denied path, not a bystander"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
