@@ -16,11 +16,13 @@ confirmed present on the crates.io index before its dependents publish.
 
 Subcommands
 -----------
-package       Run `cargo package` for every crate in the closure (leaf-first),
-              copy the resulting <name>-<version>.crate files into an output
-              directory, and write release-order.json. Runs in the official
-              build; the output is published as the `mxc-crates-package`
-              pipeline artifact. This is the only subcommand that needs cargo.
+package       `cargo package` the whole closure in ONE invocation (every crate
+              passed via -p together, so cargo resolves intra-closure path deps
+              from target/package/ rather than crates.io), copy the resulting
+              <name>-<version>.crate files into an output directory, and write
+              release-order.json. Runs in the official build; the output is
+              published as the `mxc-crates-package` pipeline artifact. This is
+              the only subcommand that needs cargo.
 
 verify-order  Assert that a caller-supplied ordered crate-name list (the
               pipeline's compile-time `crateOrder`) exactly matches the order in
@@ -34,9 +36,11 @@ wait          Poll the crates.io sparse index until <crate>@<version> is
               visible, so the next (dependent) crate only publishes once this
               one is resolvable. Runs after each ESRP publish.
 
-`cargo package --no-verify` tars a crate's source without compiling it, so a
-non-leaf crate packages fine even though its first-party dependencies are not on
-crates.io yet -- there is nothing to resolve or build at package time.
+Packaging is source-only -- `--no-verify` skips the post-package verify compile
+-- and the whole closure is packaged in a single `cargo package` invocation so
+cargo resolves first-party deps from target/package/ instead of the crates.io
+index. A non-leaf crate therefore packages fine even though its dependencies are
+not published yet; packaging them one crate at a time does NOT work.
 """
 from __future__ import annotations
 
@@ -167,18 +171,30 @@ def cmd_package(args: argparse.Namespace) -> int:
     print(flush=True)
 
     manifest = os.path.abspath(args.manifest_path)
+    # Package the whole closure in ONE `cargo package` invocation. With every
+    # crate passed via -p in the same run, cargo resolves intra-closure path
+    # dependencies against the crates being packaged (staged under
+    # target/package/) instead of the crates.io index -- so a non-leaf crate
+    # packages even though its first-party deps are not published yet. A
+    # per-crate loop does NOT work here: packaging a crate on its own strips the
+    # path from each dependency and sends cargo to crates.io for a sibling that
+    # does not exist there yet (e.g. wxc_common -> mxc_telemetry).
+    #   --no-verify : source-only tar, no compile against unpublished deps.
+    #   --allow-dirty: CI setup (e.g. appending the internal feed to
+    #                  .cargo/config.toml) leaves the tree in a state cargo
+    #                  considers dirty.
+    package_args = ["cargo", "package", "--no-verify", "--allow-dirty",
+                    "--manifest-path", manifest]
+    for crate in CRATES:
+        package_args += ["-p", crate]
+    rc = _run(package_args)
+    if rc != 0:
+        print(f"FAIL  cargo package exited {rc}")
+        return 1
+
     ordered: list[dict] = []
     for crate in CRATES:
         version = versions[crate]
-        # --no-verify: source-only tar, no compile against unpublished deps.
-        # --allow-dirty: CI setup (e.g. appending the internal feed to
-        # .cargo/config.toml) leaves the tree in a state cargo calls dirty.
-        rc = _run(["cargo", "package", "-p", crate, "--no-verify", "--allow-dirty",
-                   "--manifest-path", manifest])
-        if rc != 0:
-            print(f"FAIL  cargo package {crate} {version} (exit {rc})")
-            return 1
-
         crate_file = f"{crate}-{version}.crate"
         src = os.path.join(package_dir, crate_file)
         if not os.path.isfile(src):
