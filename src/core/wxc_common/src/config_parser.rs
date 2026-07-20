@@ -816,6 +816,24 @@ fn convert_wire_config(
             policy.blocked_hosts = v;
         }
 
+        // WSLc routes egress through the cooperative proxy but does not forward
+        // host lists to it, and a 'block' default (the WSLc default) yields no
+        // outbound networking / a drop-floor that can't even reach the proxy.
+        // Require an 'allow' default with no host lists so the proxy is reachable.
+        if containment == ContainmentBackend::Wslc
+            && policy.network_proxy.is_enabled()
+            && (policy.default_network_policy == NetworkPolicy::Block
+                || !policy.allowed_hosts.is_empty()
+                || !policy.blocked_hosts.is_empty())
+        {
+            let msg = "WSLc: network.proxy requires network.defaultPolicy='allow' and no \
+                       allowedHosts/blockedHosts. A WSLc container reaches the proxy only \
+                       with outbound networking enabled, and host lists are enforced by the \
+                       proxy, not forwarded to it.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
         // Bubblewrap is unprivileged by design; iptables-based enforcement
         // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
         // privilege story. Reject the combination explicitly.
@@ -2467,6 +2485,50 @@ mod tests {
         let err = load_request(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_url_with_block_default() {
+        // A WSLc url proxy needs outbound networking; the default 'block'
+        // policy (defaultPolicy omitted) leaves the proxy unreachable.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("requires network.defaultPolicy='allow'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_url_with_host_lists() {
+        // Host lists are not forwarded to the proxy; reject to avoid silently
+        // weaker enforcement.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://proxy.example:8080"},
+                "defaultPolicy": "allow",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowedHosts/blockedHosts"),
             "unexpected error: {err}"
         );
     }

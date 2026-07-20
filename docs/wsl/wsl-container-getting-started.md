@@ -266,7 +266,10 @@ address the container can reach:
 
 The `localhost` and `builtinTestServer` proxy forms are **rejected at
 config-parse time** for WSLC (they imply a host-loopback / MXC-run proxy that
-the container cannot reach).
+the container cannot reach). The proxy also requires `defaultPolicy: "allow"`
+and no `allowedHosts` / `blockedHosts`: the container must have outbound
+networking to reach the proxy, and host lists are not forwarded to it — configs
+that combine the proxy with a `block` default or host lists are **rejected**.
 
 **Caveats**
 

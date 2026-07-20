@@ -49,8 +49,24 @@ fn env_key(entry: &str) -> &str {
 /// Returns `true` if `key` is one of the proxy env vars this module manages
 /// (and therefore must be stripped from caller-supplied env when a
 /// cooperative proxy is active).
+///
+/// Matched case-insensitively: clients (Python `urllib`, curl, …) lower-case
+/// these names, so `No_Proxy` must be scrubbed just like `NO_PROXY`.
 pub fn is_managed_proxy_key(key: &str) -> bool {
-    PROXY_ENV_KEYS.contains(&key)
+    PROXY_ENV_KEYS.iter().any(|k| k.eq_ignore_ascii_case(key))
+}
+
+/// Redact any `user:pass@` userinfo from a proxy URL so it is safe to log.
+pub fn redact_proxy_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(auth_end);
+    match authority.rsplit_once('@') {
+        Some((_userinfo, host)) => format!("{scheme}://***@{host}{tail}"),
+        None => url.to_string(),
+    }
 }
 
 /// Build the effective environment for a sandbox whose egress is routed
@@ -143,6 +159,41 @@ mod tests {
             env.iter().filter(|e| *e == "HTTP_PROXY").count(),
             0,
             "bare managed key must be stripped: {env:?}"
+        );
+    }
+
+    #[test]
+    fn strips_mixed_case_proxy_keys() {
+        // Clients lower-case these names, so a mixed-case spelling must not
+        // survive the scrub and defeat the cooperative proxy.
+        let caller = vec![
+            "No_Proxy=*".to_string(),
+            "HtTp_PrOxY=http://attacker.example:9999".to_string(),
+            "KEEP=1".to_string(),
+        ];
+        let env = apply_cooperative_proxy_env(&caller, "http://127.0.0.1:9000");
+        assert!(env.contains(&"KEEP=1".to_string()));
+        assert!(!env.iter().any(|e| e.contains("attacker.example")));
+        assert!(!env
+            .iter()
+            .any(|e| env_key(e).eq_ignore_ascii_case("no_proxy")));
+    }
+
+    #[test]
+    fn redacts_userinfo_in_proxy_url() {
+        assert_eq!(
+            redact_proxy_url("http://user:pass@proxy.example:8080"),
+            "http://***@proxy.example:8080"
+        );
+        // No userinfo -> unchanged.
+        assert_eq!(
+            redact_proxy_url("http://proxy.example:8080"),
+            "http://proxy.example:8080"
+        );
+        // '@' only in the path must not trigger redaction.
+        assert_eq!(
+            redact_proxy_url("http://proxy.example:8080/a@b"),
+            "http://proxy.example:8080/a@b"
         );
     }
 }

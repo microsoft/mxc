@@ -986,23 +986,30 @@ impl WSLContainerRunner {
             let _ = writeln!(
                 logger,
                 "[WSLC] Cooperative network proxy configured: {}",
-                proxy_url
+                wxc_common::proxy_env::redact_proxy_url(&proxy_url)
             );
             wxc_common::proxy_env::apply_cooperative_proxy_env(&request.env, &proxy_url)
         } else {
             request.env.clone()
         };
 
+        // Env buffers must outlive WslcCreateContainer: the SDK stores the
+        // pointers into process_settings (it does not copy), and reads them at
+        // container-create time. Hoisting to function scope keeps them alive —
+        // mirrors the cmdline/_cwd_cstr handling. Scoping them inside the `if`
+        // below frees them early and causes a use-after-free (0xC0000005).
+        let _env_cstrings: Vec<Vec<u8>>;
+        let _env_ptrs: Vec<PCSTR>;
         if !effective_env.is_empty() {
-            let env_cstrings: Vec<Vec<u8>> = effective_env
+            _env_cstrings = effective_env
                 .iter()
                 .map(|e| format!("{}\0", e).into_bytes())
                 .collect();
-            let env_ptrs: Vec<PCSTR> = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
+            _env_ptrs = _env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr = (sdk.WslcSetProcessSettingsEnvVariables)(
                 &mut process_settings,
-                env_ptrs.as_ptr(),
-                env_ptrs.len(),
+                _env_ptrs.as_ptr(),
+                _env_ptrs.len(),
             );
             if hr != S_OK {
                 return sdk_error("WslcSetProcessSettingsEnvVariables failed", hr, "");
