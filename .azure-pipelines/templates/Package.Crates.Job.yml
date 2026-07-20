@@ -1,0 +1,57 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Packages the `mxc-sdk` crate closure into `.crate` files for ESRP-based
+# crates.io publishing (consumed by 1ES.Release.yml's Publish_to_CratesIo
+# stage). Publishes them as the `mxc-crates-package` pipeline artifact.
+#
+# Source-only: unlike the npm SDK this needs no built binaries, only a cargo
+# toolchain plus the internal Mxc-Azure-Feed for dependency resolution.
+# `cargo package --no-verify` tars each crate's source without compiling, so a
+# non-leaf crate packages even though its first-party deps are not yet on
+# crates.io. Source replacement in .cargo/config.toml is a resolution-time
+# concern only and is never written into the produced `.crate` manifests.
+#
+# The helper script is copied into the artifact so the release job can run its
+# `stage`/`wait`/`verify-order` subcommands without checking out the source.
+
+parameters:
+  - name: cratesArtifactName
+    type: string
+    default: mxc-crates-package
+
+jobs:
+  - job: package_crates
+    displayName: Package Crates (crates.io)
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: ubuntu-latest
+      os: linux
+    variables:
+      outDir: $(Build.SourcesDirectory)/out/crates
+    steps:
+      - checkout: self
+
+      - template: Rust.Toolchain.Public.yml@self
+        parameters:
+          targetTriple: x86_64-unknown-linux-gnu
+
+      # Resolve dependencies through the internal feed (official build has the
+      # System.AccessToken needed to authenticate). Only affects resolution;
+      # the packaged .crate files still reference crates.io.
+      - template: Cargo.Setup.Private.yml@self
+
+      - script: |
+          set -euo pipefail
+          python3 .azure-pipelines/scripts/crates_release.py package \
+            --manifest-path src/Cargo.toml \
+            --out-dir "$(outDir)"
+          cp .azure-pipelines/scripts/crates_release.py "$(outDir)/"
+        displayName: Package crate closure (leaf-first)
+        workingDirectory: $(Build.SourcesDirectory)
+
+      - task: 1ES.PublishPipelineArtifact@1
+        displayName: Publish crate package artifact
+        inputs:
+          path: $(outDir)
+          artifactName: ${{ parameters.cratesArtifactName }}

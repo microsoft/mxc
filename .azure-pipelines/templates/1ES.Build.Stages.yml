@@ -82,6 +82,16 @@ stages:
 
   - template: Mxc.Binary.Packaging.Job.yml
 
+- stage: Package_Crates
+  displayName: 'Package Crates'
+  # Source-only (no binaries), so it does not depend on Build_Binaries. Produces
+  # the `mxc-crates-package` artifact consumed by 1ES.Release.yml for ESRP-based
+  # crates.io publishing. Isolated in its own stage so it never gates npm
+  # packaging or the integration tests that depend on Package_MXC.
+  dependsOn: []
+  jobs:
+  - template: Package.Crates.Job.yml
+
 - stage: Lint
   displayName: 'Lint'
   dependsOn: []
