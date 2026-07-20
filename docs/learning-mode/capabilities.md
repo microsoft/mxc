@@ -38,15 +38,26 @@ The OS records **every** access check and **allows** it. This is an audit mode:
 it answers "what would this workload touch if nothing were blocked?" but it does
 so by **not enforcing deny-by-default** for the duration of the run.
 
-Because it defeats containment, `permissiveLearningMode` emits a **security
-warning** in the run diagnostics. It is nevertheless **permitted in every build,
-including release**, because it is a legitimate auditing tool. Callers are
-responsible for only enabling it against workloads and on hosts where allowing
-all accesses is acceptable.
+Because it defeats containment, `permissiveLearningMode` is **not** a
+free-floating capability you can drop into a policy. It is enabled **only**
+through the `--audit` CLI flag, which injects it, emits a **security warning**,
+and starts a permissive-learning-mode trace. Requesting it directly:
+
+- via the config `capabilities` array is **stripped in release builds** (a
+  security note is logged); it is retained in debug builds for local
+  development, but
+- both AppContainer and BaseContainer runners **reject** any request that
+  carries `permissiveLearningMode` without `--audit` (`SECURITY:
+  permissiveLearningMode requires --audit`).
+
+Matching is case-insensitive on both the strip and the gate, because Windows
+derives the capability SID case-insensitively — a mis-cased spelling would
+otherwise take effect while slipping past an exact-match filter.
 
 ## How to enable them
 
-Add the capability string to the policy's `capabilities` array:
+`learningMode` (deny-and-record) is a plain capability — add the string to the
+policy's `capabilities` array:
 
 ```jsonc
 {
@@ -54,20 +65,24 @@ Add the capability string to the policy's `capabilities` array:
 }
 ```
 
-or, for audit mode:
+`permissiveLearningMode` (audit / allow-all) is **not** enabled through the
+capabilities array. Because it relaxes enforcement, it is enabled only with the
+`--audit` CLI flag:
 
-```jsonc
-{
-  "capabilities": ["permissiveLearningMode"]
-}
+```
+wxc-exec --audit --config <config>
 ```
 
-Capability strings are resolved to AppContainer capability SIDs and attached to
-the child process's `SECURITY_CAPABILITIES` exactly like any other capability —
-no separate switch is required to *inject* them. When either capability is
-present the runner logs a diagnostic line describing the mode in effect
-(informational for `learningMode`, a security warning for
-`permissiveLearningMode`).
+`--audit` injects `permissiveLearningMode`, logs a security warning, and drives
+the permissive-learning-mode trace for the run. A `permissiveLearningMode`
+string placed in the `capabilities` array is stripped in release builds and is
+rejected by both runners unless `--audit` is also set.
+
+`learningMode` capability strings are resolved to AppContainer capability SIDs
+and attached to the child process's `SECURITY_CAPABILITIES` exactly like any
+other capability. When either learning-mode capability is in effect the runner
+logs a diagnostic line describing the mode (informational for `learningMode`, a
+security warning for `permissiveLearningMode`).
 
 ## Relationship to denial capture
 

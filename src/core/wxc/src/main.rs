@@ -827,23 +827,22 @@ fn main() {
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
 
     // --audit injects permissiveLearningMode so denied operations are logged
-    // but allowed. Works in both debug and release builds; in release the
-    // runner-side rejection is relaxed because request.audit is set.
+    // but allowed. Works in both debug and release builds; --audit is the only
+    // sanctioned way to enable permissiveLearningMode (the config path strips
+    // it in release and the runner gates it behind --audit).
     // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
     //
-    // Downstream capability lookups are case-sensitive (the AppContainer
-    // runner does exact string matches against the JSON capability name),
-    // so the "already present?" check here matches case-sensitively too.
-    // An operator who explicitly wrote a mis-cased spelling in the config
-    // gets a second, correctly-cased entry appended rather than silently
-    // relying on the mis-cased one that downstream lookups will ignore.
+    // The "already present?" check is case-insensitive because Windows derives
+    // the capability SID case-insensitively, so a mis-cased spelling already in
+    // the policy takes effect — appending a second, correctly-cased entry would
+    // be redundant.
     #[cfg(target_os = "windows")]
     if cli.audit
         && !request
             .policy
             .capabilities
             .iter()
-            .any(|c| c == "permissiveLearningMode")
+            .any(|c| c.eq_ignore_ascii_case("permissiveLearningMode"))
     {
         request
             .policy

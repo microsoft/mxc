@@ -609,6 +609,25 @@ impl BaseContainerRunner {
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
         );
 
+        // --- Learning-mode capabilities (parity with AppContainerScriptRunner) ---
+        // Emit per-capability diagnostics (informational for `learningMode`,
+        // a security warning for `permissiveLearningMode`), then enforce the
+        // `--audit` gate: `permissiveLearningMode` defeats deny-by-default, so
+        // it is rejected unless it arrived via `--audit` (`request.audit`).
+        for line in crate::appcontainer_runner::learning_mode_capability_diagnostics(
+            &request.policy.capabilities,
+        ) {
+            let _ = writeln!(logger, "{line}");
+        }
+        if crate::appcontainer_runner::permissive_learning_mode_requires_audit(
+            &request.policy.capabilities,
+            request.audit,
+        ) {
+            return Err(ScriptResponse::error(
+                "SECURITY: permissiveLearningMode requires --audit",
+            ));
+        }
+
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
         if request.policy.network_proxy.builtin_test_server {

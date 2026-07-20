@@ -396,9 +396,10 @@ pub enum FilesystemMode {
 pub(crate) const CAP_LEARNING_MODE: &str = "learningMode";
 
 /// Config capability string that enables **permissive learning mode**: the OS
-/// logs every access check and **allows** it (audit / allow-all). This does not
-/// enforce deny-by-default, so it emits a security warning — but it is still
-/// permitted in every build because it is useful for auditing.
+/// logs every access check and **allows** it (audit / allow-all). This defeats
+/// deny-by-default, so it is **only** reachable through the `--audit` CLI flag
+/// (the config path strips it in release builds; the runner gates it behind
+/// `--audit`).
 pub(crate) const CAP_PERMISSIVE_LEARNING_MODE: &str = "permissiveLearningMode";
 
 /// A recognized Windows learning-mode capability.
@@ -419,12 +420,16 @@ pub(crate) enum LearningModeCapability {
 
 impl LearningModeCapability {
     /// Classify a policy capability string as a learning-mode capability, or
-    /// `None` if it is an unrelated capability.
+    /// `None` if it is an unrelated capability. Matching is case-insensitive
+    /// because Windows derives the capability SID case-insensitively, so a
+    /// mis-cased spelling still takes effect and must be classified the same.
     pub(crate) fn from_capability_name(name: &str) -> Option<Self> {
-        match name {
-            CAP_LEARNING_MODE => Some(Self::Learning),
-            CAP_PERMISSIVE_LEARNING_MODE => Some(Self::Permissive),
-            _ => None,
+        if name.eq_ignore_ascii_case(CAP_LEARNING_MODE) {
+            Some(Self::Learning)
+        } else if name.eq_ignore_ascii_case(CAP_PERMISSIVE_LEARNING_MODE) {
+            Some(Self::Permissive)
+        } else {
+            None
         }
     }
 }
@@ -432,11 +437,12 @@ impl LearningModeCapability {
 /// Return the diagnostic lines the caller should log for the learning-mode
 /// capabilities requested by a policy.
 ///
-/// Both capabilities are permitted in every build. `permissiveLearningMode`
-/// logs *and allows* every access check (audit mode) — it is still allowed,
-/// including in release builds where it can be used for auditing, but it emits a
-/// security warning because it does not enforce deny-by-default.
-/// `learningMode` only records denials and emits an informational note.
+/// `learningMode` (deny-and-record) is safe and emits an informational note.
+/// `permissiveLearningMode` logs *and allows* every access check (audit mode);
+/// it defeats deny-by-default, so it emits a security warning. It is only ever
+/// reached through the `--audit` CLI flag — the config path strips it in
+/// release builds and the runner gates it behind `--audit` (see
+/// [`AppContainerScriptRunner::spawn_suspended`]).
 pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> Vec<String> {
     let mut diagnostics = Vec::new();
     for cap in capabilities {
@@ -456,6 +462,25 @@ pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> V
         }
     }
     diagnostics
+}
+
+/// Whether the requested policy violates the `permissiveLearningMode` gate:
+/// `permissiveLearningMode` defeats deny-by-default, so it is rejected unless it
+/// arrived through `--audit` (`audit == true`). Matching is case-insensitive
+/// because Windows derives the capability SID case-insensitively — a mis-cased
+/// spelling still takes effect, so it must not slip past the gate.
+///
+/// Shared by both AppContainer-family runners
+/// ([`AppContainerScriptRunner::spawn_suspended`] and
+/// `BaseContainerRunner::spawn_base`) so their gating stays identical.
+pub(crate) fn permissive_learning_mode_requires_audit(
+    capabilities: &[String],
+    audit: bool,
+) -> bool {
+    !audit
+        && capabilities
+            .iter()
+            .any(|cap| cap.eq_ignore_ascii_case(CAP_PERMISSIVE_LEARNING_MODE))
 }
 
 /// Script runner that executes commands inside a Windows AppContainer.
@@ -582,16 +607,11 @@ impl AppContainerScriptRunner {
             logger.log_line(&line);
         }
 
-        // `permissiveLearningMode` relaxes deny-by-default, so it is gated behind
-        // `--audit` (which sets `request.audit`). The diagnostics above already
-        // emitted the security warning; here we only enforce the gate.
-        if request
-            .policy
-            .capabilities
-            .iter()
-            .any(|cap| cap == CAP_PERMISSIVE_LEARNING_MODE)
-            && !request.audit
-        {
+        // `permissiveLearningMode` relaxes deny-by-default, so it is gated
+        // behind `--audit`. The diagnostics above already emitted the security
+        // warning; here we only enforce the gate (see
+        // [`permissive_learning_mode_requires_audit`]).
+        if permissive_learning_mode_requires_audit(&request.policy.capabilities, request.audit) {
             return Err(WxcError::Validation(
                 "SECURITY: permissiveLearningMode requires --audit".to_string(),
             ));
@@ -1584,14 +1604,62 @@ mod tests {
     }
 
     #[test]
-    fn permissive_learning_mode_warns_but_is_allowed() {
-        // Permissive mode is permitted in all builds (useful for auditing) but
-        // must surface a distinct security warning.
+    fn permissive_learning_mode_warns() {
+        // Permissive mode must surface a distinct security warning. (Whether it
+        // is permitted at all is enforced separately by the --audit gate; see
+        // `permissive_gate_*` tests below.)
         let caps = vec!["permissiveLearningMode".to_string()];
         let out = super::learning_mode_capability_diagnostics(&caps);
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("SECURITY WARNING"));
         assert!(out[0].contains("ALLOWED"));
+    }
+
+    #[test]
+    fn learning_mode_capability_classification_is_case_insensitive() {
+        use super::LearningModeCapability;
+        // Windows derives the capability SID case-insensitively, so mis-cased
+        // spellings must classify the same as the canonical form.
+        assert_eq!(
+            LearningModeCapability::from_capability_name("LearningMode"),
+            Some(LearningModeCapability::Learning)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("PermissiveLearningMode"),
+            Some(LearningModeCapability::Permissive)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("PERMISSIVELEARNINGMODE"),
+            Some(LearningModeCapability::Permissive)
+        );
+    }
+
+    #[test]
+    fn permissive_gate_rejects_without_audit() {
+        let caps = vec!["permissiveLearningMode".to_string()];
+        assert!(super::permissive_learning_mode_requires_audit(&caps, false));
+    }
+
+    #[test]
+    fn permissive_gate_allows_with_audit() {
+        let caps = vec!["permissiveLearningMode".to_string()];
+        assert!(!super::permissive_learning_mode_requires_audit(&caps, true));
+    }
+
+    #[test]
+    fn permissive_gate_is_case_insensitive() {
+        // A mis-cased spelling still takes effect on Windows, so the gate must
+        // catch it too.
+        let caps = vec!["PermissiveLearningMode".to_string()];
+        assert!(super::permissive_learning_mode_requires_audit(&caps, false));
+    }
+
+    #[test]
+    fn permissive_gate_ignores_other_capabilities() {
+        let caps = vec!["learningMode".to_string(), "internetClient".to_string()];
+        assert!(!super::permissive_learning_mode_requires_audit(
+            &caps, false
+        ));
     }
 
     #[test]
