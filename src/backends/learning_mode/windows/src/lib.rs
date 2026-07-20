@@ -31,10 +31,14 @@ use thiserror::Error;
 #[cfg(target_os = "windows")]
 mod ffi;
 #[cfg(target_os = "windows")]
+mod lifecycle;
+#[cfg(target_os = "windows")]
 mod secenv;
 
 #[cfg(target_os = "windows")]
 pub use ffi::{is_learning_mode_api_available, LearningModeApi, LearningModeTraceHandle};
+#[cfg(target_os = "windows")]
+pub use lifecycle::CaptureSession;
 #[cfg(target_os = "windows")]
 pub use secenv::{
     is_security_environment_api_available, probe_security_environment_exports,
