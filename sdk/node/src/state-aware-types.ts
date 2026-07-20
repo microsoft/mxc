@@ -16,7 +16,10 @@ export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
  * Subset of `ContainmentBackend` whose backends participate in the state-aware
  * lifecycle. Extended as more backends opt in.
  */
-export type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
+export type StateAwareContainmentBackend = Extract<
+  ContainmentBackend,
+  'isolation_session' | 'windows_sandbox'
+>;
 
 /**
  * Branded sandbox identifier returned by `provisionSandbox` and routed back
@@ -107,20 +110,98 @@ export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
 }
 
+// WindowsSandbox per-(backend, phase) Configs. WindowsSandbox holds a single
+// active sandbox behind a persistent host-side daemon. Unlike IsolationSession
+// it has no Entra/`user` bundle. Filesystem policy (readwrite/readonly/denied
+// HOST paths) is honored at provision and is immutable thereafter.
+
+export interface WindowsSandboxProvisionConfig {
+  /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
+  version?: string;
+  /**
+   * Filesystem policy applied at provision and frozen for the life of the
+   * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
+   * the same absolute host path; `deniedPaths` name HOST paths the contained
+   * code must not reach. The SDK forwards this policy as-is; the backend
+   * enforces it at provision and rejects a `deniedPath` equal to or nested
+   * within a mapped share (`.wsb` has no Deny primitive).
+   */
+  filesystem?: FilesystemConfig;
+}
+
+export interface WindowsSandboxStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface WindowsSandboxExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+}
+
+export interface WindowsSandboxStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface WindowsSandboxDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+/**
+ * The five per-phase Config slots every state-aware backend must declare.
+ * `object` (not `Record<string, unknown>`) is the slot base: interfaces have
+ * no implicit index signature, so a `Record<string, unknown>` base would
+ * spuriously reject `{ version?: string }`-shaped configs.
+ */
+type StateAwarePhaseConfigs = Record<Phase, object>;
+
+/**
+ * Identity helper that constrains the registry literal to declare an entry for
+ * **every** `StateAwareContainmentBackend`. Adding a backend to the union
+ * without a registry entry below is a compile error here (the literal no
+ * longer satisfies `Record<StateAwareContainmentBackend, …>`), rather than
+ * silently widening `ConfigsForBackend` to the slot base / `never`.
+ */
+type DefineStateAwareConfigRegistry<
+  T extends Record<StateAwareContainmentBackend, StateAwarePhaseConfigs>,
+> = T;
+
+/**
+ * Closed per-backend per-phase Config registry. Keyed by backend; each entry
+ * names the concrete Config interface for each phase.
+ */
+type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
+  isolation_session: {
+    provision: IsolationSessionProvisionConfig;
+    start: IsolationSessionStartConfig;
+    exec: IsolationSessionExecConfig;
+    stop: IsolationSessionStopConfig;
+    deprovision: IsolationSessionDeprovisionConfig;
+  };
+  windows_sandbox: {
+    provision: WindowsSandboxProvisionConfig;
+    start: WindowsSandboxStartConfig;
+    exec: WindowsSandboxExecConfig;
+    stop: WindowsSandboxStopConfig;
+    deprovision: WindowsSandboxDeprovisionConfig;
+  };
+}>;
+
+/** Compile-time guard: catches a backend with no registry entry. */
+type Assert<T extends true> = T;
+type _RegistryCoversAllBackends = Assert<
+  [StateAwareContainmentBackend] extends [keyof StateAwareConfigRegistry] ? true : false
+>;
+
 /**
  * Per-backend per-phase typed Config bundle. Selects the correct Config
  * bundle for the backend type parameter.
  */
 export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
-  C extends 'isolation_session'
-    ? {
-        provision: IsolationSessionProvisionConfig;
-        start: IsolationSessionStartConfig;
-        exec: IsolationSessionExecConfig;
-        stop: IsolationSessionStopConfig;
-        deprovision: IsolationSessionDeprovisionConfig;
-      }
-    : never;
+  StateAwareConfigRegistry[C];
 
 export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['provision'];
@@ -134,20 +215,42 @@ export type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['deprovision'];
 
 /**
- * Per-backend per-phase metadata bundle. Backends that don't return
- * metadata for a given phase omit that key.
+ * Identity helper that constrains the metadata registry literal to declare an
+ * entry for **every** `StateAwareContainmentBackend`. A future backend added to
+ * the union without a metadata entry below is a compile error here, symmetric
+ * to `DefineStateAwareConfigRegistry`.
  */
-export interface StateAwareMetadata {
-  isolation_session?: {
+type DefineStateAwareMetadataRegistry<
+  T extends Record<StateAwareContainmentBackend, object>,
+> = T;
+
+/**
+ * Per-backend per-phase metadata bundle. Backends that don't return metadata
+ * for a given phase omit that phase key; backends that return no metadata at
+ * all use `Record<never, never>` (so every `*MetadataFor<C>` resolves to
+ * `undefined`). Keyed by backend; every backend must declare an entry.
+ */
+export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
+  isolation_session: {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
   };
+  // WindowsSandbox returns no metadata for any phase (provision yields only the
+  // sandbox id). The key still participates so `StateAwareMetadata[C]` type-
+  // checks for `C = 'windows_sandbox'`. `Record<never, never>` has `keyof =
+  // never`, so every `*MetadataFor<'windows_sandbox'>` resolves to `undefined`.
+  windows_sandbox: Record<never, never>;
   // Future state-aware-capable backends add typed entries here.
-}
+}>;
+
+/** Compile-time guard: catches a backend with no metadata registry entry. */
+type _MetadataRegistryCoversAllBackends = Assert<
+  [StateAwareContainmentBackend] extends [keyof StateAwareMetadata] ? true : false
+>;
 
 type MetadataForPhase<C extends StateAwareContainmentBackend, Phase extends string> =
-  Phase extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>[Phase]
+  Phase extends keyof StateAwareMetadata[C]
+    ? StateAwareMetadata[C][Phase]
     : undefined;
 
 export type ProvisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'provision'>;

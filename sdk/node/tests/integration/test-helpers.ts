@@ -50,6 +50,7 @@ export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-host-prep.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
+  'wxc-windows-sandbox-daemon.exe',
   'wxc-windows-sandbox-guest.exe',
   'mxc-diagnostic-console.exe',
 ];
@@ -67,7 +68,6 @@ export const EXPECTED_MACOS_BINARIES = [
 // Binaries that are optional (feature-gated or only present in certain builds)
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
-  'wxc-windows-sandbox-daemon.exe', // Built when state-aware Windows Sandbox support is included
   'wslcsdk.dll',   // Only built with --with-wslc
   'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
                    // only when the plm crate is included in the build.
