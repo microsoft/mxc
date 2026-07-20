@@ -1,0 +1,24 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-ProcessContainer-Network-TcpBlocked",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -Command \"$ErrorActionPreference='SilentlyContinue'; $c=New-Object System.Net.Sockets.TcpClient; $h=$c.BeginConnect('1.1.1.1',445,$null,$null); if ($h.AsyncWaitHandle.WaitOne(3000) -and $c.Connected) { $c.Close(); Write-Output LEAK:tcp; exit 1 } else { Write-Output OK:tcp_blocked; exit 0 }\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_allowed"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
+    ]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "capabilities"
+  },
+  "ui": {
+    "disable": false
+  }
+}

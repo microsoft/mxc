@@ -25,6 +25,7 @@ bld/
 # Test artifacts
 *.etl
 *.log
+microvm-perf-results*.json
 
 # npm pack artifacts
 *.tgz
@@ -45,5 +46,5 @@ output
 # Claude
 .claude/
 
-# review channel artifacts
+# iterative-review working artifacts
 .review/

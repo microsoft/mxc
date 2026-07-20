@@ -23,7 +23,7 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 {
-    "version": "0.4.0-alpha",              // Schema version (semver). Current stable: "0.4.0-alpha". Also accepts "0.5.0-alpha".
+    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.7.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -52,7 +52,7 @@ production configs and the dev schema when working on experimental features:
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap)
+        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
     },
@@ -92,6 +92,21 @@ production configs and the dev schema when working on experimental features:
     }
 }
 ```
+
+> **State-aware fields.** The `phase` top-level field is the **state-aware
+> discriminator**: a request that includes it is parsed as a state-aware
+> lifecycle request (see below), *not* the one-shot config above. The `sandboxId`
+> and `correlationVector` top-level fields are state-aware-only — a one-shot
+> request carrying either is rejected with a parse error. `correlationVector` is
+> the Microsoft Correlation Vector (MS-CV) seeded at `provision` and relayed by
+> the client onto later phases (emitted under the TraceLogging `__TlgCV__` field
+> when experimental telemetry is enabled). The client relays the value verbatim;
+> the executor validates it on each non-`provision` phase and *spins* a fresh
+> child element off a mutable base, passes an already-frozen vector through
+> unchanged, and reseeds a new base if the relayed value is missing or malformed.
+> See
+> [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
+> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md#correlating-a-lifecycle).
 
 ### Filesystem Policy
 
@@ -143,7 +158,7 @@ force a particular backend.
 | Value | Description |
 |-------|-------------|
 | `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
-| `"windows_sandbox"` | Windows Sandbox VM isolation via a long-lived daemon |
+| `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-sandbox daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
@@ -152,6 +167,54 @@ force a particular backend.
 
 Only the backend section matching the selected `containment` value is used;
 other backend sections are ignored.
+
+### State-aware lifecycle envelope
+
+The dev schema additionally documents a multi-phase envelope shape for the
+state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
+`deprovision`). Where the one-shot config above is a self-contained
+`ExecutionRequest` to run once, a state-aware envelope identifies which
+phase is being driven against an existing provisioned sandbox.
+
+The envelope follows the same supported version range as one-shot requests:
+`>=0.6, <=0.8`. The example uses `0.6.0-alpha`, which is accepted throughout
+that range. The state-aware field shape is documented by the current dev
+schema:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json",
+    "version": "0.6.0-alpha",
+    "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
+    "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
+                                           // Prefix routes to the backend (wsb: -> windows_sandbox,
+                                           // iso: -> isolation_session).
+    "containment": "windows_sandbox",      // Required for `provision`; ignored for other phases
+                                           // (the backend is inferred from sandboxId).
+    "process": { "commandLine": "echo hi" }
+    // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
+    // level, exactly as in a one-shot request -- there is no wrapping `config`
+    // object. Backend- and phase-specific config, when a phase has any, nests
+    // under `experimental.<backendKey>.<phase>`, e.g.:
+    //   "experimental": { "isolation_session": { "start": { "user": { ... } } } }
+}
+```
+
+Phase / sandboxId / containment validation:
+
+| Phase | `sandboxId` | `containment` |
+|---|---|---|
+| `provision`     | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
+| `start`         | **Required** (`<prefix>:<token>`) | Ignored if present |
+| `exec`          | **Required** | Ignored if present |
+| `stop`          | **Required** | Ignored if present |
+| `deprovision`   | **Required** | Ignored if present |
+
+State-aware-capable backends today: `isolation_session` and `windows_sandbox`
+(both Windows-only, both still experimental). The dispatcher rejects
+state-aware envelopes for backends that have not opted in.
+
+Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
 
 ### Schema Versioning
 
@@ -170,12 +233,13 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.4, <=0.5 | Accepted (assumed compatible) |
-| `"0.3.0-alpha"` | >=0.4, <=0.5 | **Rejected** — "older than supported" |
-| `"0.4.0-alpha"` | >=0.4, <=0.5 | Accepted (0.4 in range) |
-| `"0.5.0-alpha"` | >=0.4, <=0.5 | Accepted (0.5 in range) |
-| `"0.6.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.4, <=0.5 | **Rejected** — "newer than supported" |
+| absent | >=0.6, <=0.8 | Accepted (assumed compatible) |
+| `"0.5.0-alpha"` | >=0.6, <=0.8 | **Rejected** — "older than supported" |
+| `"0.6.0-alpha"` | >=0.6, <=0.8 | Accepted (0.6 in range) |
+| `"0.7.0-alpha"` | >=0.6, <=0.8 | Accepted (0.7 in range) |
+| `"0.8.0-alpha"` | >=0.6, <=0.8 | Accepted (0.8 in range) |
+| `"0.9.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

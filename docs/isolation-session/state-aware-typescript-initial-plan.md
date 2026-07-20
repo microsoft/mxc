@@ -157,7 +157,7 @@ codes) live in the [Rust plan](state-aware-rust-initial-plan.md).
 
 ## Test helpers
 
-`sdk/tests/integration/test-helpers.ts` exports three helpers for state-aware
+`sdk/node/tests/integration/test-helpers.ts` exports three helpers for state-aware
 integration tests on hosts that may lack the runtime:
 
 - `runOrSkipIfBackendUnavailable<T>(t, label, fn)` — wraps a call and converts

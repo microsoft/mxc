@@ -167,25 +167,29 @@ fn diagnose_api_not_implemented() -> LaunchDiagnostic {
     let message = if key_status.is_empty() {
         "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
          The BaseContainer feature is not enabled on this OS build. \
-         Ensure the required velocity keys are enabled, or use schema \
-         version '0.4.0-alpha' to fall back to the AppContainer backend."
+         It may be possible to enable it through the Windows experimental \
+         features settings, or run on a host that supports the BaseContainer \
+         backend (MXC falls back to AppContainer automatically on builds \
+         without it)."
             .to_string()
     } else {
         let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
         if disabled.is_empty() {
             "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-             All known velocity keys appear enabled, but the feature is \
-             still gated. The OS build may require additional enablement. \
-             Use schema version '0.4.0-alpha' to fall back to the AppContainer backend."
+             The BaseContainer feature is not enabled on this OS build; it may \
+             require additional enablement. MXC falls back to AppContainer \
+             automatically on builds without BaseContainer support."
                 .to_string()
         } else {
             let disabled_list: Vec<String> =
                 disabled.iter().map(|(id, _)| id.to_string()).collect();
             format!(
                 "Experimental_CreateProcessInSandbox returned E_NOTIMPL. \
-                 The following velocity keys are not enabled: {}. \
-                 Enable them and retry, or use schema version '0.4.0-alpha' \
-                 to fall back to the AppContainer backend.",
+                 The BaseContainer feature is not enabled on this OS build \
+                 (disabled feature flags: {}). It may be possible to enable it \
+                 through the Windows experimental features settings, or run on a \
+                 host that supports the BaseContainer backend (MXC falls back to \
+                 AppContainer automatically on builds without it).",
                 disabled_list.join(", ")
             )
         }
@@ -424,7 +428,9 @@ mod tests {
     fn api_not_implemented_triggers_feature_diagnostic() {
         let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED.0, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
-        assert!(diag.message.contains("velocity"));
+        assert!(diag
+            .message
+            .contains("BaseContainer feature is not enabled"));
     }
 
     #[test]

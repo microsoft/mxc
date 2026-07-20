@@ -1,0 +1,24 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-ProcessContainer-Network-UncBlocked",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"net use \\\\1.1.1.1\\IPC$ /persistent:no >nul 2>&1 && (net use \\\\1.1.1.1\\IPC$ /delete >nul 2>&1&echo LEAK:unc&exit 1) || (echo OK:unc_blocked&exit 0)\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_allowed"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
+    ]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "capabilities"
+  },
+  "ui": {
+    "disable": false
+  }
+}

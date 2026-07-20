@@ -11,17 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 wxc_common.workspace = true
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-appcontainer_common = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-bwrap_common = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-seatbelt_common = { workspace = true }
+mxc_engine = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc = { workspace = true }

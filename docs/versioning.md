@@ -12,13 +12,13 @@ The `version` field in SandboxPolicy must match the MXC config
 JSON version: they are the same version, tied 1:1.
 
 When a consumer specifies a SandboxPolicy version (e.g.,
-`0.4.0`), MXC creates the corresponding configuration using the
-`0.4.0` schema.
+`0.6.0-alpha`), MXC creates the corresponding configuration using the
+`0.6.0-alpha` schema.
 
 ```typescript
-// sdk/src/types.ts
+// sdk/node/src/types.ts
 const policy: SandboxPolicy = {
-  version: "0.4.0-alpha",
+  version: "0.6.0-alpha",
   filesystem: { ... },
   network: { ... },
   timeoutMs: 30000,
@@ -29,7 +29,7 @@ The config JSON carries this same version:
 
 ```json
 {
-  "version": "0.4.0-alpha",
+  "version": "0.6.0-alpha",
   "process": { ... },
   "filesystem": { ... },
   "network": { ... }
@@ -43,18 +43,52 @@ Per [semver.org](https://semver.org/):
 - **Minor** (x.Y.0) — new features, backward compatible
 - **Major** (X.0.0) — breaking changes
 
+## The three version axes
+
+MXC tracks three independent "versions" that are deliberately **never
+conflated**. Each answers a different question and changes for different
+reasons:
+
+| Axis | What it describes | Where it lives | Who decides it |
+|---|---|---|---|
+| **Schema (config) version** | The *shape* of the config JSON — which fields exist and what values they accept. | The `version` field in the config / `SandboxPolicy`. | The config author. |
+| **Product version** | The MXC *binaries and npm package* that do the work. | Rust workspace version (`src/Cargo.toml`) + `sdk/package.json`. | The release. |
+| **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
+
+- **Schema version** is semver and is checked at the trust boundary: the parser
+  accepts the `0.6.x` floor line through the `0.8.x` dev-ceiling line (the
+  canonical min/max constants are currently `0.6.0-alpha` and `0.8.0-alpha` in
+  `schemas/schema-version.json`), and the SDK mirrors that range. Only
+  `major.minor` is compared — patch and pre-release labels are ignored — and both
+  back-dated and forward-dated versions are rejected.
+- **Product version** tracks the shipped artifacts and moves independently of the
+  schema version; a binary release can fix bugs without changing the config shape.
+  `scripts/check-version-sync.js` keeps the Rust workspace and npm versions in
+  step, and `scripts/versioning/check-schema-versions.js` keeps the schema-version
+  constants in step — but the two axes are not tied to each other.
+- **Host capability** is resolved by runtime negotiation, not by a version string.
+  As of Phase 3a the schema `version` no longer selects the Windows backend:
+  ProcessContainer resolves to BaseContainer or AppContainer purely by host
+  capability (see [Version Negotiation](#version-negotiation)). An identical
+  config runs the same way regardless of which (in-range) schema version it
+  declares.
+
 ## Schema Shipping Model
 
 ```
 mxc/schemas/
 ├── stable/
-│   ├── mxc-config.schema.0.4.0-alpha.json
-│   ├── mxc-config.schema.0.5.0-alpha.json
-│   ├── mxc-config.schema.0.6.0-alpha.json
+│   ├── mxc-config.schema.0.4.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.5.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
 │   └── mxc-config.schema.0.7.0-alpha.json  (shipped — current stable)
 └── dev/
     └── mxc-config.schema.0.8.0-dev.json    (current — work in progress)
 ```
+
+Retired stable schema files are **kept as immutable historical artifacts** — the
+parser simply stops accepting those versions (the supported floor is
+`0.6.0-alpha`). Released schemas are never edited or deleted.
 
 The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
 section structure so that editors can validate experimental configs.
@@ -210,8 +244,8 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
    from experimental to top-level:
 
    - In `wxc_common::config_parser`, rename the matching entry in
-     `present_backend_sections` and `owned_backend_section` from
-     `experimental.<name>` to `<name>`.
+     `present_backend_sections` (and update `validate_single_backend_section`)
+     from `experimental.<name>` to `<name>`.
 
    The single-backend-section rule is a cross-field constraint enforced by the
    parser (the trust boundary), **not** by the JSON schema — the generated
@@ -229,23 +263,25 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 User writes SandboxPolicy (policy + environment, versioned)
         │
         ▼
-Config JSON (version: "0.4.0-alpha")
+Config JSON (version: "0.6.0-alpha")
         │
         ▼
-MXC parses → validates schema version
+MXC parses → Stage 1: validate schema version (range check)
         │       → if --experimental, includes experimental section
         │
         ▼
-MXC calls OS: EnumerateSandboxSpecVersionInfo()
-        │        → returns supported tech language versions
-        │           e.g., [1.4.5, 2.0.0]
+Stage 2: resolve `containment` intent → concrete backend
         │
         ▼
-MXC translates policy → flat buffer
-        │  (based on the tech language version the OS supports)
+Stage 3: probe host capability → select backend tier
+        │  (ProcessContainer: BaseContainer if usable, else AppContainer)
         │
         ▼
-MXC calls OS: CreateProcessInSandbox(flatbuffer)
+For the BaseContainer tier: translate policy → flat buffer
+        │        (fixed SANDBOX_SPEC_VERSION)
+        │
+        ▼
+Launch (Experimental_CreateProcessInSandbox(flatbuffer))
         │
         ▼
 Process runs in sandbox
@@ -324,54 +360,102 @@ on the roadmap.
 
 ## Version Negotiation
 
+Execution resolves a request in three ordered stages. The schema version gates
+only the first; it does **not** influence stages 2 or 3 (Phase 3a removed that
+coupling).
+
 ```
-1. User sends SandboxPolicy with version "0.4.0-alpha"
+Stage 1 — Schema-range check (the trust boundary, `config_parser`)
+  Is config.version within [floor, dev-ceiling]?  (major.minor; pre-release
+  labels ignored)
+    below floor   → error: "older than supported" (update your config)
+    above ceiling → error: "newer than supported" (upgrade wxc-exec)
+    in range / absent → continue
 
-2. MXC validates: is "0.4.0-alpha" ≤ SUPPORTED_VERSION?
-   Yes → continue
-   No  → error: "upgrade wxc-exec"
+Stage 2 — Containment resolve (independent of schema version)
+  Map the `containment` intent to a concrete backend:
+    omitted / "process" → OS-native process sandbox
+                          (Windows: ProcessContainer, Linux: Bubblewrap,
+                           macOS: Seatbelt)
+    "vm"                → host VM-class backend
+    explicit backend    → used verbatim
 
-3. MXC calls: EnumerateSandboxSpecVersionInfo(HIGHEST_MAJOR)
-   OS returns: [
-     { version: "1.4.5", isAvailable: true },
-     { version: "2.0.0", isAvailable: true }
-   ]
-
-4. MXC selects the best tech language version for the
-   features in the policy
-
-5. MXC translates policy → flat buffer targeting that
-   tech language version
-
-6. MXC calls: CreateProcessInSandbox(flatbuffer)
-   OS returns: success or error with disposition
+Stage 3 — Host-capability negotiate (runtime probe, no version input)
+  For ProcessContainer on Windows:
+    BaseContainer usable on this host?  (is_base_container_usable())
+      yes → BaseContainer (native OS sandbox API)
+      no  → AppContainer fallback tier (BFS when compiled in with the
+            `tier2_bfs` feature and `bfscfg.exe` is present, else DACL)
+  The chosen tier and any fallback are logged (warnings + "selected isolation
+  tier: …"). This capability fallback is the ONLY fallback.
 ```
+
+For the BaseContainer tier, Stage 3 translates the policy into a FlatBuffer and
+invokes the OS sandbox API. Today MXC builds the FlatBuffer at a fixed spec
+version (`SANDBOX_SPEC_VERSION`, `base_container_runner.rs`) and calls
+`Experimental_CreateProcessInSandbox` directly:
+
+```
+translate policy → FlatBuffer (fixed SANDBOX_SPEC_VERSION)
+  → Experimental_CreateProcessInSandbox(flatbuffer) → success or typed error
+```
+
+> **Forward-looking:** the design anticipates a spec-version *handshake* — the OS
+> advertising the spec versions it supports (`EnumerateSandboxSpecVersionInfo`)
+> and MXC selecting the best one for the policy's features before translating —
+> so that a single binary can target multiple OS sandbox revisions. That
+> enumerate/select step is **not implemented yet**; the current code uses the
+> fixed spec version above.
+
+**Backend selection is capability-driven, not version-driven** (Stage 3 takes no
+version input), and **security policy never fuzzy-falls-back**: if the selected
+backend cannot honor the requested filesystem/network policy, execution fails
+with a typed, actionable error rather than silently weakening enforcement (see
+[Error Contract](#error-contract)).
 
 ## OS APIs
 
+The BaseContainer tier calls the OS sandbox API to launch the child:
+
 ```c
-// Query what the OS supports
+// Execute with the translated policy (current).
+HRESULT Experimental_CreateProcessInSandbox(
+    BYTE* flatbuffer,
+    UINT32 flatbufferSize,
+    PROCESS_INFORMATION* processInfo
+);
+
+// Forward-looking (not yet implemented): query the spec versions the OS
+// supports so a single binary can target multiple sandbox revisions.
 HRESULT EnumerateSandboxSpecVersionInfo(
     UINT32 highestMajor,
     SANDBOX_VERSION_INFO** versions,
     UINT32* count
 );
-
-// Execute with the translated policy
-HRESULT CreateProcessInSandbox(
-    BYTE* flatbuffer,
-    UINT32 flatbufferSize,
-    PROCESS_INFORMATION* processInfo
-);
 ```
 
 ## Error Contract
 
-MXC ↔ OS needs a defined error contract:
-- Which feature failed
-- Whether it's a version mismatch or runtime unavailability (e.g., Hyper-V off)
-- What the user should do (upgrade OS, enable feature, etc.)
-- Security policy is deterministic — no relaxation, no fuzzy fallback
+Negotiation failures are **typed and actionable** — never a silent fallback:
+
+- **Schema-range failures** (Stage 1) carry a clear "older than supported" /
+  "newer than supported" message telling the caller whether to update the config
+  or upgrade `wxc-exec`.
+- **Capability failures** (Stage 3) surface on the runner's `ScriptResponse`
+  (and the SDK `spawn` path's `MxcError`) as a `BackendUnavailable` failure
+  phase when the requested backend's API is absent (e.g. the BaseContainer OS
+  sandbox API is not present on this build), with a hint pointing at the host
+  requirement — not a downgrade to a weaker backend behind the caller's back.
+  (BaseContainer-vs-AppContainer is the one exception, and it is an explicit,
+  logged capability tier, not a security relaxation.)
+- **Policy-unsupported failures** (a backend that cannot honor a specific policy
+  field, e.g. `deniedPaths`) fail with a specific message naming the
+  unsupported field. Security policy is deterministic — no relaxation, no fuzzy
+  fallback.
+
+The MXC ↔ OS contract therefore reports: which feature failed, whether it was a
+version mismatch or a runtime/capability unavailability (e.g. Hyper-V off), and
+what the user should do (upgrade OS, enable feature, change the config).
 
 ## Experimental Features — Clarifications
 

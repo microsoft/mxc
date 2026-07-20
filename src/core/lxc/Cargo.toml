@@ -9,8 +9,8 @@ name = "lxc-exec"
 path = "src/main.rs"
 
 [features]
-hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
-microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "dep:nanvix_runner"]
+hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engine/hyperlight"]
+microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "mxc_engine/microvm"]
 
 [build-dependencies]
 mxc_build_common.workspace = true
@@ -18,12 +18,11 @@ nanvix_build_common = { path = "../../backends/nanvix/build_common" }
 
 [dependencies]
 wxc_common = { workspace = true }
+mxc_engine = { workspace = true }
 lxc_common = { workspace = true }
-bwrap_common = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
-nanvix_runner = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight_common = { workspace = true, optional = true }

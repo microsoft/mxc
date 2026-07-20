@@ -77,20 +77,23 @@ use windows::Win32::Foundation::{
     WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    ConvertSidToStringSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW,
+    SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID,
+    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 // DENY_ACCESS lives on ACCESS_MODE in windows 0.62
 use windows::Win32::Security::Authorization::DENY_ACCESS;
 use windows::Win32::Security::{
     AclSizeInformation, AddAccessAllowedAceEx, AddAccessDeniedAceEx, AddAce, EqualSid, GetAce,
-    GetAclInformation, GetLengthSid, InitializeAcl, IsValidSid, ACCESS_ALLOWED_ACE,
-    ACCESS_DENIED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
-    CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE, OBJECT_INHERIT_ACE,
-    PSECURITY_DESCRIPTOR, PSID,
+    GetAclInformation, GetLengthSid, GetTokenInformation, InitializeAcl, IsValidSid, TokenOwner,
+    TokenUser, ACCESS_ALLOWED_ACE, ACCESS_DENIED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_REVISION,
+    ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE,
+    OBJECT_INHERIT_ACE, OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_INFORMATION_CLASS,
+    TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
-    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    DELETE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, GetCurrentProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
@@ -187,6 +190,11 @@ pub enum DaclError {
         /// Win32 error description.
         reason: String,
     },
+    /// The path is owned by another identity. Windows object owners can still
+    /// rewrite the DACL, so MXC cannot secure this path by stamping an
+    /// owner-only DACL.
+    #[error("path is not owned by this process identity: {0}")]
+    ForeignOwner(PathBuf),
     /// Generic Win32 error.
     #[error("Win32 error on {path}: {reason}")]
     Win32 {
@@ -907,9 +915,10 @@ unsafe impl Send for OwnedSid {}
 unsafe impl Sync for OwnedSid {}
 
 /// Process-wide cache of the three well-known AppContainer-membership
-/// SIDs. `compute_appcontainer_effective_access` used to re-parse these
-/// from string form on every invocation — three `ConvertStringSidToSidW`
-/// + `LocalAlloc` + matching `LocalFree` per call.
+/// SIDs, parsed once instead of re-parsing from string form on every
+/// `compute_appcontainer_effective_access` invocation (which would
+/// otherwise cost three `ConvertStringSidToSidW` + `LocalAlloc` +
+/// matching `LocalFree` per call).
 ///
 /// The cache is read-only after first init; OnceLock guarantees the
 /// init closure runs exactly once. The cached `OwnedSid`s deliberately
@@ -1176,8 +1185,241 @@ pub fn apply_explicit_ace(
     Ok(())
 }
 
-/// Revoke explicit ACEs on `path` for `sid_str` whose `(access_mask,
-/// ace_type, inherit_flags)` tuple exactly matches the requested one.
+fn token_sid(
+    token_information_class: TOKEN_INFORMATION_CLASS,
+    token_label: &str,
+    token_path: &Path,
+    sid_from_buffer: impl FnOnce(&[u8]) -> PSID,
+) -> Result<OwnedSid, DaclError> {
+    use windows::Win32::System::Threading::OpenProcessToken;
+
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| win32_err_str(token_path, &format!("OpenProcessToken: {e}")))?;
+        let _token = OwnedHandle(token);
+
+        // Expected to fail with ERROR_INSUFFICIENT_BUFFER while returning the
+        // required size in `len`.
+        let mut len = 0u32;
+        let probe = GetTokenInformation(token, token_information_class, None, 0, &mut len);
+        if probe.is_ok() || len == 0 {
+            return Err(win32_err_str(
+                token_path,
+                &format!("GetTokenInformation({token_label}) size probe: {probe:?}, len={len}"),
+            ));
+        }
+
+        let mut buf = vec![0u8; len.max(1) as usize];
+        GetTokenInformation(
+            token,
+            token_information_class,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            len,
+            &mut len,
+        )
+        .map_err(|e| {
+            win32_err_str(
+                token_path,
+                &format!("GetTokenInformation({token_label}): {e}"),
+            )
+        })?;
+
+        owned_sid_from_psid(sid_from_buffer(&buf), token_path, token_label)
+    }
+}
+
+fn owned_sid_from_psid(sid: PSID, path: &Path, context: &str) -> Result<OwnedSid, DaclError> {
+    let mut string_sid = PWSTR::null();
+    // SAFETY: `sid` is supplied by Win32 (`GetTokenInformation` or
+    // `GetNamedSecurityInfoW`) and remains valid for this call.
+    unsafe {
+        ConvertSidToStringSidW(sid, &mut string_sid)
+            .map_err(|e| win32_err_str(path, &format!("ConvertSidToStringSidW({context}): {e}")))?;
+    }
+    // SAFETY: `string_sid` was allocated by ConvertSidToStringSidW and is a
+    // null-terminated UTF-16 string until freed with LocalFree below.
+    let sid_string = unsafe { string_sid.to_string() }
+        .map_err(|e| DaclError::InvalidSid(format!("{context} SID string not UTF-16: {e}")));
+    if !string_sid.is_null() {
+        // SAFETY: ConvertSidToStringSidW allocates this buffer with LocalAlloc.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(string_sid.0 as *mut c_void)));
+        }
+    }
+    OwnedSid::parse(&sid_string?)
+}
+
+/// The current process token's user SID, as an [`OwnedSid`].
+fn current_user_sid() -> Result<OwnedSid, DaclError> {
+    token_sid(
+        TokenUser,
+        "TokenUser",
+        Path::new("<process token>"),
+        |buf| {
+            // SAFETY: `token_sid` populated `buf` with TOKEN_USER data.
+            unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid }
+        },
+    )
+}
+
+/// The token's *owner* SID: the SID that newly-created objects get as their
+/// owner. Differs from [`current_user_sid`] (the token USER) only when running
+/// elevated, where the default owner is the Administrators group. Best-effort:
+/// callers fall back to the user SID if this fails.
+fn current_token_owner_sid() -> Result<OwnedSid, DaclError> {
+    token_sid(
+        TokenOwner,
+        "TokenOwner",
+        Path::new("<process token owner>"),
+        |buf| {
+            // SAFETY: `token_sid` populated `buf` with TOKEN_OWNER data.
+            unsafe { (*(buf.as_ptr() as *const TOKEN_OWNER)).Owner }
+        },
+    )
+}
+
+/// The SID set that a filesystem object created by THIS process can legitimately
+/// be owned by: the token user SID and (when elevated) the token owner SID.
+fn self_owner_sids() -> Result<Vec<OwnedSid>, DaclError> {
+    let mut sids = vec![current_user_sid()?];
+    // Best-effort: only meaningful (and only differs) under elevation.
+    if let Ok(owner) = current_token_owner_sid() {
+        sids.push(owner);
+    }
+    Ok(sids)
+}
+
+/// Whether `path`'s owner is THIS process's own identity (its token user, or —
+/// when elevated — its token owner / Administrators).
+///
+/// Used to **fail closed** when a shared-temp directory MXC is about to trust
+/// (read pre-existing ownership records / markers from, or write a per-launch
+/// auth nonce into) was pre-created by *another* user. Such a directory has a
+/// foreign owner SID, and a foreign owner retains *implicit* `WRITE_DAC` /
+/// `READ_CONTROL` regardless of the DACL — so merely stamping an owner-only
+/// DACL does not evict them: they can re-grant themselves access afterward.
+/// MXC must therefore refuse to act on a directory it does not own rather than
+/// trust its contents.
+///
+/// Returns `Err` if the owner cannot be read at all (e.g. the directory is
+/// owned by a foreign user who granted us no `READ_CONTROL`); callers treat
+/// that the same as "not ours" and fail closed.
+pub fn owner_is_self(path: &Path) -> Result<bool, DaclError> {
+    let mine = self_owner_sids()?;
+    let path_w = wide(path);
+    let mut owner_psid: PSID = PSID(ptr::null_mut());
+    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(ptr::null_mut());
+    // SAFETY: `path_w` is null-terminated, and all optional out-pointers are
+    // valid for the duration of the call. `sd` is freed with LocalFree below.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner_psid),
+            None,
+            None,
+            None,
+            &mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "GetNamedSecurityInfoW(owner)", rc));
+    }
+    let mut is_self = false;
+    if !owner_psid.0.is_null() {
+        for sid in &mine {
+            // SAFETY: `owner_psid` points into the security descriptor returned
+            // above, and `sid` is an owned valid SID.
+            if unsafe { EqualSid(owner_psid, sid.as_psid()).is_ok() } {
+                is_self = true;
+                break;
+            }
+        }
+    }
+    // SAFETY: GetNamedSecurityInfoW allocated `sd` with LocalAlloc.
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+    Ok(is_self)
+}
+
+/// Stamp a protected DACL that grants only the current user and Local SYSTEM.
+///
+/// Unlike [`DaclManager`], this is deliberately NOT journaled: it stamps a
+/// permanent owner-only DACL on a path MXC owns (its own scratch dirs / record
+/// files), so there is nothing to restore on the host afterward.
+///
+/// # Threat model
+///
+/// Protects MXC state — notably the auth nonce persisted in the state-aware
+/// `daemon.json` — from CROSS-USER disclosure and tampering when the process
+/// temp directory is shared (e.g. `C:\Windows\Temp` under a service account).
+/// Same-user processes are trusted. Callers should treat an error as fatal and
+/// must not write sensitive content to a path that could not be secured
+/// (fail-closed).
+pub fn set_owner_only_dacl(path: &Path, inheritable: bool) -> Result<(), DaclError> {
+    if !owner_is_self(path)? {
+        return Err(DaclError::ForeignOwner(path.to_path_buf()));
+    }
+
+    let user = current_user_sid()?;
+    let system = OwnedSid::parse("S-1-5-18")?; // Local SYSTEM.
+
+    let inheritance: u32 = if inheritable {
+        OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0
+    } else {
+        0
+    };
+    let mask = FILE_ALL_ACCESS.0;
+    let grant = |sid: &OwnedSid| EXPLICIT_ACCESS_W {
+        grfAccessPermissions: mask,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: ACE_FLAGS(inheritance),
+        Trustee: trustee_for(sid),
+    };
+    let access_entries = [grant(&user), grant(&system)];
+
+    // Build a fresh ACL from ONLY these two entries (pass no existing ACL, so
+    // nothing is merged in), then apply it PROTECTED so inherited ACEs from the
+    // possibly shared parent directory are dropped.
+    let mut new_dacl: *mut ACL = ptr::null_mut();
+    // SAFETY: `access_entries` contains valid trustee pointers backed by SIDs
+    // that outlive the call; `new_dacl` is freed with LocalFree below.
+    let rc = unsafe { SetEntriesInAclW(Some(&access_entries), None, &mut new_dacl) };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "SetEntriesInAclW", rc));
+    }
+
+    let path_w = wide(path);
+    let info = OBJECT_SECURITY_INFORMATION(
+        DACL_SECURITY_INFORMATION.0 | PROTECTED_DACL_SECURITY_INFORMATION.0,
+    );
+    // SAFETY: `path_w` is null-terminated and `new_dacl` was allocated by
+    // SetEntriesInAclW and remains valid until freed after the call.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            info,
+            None,
+            None,
+            Some(new_dacl as *const ACL),
+            None,
+        )
+    };
+    // SAFETY: SetEntriesInAclW allocated `new_dacl` with LocalAlloc.
+    unsafe {
+        if !new_dacl.is_null() {
+            let _ = LocalFree(Some(HLOCAL(new_dacl as *mut c_void)));
+        }
+    }
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
+    }
+    Ok(())
+}
 /// Mirrors [`apply_explicit_ace`] in reverse: any non-matching
 /// explicit ACE for the same SID — including those authored by other
 /// tools (e.g. `icacls C:\ /grant "ALL APPLICATION PACKAGES":(R)`) —
@@ -2008,7 +2250,43 @@ fn process_creation_filetime() -> Result<u64, DaclError> {
 mod tests {
     use super::*;
 
-    // Note: the analogous compile-time `const _: () = assert!(...)`
+    /// A directory THIS process creates must be reported as owned by us.
+    #[test]
+    fn owner_is_self_true_for_dir_we_create() {
+        let dir = std::env::temp_dir().join(format!(
+            "wxc-dacl-owner-test-{}-{}",
+            std::process::id(),
+            generate_run_id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let owned = owner_is_self(&dir).expect("read owner");
+        assert!(
+            owned,
+            "a directory created by this process must be owned by us"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Stamping the owner-only DACL must not change ownership: `owner_is_self`
+    /// stays true (the verify-after-stamp in `set_owner_only_dir` succeeds).
+    #[test]
+    fn owner_is_self_true_after_owner_only_stamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "wxc-dacl-secure-test-{}-{}",
+            std::process::id(),
+            generate_run_id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        set_owner_only_dacl(&dir, true).expect("secure dir");
+        assert!(
+            owner_is_self(&dir).expect("read owner"),
+            "owner must be unchanged by stamping an owner-only DACL"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     // block at module level (above) covers RW_MASK/RO_MASK shape
     // invariants. Putting them there means a value drift fails the
     // build instead of silently passing tests on hosts where the
@@ -2647,6 +2925,47 @@ mod tests {
         }
         let report = recover_orphaned_state().unwrap();
         assert!(report.files_processed >= 1);
+    }
+
+    #[test]
+    fn set_owner_only_dacl_strips_inheritance_and_grants_owner() {
+        use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        // Parent carries an inheritable Everyone ACE; a freshly created child
+        // inherits it. Locking the child owner-only with a PROTECTED DACL must
+        // strip that inherited ACE and leave only our explicit (non-inherited)
+        // entries.
+        let parent = tempfile::tempdir().unwrap();
+        apply_explicit_ace(
+            parent.path(),
+            "S-1-1-0", // Everyone
+            FILE_ALL_ACCESS.0,
+            AceType::Allow,
+            true,
+        )
+        .unwrap();
+        let child = parent.path().join("locked");
+        std::fs::create_dir(&child).unwrap();
+
+        let before = collect_full_dacl_order(&child);
+        assert!(
+            before.iter().any(|(_, inherited)| *inherited),
+            "child should start with at least one inherited ACE: {before:?}"
+        );
+
+        set_owner_only_dacl(&child, true).unwrap();
+
+        let after = collect_full_dacl_order(&child);
+        assert!(
+            !after.is_empty() && after.iter().all(|(_, inherited)| !*inherited),
+            "PROTECTED DACL must strip all inherited ACEs and keep explicit ones: {after:?}"
+        );
+        // The inherited Everyone ACE must be gone (not re-granted).
+        assert!(
+            scan_explicit_aces_for_sid(&child, "S-1-1-0")
+                .unwrap()
+                .is_empty(),
+            "owner-only lockdown must not grant Everyone"
+        );
     }
 
     #[test]

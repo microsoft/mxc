@@ -58,6 +58,18 @@ pub struct MxcConfig {
     /// non-provision state-aware phases.
     pub sandbox_id: Option<String>,
 
+    /// Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in
+    /// the provision result. The client relays it verbatim into every later
+    /// state-aware phase so all phases of one lifecycle share a telemetry base
+    /// prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on
+    /// each non-provision phase it validates the relayed value and *spins* a fresh
+    /// child element off a mutable base (so multiple invocations of one phase stay
+    /// distinct), passes an already-frozen vector through unchanged, and reseeds a
+    /// brand-new base if the relayed value is absent or malformed — so a missing
+    /// or hostile relay never reaches telemetry unvalidated. Ignored unless
+    /// experimental telemetry is enabled; not valid on one-shot requests.
+    pub correlation_vector: Option<String>,
+
     /// Externally assigned container identifier.
     pub container_id: Option<String>,
 
@@ -577,7 +589,7 @@ mod schema_gen {
 
     /// Emit the SDK's wire TypeScript types directly from the same generated schema
     /// model — no third-party generator. The output is a drift oracle
-    /// (`sdk/src/generated/wire.ts`): the SDK's hand-written public types are
+    /// (`sdk/node/src/generated/wire.ts`): the SDK's hand-written public types are
     /// asserted to conform to it by a unit test, and a CI gate regenerates and
     /// diffs the committed file. Deterministic: `serde_json`'s default `Map` is a
     /// `BTreeMap`, so definitions and object properties are emitted in stable

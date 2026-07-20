@@ -1,0 +1,23 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-ProcessContainer-Git-DeniedMissing",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"cd /d C:\\temp\\wxc_test_gitproj & mkdir .git 2>nul & if exist .git (echo LEAK:git_created&rmdir .git 2>nul&exit 1) else (echo OK:git_create_denied) & echo x> ws_ok.txt & if exist ws_ok.txt (echo OK:ws_write) else (echo FAIL:ws_write&exit 1) & exit 0\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_gitproj"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
+    ],
+    "deniedPaths": [
+      "C:\\temp\\wxc_test_gitproj\\.git"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}

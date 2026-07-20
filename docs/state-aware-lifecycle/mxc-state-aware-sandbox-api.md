@@ -63,7 +63,7 @@ elaborates.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
+| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union over `phase`. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` fields at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (§9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (the `wire::MxcConfig` parse target). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. | Existing one-shot error paths preserved. |
@@ -178,12 +178,21 @@ opaque to MXC.
 
 The prefix is required: backend authors register their tag alongside the backend's
 `ContainmentBackend` variant, and the dispatcher uses it to route non-provision calls
-without a separate `containment` field on the wire (§7.1). An unrecognised prefix
-surfaces as `unsupported_containment`; a recognised prefix with a malformed body surfaces
-as `malformed_id` (§8). The same prefix is exposed on the `StatefulSandboxBackend` trait
-as `const ID_PREFIX: &'static str` (§9.2) so the default `provision` body can mint
+without a separate `containment` field on the wire (§7.1).
+
+The wire spec and the SDK observably disagree on *which* error fires for an
+unrecognised prefix, and this is by design:
+
+| Source                  | Behaviour for an unrecognised `sandboxId` prefix |
+| ----------------------- | ------------------------------------------------ |
+| SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` **before** the request reaches `wxc-exec`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id (not as a runtime dispatch failure). See `sdk/node/src/state-aware-helper.ts`. |
+| Wire (`wxc-exec` directly) | Returns `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
+
+A recognised prefix with a malformed body is `malformed_id` from both sources
+(§8). The same prefix is exposed on the `StatefulSandboxBackend` trait as
+`const ID_PREFIX: &'static str` (§9.2) so the default `provision` body can mint
 synthetic ids with the right prefix; the trait const and the dispatcher's routing table
-read from the same source, eliminating drift.
+read from the same source, eliminating drift within Rust.
 
 A second const, `const BACKEND_KEY: &'static str`, lives alongside `ID_PREFIX` on the
 trait (§9.2). It carries the wire-format `containment` value for the backend (e.g.,
@@ -227,7 +236,7 @@ wire format and have different roles:
 | Field | Where it appears | Source | Purpose |
 |---|---|---|---|
 | `sandboxId` | State-aware wire envelope (§7); SDK return value from `provisionSandbox` | System-generated by the backend | Opaque routing identifier; must be passed to subsequent state-aware calls |
-| `containerId` | One-shot wire envelope (per `docs/config-schema.md`) | Caller-supplied (or auto-generated random hex) | Human-readable label, used as e.g. AppContainer profile name |
+| `containerId` | One-shot wire envelope (per `docs/schema.md`) | Caller-supplied (or auto-generated random hex) | Human-readable label, used as e.g. AppContainer profile name |
 
 State-aware non-provision calls carry `sandboxId` on the request; provision returns it
 on the response. Neither shape carries `containerId`. One-shot calls carry `containerId`
@@ -248,7 +257,7 @@ type SandboxId<C extends StateAwareContainmentBackend> =
 
 type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
-type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session'>;
+type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_session' | 'windows_sandbox'>;
 // extended as state-aware-capable backends are added
 
 // Per-(backend, phase) Configs. Each declares only the fields valid for that backend
@@ -286,6 +295,34 @@ interface IsolationSessionProvisionMetadata {
   agentUserName: string;
 }
 
+// WindowsSandbox holds a single active sandbox behind a persistent host-side
+// daemon. It has no Entra/user bundle. Filesystem policy is honored at
+// provision and is immutable thereafter (see §10.3).
+
+interface WindowsSandboxProvisionConfig {
+  version?: string;
+  filesystem?: FilesystemConfig;
+}
+
+interface WindowsSandboxStartConfig {
+  version?: string;
+}
+
+interface WindowsSandboxExecConfig {
+  version?: string;
+  process: ProcessConfig;
+}
+
+interface WindowsSandboxStopConfig {
+  version?: string;
+}
+
+interface WindowsSandboxDeprovisionConfig {
+  version?: string;
+}
+
+// WindowsSandbox returns no metadata for any phase.
+
 // Backend Config bundle — outer keys are state-aware-capable backends; inner per-phase
 // entries carry the typed per-(backend, phase) Config. Used by the generic per-phase
 // helpers below.
@@ -296,6 +333,12 @@ type ConfigsForBackend<C extends StateAwareContainmentBackend> =
     exec: IsolationSessionExecConfig;
     stop: IsolationSessionStopConfig;
     deprovision: IsolationSessionDeprovisionConfig;
+  } : C extends 'windows_sandbox' ? {
+    provision: WindowsSandboxProvisionConfig;
+    start: WindowsSandboxStartConfig;
+    exec: WindowsSandboxExecConfig;
+    stop: WindowsSandboxStopConfig;
+    deprovision: WindowsSandboxDeprovisionConfig;
   } : never;
 
 type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
@@ -315,7 +358,9 @@ interface StateAwareMetadata {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, deprovision
   };
-  // future state-aware-capable backends add typed entries here
+  windows_sandbox?: Record<never, never>;
+  // WindowsSandbox returns no metadata for any phase (keyof never -> undefined).
+  // Future state-aware-capable backends add typed entries here.
 }
 
 type ProvisionMetadataFor<C extends StateAwareContainmentBackend> =
@@ -338,6 +383,7 @@ type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> =
 interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
+  correlationVector?: string; // MS-CV to relay onto later phases (telemetry)
 }
 
 interface StartResult<C extends StateAwareContainmentBackend> {
@@ -360,7 +406,7 @@ interface ExecResult {
 ```
 
 `FilesystemConfig`, `NetworkConfig`, `UiConfig`, `ProcessConfig` are the existing
-wire-format-aligned interfaces from `sdk/src/types.ts`, reused unchanged as field
+wire-format-aligned interfaces from `sdk/node/src/types.ts`, reused unchanged as field
 types inside the per-(backend, phase) Configs. State-aware deliberately does not use
 `SandboxPolicy`; consumers spell out wire-format-aligned values directly (e.g.,
 `network: { defaultPolicy: 'block' }` instead of `network: { allowOutbound: false }`).
@@ -434,7 +480,7 @@ branded id and do not restate it. The wire envelope mirrors this: provision carr
 `containment`; non-provision phases route via the prefix on `sandboxId` (§5, §7.1).
 
 The third positional argument is the existing `SandboxSpawnOptions` from
-`sdk/src/sandbox.ts`, extended with `signal?: AbortSignal` for cancellation.
+`sdk/node/src/sandbox.ts`, extended with `signal?: AbortSignal` for cancellation.
 State-aware reuses the same options bag as one-shot — single mental model, single place
 to learn the cross-cutting flags. Phase-specific fields on `SandboxSpawnOptions`
 (`ptyOptions`, `usePty`) are honored by `execInSandbox` / `execInSandboxAsync` and
@@ -504,7 +550,7 @@ await deprovisionSandbox(sandboxId, {}, opts);
 
 `spawnSandbox` is the composition of the five state-aware phases run end-to-end. The two
 surfaces share `ContainmentBackend` and the wire-format-aligned interfaces in
-`sdk/src/types.ts` (`ProcessConfig`, `FilesystemConfig`, `NetworkConfig`, `UiConfig`).
+`sdk/node/src/types.ts` (`ProcessConfig`, `FilesystemConfig`, `NetworkConfig`, `UiConfig`).
 They differ in granularity and in how those interfaces are surfaced: one-shot bundles
 them inside `ContainerConfig` (which is itself produced from a `SandboxPolicy` by
 `createConfigFromPolicy`); state-aware uses them as field types inside the
@@ -555,7 +601,7 @@ interface OneShotRequest {
   lifecycle?: LifecycleConfig;
   processContainer?: ProcessContainerConfig;
   lxc?: LxcConfig;
-  experimental?: ExperimentalOneShotConfigs;     // existing one-shot shape per docs/config-schema.md
+  experimental?: ExperimentalOneShotConfigs;     // existing one-shot shape per docs/schema.md
 }
 
 interface ProvisionStateAwareRequest {
@@ -607,6 +653,7 @@ State-aware-only fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `phase` | `Phase` member | Yes | Discriminator. Absence means a one-shot request. |
+| `correlationVector` | string | No. Relayed by the client onto non-`provision` phases; absent on `provision` (seeded by the executor). Rejected as a parse error on one-shot requests. | Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in its result; the client relays it verbatim into later phases so the lifecycle shares a telemetry base prefix (emitted under `__TlgCV__`). Each non-`provision` phase validates the relayed value and *spins* a fresh child element off a mutable base (keeping repeat invocations distinct), passes an already-frozen vector through unchanged, and reseeds a new base if it is absent or malformed. Ignored unless experimental telemetry is enabled. See [telemetry docs](../telemetry/telemetry.md#correlating-a-lifecycle). |
 | `process` | `ProcessConfig` | Required for `exec`; absent otherwise. | Cross-backend execution fields. |
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
@@ -619,7 +666,7 @@ declare which phases honor them, see §10.3):
 | `ui` | `UiConfig` | UI access policy. |
 
 One-shot-only fields (`containerId`, `lifecycle`, `processContainer`, `lxc`) are not
-enumerated here; their definitions live in `docs/config-schema.md`.
+enumerated here; their definitions live in `docs/schema.md`.
 
 ### 7.2 The `experimental` block
 
@@ -652,7 +699,7 @@ Configs (§6.1), not on this wire-shape type. Raw-JSON callers writing
 
 For one-shot calls (phase absent), `experimental.<backend>` directly holds the backend's
 one-shot config object (e.g., `experimental.wslc?: WslcConfig`), as documented in
-`docs/config-schema.md`. The TypeScript types make this distinction structural:
+`docs/schema.md`. The TypeScript types make this distinction structural:
 `OneShotRequest.experimental` and `StateAwareRequest.experimental` have different shapes.
 
 ### 7.3 Response convention
@@ -694,7 +741,7 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 
 | Phase | `TResult` shape |
 |---|---|
-| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object }` |
+| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object; correlationVector?: string }` |
 | `start` | `{ metadata?: object }` |
 | `stop` | `{ metadata?: object }` |
 | `deprovision` | `{ metadata?: object }` |
@@ -915,10 +962,10 @@ other state-aware backend, so caller error-handling code is portable across back
 | Code | Meaning |
 |---|---|
 | `malformed_request` | Envelope-level error: missing required field, unknown phase, malformed JSON |
-| `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build |
+| `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build. **SDK callers**: the SDK type-checks unknown `sandboxId` prefixes against the closed `StateAwareContainmentBackend` union *before* dispatching and instead throws `malformed_id` for an unknown prefix; `unsupported_containment` is reachable from the SDK only on the provision path. See §6.4 |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
 | `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
-| `malformed_id` | The `sandboxId` does not have a recognised backend prefix, or has a recognised prefix but does not deserialise into the backend's native form |
+| `malformed_id` | The `sandboxId` does not have a recognised backend prefix, or has a recognised prefix but does not deserialise into the backend's native form. **SDK callers** also see this error code for any non-provision call whose `sandboxId` prefix is not in `StateAwareContainmentBackend` |
 | `stale_id` | The `sandboxId` deserialised but refers to a resource the backend no longer recognises |
 | `not_provisioned` | Phase requires a provisioned sandbox; none provided, or the id is in a pre-provision state |
 | `not_started` | Phase requires a started sandbox; the id is provisioned but not started |
@@ -1247,7 +1294,7 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
    existing `RawProcess` intermediate in `config_parser.rs`. Wrapping these four
    typed fields into a Rust `ProcessConfig` struct adds no type safety the compiler
    does not already provide on the flat fields. The TypeScript-side `ProcessConfig`
-   in `sdk/src/types.ts` is unchanged regardless.
+   in `sdk/node/src/types.ts` is unchanged regardless.
 
 3. **Cross-cutting policy is already typed on `ExecutionRequest`.** Existing backends read
    `request.policy.readwrite_paths`, `request.policy.allowed_hosts`,
@@ -1267,7 +1314,7 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 5. **No SDK or wire-format change is required.** The TypeScript `ProcessConfig`,
    `FilesystemConfig`, `NetworkConfig`, and `UiConfig` interfaces in
-   `sdk/src/types.ts` are public consumer-facing types and remain unchanged. The
+   `sdk/node/src/types.ts` are public consumer-facing types and remain unchanged. The
    wire JSON shape is unchanged. The Rust trait reading `request.script_code`,
    `request.policy.allowed_hosts`, etc. is an internal implementation choice
    invisible above the Rust layer.
@@ -1487,7 +1534,21 @@ documented in the backend's plan doc):
 | `network` | applied | rejected | rejected | rejected | rejected |
 | `ui` | applied | rejected | rejected | rejected | rejected |
 
-The matrix lands at two layers, each enforcing it independently:
+For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
+applied at provision and frozen for the life of the sandbox; later phases reject it.
+`network` and `ui` are not yet honored at any phase (network isolation is enforced
+unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundle.
+
+> **Known gap (`deniedPaths`).** WindowsSandbox honors `deniedPaths` only as a
+> best-effort provision-time rejection (a `.wsb` mapped share cannot express a Deny
+> ACE), not as a hardened security boundary. See the "Known gap (`deniedPaths`)"
+> caveat in [`docs/windows-sandbox/windows-sandbox.md`](../windows-sandbox/windows-sandbox.md).
+
+| Field | provision | start | exec | stop | deprovision |
+|---|---|---|---|---|---|
+| `filesystem` | applied | rejected | rejected | rejected | rejected |
+| `network` | rejected | rejected | rejected | rejected | rejected |
+| `ui` | rejected | rejected | rejected | rejected | rejected |
 
 - **Compile-time enforcement at the SDK.** Each per-(backend, phase) Config (§6.1)
   declares only the cross-cutting fields the matrix marks as `applied` for that phase
