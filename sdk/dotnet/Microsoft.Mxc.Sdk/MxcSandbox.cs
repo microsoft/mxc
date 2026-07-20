@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk.Native;
+using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
 
 namespace Microsoft.Mxc.Sdk;
 
@@ -100,6 +101,47 @@ public static class MxcSandbox
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(command);
         return Task.Run(() => Run(policy, command), cancellationToken);
+    }
+
+    /// <summary>
+    /// Spawn <paramref name="command"/> in a sandbox described by
+    /// <paramref name="policy"/> and return a live <see cref="MxcSandboxProcess"/>
+    /// you can stream stdio through, wait on, and kill while it runs.
+    /// </summary>
+    /// <param name="policy">What to restrict. Its <see cref="SandboxPolicy.Version"/> must be set.</param>
+    /// <param name="command">The command line to run (the <c>process.commandLine</c> equivalent).</param>
+    /// <returns>A live process handle. Dispose it to release native resources (killing the child if still running).</returns>
+    /// <exception cref="ArgumentNullException">A required argument was null.</exception>
+    /// <exception cref="MxcException">The sandbox could not be built or spawned.</exception>
+    public static MxcSandboxProcess Spawn(SandboxPolicy policy, string command)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(command);
+
+        var policyJson = JsonSerializer.Serialize(policy, PolicyJsonOptions);
+        var policyBuf = ToNullTerminatedUtf8(policyJson);
+        var commandBuf = ToNullTerminatedUtf8(command);
+
+        unsafe
+        {
+            fixed (byte* policyPtr = policyBuf)
+            fixed (byte* commandPtr = commandBuf)
+            {
+                NativeSandbox* handle = null;
+                byte* error = null;
+                var status = NativeMethods.mxc_spawn(policyPtr, commandPtr, &handle, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    var message = PtrToString(error) ?? "unknown error";
+                    if (error is not null)
+                    {
+                        NativeMethods.mxc_string_free(error);
+                    }
+                    throw new MxcException((ErrorCode)status, message);
+                }
+                return new MxcSandboxProcess(MxcSandboxHandle.FromRaw(handle), policy.TimeoutMs);
+            }
+        }
     }
 
     private static byte[] ToNullTerminatedUtf8(string value)

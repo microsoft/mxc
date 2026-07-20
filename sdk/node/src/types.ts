@@ -200,10 +200,12 @@ export interface NetworkConfig {
   allowedHosts?: string[];
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
-  /** Proxy configuration (supported on Windows ProcessContainer and Linux Bubblewrap).
-   *  `builtinTestServer` activates a bundled, testing-only proxy; the SDK rejects it
-   *  unless `allowTestingFeatures: true` is set in SandboxSpawnOptions (which maps to
-   *  the native `--allow-testing-features` flag). */
+  /** Proxy configuration (supported on Windows ProcessContainer, Linux Bubblewrap,
+   *  and macOS Seatbelt). On Bubblewrap/Seatbelt it is a cooperative env-var proxy
+   *  (HTTP_PROXY/HTTPS_PROXY): well-behaved HTTP clients honor it, raw-socket clients
+   *  can bypass it. `builtinTestServer` activates a bundled, testing-only proxy; the
+   *  SDK rejects it unless `allowTestingFeatures: true` is set in SandboxSpawnOptions
+   *  (which maps to the native `--allow-testing-features` flag). */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
@@ -344,11 +346,15 @@ export type SandboxPolicy = {
       /** Hosts to block even when outbound is allowed. Requires allowOutbound. */
       blockedHosts?: string[];
       /**
-       * Proxy configuration. Routes all traffic through this proxy.
-       * Cannot be combined with other network flags. `builtinTestServer`
-       * selects a bundled, testing-only proxy; the SDK rejects it unless
-       * `allowTestingFeatures: true` is set in SandboxSpawnOptions (which maps
-       * to the native `--allow-testing-features` flag).
+       * Proxy configuration. Routes cooperating HTTP traffic through this proxy.
+       * Supported on Windows ProcessContainer, Linux Bubblewrap, and macOS
+       * Seatbelt. On Bubblewrap/Seatbelt it is a cooperative env-var proxy
+       * (HTTP_PROXY/HTTPS_PROXY) — raw-socket clients can bypass it. Native
+       * validation enforces backend-specific combination rules.
+       * `builtinTestServer` selects a bundled, testing-only proxy; the SDK
+       * rejects it unless `allowTestingFeatures: true` is set in
+       * SandboxSpawnOptions (which maps to the native
+       * `--allow-testing-features` flag).
        */
       proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   };

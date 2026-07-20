@@ -46,10 +46,21 @@
 //! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
 //! binaries for those.
 //!
-//! | Entry point       | Stdio                                   |
-//! |-------------------|-----------------------------------------|
-//! | [`run`]           | captured (stdout/stderr returned)       |
-//! | [`spawn_sandbox`] | live (stream, feed stdin, kill)         |
+//! | Entry point            | Stdio                                   |
+//! |------------------------|-----------------------------------------|
+//! | [`run`]                | captured (stdout/stderr returned)       |
+//! | [`spawn_sandbox`]      | live (stream, feed stdin, kill)         |
+//! | [`run_state_aware_json`] | state-aware envelope phases (JSON in/out) |
+//! | [`exec_sandbox`]       | state-aware exec, live (stream/kill)    |
+//!
+//! ## State-aware lifecycle
+//!
+//! [`run_state_aware_json`] drives the envelope phases — `provision`, `start`,
+//! `stop`, `deprovision` (and a dry run of any phase) — taking the wire-format
+//! request JSON and returning the response-envelope JSON. [`exec_sandbox`] runs
+//! the `exec` phase as a live streaming [`Sandbox`], the same handle
+//! [`spawn_sandbox`] returns. The only in-tree state-aware backend
+//! (IsolationSession) is Windows-only and needs its OS-side service.
 //!
 //! ## No pty
 //!
@@ -106,4 +117,28 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
         code: ErrorCode::BackendError,
         message: format!("waiting for the sandbox to complete failed: {e}"),
     })
+}
+
+/// Run a **state-aware lifecycle** request (as a JSON string) and return the
+/// response-envelope JSON string.
+///
+/// Handles the envelope phases — `provision`, `start`, `stop`, `deprovision` —
+/// and a dry run of any phase. A non-dry-run `exec` streams its output, so it is
+/// rejected here; drive it through [`exec_sandbox`] instead.
+///
+/// The request JSON is the same wire format the executor accepts (an object with
+/// a `phase` field). Errors (malformed request, unsupported phase, backend
+/// failures) come back as an [`Error`] with the matching [`ErrorCode`].
+pub fn run_state_aware_json(request_json: &str, dry_run: bool) -> Result<String, Error> {
+    mxc_engine::run_state_aware_json(request_json, dry_run)
+}
+
+/// Run the `exec` phase of a state-aware request (as a JSON string) as a **live
+/// streaming** process, returning a [`Sandbox`] handle for bidirectional stdio,
+/// waiting, and termination — exactly like [`spawn_sandbox`].
+///
+/// The request JSON must be an `exec`-phase state-aware request (with a
+/// `sandboxId` identifying a started sandbox). No pty is allocated.
+pub fn exec_sandbox(request_json: &str) -> Result<Sandbox, Error> {
+    mxc_engine::exec_state_aware_json(request_json).map(Sandbox::new)
 }
