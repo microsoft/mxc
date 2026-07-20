@@ -234,6 +234,35 @@ $null = $results.Add(@{
     Reason  = $(if ($objPass) { "" } else { "object-validation test failed" })
 })
 
+Write-Host "`n--- Denied Masking / Most-Specific Tests ---" -ForegroundColor Cyan
+# Denied-path masking and most-specific-path-wins on WSLC. Each is delegated to
+# a standalone script that owns its on-disk fixture (a read-write mount plus
+# unmounted denied siblings / parent), since the config is meaningless without
+# the fixture. WSLC masks by NOT mounting the denied path (see policy_mapping.rs).
+$maskScript = Join-Path $PSScriptRoot "run_wslc_denied_masking_test.ps1"
+$maskArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $maskArgs.Debug = $true }
+& $maskScript @maskArgs
+$maskPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_denied_masking.json"
+    Pass    = $maskPass
+    Skipped = $false
+    Reason  = $(if ($maskPass) { "" } else { "denied-masking test failed" })
+})
+
+$mspScript = Join-Path $PSScriptRoot "run_wslc_most_specific_test.ps1"
+$mspArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $mspArgs.Debug = $true }
+& $mspScript @mspArgs
+$mspPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_most_specific_denied_parent.json"
+    Pass    = $mspPass
+    Skipped = $false
+    Reason  = $(if ($mspPass) { "" } else { "most-specific test failed" })
+})
+
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_tcp.json" -OutputContains "PORT_MAPPING_TCP_OK"))
