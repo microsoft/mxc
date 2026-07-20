@@ -59,7 +59,10 @@ production configs and the dev schema when working on experimental features:
 
     "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
-        "capabilities": ["internetClient"]
+        "capabilities": ["internetClient"],
+        "captureDenials": {                // Windows-only: record the process's access
+            "outputPath": "C:\\logs\\denials.etl"  // attempts to a learning-mode ETL trace.
+        }                                  // Omit outputPath for a managed per-run temp file.
     },
 
     "lxc": {                               // LXC-specific

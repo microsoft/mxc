@@ -556,6 +556,22 @@ pub struct ContainerPolicy {
     pub ui: UiPolicy,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+    /// Windows denial capture (from `processContainer.captureDenials`). When
+    /// `Some`, the runner records the sandboxed process's ungranted access
+    /// attempts to a learning-mode ETL trace. `None` disables capture.
+    pub capture_denials: Option<CaptureDenialsConfig>,
+}
+
+/// Windows denial-capture settings (from `processContainer.captureDenials`).
+/// The presence of this struct on [`ContainerPolicy::capture_denials`] enables
+/// capture; the runner records the sandboxed process's access attempts to a
+/// learning-mode ETL trace while enforcement stays unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureDenialsConfig {
+    /// Absolute path where the denial ETL trace is written. When `None`, the
+    /// runner falls back to a managed per-run temporary file.
+    pub output_path: Option<String>,
 }
 
 /// Port mapping for host↔container port forwarding.

@@ -38,6 +38,16 @@ export interface BaseProcessUi {
 }
 
 /**
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.
+ */
+export interface CaptureDenials {
+  /**
+   * Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist and be writable.
+   */
+  outputPath?: string | null;
+}
+
+/**
  * Clipboard access level.
  */
 export type ClipboardPolicy = "none" | "read" | "write" | "all";
@@ -299,6 +309,10 @@ export interface ProcessContainer {
    * AppContainer capabilities (e.g. `internetClient`, `registryRead`).
    */
   capabilities?: string[] | null;
+  /**
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the learning-mode OS API.
+   */
+  captureDenials?: CaptureDenials | null;
   /**
    * AppContainer permissive learning mode.
    */

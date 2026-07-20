@@ -1,0 +1,14 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-CaptureDenials",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"print('Capture-denials demo: ungranted access attempts are recorded to an ETL trace')\""
+  },
+  "processContainer": {
+    "capabilities": ["internetClient"],
+    "captureDenials": {
+      "outputPath": "C:\\logs\\mxc-denials.etl"
+    }
+  }
+}
