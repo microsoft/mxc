@@ -317,22 +317,6 @@ fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
     ScriptResponse::error(&msg)
 }
 
-fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
-    if missing as u32 & WslcComponentFlags::WslPackage as u32 != 0 {
-        return format!(
-            "WSLC runtime unavailable. Missing components: {:?}. WSL 2.8.1 or newer \
-             is required. Run `wsl --update` and check `wsl --version`.",
-            missing
-        );
-    }
-
-    format!(
-        "WSLC runtime not available. Missing components: {:?}. Ensure WSL2 and the \
-         WSLC SDK are installed.",
-        missing
-    )
-}
-
 impl ScriptRunner for WSLContainerRunner {
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         unsafe { self.run_internal(request, logger) }
@@ -372,7 +356,11 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcCanRun failed", hr, ""));
         }
         if can_run == 0 {
-            return Err(ScriptResponse::error(&wslc_prerequisite_error(missing)));
+            return Err(ScriptResponse::error(&format!(
+                "WSLC runtime unavailable. Missing components: {:?}. Install WSL 2.8.1 or \
+                 newer and run `wsl --update`.",
+                missing
+            )));
         }
         let _ = writeln!(logger, "[WSLC] Runtime check passed");
 
