@@ -9,6 +9,7 @@
 //! stays resident for the process lifetime, so the module handle is used only to
 //! resolve exports and then dropped without `FreeLibrary`.
 
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 
@@ -139,7 +140,14 @@ impl LearningModeApi {
         trace: LearningModeTraceHandle,
         output_path: Option<&Path>,
     ) -> Result<(), LearningModeError> {
-        let wide_path = output_path.map(|p| string_util::to_wide(&p.to_string_lossy()));
+        // Encode the path losslessly: `encode_wide` preserves non-Unicode path data that
+        // `to_string_lossy` would replace, so the ETL lands at exactly the requested path.
+        let wide_path = output_path.map(|p| {
+            p.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        });
         let path_ptr = wide_path.as_ref().map_or(ptr::null(), |w| w.as_ptr());
         let mut handle = trace.0;
 

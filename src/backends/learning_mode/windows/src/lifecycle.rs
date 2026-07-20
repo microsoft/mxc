@@ -87,15 +87,19 @@ impl CaptureSession {
     /// `CreateProcessAsUserInsideSecurityEnvironment`.
     ///
     /// # Panics
-    /// Never after a successful [`begin`](Self::begin) and before
-    /// [`finish`](Self::finish); the environment is present for the whole session
-    /// lifetime.
+    /// Panics only on an internal invariant violation — the environment is present for
+    /// the entire session lifetime (set by [`begin`](Self::begin), taken only by
+    /// [`finish`](Self::finish), which consumes `self`, or by [`Drop`]), so a live
+    /// `&self` here always holds one. Failing fast surfaces a misuse at the call site
+    /// rather than silently handing a NULL handle to a Win32 API.
     #[must_use]
     pub fn environment(&self) -> HANDLE {
-        self.environment.as_ref().map_or(
-            HANDLE(std::ptr::null_mut()),
-            ProcessSecurityEnvironment::raw,
-        )
+        match self.environment.as_ref() {
+            Some(env) => env.raw(),
+            None => {
+                panic!("CaptureSession::environment called after the environment was torn down")
+            }
+        }
     }
 
     /// Seal the trace to `output_path` (or discard it when `None`), then close the
