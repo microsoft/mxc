@@ -18,7 +18,7 @@ use wxc_common::models::{ContainerPolicy, ExecutionRequest, LxcConfig, NetworkEn
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend,
-    StopResult, INVALID_PIPE_HANDLE,
+    StopResult, null_pipe_handle,
 };
 
 use crate::filesystem_mounts;
@@ -368,9 +368,9 @@ impl StatefulSandboxBackend for LxcStateAwareRunner {
             .map_err(|e| MxcError::backend_error(format!("Execution failed: {e}")))?;
 
         Ok(ExecHandle {
-            stdout: INVALID_PIPE_HANDLE,
-            stderr: INVALID_PIPE_HANDLE,
-            stdin: INVALID_PIPE_HANDLE,
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
             waiter: Box::new(move || Ok(exit_code)),
             terminator: Box::new(|| {}),
         })

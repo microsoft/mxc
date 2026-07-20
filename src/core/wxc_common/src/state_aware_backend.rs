@@ -33,15 +33,18 @@ pub type PipeHandle = windows::Win32::Foundation::HANDLE;
 #[cfg(not(target_os = "windows"))]
 pub type PipeHandle = i32;
 
-/// Placeholder pipe handle for backends that perform their own output relay and
-/// therefore expose no live pipes to the dispatcher. On Windows this is a null
-/// `HANDLE`; on Unix-like targets it is the invalid file descriptor `-1`.
+/// A null / invalid [`PipeHandle`] — the sentinel a backend returns for a
+/// stream it does not expose (e.g. IsolationSession, which relays internally).
 #[cfg(target_os = "windows")]
-pub const INVALID_PIPE_HANDLE: PipeHandle =
-    windows::Win32::Foundation::HANDLE(std::ptr::null_mut());
+pub fn null_pipe_handle() -> PipeHandle {
+    windows::Win32::Foundation::HANDLE(std::ptr::null_mut())
+}
 
+/// A null / invalid [`PipeHandle`] — see the Windows variant.
 #[cfg(not(target_os = "windows"))]
-pub const INVALID_PIPE_HANDLE: PipeHandle = -1;
+pub fn null_pipe_handle() -> PipeHandle {
+    -1
+}
 
 /// Provision-phase result. Carries the freshly-minted `sandbox_id` and
 /// optional backend-typed metadata.

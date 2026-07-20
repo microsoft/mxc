@@ -4,10 +4,18 @@
 //! C ABI over the MXC public Rust SDK ([`mxc_sdk`]).
 //!
 //! This is the flat, panic-safe C surface that language bindings (currently the
-//! C# SDK) load. It intentionally mirrors the SDK's run-to-completion path:
-//! [`mxc_run`] builds a request from a `SandboxPolicy` JSON + a command string,
-//! runs the sandbox to completion, and returns the captured stdout/stderr and
-//! exit outcome.
+//! C# SDK) load. It spans three surfaces:
+//!
+//! - **Run to completion** — [`mxc_run`] builds a request from a `SandboxPolicy`
+//!   JSON + a command string, runs the sandbox to completion, and returns the
+//!   captured stdout/stderr and exit outcome.
+//! - **Streaming** (`streaming` module) — [`mxc_spawn`] returns an opaque live
+//!   handle the caller reads/writes/waits/kills via the `mxc_stream_*` /
+//!   `mxc_sandbox_*` externs.
+//! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
+//!   drives the envelope phases (provision / start / stop / deprovision), and
+//!   [`mxc_state_aware_exec`] runs the exec phase as a live streaming handle
+//!   (reusing the streaming externs).
 //!
 //! ## Contract
 //!
@@ -35,11 +43,6 @@
 //! binding is regenerated in the same change. Do not treat `mxc_ffi` as a
 //! frozen ABI to link third-party consumers against; consume MXC through a
 //! versioned binding (the C# SDK) matched to the same release.
-//!
-//! Planned additions (streaming stdio + process control, and the state-aware
-//! lifecycle) will extend this surface with new entry points and types; the
-//! [`MXC_STATUS_*`](MXC_STATUS_SUCCESS) space already reserves the codes those
-//! paths need, so they will not perturb the existing one.
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::catch_unwind;
@@ -47,6 +50,11 @@ use std::ptr;
 use std::sync::OnceLock;
 
 use mxc_sdk::{build_request, run, ErrorCode, SandboxPolicy, WaitOutcome};
+
+mod state_aware;
+mod streaming;
+pub use state_aware::*;
+pub use streaming::*;
 
 // ---------------------------------------------------------------------------
 // Status codes
@@ -89,7 +97,7 @@ pub const MXC_STATUS_INVALID_UTF8: i32 = 101;
 pub const MXC_STATUS_PANIC: i32 = 102;
 
 /// Map an [`ErrorCode`] to its stable FFI status code.
-fn status_from_error_code(code: ErrorCode) -> i32 {
+pub(crate) fn status_from_error_code(code: ErrorCode) -> i32 {
     match code {
         ErrorCode::MalformedRequest => MXC_STATUS_MALFORMED_REQUEST,
         ErrorCode::UnsupportedContainment => MXC_STATUS_UNSUPPORTED_CONTAINMENT,
@@ -170,7 +178,7 @@ impl MxcRunResult {
 /// Allocate a heap C string from bytes, lossily decoding invalid UTF-8 and
 /// replacing interior NULs (which a C string can't hold) with U+FFFD. Returns
 /// null only if allocation of the `CString` itself somehow fails.
-fn alloc_cstring(bytes: &[u8]) -> *mut c_char {
+pub(crate) fn alloc_cstring(bytes: &[u8]) -> *mut c_char {
     let lossy = String::from_utf8_lossy(bytes);
     let sanitized = lossy.replace('\0', "\u{fffd}");
     match CString::new(sanitized) {
@@ -181,7 +189,7 @@ fn alloc_cstring(bytes: &[u8]) -> *mut c_char {
 
 /// Free a `CString` previously produced by [`alloc_cstring`] / [`into_raw`],
 /// resetting the pointer to null.
-fn free_cstr(p: &mut *mut c_char) {
+pub(crate) fn free_cstr(p: &mut *mut c_char) {
     if !p.is_null() {
         // SAFETY: `*p` was produced by `CString::into_raw` in this library, so
         // reconstructing and dropping it frees exactly that allocation.
@@ -195,7 +203,7 @@ fn free_cstr(p: &mut *mut c_char) {
 /// # Safety
 /// `p` must be null or a valid NUL-terminated C string that stays alive for the
 /// duration of the borrow.
-unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
+pub(crate) unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
     }
