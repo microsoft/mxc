@@ -4,7 +4,7 @@
 //! WSL Container runner — implements `ScriptRunner` for the WSLC SDK backend.
 //!
 //! Orchestrates the full lifecycle:
-//! `WslcCanRun → Session → Image check → Process settings → Container → Start →
+//! `WslcGetMissingComponents → Session → Image check → Process settings → Container → Start →
 //!  I/O capture → Exit code → ScriptResponse`
 //!
 //! RAII guards ensure cleanup even on error paths.
@@ -349,13 +349,12 @@ impl WSLContainerRunner {
         };
 
         // Prerequisites check
-        let mut can_run: BOOL = 0;
         let mut missing = WslcComponentFlags::None;
-        let hr = (sdk.WslcCanRun)(&mut can_run, &mut missing);
+        let hr = (sdk.WslcGetMissingComponents)(&mut missing);
         if hr != S_OK {
-            return Err(sdk_error("WslcCanRun failed", hr, ""));
+            return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
         }
-        if can_run == 0 {
+        if !matches!(missing, WslcComponentFlags::None) {
             return Err(ScriptResponse::error(&format!(
                 "WSLC runtime not available. Missing components: {:?}. \
                  Ensure WSL2 and the WSLC SDK are installed.",
@@ -605,7 +604,7 @@ impl WSLContainerRunner {
             uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
             progress_callback: None,
             progress_callback_context: ptr::null_mut(),
-            auth_info: ptr::null(),
+            registry_auth: ptr::null(),
         };
         let mut pull_err = CoTaskMemPWSTR::null();
         let hr = (sdk.WslcPullSessionImage)(session, &pull_opts, pull_err.as_mut_ptr());
@@ -997,12 +996,12 @@ impl WSLContainerRunner {
                 policy_mapping::windows_path_to_container_path(&request.working_directory)
             {
                 _cwd_cstr = format!("{}\0", container_cwd);
-                let hr = (sdk.WslcSetProcessSettingsCurrentDirectory)(
+                let hr = (sdk.WslcSetProcessSettingsWorkingDirectory)(
                     &mut process_settings,
                     _cwd_cstr.as_bytes().as_ptr() as PCSTR,
                 );
                 if hr != S_OK {
-                    return sdk_error("WslcSetProcessSettingsCurrentDirectory failed", hr, "");
+                    return sdk_error("WslcSetProcessSettingsWorkingDirectory failed", hr, "");
                 }
             }
         }
@@ -1024,12 +1023,11 @@ impl WSLContainerRunner {
         // Apply before networking mode so the SDK has the complete picture
         // when the container is created. Empty list = no forwarding (default).
         // The parser rejects `"udp"` up front: the C header declares
-        // `WSLC_PORT_PROTOCOL_UDP = 1` but the shipped runtime
-        // (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL` when UDP is
-        // actually requested. The protocol match below therefore only ever
-        // sees `"tcp"` today, but the explicit branch is retained so this
-        // code keeps compiling cleanly if/when the parser starts accepting
-        // UDP after an SDK update.
+        // `WSLC_PORT_PROTOCOL_UDP = 1` but the shipped runtime returns
+        // `E_NOTIMPL` when UDP is actually requested. The protocol match below
+        // therefore only ever sees `"tcp"` today, but the explicit branch is
+        // retained so this code keeps compiling cleanly if/when the parser
+        // starts accepting UDP after an SDK update.
         if !self.config.port_mappings.is_empty() {
             let mappings: Vec<WslcContainerPortMapping> = self
                 .config

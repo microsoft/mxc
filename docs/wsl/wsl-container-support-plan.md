@@ -10,8 +10,9 @@ the WSLC SDK self-host release. Key changes:
 - **Config format updated:** The JSON section is `"wslc"` (not `"container"`),
   command is `"process": { "commandLine": ... }` (not `"script"`), and timeout
   is under `"process": { "timeout": ... }`.
-- **WSLC SDK available:** The SDK (v2.8.1) has been released as a self-host
-  package with `wslcsdk.h`, `wslcsdk.lib`, and `wslcsdk.dll`. API names use
+- **WSLC SDK available:** The SDK (v2.9.3) is consumed from the
+  `MxcDependencies` Azure Artifacts feed and provides `wslcsdk.h`,
+  `wslcsdk.lib`, and `wslcsdk.dll`. API names use
   verb-first convention (e.g., `WslcInitSessionSettings` not
   `WslcInitSessionSettings`).
 - **Phases 1-2 complete:** Config parsing and backend routing shipped in PR #44.
@@ -192,7 +193,7 @@ The existing `WindowsSandboxScriptRunner` already overrides `run()` entirely (it
 `script_runner.rs` or `AppContainerScriptRunner` are required.
 
 **Component A — WSLC FFI Bindings** (`wslc_bindings.rs`)
-Rust FFI declarations for the WSLC SDK C API (v2.8.1). Hand-written `extern "C"`
+Rust FFI declarations for the WSLC SDK C API (v2.9.3). Hand-written `extern "C"`
 blocks from `wslcsdk.h`. Key bindings (actual API names from the SDK):
 
 Session APIs:
@@ -211,7 +212,7 @@ Container APIs:
 - `WslcSetContainerSettingsInitProcess()` — attach process settings before creation
 - `WslcSetContainerSettingsNetworkingMode()` — `NONE` (isolated) or `BRIDGED` (NAT)
 - `WslcSetContainerSettingsVolumes()` — mount Windows paths into Linux container
-- `WslcSetContainerSettingsPortMappings()` — host↔container port forwarding (TCP only; UDP is declared in the header but returns `E_NOTIMPL` in the vendored SDK 2.8.1 runtime, so the MXC parser hard-rejects `"udp"` at config-validation time)
+- `WslcSetContainerSettingsPortMappings()` — host↔container port forwarding (TCP only; UDP is declared in the header but returns `E_NOTIMPL` in the SDK runtime, so the MXC parser hard-rejects `"udp"` at config-validation time)
 - `WslcSetContainerSettingsFlags()` — `AUTO_REMOVE`, `ENABLE_GPU`, `PRIVILEGED`
 - `WslcGetContainerInitProcess()` — retrieve process handle after start
 - `WslcStopContainer()` / `WslcDeleteContainer()` / `WslcReleaseContainer()` — teardown
@@ -226,11 +227,12 @@ Process APIs:
 - `WslcGetProcessExitEvent()` — get Win32 event HANDLE to wait on process exit
 - `WslcReleaseProcess()` — cleanup
 
-Key dependency: `windows-sys` crate for Win32 types (`HANDLE`, `HRESULT`). Link
-against `wslcsdk.lib` at build time — `wslcsdk.lib` and `wslcsdk.h` are sourced
-from the WSLC SDK NuGet package (`Microsoft.WSL.Containers.2.8.1.nupkg`),
-extracted into `external/wslc-sdk/`. The `build.rs` script locates the lib by
-architecture.
+Key dependency: `windows-sys` crate for Win32 types (`HANDLE`, `HRESULT`). The
+SDK is loaded at runtime via `libloading`; `wslcsdk.h` and `wslcsdk.dll` are
+sourced from the `Microsoft.WSL.Containers` NuGet package, which `build.rs`
+downloads from the `MxcDependencies` Azure Artifacts feed at build time (with a
+vendored `.nupkg` in `external/wslc-sdk/` as an offline fallback). The `build.rs`
+script locates the DLL by architecture.
 
 **Component B — WSLContainerRunner** (`wsl_container_runner.rs`)
 Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
@@ -309,7 +311,7 @@ Network mapping:
 Port mapping (new capability enabled by WSLC SDK):
 | Config field | WSLC SDK equivalent |
 |---|---|
-| `portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: "tcp" }]` | `WslcSetContainerSettingsPortMappings()` with `WslcContainerPortMapping` structs (TCP only; `protocol` defaults to `"tcp"`. UDP is declared by the SDK header but returns `E_NOTIMPL` at runtime in the vendored SDK 2.8.1 and is rejected by the parser.) |
+| `portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: "tcp" }]` | `WslcSetContainerSettingsPortMappings()` with `WslcContainerPortMapping` structs (TCP only; `protocol` defaults to `"tcp"`. UDP is declared by the SDK header but returns `E_NOTIMPL` at runtime in the SDK and is rejected by the parser.) |
 
 **WSLC SDK advantage:** The `WslcContainerVolume` struct directly models the Windows↔Linux path mapping with `windowsPath` (PCWSTR) and `containerPath` (PCSTR) fields. The runner applies the deterministic `/mnt/<drive>/...` mapping rule and the SDK's 9P filesystem handles the cross-OS bridging internally.
 
@@ -505,7 +507,7 @@ management is the caller's responsibility.
 
 - Windows 11 or Windows Server 2022/2025
 - WSL2 enabled (VM Platform optional component)
-- WSLC SDK MSI installed (`wsl.2.8.1.0.x64.msi` or ARM64 variant from the
+- WSLC SDK MSI installed (`wsl.2.9.3.0.x64.msi` or ARM64 variant from the
   self-host package)
 - COM initialized on calling thread (handled by the runner)
 - `WslcGetVersion()` succeeds (verifies WSL service connectivity)
@@ -541,7 +543,7 @@ management is the caller's responsibility.
 
 ```powershell
 # One-time setup: install WSLC SDK MSI
-msiexec /i wsl.2.8.1.0.x64.msi
+msiexec /i wsl.2.9.3.0.x64.msi
 
 # Verify WSLC is available
 wslc container run hello-world

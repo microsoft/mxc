@@ -984,9 +984,8 @@ fn convert_wire_config(
                     }
                     // Only TCP is representable in the wire model
                     // (TransportProtocol is tcp-only); a `udp` value is rejected
-                    // at deserialize. The vendored WSLC SDK runtime
-                    // (Microsoft.WSL.Containers 2.8.1) returns E_NOTIMPL for UDP,
-                    // so only TCP is currently supported.
+                    // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
+                    // UDP, so only TCP is currently supported.
                     let protocol = "tcp".to_string();
                     converted.push(PortMapping {
                         windows_port: m.windows_port,
@@ -3384,8 +3383,8 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_udp_rejected() {
-        // The wire model's TransportProtocol is tcp-only (the vendored WSLC SDK
-        // 2.8.1 runtime returns E_NOTIMPL for UDP), so "udp" is rejected at
+        // The wire model's TransportProtocol is tcp-only (the WSLC SDK runtime
+        // returns E_NOTIMPL for UDP), so "udp" is rejected at
         // deserialize as an unknown enum variant.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
