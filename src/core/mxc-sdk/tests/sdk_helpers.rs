@@ -150,14 +150,13 @@ fn build_request_host_rules_require_outbound() {
         timeout_ms: None,
     };
 
-    // Mirror the SDK's `resolvesToHostFilteringBackend`: Linux (Bubblewrap/LXC)
-    // and macOS (Seatbelt) accept host rules without `allowOutbound`; only the
-    // Windows ProcessContainer backend requires it. Either way it must not panic.
+    // Unix backends accept host rules without `allowOutbound`; only Windows
+    // ProcessContainer requires it. Either way this must not panic.
     let result = build_request(&policy, None);
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(
             result.is_ok(),
-            "Linux/macOS host-filtering backends accept host rules without allowOutbound (matching the SDK)"
+            "Linux/macOS accept host rules without allowOutbound (matching the SDK)"
         );
     } else {
         assert!(

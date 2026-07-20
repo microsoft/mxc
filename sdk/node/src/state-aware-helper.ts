@@ -20,11 +20,13 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] a
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
+export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
 // Mapping from a sandboxId's leading prefix segment to the wire-format
 // backend key. Extended as more state-aware backends opt in.
 export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
   [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
+  [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
 };
 
 /**
@@ -50,6 +52,7 @@ export interface BuildEnvelopeArgs {
   backendKey: StateAwareContainmentBackend;
   containment?: StateAwareContainmentBackend; // provision only
   sandboxId?: string;                        // non-provision only
+  correlationVector?: string;                // non-provision relay (from provision)
   config?: Record<string, unknown>;
 }
 
@@ -60,7 +63,7 @@ export interface BuildEnvelopeArgs {
  * remaining backend-specific fields under `experimental.<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
-  const { phase, backendKey, containment, sandboxId, config } = args;
+  const { phase, backendKey, containment, sandboxId, correlationVector, config } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
@@ -73,6 +76,12 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
+  }
+  // Correlation vector (MS-CV) seeded at provision and relayed by the client
+  // into every later phase so the whole lifecycle shares a telemetry base
+  // prefix. Provision omits it (the executor seeds its own).
+  if (correlationVector) {
+    envelope.correlationVector = correlationVector;
   }
 
   for (const field of CROSS_CUTTING_FIELDS) {
@@ -196,11 +205,26 @@ export function spawnAndCollect(
     const child = spawnImpl(executablePath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as {
+      stdin: NodeJS.WritableStream | null;
       stdout: NodeJS.ReadableStream | null;
       stderr: NodeJS.ReadableStream | null;
       kill: (signal?: NodeJS.Signals | number) => boolean;
       on: (event: string, cb: (...a: unknown[]) => void) => unknown;
     };
+
+    // Buffered (non-streaming) exec supplies no stdin, so close the child's
+    // write end immediately. The Rust state-aware exec path treats non-TTY
+    // stdin as a pipe and blocks forwarding guest stdin until it sees EOF on
+    // this handle; without the explicit end() a stdin-reading command (e.g.
+    // `cat`) would hang until the phase timeout. EOF == "no input".
+    //
+    // Guard the stdin pipe with its own 'error' handler first: the child may
+    // have already exited by the time we end(), in which case the write end
+    // emits EPIPE. The child.on('error') below is on the process, not this
+    // stream, so without this listener an unhandled 'error' would crash the
+    // whole process instead of just failing this one call.
+    child.stdin?.on('error', () => {});
+    child.stdin?.end();
 
     let stdoutData = '';
     let stderrData = '';

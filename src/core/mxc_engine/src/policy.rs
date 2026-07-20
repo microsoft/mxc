@@ -750,24 +750,16 @@ fn build_wire_config(
         },
     });
 
-    // Mirror the SDK's `resolvesToHostFilteringBackend` (sdk/node/src/sandbox.ts):
-    // Linux (Bubblewrap/LXC) and macOS (Seatbelt) are treated as host-filtering
-    // backends, so `allowedHosts`/`blockedHosts` are accepted without
-    // `allowOutbound`; only Windows ProcessContainer requires `allowOutbound`.
+    // Mirror the SDK's host-rule validation: Unix backends accept host lists
+    // without `allowOutbound`; only Windows ProcessContainer requires it.
     // NB: Seatbelt can't actually enforce hostnames (`profile_builder` degrades a
     // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
-    let targets_host_filtering_backend = cfg!(any(target_os = "linux", target_os = "macos"));
+    let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"));
 
     if let Some(net) = &policy.network {
-        if net.proxy.is_some() && cfg!(target_os = "macos") {
-            return Err(MxcError::malformed_request(
-                "Proxy configuration is not supported on macOS",
-            ));
-        }
-
-        if !targets_host_filtering_backend
+        if !accepts_host_rules_without_outbound
             && (!net.allowed_hosts.is_empty() || !net.blocked_hosts.is_empty())
             && !net.allow_outbound
         {
@@ -1027,10 +1019,8 @@ mod tests {
         }
     }
 
-    // macOS Seatbelt is treated as a host-filtering backend to mirror the SDK
-    // (`resolvesToHostFilteringBackend` in sdk/node/src/sandbox.ts), so `allowedHosts`
-    // is accepted with or without `allowOutbound` — consistency with the SDK over
-    // rejecting on macOS, even though Seatbelt can't actually filter by host.
+    // Mirror the TypeScript SDK by accepting `allowedHosts` with or without
+    // `allowOutbound`, even though Seatbelt cannot enforce the host list.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_allowed_hosts_without_outbound_is_accepted() {
@@ -1060,6 +1050,24 @@ mod tests {
         assert!(
             build_request(&policy, None).is_ok(),
             "outbound-allowed host filter should build"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_proxy_is_accepted_and_mapped() {
+        let policy = policy_with_network(NetworkSection {
+            proxy: Some(ProxySpec::Localhost(8080)),
+            ..Default::default()
+        });
+        let request =
+            build_request(&policy, None).expect("macOS must accept Seatbelt proxy configuration");
+        let proxy = &request.inner.policy.network_proxy;
+
+        assert!(proxy.is_enabled());
+        assert_eq!(
+            proxy.address.as_ref().map(|address| address.port()),
+            Some(8080)
         );
     }
 

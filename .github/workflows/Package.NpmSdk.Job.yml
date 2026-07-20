@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in lxc-exec linux-test-proxy mxc-exec-mac; do
+          for name in lxc-exec unix-test-proxy mxc-exec-mac; do
             find bin -name "$name" -exec chmod +x {} +
           done
 

@@ -1,0 +1,19 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Denied-Symlink-File",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "B=/mnt/symmask; if cat \"$B/control.txt\" 2>/dev/null | grep -q CONTROL_SECRET; then echo CONTROL_OK; else echo CONTROL_MISSING; fi; if cat \"$B/link_to_file\" 2>/dev/null | grep -q FILE_TARGET_SECRET; then echo SYMFILE_LEAK; else echo SYMFILE_MASKED_OK; fi"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/symmask"],
+    "deniedPaths": ["/mnt/symmask/link_to_file"]
+  }
+}
