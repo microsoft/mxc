@@ -20,9 +20,12 @@ provides:
 - **Filesystem isolation** via `(allow file-read*)` / `(allow file-write*)`
   rules over `subpath` literals, with deny rules layered on top so
   `deniedPaths` overrides any broader allow.
-- **Network isolation** via `(allow network-outbound)` rules with
-  per-host `(remote tcp …)` filters when `allowedHosts` is set, and
-  `(deny network-outbound …)` for `blockedHosts`.
+- **Network isolation** via allow/block-all outbound rules. Seatbelt cannot
+  enforce DNS host lists: `allowedHosts` degrades to allow-all outbound and
+  `blockedHosts` is rejected.
+- **Cooperative HTTP proxy** via `network.proxy`: `HTTP_PROXY` /
+  `HTTPS_PROXY` / `ALL_PROXY` are injected into the sandbox so well-behaved
+  clients route through the configured proxy (raw-socket clients can bypass it).
 - **UI isolation** by denying mach-lookup of `com.apple.windowserver`,
   pasteboard, and HID iokit user clients when `ui.disable` /
   `ui.clipboard=none` / `ui.injection=false`.
@@ -193,11 +196,21 @@ independently of the profile.
 |---|---|
 | `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all sockets. |
 | `defaultPolicy: "allow"` (no host list) | `(allow network-outbound)` plus `(allow network-bind (local ip))` and `(allow system-socket)`. |
-| `allowedHosts` | `(allow network-outbound (remote tcp "host:*") (remote udp "host:*"))` per host. Apple's Seatbelt does not perform DNS — host filtering is best-effort and applied at connect time. |
-| `blockedHosts` | `(deny network-outbound …)` emitted last so explicit blocks override allows. |
+| `allowedHosts` | Accepted for SDK compatibility, but Seatbelt cannot filter DNS names; the profile degrades to allow-all outbound as best-effort. |
+| `blockedHosts` | Rejected during validation because Seatbelt cannot enforce hostname blocks. |
+| `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, the existing allow-all covers it. |
+| `proxy` (remote `url`) | Under `defaultPolicy: "block"`, **rejected during validation** — Seatbelt cannot filter a remote proxy by DNS name, so reachability would degrade to allow-all and silently weaken the deny for raw-socket clients. Under `allow`, allows all outbound as best-effort (the proxy enforces host policy). Use a loopback proxy or `builtinTestServer` for MXC-scoped reachability under deny. |
 
-Proxy configuration (`network.proxy`) is **not supported** on macOS — the
-SDK rejects it with a clear error, mirroring the Linux behavior.
+Proxy configuration (`network.proxy`) is supported via the **cooperative
+env-var model** (the same as the Bubblewrap backend): the runner launches or
+points at an HTTP proxy and injects `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+(and their lowercase forms) into the sandbox environment, stripping any
+caller-supplied proxy vars so sandboxed code can't override them. Well-behaved HTTP clients
+(curl, requests, fetch, …) honor it; clients that open raw sockets and ignore
+the env vars bypass it. `builtinTestServer` launches a bundled, testing-only
+proxy (`unix-test-proxy`) and requires `--allow-testing-features`. macOS has no
+per-process WinHTTP-style OS proxy policy, so unlike Windows the proxy is
+cooperative rather than kernel-enforced.
 
 ### UI policy
 
@@ -297,7 +310,12 @@ environment.
 
 ## Limitations and caveats
 
-- **No proxy support.** The macOS sandbox cannot interpose at the TLS layer.
+- **Proxy support is cooperative, not enforced.** `network.proxy` injects
+  `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` into the sandbox (see [Network policy](#network-policy)).
+  Clients that honor those env vars route through the proxy; clients that open
+  raw sockets and ignore them bypass it. The macOS sandbox cannot interpose at
+  the TLS/socket layer per process, so this matches the Bubblewrap backend
+  rather than Windows' kernel-enforced WinHTTP policy.
 - **Per-host network filtering (`blockedHosts`) is not supported.** Apple's
   Seatbelt profile language has no mechanism for selectively blocking individual
   hostnames while allowing all other traffic. The `blockedHosts` config field is
@@ -343,4 +361,4 @@ environment.
 | Network | Windows Firewall | iptables/nftables | Profile `network-*` rules |
 | Privileges | Optional admin | Root (or unprivileged LXC) | None — `sandbox_init` is unprivileged |
 | Container lifecycle | Yes (named) | Yes (named) | No (per-process) |
-| Proxy support | Yes | No | No |
+| Proxy support | Yes (WinHTTP, kernel-enforced) | No | Cooperative (env-var) |

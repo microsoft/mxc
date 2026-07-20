@@ -30,9 +30,13 @@
     <Compile Include="Native/NativeMethods.g.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Microsoft.Mxc.Sdk.Tests" />
+  </ItemGroup>
+
   <Target Name="GenerateNativeBindings"
           BeforeTargets="CoreCompile"
-          Inputs="$(MxcSrcDir)/ffi/mxc_ffi/src/lib.rs;$(MxcSrcDir)/ffi/mxc_ffi/build.rs"
+          Inputs="$(MxcSrcDir)/ffi/mxc_ffi/src/lib.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/streaming.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/state_aware.rs;$(MxcSrcDir)/ffi/mxc_ffi/build.rs"
           Outputs="$(MxcGeneratedBindings)">
     <Message Importance="high" Text="mxc: generating C# P/Invoke bindings (cargo build -p mxc_ffi --features dotnetsdk)" />
     <Exec Command="cargo build -p mxc_ffi --features dotnetsdk" WorkingDirectory="$(MxcSrcDir)" />
