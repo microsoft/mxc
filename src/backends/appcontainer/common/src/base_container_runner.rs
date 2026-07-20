@@ -610,7 +610,7 @@ impl BaseContainerRunner {
         );
 
         // --- Learning-mode capabilities (parity with AppContainerScriptRunner) ---
-        // Emit per-capability diagnostics (informational for `learningMode`,
+        // Emit per-capability diagnostics (informational for `learningModeLogging`,
         // a security warning for `permissiveLearningMode`), then enforce the
         // `--audit` gate: `permissiveLearningMode` defeats deny-by-default, so
         // it is rejected unless it arrived via `--audit` (`request.audit`).

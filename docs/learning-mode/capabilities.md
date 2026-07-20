@@ -22,10 +22,10 @@ The two capabilities are **semantically distinct and must not be conflated**:
 
 | Capability              | Behavior                                              | Enforcement                          |
 | ----------------------- | ----------------------------------------------------- | ------------------------------------ |
-| `learningMode`          | Logs every **failed** access check (deny-and-record). | **Unchanged** — accesses stay denied. |
+| `learningModeLogging`   | Logs every **failed** access check (deny-and-record). | **Unchanged** — accesses stay denied. |
 | `permissiveLearningMode`| Logs **every** access check and **allows** it (audit / allow-all). | **Weakened** — the container no longer enforces deny-by-default. |
 
-### `learningMode` — deny-and-record
+### `learningModeLogging` — deny-and-record
 
 The OS records each access check that *would have been denied*, but the access
 is **still denied**. Containment is unchanged, so this is safe to use as a
@@ -56,12 +56,12 @@ otherwise take effect while slipping past an exact-match filter.
 
 ## How to enable them
 
-`learningMode` (deny-and-record) is a plain capability — add the string to the
-policy's `capabilities` array:
+`learningModeLogging` (deny-and-record) is a plain capability — add the string
+to the policy's `capabilities` array:
 
 ```jsonc
 {
-  "capabilities": ["learningMode"]
+  "capabilities": ["learningModeLogging"]
 }
 ```
 
@@ -78,11 +78,11 @@ the permissive-learning-mode trace for the run. A `permissiveLearningMode`
 string placed in the `capabilities` array is stripped in release builds and is
 rejected by both runners unless `--audit` is also set.
 
-`learningMode` capability strings are resolved to AppContainer capability SIDs
-and attached to the child process's `SECURITY_CAPABILITIES` exactly like any
+`learningModeLogging` capability strings are resolved to AppContainer capability
+SIDs and attached to the child process's `SECURITY_CAPABILITIES` exactly like any
 other capability. When either learning-mode capability is in effect the runner
-logs a diagnostic line describing the mode (informational for `learningMode`, a
-security warning for `permissiveLearningMode`).
+logs a diagnostic line describing the mode (informational for
+`learningModeLogging`, a security warning for `permissiveLearningMode`).
 
 ## Relationship to denial capture
 

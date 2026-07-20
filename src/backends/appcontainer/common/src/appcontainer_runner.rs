@@ -393,7 +393,7 @@ pub enum FilesystemMode {
 /// Config capability string that enables **learning mode**: the OS logs every
 /// *failed* access check for the AppContainer, but the access is still
 /// **denied** (deny-and-record). Containment is unchanged.
-pub(crate) const CAP_LEARNING_MODE: &str = "learningMode";
+pub(crate) const CAP_LEARNING_MODE_LOGGING: &str = "learningModeLogging";
 
 /// Config capability string that enables **permissive learning mode**: the OS
 /// logs every access check and **allows** it (audit / allow-all). This defeats
@@ -410,7 +410,7 @@ pub(crate) const CAP_PERMISSIVE_LEARNING_MODE: &str = "permissiveLearningMode";
 /// the accesses it logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LearningModeCapability {
-    /// `learningMode` — log *failed* accesses; accesses remain **denied**
+    /// `learningModeLogging` — log *failed* accesses; accesses remain **denied**
     /// (deny-and-record). Containment is unchanged.
     Learning,
     /// `permissiveLearningMode` — log every access check and **allow** it
@@ -424,7 +424,7 @@ impl LearningModeCapability {
     /// because Windows derives the capability SID case-insensitively, so a
     /// mis-cased spelling still takes effect and must be classified the same.
     pub(crate) fn from_capability_name(name: &str) -> Option<Self> {
-        if name.eq_ignore_ascii_case(CAP_LEARNING_MODE) {
+        if name.eq_ignore_ascii_case(CAP_LEARNING_MODE_LOGGING) {
             Some(Self::Learning)
         } else if name.eq_ignore_ascii_case(CAP_PERMISSIVE_LEARNING_MODE) {
             Some(Self::Permissive)
@@ -437,10 +437,10 @@ impl LearningModeCapability {
 /// Return the diagnostic lines the caller should log for the learning-mode
 /// capabilities requested by a policy.
 ///
-/// `learningMode` (deny-and-record) is safe and emits an informational note.
-/// `permissiveLearningMode` logs *and allows* every access check (audit mode);
-/// it defeats deny-by-default, so it emits a security warning. It is only ever
-/// reached through the `--audit` CLI flag — the config path strips it in
+/// `learningModeLogging` (deny-and-record) is safe and emits an informational
+/// note. `permissiveLearningMode` logs *and allows* every access check (audit
+/// mode); it defeats deny-by-default, so it emits a security warning. It is only
+/// ever reached through the `--audit` CLI flag — the config path strips it in
 /// release builds and the runner gates it behind `--audit` (see
 /// [`AppContainerScriptRunner::spawn_suspended`]).
 pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> Vec<String> {
@@ -454,7 +454,7 @@ pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> V
                     .to_string(),
             ),
             Some(LearningModeCapability::Learning) => diagnostics.push(
-                "learningMode is ENABLED: failed access attempts are logged; accesses are \
+                "learningModeLogging is ENABLED: failed access attempts are logged; accesses are \
                  still denied (deny-and-record)."
                     .to_string(),
             ),
@@ -599,10 +599,11 @@ impl AppContainerScriptRunner {
         capture: bool,
     ) -> Result<SpawnedChild, WxcError> {
         // --- Learning-mode capabilities ---
-        // `learningMode` (deny-and-record) and `permissiveLearningMode` (allow-all
-        // audit) are distinct. Emit per-capability diagnostics for whichever are
-        // present (informational for `learningMode`, a security warning for
-        // `permissiveLearningMode`). See [`learning_mode_capability_diagnostics`].
+        // `learningModeLogging` (deny-and-record) and `permissiveLearningMode`
+        // (allow-all audit) are distinct. Emit per-capability diagnostics for
+        // whichever are present (informational for `learningModeLogging`, a
+        // security warning for `permissiveLearningMode`). See
+        // [`learning_mode_capability_diagnostics`].
         for line in learning_mode_capability_diagnostics(&request.policy.capabilities) {
             logger.log_line(&line);
         }
@@ -1576,7 +1577,7 @@ mod tests {
     fn learning_mode_capability_classification() {
         use super::LearningModeCapability;
         assert_eq!(
-            LearningModeCapability::from_capability_name("learningMode"),
+            LearningModeCapability::from_capability_name("learningModeLogging"),
             Some(LearningModeCapability::Learning)
         );
         assert_eq!(
@@ -1591,7 +1592,7 @@ mod tests {
 
     #[test]
     fn learning_mode_diagnostic_is_deny_and_record() {
-        let caps = vec!["learningMode".to_string()];
+        let caps = vec!["learningModeLogging".to_string()];
         let out = super::learning_mode_capability_diagnostics(&caps);
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("deny-and-record"));
@@ -1616,7 +1617,7 @@ mod tests {
         // Windows derives the capability SID case-insensitively, so mis-cased
         // spellings must classify the same as the canonical form.
         assert_eq!(
-            LearningModeCapability::from_capability_name("LearningMode"),
+            LearningModeCapability::from_capability_name("LearningModeLogging"),
             Some(LearningModeCapability::Learning)
         );
         assert_eq!(
@@ -1651,7 +1652,10 @@ mod tests {
 
     #[test]
     fn permissive_gate_ignores_other_capabilities() {
-        let caps = vec!["learningMode".to_string(), "internetClient".to_string()];
+        let caps = vec![
+            "learningModeLogging".to_string(),
+            "internetClient".to_string(),
+        ];
         assert!(!super::permissive_learning_mode_requires_audit(
             &caps, false
         ));
@@ -1667,7 +1671,7 @@ mod tests {
     #[test]
     fn both_learning_capabilities_are_reported_distinctly() {
         let caps = vec![
-            "learningMode".to_string(),
+            "learningModeLogging".to_string(),
             "permissiveLearningMode".to_string(),
         ];
         let out = super::learning_mode_capability_diagnostics(&caps);

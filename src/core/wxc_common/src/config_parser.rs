@@ -686,14 +686,15 @@ fn convert_wire_config(
         }
 
         // The learningMode boolean maps to the deny-and-record learning-mode
-        // capability. AppContainer restrictions remain enforced; access
-        // denials are recorded for diagnostics. This is available in every
-        // build. The allow-all auditing mode (permissiveLearningMode) is not
-        // reachable from config — it is enabled only via the `--audit` CLI flag.
+        // capability (`learningModeLogging`). AppContainer restrictions remain
+        // enforced; access denials are recorded for diagnostics. This is
+        // available in every build. The allow-all auditing mode
+        // (permissiveLearningMode) is not reachable from config — it is enabled
+        // only via the `--audit` CLI flag.
         if ac.learning_mode.unwrap_or(false) {
-            policy.capabilities.push("learningMode".to_string());
+            policy.capabilities.push("learningModeLogging".to_string());
             logger.log(
-                "NOTE: 'learningMode' enabled - AppContainer restrictions remain \
+                "NOTE: 'learningModeLogging' enabled - AppContainer restrictions remain \
 enforced; access denials are recorded for diagnostics.\n",
             );
         }
@@ -1671,7 +1672,7 @@ mod tests {
         assert!(req
             .policy
             .capabilities
-            .contains(&"learningMode".to_string()));
+            .contains(&"learningModeLogging".to_string()));
         // The boolean must NOT inject the allow-all permissive capability.
         assert!(!req
             .policy
