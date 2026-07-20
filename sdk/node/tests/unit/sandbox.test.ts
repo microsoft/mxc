@@ -712,7 +712,7 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should allow allowedHosts without allowOutbound on macOS (seatbelt supports per-host filtering)', () => {
+    it('should pass allowedHosts through for Seatbelt compatibility', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
@@ -729,7 +729,7 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
-    it('should allow blockedHosts without allowOutbound on macOS', () => {
+    it('should pass blockedHosts through for native Seatbelt validation', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
@@ -775,16 +775,14 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
-    it('should reject proxy configuration on macOS', () => {
+    it('should accept proxy configuration on macOS (Seatbelt)', () => {
       mockDarwin();
       try {
-        assert.throws(
-          () => createConfigFromPolicy({
-            version: '0.6.0-alpha',
-            network: { proxy: { builtinTestServer: true } },
-          }),
-          { message: /not supported on macOS/ },
-        );
+        const config = createConfigFromPolicy({
+          version: '0.7.0-alpha',
+          network: { proxy: { url: 'http://127.0.0.1:8080' } },
+        });
+        assert.deepStrictEqual(config.network!.proxy, { url: 'http://127.0.0.1:8080' });
       } finally {
         restore();
       }
@@ -795,10 +793,10 @@ describe('createConfigFromPolicy', () => {
     // These tests assert the "allowOutbound required for host filtering"
     // gate. The gate applies to backends that map host filtering to
     // capabilities/ACLs (Windows process container path). It is intentionally
-    // waived for backends that do per-host iptables/Seatbelt filtering
-    // (wslc, seatbelt, bubblewrap, and Linux abstract 'process' which
-    // resolves to bubblewrap). Mock platform to win32 so the test asserts
-    // the gate independent of the CI runner's OS.
+    // waived for Unix backends. Bubblewrap/LXC/WSLC enforce host lists;
+    // Seatbelt accepts them for compatibility and validates its limitations
+    // natively. Mock platform to win32 so the test asserts the gate
+    // independent of the CI runner's OS.
     let originalPlatform: PropertyDescriptor | undefined;
     const mockWindows = () => {
       originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');

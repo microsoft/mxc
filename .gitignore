@@ -46,5 +46,5 @@ output
 # Claude
 .claude/
 
-# review channel artifacts
+# iterative-review working artifacts
 .review/

@@ -137,18 +137,37 @@ pub fn load_mxc_request_with_options(
 ) -> Result<MxcRequest, ParseError> {
     let json_str =
         decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
+    parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+}
 
+/// Parse an MXC request from a **raw JSON string** (already decoded — not a file
+/// path or base64). Discriminates one-shot vs state-aware by the `phase` key,
+/// the same as [`load_mxc_request`], but skips the file/base64 decode step so an
+/// in-memory JSON string can be parsed directly.
+pub fn load_mxc_request_from_json(
+    json_str: &str,
+    logger: &mut Logger,
+) -> Result<MxcRequest, ParseError> {
+    parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false)
+}
+
+/// Shared parse core over an already-decoded JSON string.
+fn parse_mxc_request_json(
+    json_str: &str,
+    logger: &mut Logger,
+    allow_missing_command: bool,
+) -> Result<MxcRequest, ParseError> {
     // Parse once into a generic JSON value so we can (a) discriminate one-shot
     // vs state-aware by presence of the `phase` key and (b) capture the raw
     // `experimental` block for the state-aware path, where it is typed
     // per-backend at dispatch time rather than at parse time.
-    let parsed_json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+    let parsed_json: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
     })?;
 
     if parsed_json.get("phase").is_some() {
-        convert_wire_state_aware(parsed_json, logger, opts.allow_missing_command)
+        convert_wire_state_aware(parsed_json, logger, allow_missing_command)
             .map(MxcRequest::StateAware)
             .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
@@ -156,11 +175,11 @@ pub fn load_mxc_request_with_options(
         // `parsed_json`) so serde's line/column context is preserved in error
         // messages on this trust boundary; `from_value` discards it, turning a
         // typo or out-of-range field into an unlocalised "expected u16"-style dump.
-        let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
+        let cfg: wire::MxcConfig = serde_json::from_str(json_str).map_err(|e| {
             logger.log_line("Error parsing JSON");
             ParseError::OneShot(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
         })?;
-        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
@@ -597,6 +616,11 @@ fn convert_wire_config(
         logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
+    if cfg.correlation_vector.is_some() {
+        let msg = "'correlationVector' is only valid on state-aware lifecycle requests".to_string();
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
 
     // Backend sections present in the config (captured before fields move out).
     let present_backend_sections = present_backend_sections(&cfg);
@@ -770,9 +794,10 @@ fn convert_wire_config(
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
                 && containment != ContainmentBackend::Lxc
+                && containment != ContainmentBackend::Seatbelt
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', or 'lxc' containment backends";
+                           'bubblewrap', 'lxc', or 'seatbelt' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -831,6 +856,53 @@ fn convert_wire_config(
                        network.enforcementMode='firewall' or 'both'. The cooperative \
                        env-var proxy enforces hosts at the proxy layer; iptables-based \
                        enforcement requires privilege and is mutually exclusive.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Seatbelt has no privileged packet-filter layer on macOS: it enforces
+        // network policy through the sandbox profile (capabilities-style) and
+        // ignores enforcementMode. Combining network.proxy with a firewall mode
+        // would silently drop the firewall expectation, so reject it explicitly,
+        // mirroring the Bubblewrap guard above.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.network_proxy.is_enabled()
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Seatbelt: network.proxy cannot be combined with \
+                       network.enforcementMode='firewall' or 'both'. macOS Seatbelt \
+                       enforces network policy through the sandbox profile and has no \
+                       packet-filter layer, so a firewall mode cannot be honored.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Seatbelt scopes a *loopback* proxy's reachability to its exact port
+        // even under default-deny (profile_builder::write_proxy_reachability_rules),
+        // but it cannot filter a *remote* proxy by host: a remote proxy under
+        // defaultPolicy='block' degrades to allow-all outbound, silently turning
+        // the kernel-enforced deny into allow-all for raw-socket clients that
+        // ignore HTTP_PROXY. Reject that combination. Loopback proxies (including
+        // builtinTestServer, whose loopback address is resolved at runtime and is
+        // therefore absent here) stay port-scoped and are allowed.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.default_network_policy == NetworkPolicy::Block
+            && policy
+                .network_proxy
+                .address
+                .as_ref()
+                .is_some_and(|addr| !matches!(addr.host(), "127.0.0.1" | "::1" | "localhost"))
+        {
+            let msg = "Seatbelt: a remote network.proxy (non-loopback host) cannot be \
+                       combined with defaultPolicy='block'. Seatbelt cannot filter a remote \
+                       proxy by host, so outbound reachability degrades to allow-all, \
+                       silently weakening the deny for raw-socket clients that ignore \
+                       HTTP_PROXY. Use a loopback proxy (127.0.0.1/::1/localhost) or \
+                       'network.proxy.builtinTestServer: true' for port-scoped reachability \
+                       under deny.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
@@ -1043,6 +1115,21 @@ fn convert_wire_state_aware(
         .as_object_mut()
         .and_then(|map| map.remove("experimental"));
 
+    // Peeling `experimental` off above also removes it from the typed
+    // deserialize, so a non-object value (e.g. `"experimental": 42`) would slip
+    // through unchecked here and be silently ignored — unlike the one-shot path,
+    // where `experimental` is a typed `Option<Experimental>` and a non-object is
+    // a hard parse error. Reject a present, non-null, non-object value up front
+    // so both paths fail malformed configs consistently. (`null` maps to "absent"
+    // on both paths and is accepted.)
+    if let Some(exp) = experimental_raw.as_ref() {
+        if !exp.is_null() && !exp.is_object() {
+            let msg = "invalid `experimental`: expected an object".to_string();
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    }
+
     let mut cfg: wire::MxcConfig = serde_json::from_value(value).map_err(|e| {
         logger.log_line("Error parsing JSON");
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
@@ -1086,6 +1173,7 @@ fn convert_wire_state_aware(
     validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref(), logger)?;
 
     let sandbox_id = cfg.sandbox_id.clone();
+    let correlation_vector = cfg.correlation_vector.clone();
 
     // State-aware requests carry only cross-cutting fields (process /
     // filesystem / network / ui) plus the experimental backend block. One-shot-
@@ -1120,6 +1208,7 @@ fn convert_wire_state_aware(
     // now-validated-absent stable sections so the shared one-shot converter
     // sees a clean surrogate and its `phase`/`sandboxId` guard passes.
     cfg.sandbox_id = None;
+    cfg.correlation_vector = None;
     cfg.experimental = None;
     cfg.seatbelt = None;
     cfg.process_container = None;
@@ -1127,13 +1216,34 @@ fn convert_wire_state_aware(
     cfg.lifecycle = None;
 
     let require_process = phase == Phase::Exec;
-    let request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+
+    // Populate the typed `experimental.telemetry` field from the raw block that
+    // was peeled off above. The rest of `experimental` is typed per-backend at
+    // dispatch time (from `experimental_raw`), but telemetry is a cross-cutting,
+    // backend-independent setting consumed the same way as the one-shot path —
+    // so it belongs on the typed request, not in a parallel raw-JSON reader. A
+    // present-but-malformed `telemetry` object is a client error (rejected here,
+    // exactly like the one-shot parser), not a silent disable.
+    if let Some(telemetry_val) = experimental_raw
+        .as_ref()
+        .and_then(|exp| exp.get("telemetry"))
+    {
+        let telemetry: TelemetryConfig =
+            serde_json::from_value(telemetry_val.clone()).map_err(|e| {
+                let msg = format!("invalid experimental.telemetry: {e}");
+                logger.log_line(&msg);
+                WxcError::ConfigParse(msg)
+            })?;
+        request.experimental.telemetry = Some(telemetry);
+    }
 
     Ok(ParsedStateAwareRequest {
         request,
         phase,
         containment,
         sandbox_id,
+        correlation_vector,
         experimental_raw,
     })
 }
@@ -1286,6 +1396,89 @@ mod tests {
                     })
                 );
             }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_telemetry_populates_typed_field() {
+        // Telemetry is a cross-cutting setting: the state-aware parser must
+        // populate the typed `experimental.telemetry` field (consumed the same
+        // way as one-shot) while leaving the per-backend `experimental_raw`
+        // block intact for dispatch.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": {"enabled": true}}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                let telem = p
+                    .request
+                    .experimental
+                    .telemetry
+                    .expect("telemetry should be populated");
+                assert_eq!(telem.enabled, Some(true));
+                // The raw block is still available for per-backend dispatch.
+                assert!(p.experimental_raw.is_some());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_without_telemetry_leaves_typed_field_unset() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_malformed_telemetry_is_rejected() {
+        // A present-but-malformed telemetry block is a client error rejected at
+        // parse time (surfaced as a state-aware envelope), not a silent disable.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": 42}
+        }"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_non_object_experimental_is_rejected() {
+        // A non-object `experimental` (here a bare number) is a hard parse error
+        // on the one-shot path (typed `Option<Experimental>`); the state-aware
+        // path peels `experimental` off before typed deserialize, so it must
+        // reject a non-object value explicitly to stay consistent rather than
+        // silently ignoring it.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": 42
+        }"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_null_experimental_is_accepted() {
+        // `null` maps to "absent" on both the one-shot and state-aware paths, so
+        // it is accepted (leaving telemetry unset), unlike a non-object value.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": null
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
@@ -2231,6 +2424,151 @@ mod tests {
     }
 
     #[test]
+    fn proxy_accepted_with_seatbelt() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_url_accepted_with_seatbelt() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://127.0.0.1:8080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn proxy_with_seatbelt_and_firewall_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Seatbelt: network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_with_seatbelt_and_both_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "both"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_remote_url_with_seatbelt_and_default_block_is_rejected() {
+        // A remote (non-loopback) proxy under default-deny would degrade the
+        // Seatbelt profile to allow-all outbound — reject it at validation.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "proxy": {"url": "http://proxy.example.com:8080"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("remote network.proxy") && msg.contains("defaultPolicy='block'"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_loopback_url_with_seatbelt_and_default_block_is_accepted() {
+        // A loopback proxy is port-scoped under deny, so it must NOT be rejected.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "proxy": {"url": "http://127.0.0.1:8080"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_builtin_with_seatbelt_and_default_block_is_accepted() {
+        // builtinTestServer resolves to a loopback port at runtime → port-scoped,
+        // so default-deny is safe and must be accepted.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "proxy": {"builtinTestServer": true}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
     fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
@@ -2634,6 +2972,22 @@ mod tests {
         assert!(
             msg.contains("sandboxId") && msg.contains("state-aware"),
             "one-shot path should reject 'sandboxId', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn one_shot_rejects_correlation_vector_field() {
+        // `correlationVector` is a state-aware-only relay field; a one-shot
+        // payload carrying it must be rejected, mirroring `phase`/`sandboxId`.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("correlationVector") && msg.contains("state-aware"),
+            "one-shot path should reject 'correlationVector', got: {msg}"
         );
     }
 
