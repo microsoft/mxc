@@ -11,3 +11,7 @@ thiserror = { workspace = true }
 wxc_common = { workspace = true }
 windows = { workspace = true }
 windows-core = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+sandbox_spec = { workspace = true }
+flatbuffers = { workspace = true }
