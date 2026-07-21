@@ -2,6 +2,7 @@
 members = [
     "core/wxc",
     "core/wxc_common",
+    "core/learning_mode_core",
     "core/lxc",
     "core/mxc_darwin",
     "core/mxc-sdk",
@@ -111,6 +112,7 @@ windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 isolation_session_common = { path = "backends/isolation_session/common" }
 hyperlight_common = { path = "backends/hyperlight/common" }
 learning_mode_windows = { path = "backends/learning_mode/windows" }
+learning_mode_core = { path = "core/learning_mode_core" }
 nanvix_runner = { path = "backends/nanvix/runner" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
