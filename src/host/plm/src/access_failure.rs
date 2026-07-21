@@ -244,54 +244,22 @@ pub(crate) fn normalize_file_path(p: &str) -> String {
     s
 }
 
-/// Free-function sibling of `ParseAccumulator::is_skippable` exposed
-/// for unit tests that don't want to build a whole accumulator. Logic
-/// must stay in lock-step with the cached form on `ParseAccumulator`.
+/// Test-only thin wrapper over [`ParseAccumulator::is_skippable`].
+///
+/// Building a throwaway accumulator here means the unit tests drive the
+/// real production filter (the cached hot path in `event_parser`) instead
+/// of a parallel copy of the logic that could silently drift out of
+/// lock-step with it.
 #[cfg(test)]
 pub(crate) fn is_skippable(
     file_path: &str,
     current_directory: Option<&str>,
     verbose: bool,
 ) -> bool {
-    if let Some(cwd) = current_directory {
-        // Defensive: refuse to treat a bare drive root ("C:" / "C:\\") as a
-        // CWD prefix — otherwise the `format!("{cwd}\\")` match below would
-        // swallow every event under that drive. Equality match still applies.
-        let cwd_trimmed = cwd.trim_end_matches('\\');
-        let is_drive_root = cwd_trimmed.len() == 2
-            && cwd_trimmed.chars().nth(1) == Some(':')
-            && cwd_trimmed
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_alphabetic())
-                .unwrap_or(false);
-        let normalized = file_path.trim_end_matches('\\');
-        if normalized.eq_ignore_ascii_case(cwd_trimmed)
-            || (!is_drive_root
-                && normalized
-                    .to_ascii_lowercase()
-                    .starts_with(&format!("{}\\", cwd_trimmed.to_ascii_lowercase())))
-        {
-            if verbose {
-                println!("Skipping current-directory event: {file_path}");
-            }
-            return true;
-        }
-    }
-    if file_path.len() < 4 {
-        if verbose {
-            println!("Skipping too-short path event: {file_path}");
-        }
-        return true;
-    }
-    let second = file_path.chars().nth(1);
-    if second != Some(':') {
-        if verbose {
-            println!("Skipping non-drive-letter path event: {file_path}");
-        }
-        return true;
-    }
-    false
+    // An empty capability table is fine: `is_skippable` only consults the
+    // cached CWD / drive-letter state, not the capability index.
+    crate::event_parser::ParseAccumulator::new(current_directory, verbose, Vec::new())
+        .is_skippable(file_path)
 }
 
 /// Shared `EventID=14` XML fixture used by tests in this module and

@@ -674,7 +674,7 @@ pub(crate) struct ParseAccumulator {
 }
 
 impl ParseAccumulator {
-    fn new(
+    pub(crate) fn new(
         current_directory: Option<&str>,
         verbose: bool,
         capability_table: Vec<extract_caps::CapabilityEntry>,
@@ -683,13 +683,16 @@ impl ParseAccumulator {
         let (cwd_lc_trimmed, cwd_lc_prefix) = match current_directory {
             Some(cwd) => {
                 let trimmed = cwd.trim_end_matches('\\');
-                let is_drive_root = trimmed.len() == 2
-                    && trimmed.chars().nth(1) == Some(':')
-                    && trimmed
-                        .chars()
-                        .next()
-                        .map(|c| c.is_ascii_alphabetic())
-                        .unwrap_or(false);
+                // A bare drive root is exactly two bytes: an ASCII letter
+                // followed by ':' (e.g. "C:"). Inspecting the bytes directly
+                // — rather than folding an `Option` from `chars().next()`
+                // down to `false` — states that intent plainly and drops an
+                // unwrap whose fallback is unreachable once the length is
+                // known to be 2.
+                let trimmed_bytes = trimmed.as_bytes();
+                let is_drive_root = trimmed_bytes.len() == 2
+                    && trimmed_bytes[0].is_ascii_alphabetic()
+                    && trimmed_bytes[1] == b':';
                 let lc = trimmed.to_ascii_lowercase();
                 let prefix = if is_drive_root {
                     None
@@ -717,27 +720,29 @@ impl ParseAccumulator {
     /// precomputed lowercase forms of `current_directory` to avoid two
     /// `String` allocs per event.
     pub(crate) fn is_skippable(&self, file_path: &str) -> bool {
-        if let (Some(cwd_lc), prefix_opt) = (&self.cwd_lc_trimmed, &self.cwd_lc_prefix) {
-            let normalized = file_path.trim_end_matches('\\');
-            let normalized_bytes = normalized.as_bytes();
-            let cwd_bytes = cwd_lc.as_bytes();
-            let cwd_equals = normalized_bytes.len() == cwd_bytes.len()
-                && normalized_bytes
+        if let (Some(cwd_lowercase), cwd_prefix) = (&self.cwd_lc_trimmed, &self.cwd_lc_prefix) {
+            let normalized_path = file_path.trim_end_matches('\\');
+            let path_bytes = normalized_path.as_bytes();
+            let cwd_bytes = cwd_lowercase.as_bytes();
+            let matches_cwd_exactly = path_bytes.len() == cwd_bytes.len()
+                && path_bytes
                     .iter()
                     .zip(cwd_bytes)
-                    .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs));
-            let prefix_match = prefix_opt
+                    .all(|(path_byte, cwd_byte)| path_byte.eq_ignore_ascii_case(cwd_byte));
+            let is_under_cwd = cwd_prefix
                 .as_deref()
                 .map(|prefix| {
                     let prefix_bytes = prefix.as_bytes();
-                    normalized_bytes.len() >= prefix_bytes.len()
-                        && normalized_bytes[..prefix_bytes.len()]
+                    path_bytes.len() >= prefix_bytes.len()
+                        && path_bytes[..prefix_bytes.len()]
                             .iter()
                             .zip(prefix_bytes)
-                            .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs))
+                            .all(|(path_byte, prefix_byte)| {
+                                path_byte.eq_ignore_ascii_case(prefix_byte)
+                            })
                 })
                 .unwrap_or(false);
-            if cwd_equals || prefix_match {
+            if matches_cwd_exactly || is_under_cwd {
                 if self.verbose {
                     println!("Skipping current-directory event: {file_path}");
                 }
