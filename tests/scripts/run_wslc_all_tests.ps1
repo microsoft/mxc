@@ -234,7 +234,6 @@ $null = $results.Add(@{
     Reason  = $(if ($objPass) { "" } else { "object-validation test failed" })
 })
 
-<<<<<<< HEAD
 # Denied-path `..`-through-junction pre-flight validation (comment 1): a deny
 # that only lands inside a mounted tree after following a junction AND folding
 # `..` across not-yet-created components must be rejected at pre-flight. Owns its
@@ -249,7 +248,8 @@ $null = $results.Add(@{
     Pass    = $ddtPass
     Skipped = $false
     Reason  = $(if ($ddtPass) { "" } else { "dotdot-alias validation test failed" })
-=======
+})
+
 Write-Host "`n--- Denied Masking / Most-Specific Tests ---" -ForegroundColor Cyan
 # Denied-path masking and most-specific-path-wins on WSLC. Each is delegated to
 # a standalone script that owns its on-disk fixture (a read-write mount plus
@@ -277,7 +277,6 @@ $null = $results.Add(@{
     Pass    = $mspPass
     Skipped = $false
     Reason  = $(if ($mspPass) { "" } else { "most-specific test failed" })
->>>>>>> origin/main
 })
 
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
