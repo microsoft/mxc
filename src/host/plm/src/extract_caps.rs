@@ -222,6 +222,30 @@ unsafe fn free_sid_array(arr: *mut PSID, count: u32) {
     let _ = LocalFree(Some(HLOCAL(arr as *mut _)));
 }
 
+/// Copy the bytes of the canonical (first) SID out of an array returned by
+/// `DeriveCapabilitySidsFromName`.
+///
+/// `arr` points to `count` contiguous `PSID` values (or is null when
+/// `count` is 0). The first element is read through a length-`count`
+/// slice so the access is provably in bounds rather than a bare pointer
+/// dereference; the individual SID is then null- and length-validated by
+/// [`sid_bytes_from_ptr`].
+#[cfg(target_os = "windows")]
+unsafe fn first_sid_bytes(arr: *const PSID, count: u32) -> Option<Vec<u8>> {
+    if arr.is_null() || count == 0 {
+        return None;
+    }
+    // SAFETY: `arr`/`count` are forwarded exactly as reported by
+    // `DeriveCapabilitySidsFromName`, which allocates `count` contiguous
+    // `PSID` entries at `arr`. `arr` is non-null and `count > 0` (checked
+    // above), so a slice of `count` elements is valid and index 0 is in
+    // bounds. The bounds check on `[0]` cannot panic given `count > 0`.
+    let first = unsafe { std::slice::from_raw_parts(arr, count as usize)[0] };
+    // SAFETY: `first` is one of the SID pointers the OS allocated;
+    // `sid_bytes_from_ptr` null-checks and length-validates it before copy.
+    unsafe { sid_bytes_from_ptr(first) }
+}
+
 /// Build the table of (capability name, AppPackage SID, Group SID) tuples
 /// by calling `DeriveCapabilitySidsFromName` for each known capability.
 /// Capabilities the OS rejects are silently skipped. Non-Windows targets
@@ -252,17 +276,11 @@ pub fn build_capability_table() -> Vec<CapabilityEntry> {
         }
 
         // First entry of each array is the canonical SID; alternate
-        // encodings (when present) are not currently matched.
-        let app_package_sid = if cap_count > 0 && !cap_sids.is_null() {
-            unsafe { sid_bytes_from_ptr(*cap_sids) }
-        } else {
-            None
-        };
-        let group_sid = if group_count > 0 && !group_sids.is_null() {
-            unsafe { sid_bytes_from_ptr(*group_sids) }
-        } else {
-            None
-        };
+        // encodings (when present) are not currently matched. Each is read
+        // through a bounded slice (see `first_sid_bytes`) so the access is
+        // tied to the count the OS reported rather than a raw dereference.
+        let app_package_sid = unsafe { first_sid_bytes(cap_sids, cap_count) };
+        let group_sid = unsafe { first_sid_bytes(group_sids, group_count) };
 
         out.push(CapabilityEntry {
             name: name.to_string(),
