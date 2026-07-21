@@ -30,6 +30,9 @@ jobs:
       - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
         run: node scripts/versioning/check-rust-toolchain-sync.js
 
+      - name: Check IsolationSession SDK package consistency
+        run: node scripts/versioning/check-isosession-sdk.js
+
       - name: Check schema is in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-schema-codegen.js
 

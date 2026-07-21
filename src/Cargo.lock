@@ -1088,6 +1088,7 @@ name = "isolation_session_bindings"
 version = "0.7.0"
 dependencies = [
  "semver",
+ "sha2",
  "windows",
  "windows-collections",
  "windows-core",

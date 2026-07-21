@@ -17,3 +17,16 @@
     clippy::all
 )]
 pub mod bindings;
+
+/// The IsoSession runtime instance this crate was built against, baked in by
+/// `build.rs` from the SDK NuGet's `GENERATION_INFO.toml` (`instance` key) via
+/// `cargo:rustc-env=ISOSESSION_INSTANCE`.
+///
+/// `None` when the build had no instance to bake (source-only build whose
+/// committed provenance fallback carries no `instance`). The IsolationSession
+/// backend uses this to verify the installed runtime folder matches the build.
+///
+/// Exposed here because `cargo:rustc-env` only reaches the crate whose
+/// build script emitted it — `option_env!` in a downstream crate would always
+/// see `None`.
+pub const EXPECTED_INSTANCE: Option<&str> = option_env!("ISOSESSION_INSTANCE");

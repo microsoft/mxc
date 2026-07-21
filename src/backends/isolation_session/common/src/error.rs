@@ -26,6 +26,12 @@ pub(super) enum IsolationSessionError {
     /// deprovisioned (or never existed in this user's session). Surfaces
     /// as `MxcError::StaleId` at the dispatch boundary.
     Stale(String),
+    /// The installed IsoSession runtime instance (e.g. the
+    /// `…\Agentic Runtime\<instance>` folder) does not match the instance
+    /// this `wxc-exec` was built against (baked in at compile time from the
+    /// SDK NuGet's `GENERATION_INFO.toml`). Surfaces as
+    /// `MxcError::backend_unavailable`.
+    IncompatibleVersion(String),
 }
 
 impl std::fmt::Display for IsolationSessionError {
@@ -37,6 +43,9 @@ impl std::fmt::Display for IsolationSessionError {
             }
             Self::Lifecycle(msg) => write!(f, "Isolation Session lifecycle error: {}", msg),
             Self::Stale(msg) => write!(f, "Isolation Session stale id: {}", msg),
+            Self::IncompatibleVersion(msg) => {
+                write!(f, "Isolation Session incompatible version: {}", msg)
+            }
         }
     }
 }
@@ -103,6 +112,7 @@ pub(super) fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
         IsolationSessionError::ServiceUnavailable(_) => MxcError::backend_unavailable(message),
         IsolationSessionError::Lifecycle(_) => MxcError::backend_error(message),
         IsolationSessionError::Stale(_) => MxcError::stale_id(message),
+        IsolationSessionError::IncompatibleVersion(_) => MxcError::backend_unavailable(message),
     }
 }
 
@@ -128,6 +138,10 @@ mod tests {
         assert_eq!(
             map_lifecycle_error(IsolationSessionError::Stale("x".into())).code,
             MxcErrorCode::StaleId,
+        );
+        assert_eq!(
+            map_lifecycle_error(IsolationSessionError::IncompatibleVersion("x".into())).code,
+            MxcErrorCode::BackendUnavailable,
         );
     }
 

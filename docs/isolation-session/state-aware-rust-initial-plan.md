@@ -228,6 +228,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 |---|---|---|
 | `Policy(...)` | `policy_validation` | Caller-supplied policy field that this phase does not accept — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot). |
 | `ServiceUnavailable(...)` | `backend_unavailable` | `IsoSessionOps` activation failure: `IsoSessionApp.dll` not registered, or `Feature_IsoBrokerSessionApis` disabled at the OS-side. HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
+| `IncompatibleVersion(...)` | `backend_unavailable` | The installed IsoSession runtime instance (the `…\Agentic Runtime\<instance>` folder named by `MXC_ISOSESSION_RUNTIME_DIR`) does not match the instance this `wxc-exec` was built against (baked in at compile time from the SDK NuGet's `GENERATION_INFO.toml`). Checked in `regfree::check_instance_compatibility` before activation. Skipped when no instance was baked in or no runtime dir is configured. |
 | `Stale(...)` | `stale_id` | OS-side `AgentManager::FindActiveAgentUserByProvisionId` returns `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the `provisionId` is missing from both the in-memory cache and the persisted registry. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other HRESULT from a lifecycle op. The error message embeds the operation name, HRESULT, OS-side message, and remediation hint where present. |
 

@@ -58,6 +58,13 @@ fn to_iso_config_id(value: IsolationSessionConfigurationId) -> IsoSessionConfigI
 
 /// Activates the in-proc `IsoSessionOps` factory and returns the instance.
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
+    // Fail fast if the installed IsoSession runtime instance does not match the
+    // instance this wxc-exec was built against (baked in from the SDK NuGet at
+    // compile time). No-op when no instance was baked in or no runtime dir is
+    // configured. Runs before any activation so a version skew surfaces as a
+    // clear IncompatibleVersion error rather than an opaque activation HRESULT.
+    super::regfree::check_instance_compatibility()?;
+
     // Establish reg-free WinRT activation from MXC_ISOSESSION_RUNTIME_DIR, if
     // set, so IsoSessionApp.dll / IsoSessionClient.dll resolve from the known
     // relocatable location instead of System32. No-op when the var is unset.

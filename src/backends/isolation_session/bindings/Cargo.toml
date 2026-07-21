@@ -15,4 +15,5 @@ windows = { workspace = true }
 
 [build-dependencies]
 semver = "1"
+sha2 = "0.10"
 zip = "2"

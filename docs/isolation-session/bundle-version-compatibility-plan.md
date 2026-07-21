@@ -7,8 +7,8 @@ The IsolationSession implementation binaries (`IsoSessionApp.dll`,
 `IsoSessionProxyStub.dll`, `IsoSessionInstaller.exe`, `IsoSession.manifest`) do
 **not** live in `System32`. They ship out-of-band — via an MSI (or the
 `poc-assemble-2606.ps1` PoC) — into a runtime folder such as
-`%ProgramFiles%\Microsoft\Agentic Runtime\2606`. Multiple runtime versions can
-coexist, each identified by an **instance string** (e.g. `"2606"`).
+`%ProgramFiles%\Microsoft\Agentic Runtime\2026.06`. Multiple runtime versions can
+coexist, each identified by an **instance string** (e.g. `"2026.06"`).
 
 `wxc-exec.exe` is built against a *metadata-only* NuGet
 (`Microsoft.Windows.AI.IsolationSession.SDK.<version>.nupkg`) that records which
@@ -24,27 +24,27 @@ at build time by the NuGet MXC compiles against** — the act of building *is* t
 binding.
 
 The metadata-only NuGet
-(`Microsoft.Windows.AI.IsolationSession.SDK.0.2606.0.nupkg`, 24,777 B) contains:
+(`Microsoft.Windows.AI.IsolationSession.SDK.0.202606.0.nupkg`) contains:
 
 | File | Role |
 |---|---|
 | `metadata/windows.ai.isolationsession.winmd` | Official WinRT metadata — regeneration input for `bindings.rs` |
 | `metadata/windows.ai.isolationsession.preview.winmd` | Preview metadata (the surface MXC currently calls) |
 | `metadata/GENERATION_INFO.toml` | **Provenance + the `instance` identity** — the only file a normal build reads |
-| `*.nuspec` | Package manifest; `<version>` (`0.2606.0`) encodes the instance in its minor field |
+| `*.nuspec` | Package manifest; `<version>` (`0.202606.0`) encodes the **dot-stripped** instance in its minor field (`2026.06` → `202606`) |
 | `README.md`, NuGet plumbing | Docs / packaging |
 
 It ships **no implementation DLLs**. The runtime binaries
 (`IsoSessionApp.dll`, …, `IsoSession.manifest`) are delivered out-of-band by the
-matching runtime MSI into `%ProgramFiles%\Microsoft\Agentic Runtime\2606`.
+matching runtime MSI into `%ProgramFiles%\Microsoft\Agentic Runtime\2026.06`.
 
 The `instance` identity is stamped by the OS repo's `pack.ps1` into
 `metadata/GENERATION_INFO.toml`:
 
 ```toml
 target_windows_crate = "0.62"   # gates the windows crate (build.rs uses this today)
-instance     = "2606"           # <- THE runtime identity this metadata pairs with
-runtime_dir  = "%ProgramFiles%\\Microsoft\\Agentic Runtime\\2606"
+instance     = "2026.06"        # <- THE runtime identity this metadata pairs with
+runtime_dir  = "%ProgramFiles%\\Microsoft\\Agentic Runtime\\2026.06"
 winmd_sha256 = "A308955792326C187..."
 generated_utc = "2026-06-29T17:25:56Z"
 ```
@@ -52,17 +52,17 @@ generated_utc = "2026-06-29T17:25:56Z"
 Its own comment states the role: *"Runtime identity this metadata is versioned
 with. Selects which MSI-installed runtime folder MXC binds at runtime."* The
 nuspec echoes it: *"Version tracks the IsoSession API/runtime identity (the
-'2606' folder/instance). Bump in lockstep with the matching MSI runtime."*
+'2026.06' folder/instance). Bump in lockstep with the matching MSI runtime."*
 
 So the mapping flows like this — established at build, verified at runtime:
 
 ```
-NuGet (instance = "2606")
-        │  build.rs reads it, bakes ISOSESSION_INSTANCE=2606 into the binary
+NuGet (instance = "2026.06")
+        │  build.rs reads it, bakes ISOSESSION_INSTANCE=2026.06 into the binary
         ▼
-wxc-exec.exe  ── carries "I was built for 2606" ──┐
+wxc-exec.exe  ── carries "I was built for 2026.06" ──┐
                                                   │ runtime string compare
-Installed runtime MSI -> ...\Agentic Runtime\2606 ┘
+Installed runtime MSI -> ...\Agentic Runtime\2026.06 ┘
 ```
 
 Because the contract is strict 1:1 (one NuGet ⇄ one instance), the runtime check
@@ -88,13 +88,13 @@ The compatibility check builds on top of design that has already landed:
   `IsoSessionApp.dll` from that folder, and obtains the activation factory
   directly. `manager::check_service_available_and_activate()` already calls it.
 - **The coupling is the instance identity string, not a semver.** The NuGet
-  records `instance = "2606"` and `runtime_dir =
-  %ProgramFiles%\Microsoft\Agentic Runtime\2606`. The `<instance>` string — not
+  records `instance = "2026.06"` and `runtime_dir =
+  %ProgramFiles%\Microsoft\Agentic Runtime\2026.06`. The `<instance>` string — not
   the MXC package version — selects the runtime folder. Build and runtime are
   bumped in lockstep but the instance string is an OS/runtime identity, distinct
   from MXC's `CARGO_PKG_VERSION`.
 - Runtime identity additionally lives **inside** `IsoSession.manifest` as an
-  embedded `<iso:instance name="2606">` element (the last child of
+  embedded `<iso:instance name="2026.06">` element (the last child of
   `<assembly>`), so the same file drives reg-free activation and names the
   instance.
 
@@ -107,24 +107,33 @@ mismatch.
 ## Decisions
 
 1. **Compatibility model:** strict exact match on the **instance identity
-   string** (e.g. `"2606"`), not the MXC package version.
+   string** (e.g. `"2026.06"`), not the MXC package version.
 2. **Build-side "expected" instance:** `bindings/build.rs` reads `instance` from
    the NuGet's `metadata/GENERATION_INFO.toml` (same parse path it already uses
    for `target_windows_crate`) and emits it as a compile-time constant
    (`cargo:rustc-env=ISOSESSION_INSTANCE=<instance>`), read at runtime via
    `option_env!`.
-3. **Runtime-side "actual" instance:** derive from `MXC_ISOSESSION_RUNTIME_DIR`
-   — the leaf folder name is the instance (`…\Agentic Runtime\2606` → `2606`),
-   optionally cross-checked against `<iso:instance name="…">` in
-   `IsoSession.manifest` for a stronger guarantee.
+3. **Runtime-side "actual" instance:** derive from `MXC_ISOSESSION_RUNTIME_DIR`.
+   The authoritative source is `<iso:instance name="…">` in the runtime dir's
+   `IsoSession.manifest`; the leaf folder name (`…\Agentic Runtime\2026.06` →
+   `2026.06`) is only a fallback when the manifest carries no instance marker.
+   **Part 2 hardening:** when a runtime dir is configured it is validated
+   strictly — the directory must exist and contain an `IsoSession.manifest`;
+   a missing directory or missing manifest is a hard `IncompatibleVersion`
+   error, not a silent skip. This closes the spoof where renaming a stub leaf
+   folder could satisfy a leaf-name-only comparison.
 4. **Discovery:** reuse `regfree.rs::RUNTIME_DIR_ENV`
    (`MXC_ISOSESSION_RUNTIME_DIR`). No `current_exe()` fallback.
 5. **Scope:** add the instance compatibility **check** only — activation and DLL
    loading are already implemented in `regfree.rs`.
-6. **Tolerant degradation:** if the expected instance is unknown (source-only
-   build with no `instance` in the fallback TOML) **or** the runtime dir is
-   unset, skip the check (`Ok(())`) — preserving today's behavior. Only a
-   *present-but-mismatched* runtime is an error.
+6. **Tolerant degradation (bounded):** if the expected instance is unknown
+   (source-only build with no `instance` in the fallback TOML) **or** the
+   runtime dir is unset, skip the check (`Ok(())`) — preserving today's
+   behavior. But once a runtime dir *is* configured, the check is strict:
+   a non-existent directory, a missing `IsoSession.manifest`, or a
+   present-but-mismatched instance are all errors. (This is intentionally
+   stricter than reg-free activation, which silently degrades on a missing
+   manifest; the compatibility gate must not.)
 
 ## Build-time: taking the *correct* NuGet dependency
 
@@ -142,7 +151,9 @@ following gates close the "wrong package" gaps:
    on more than one rather than picking arbitrarily by filesystem order.
 2. **Triangulate the instance.** Parse the `instance` from the TOML, the
    `<version>` from the nuspec, and the version embedded in the nupkg filename
-   (`…SDK.0.2606.0.nupkg`), and **fail the build if they disagree**. This is what
+   (`…SDK.0.202606.0.nupkg`), and **fail the build if they disagree** (the
+   `instance` compares dot-stripped: `2026.06` → `202606` = the version minor).
+   This is what
    makes the baked `ISOSESSION_INSTANCE` provably the package's declared identity
    (a renamed/repacked file can otherwise lie).
 3. **Verify `winmd_sha256`.** Hash the shipped winmd and compare to the
@@ -178,12 +189,17 @@ the package declares.
      override is never silent.
 2. **`regfree.rs`** — add:
    - `expected_instance() -> Option<&'static str>` = `option_env!("ISOSESSION_INSTANCE")`.
-   - `runtime_instance(dir) -> Option<String>` = trimmed leaf folder name of the
-     runtime dir (optionally validated against `<iso:instance name>` in
-     `IsoSession.manifest`).
-   - `check_instance_compatibility() -> Result<(), IsolationSessionError>`:
-     unset runtime dir or unknown expected → `Ok(())`; both known and unequal →
-     `IncompatibleVersion` naming both instances.
+   - `read_manifest_text(dir)` — BOM-aware read of `IsoSession.manifest`.
+   - `parse_manifest_instance(xml) -> Option<String>` — extract `name` from the
+     `<iso:instance …>` element only (ignoring `<assemblyIdentity>`/`<file>`).
+   - `runtime_instance_from_dir(dir) -> Option<String>` = trimmed leaf folder
+     name (fallback when the manifest carries no instance marker).
+   - `evaluate_instance_compatibility(expected, runtime_dir)`: unset runtime dir
+     or unknown expected → `Ok(())`; a configured runtime dir must **exist** and
+     contain an **`IsoSession.manifest`** (else `IncompatibleVersion`); actual =
+     manifest instance or leaf fallback; unequal → `IncompatibleVersion` naming
+     both instances.
+   - `check_instance_compatibility()` — thin wrapper reading env + build const.
 3. **`manager.rs`** — call `check_instance_compatibility()` at the top of
    `check_service_available_and_activate()`, *before* `ensure_regfree_activation()`
    / `activate_from_runtime_dir()`. This single insertion point covers one-shot
@@ -226,13 +242,17 @@ No new `bundle.rs` module, no `serde_json` dependency, no
 
 ## Tests
 
-**Rust (CI-safe — pure string/path logic, no DLL)**
+**Rust (CI-safe — pure string/path + temp-dir logic, no DLL)**
 - `regfree.rs` `#[cfg(test)]`:
-  - leaf-name extraction from a runtime dir (`…\Agentic Runtime\2606` → `2606`);
-  - expected == actual → `Ok`;
-  - expected != actual → `IncompatibleVersion`;
-  - unset runtime-dir env → `Ok` (no behavior change);
-  - unknown expected instance → `Ok` (tolerant degradation).
+  - `parse_manifest_instance`: extracts `<iso:instance name>`; ignores
+    `<assemblyIdentity name>` / `<file name>`; tolerates the `<?xml?>` prolog;
+    both quote styles.
+  - `attr_value`: matches a standalone `name` attribute; rejects `filename`.
+  - `read_manifest_text`: UTF-8 and UTF-16 (BOM) manifests.
+  - strict `evaluate_instance_compatibility` (temp-dir based): match → `Ok`;
+    mismatch → `IncompatibleVersion`; **non-existent dir → error**; **missing
+    manifest → error**; leaf-name fallback when manifest has no instance;
+    unset runtime-dir env → `Ok`; unknown expected instance → `Ok`.
 - `error.rs`: `IncompatibleVersion` → `BackendUnavailable` mapping.
 
 **Build-script behavior** (exercised by the CI gate + a successful build)

@@ -1,7 +1,41 @@
-# Provenance information for the generated isolation_session_bindings crate.
-# Updated manually after regenerating the bindings; verified by the bindings crate's build.rs.
+# GENERATION_INFO.toml
+#
+# Provenance for the Windows.AI.IsolationSession Rust bindings that MXC
+# (wxc-exec) compiles against. This is the ONLY file MXC's bindings build.rs
+# reads on a normal build -- it compares `target_windows_crate` (major.minor)
+# against the workspace `windows` crate in Cargo.lock and panics if they drift,
+# forcing a regeneration. The .winmd shipped beside this file is the input used
+# to regenerate `bindings.rs`; it is NOT consumed by an ordinary `cargo build`.
+#
+# Consumers extract this file to:
+#   external/windows-sdk/isolation-session/GENERATION_INFO.toml
+#
+# This is a TEMPLATE checked into the OS repo. pack.ps1 stamps the @PLACEHOLDER@
+# values from the live build output at pack time; the .winmd binaries are never
+# committed to the OS repo (they are build artifacts, mirroring MXC, which
+# commits bindings.rs + this provenance but not the winmd).
 
-[tool]
-windows_bindgen_version = "0.62.1"
+# WinRT API metadata this binding set was generated from.
+winmd = "windows.ai.isolationsession.winmd"
+winmd_preview = "windows.ai.isolationsession.preview.winmd"
+
+# The `windows` crate major.minor the generated bindings target. windows-bindgen
+# X.Y emits code for the `windows` X.Y crate, so a regenerator must use a
+# windows-bindgen whose major.minor matches this. build.rs enforces this.
 target_windows_crate = "0.62"
-generated_date = "2026-05-08"
+
+# The windows-bindgen release used to (re)generate bindings.rs.
+windows_bindgen = "0.62.1"
+
+# Runtime identity this metadata is versioned with. Selects which MSI-installed
+# runtime folder MXC binds at runtime (the POC's MXC_ISOSESSION_RUNTIME_DIR).
+# The implementation binaries for this instance are delivered by the matching
+# runtime MSI -- NOT by this package.
+instance = "2026.06"
+runtime_dir = "%ProgramFiles%\\Microsoft\\Agentic Runtime\\2026.06"
+
+# Stamped by pack.ps1 from the OS build output.
+os_build = "unknown"
+winmd_sha256 = "A308955792326C187652BB85B0C34DAD5C59A382498C3ED2AA268D1B95163F8B"
+generated_utc = "2026-06-29T17:25:56.1135031Z"
+
