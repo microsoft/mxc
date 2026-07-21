@@ -63,14 +63,16 @@ You are investigating the issue that triggered `/investigate`.
 
 ## Mandatory routing
 
-Do not create a pull request for an issue involving security, credentials,
-permissions, host isolation, containment behavior, schemas, generated SDK
-artifacts, production code, CI, dependencies, build scripts, versioning,
-releases, or publishing.
+Before assessing or classifying the issue, determine whether it is potentially
+security-sensitive. If it is, post only one minimal public routing comment that
+states public investigation is inappropriate and directs the reporter to
+`SECURITY.md`, then stop. Do not assess, classify, request diagnostics, create
+a draft PR, or repeat sensitive technical details.
 
-For a potentially security-sensitive issue, do not repeat sensitive technical
-details. State only that public investigation is inappropriate and direct the
-reporter to `SECURITY.md`.
+For a non-security issue involving credentials, permissions, host isolation,
+containment behavior, schemas, generated SDK artifacts, production code, CI,
+dependencies, build scripts, versioning, releases, or publishing, investigate
+and report normally but do not create a pull request.
 
 ## Investigation
 
@@ -80,22 +82,22 @@ reporter to `SECURITY.md`.
    - Use `insufficient information` only when inspecting the issue, relevant
      code, tests, and documentation leaves insufficient evidence to justify a
      classification.
-   - For `insufficient information`, use the trusted GitHub tool context to
-     identify and mention the issue author. Request reproduction steps, expected
-     and actual behavior, MXC version, OS and build, and sanitized logs. Do not
-     create a draft PR.
-   - Do not request public diagnostics for potentially security-sensitive
-    issues; follow the minimal routing rule instead.
-3. Classify it as exactly one of: `bug`, `documentation gap`, or
-   `design decision`.
+   - For `insufficient information`, first call the trusted GitHub tool to read
+     the triggering issue. Mention that issue's `user.login`, not the triggering
+     `actor` who ran `/investigate`; the actor may be a maintainer rather than
+     the reporter. Request reproduction steps, expected and actual behavior,
+     MXC version, OS and build, and sanitized logs. Do not create a draft PR.
+3. Use exactly one classification: `bug`, `documentation gap`, `design
+   decision`, `none - insufficient information`, or `none - no actionable
+   classification`.
    - If the report is ambiguous or requires a maintainer choice, classify it as
    `design decision` and state the specific missing decision.
    - If the assessment is `insufficient information`, classify it as
    `none - insufficient information`.
-   - If the assessment is `cannot reproduce` and the available repository
-   evidence supports none of the three classifications, say that no
-   classification is justified. Do not invent a classification, evidence, root
-   cause, or fix.
+   - If the assessment is `expected behavior` or `cannot reproduce` and the
+     available repository evidence supports none of the three classifications,
+     say that no classification is justified. Do not invent a classification,
+     evidence, root cause, or fix.
 4. Give concise repository evidence and one recommended maintainer next step.
 5. Post exactly one public comment using this structure:
 

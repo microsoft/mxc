@@ -50,8 +50,9 @@ repository's existing `issue-triage.md` pattern.
    `.github/copilot-instructions.md`, path-specific instructions, and any
    relevant `AGENTS.md` file.
 3. Determine whether the issue is potentially security-sensitive or concerns
-   an excluded area. If so, do not expose further technical detail in public
-   and do not create a pull request.
+   an excluded area. Security-sensitive issues stop here: post only a minimal
+   `SECURITY.md` routing comment and do not assess, classify, request
+   diagnostics, or create a pull request.
 4. Inspect the relevant source, tests, and documentation.
 5. Post one concise, fixed-format public comment containing:
    - assessment: `confirmed`, `expected behavior`, `insufficient information`,
