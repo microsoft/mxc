@@ -59,7 +59,15 @@ production configs and the dev schema when working on experimental features:
 
     "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
-        "capabilities": ["internetClient"]
+        "capabilities": ["internetClient"],
+        "captureDenials": {                // Windows-only: record the process's access
+            "mode": "block-and-log",       // "block-and-log" (default): access stays denied and
+                                           // is logged (deny-by-default preserved). "allow-and-log":
+                                           // access is allowed and logged (audit; relaxes
+                                           // deny-by-default, emits a security warning).
+            "outputPath": "C:\\logs\\denials.etl"  // attempts to a learning-mode ETL trace. The
+        }                                  // parent dir must already exist; omit outputPath
+                                           // for a managed per-run temp file.
     },
 
     "lxc": {                               // LXC-specific

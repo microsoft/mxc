@@ -8,10 +8,10 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
-    IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
-    PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig, TestFeatureConfig,
-    UiPolicy, WindowsSandboxConfig, WslcConfig,
+    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
+    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
+    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -592,6 +592,51 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
     }
 }
 
+/// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
+/// must be an absolute path whose parent directory already exists (the runner
+/// opens the file there when it seals the trace, under the caller's own
+/// identity). A relative path or a missing parent yields an actionable error.
+fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
+    let candidate = std::path::Path::new(path);
+    if !candidate.is_absolute() {
+        let msg = format!(
+            "processContainer.captureDenials.outputPath must be an absolute path: '{path}'"
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+    match candidate.parent() {
+        // A filesystem root ("/", "C:\\") has either no parent (`None`) or an
+        // empty parent, and cannot name a trace file.
+        None => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath must name a file, not a \
+                 directory root: '{path}'"
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        Some(parent) if parent.as_os_str().is_empty() => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath must name a file, not a \
+                 directory root: '{path}'"
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        Some(parent) if !parent.is_dir() => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath parent directory does not \
+                 exist: '{}'",
+                parent.display()
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        _ => Ok(()),
+    }
+}
+
 // `allow_missing_command` relaxes the `require_process == true` arms so that a
 // CLI command-line override (provided by the driver after parsing) can stand in
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
@@ -721,6 +766,28 @@ enforced; access denials are recorded for diagnostics.\n",
         // runner emits a security warning whenever it is present.
         if let Some(caps) = ac.capabilities {
             policy.capabilities.extend(caps);
+        }
+
+        // captureDenials (Windows denial capture). Presence enables capture: the
+        // runner records the process's ungranted access attempts to a
+        // learning-mode ETL trace. `mode` decides whether each recorded access is
+        // blocked (`block-and-log`, the default) or allowed (`allow-and-log`).
+        // The optional outputPath names where the trace is sealed; validate it
+        // eagerly so a bad path fails at parse time rather than deep in the runner.
+        if let Some(cd) = ac.capture_denials {
+            if let Some(path) = cd.output_path.as_deref() {
+                validate_capture_denials_output_path(path, logger)?;
+            }
+            let mode = match cd.mode {
+                Some(wire::CaptureDenialsMode::AllowAndLog) => CaptureDenialsMode::AllowAndLog,
+                Some(wire::CaptureDenialsMode::BlockAndLog) | None => {
+                    CaptureDenialsMode::BlockAndLog
+                }
+            };
+            policy.capture_denials = Some(CaptureDenialsConfig {
+                mode,
+                output_path: cd.output_path,
+            });
         }
 
         // BaseProcessContainer-specific UI config.
@@ -1718,6 +1785,171 @@ mod tests {
         assert_eq!(req.policy.capabilities[0], "internetClient");
         assert_eq!(req.policy.capabilities[1], "privateNetworkClientServer");
         assert_eq!(req.policy.capabilities[2], "documentsLibrary");
+    }
+
+    #[test]
+    fn capture_denials_absent_leaves_policy_none() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.capture_denials.is_none());
+    }
+
+    #[test]
+    fn capture_denials_presence_enables_capture_without_path() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req
+            .policy
+            .capture_denials
+            .expect("captureDenials presence should enable capture");
+        assert!(cd.output_path.is_none());
+        // Omitting `mode` defaults to the safe block-and-log behavior.
+        assert_eq!(cd.mode, CaptureDenialsMode::BlockAndLog);
+    }
+
+    #[test]
+    fn capture_denials_mode_block_and_log_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "block-and-log"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(cd.mode, CaptureDenialsMode::BlockAndLog);
+    }
+
+    #[test]
+    fn capture_denials_mode_allow_and_log_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "allow-and-log"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(cd.mode, CaptureDenialsMode::AllowAndLog);
+    }
+
+    #[test]
+    fn capture_denials_unknown_mode_rejected() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "audit"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("an unknown captureDenials mode must be rejected");
+        // serde surfaces the accepted variants; the message must name both so
+        // the error is actionable.
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("block-and-log") && msg.contains("allow-and-log"),
+            "error should list the valid modes: {msg}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_accepts_valid_absolute_output_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("denials.etl");
+        let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(
+            cd.output_path.as_deref(),
+            Some(path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn capture_denials_relative_output_path_rejected() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"outputPath": "relative/denials.etl"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("a relative outputPath must be rejected");
+        assert!(
+            format!("{err:?}").contains("absolute"),
+            "error should mention the absolute-path requirement: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_missing_parent_dir_rejected() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Parent directory `nonexistent` is never created.
+        let path = dir.path().join("nonexistent").join("denials.etl");
+        let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("an outputPath whose parent is missing must be rejected");
+        assert!(
+            format!("{err:?}").contains("parent directory does not"),
+            "error should mention the missing parent directory: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_filesystem_root_output_path_rejected() {
+        // A bare filesystem root has no parent (`Path::parent()` == None) and
+        // cannot name a trace file. Use a platform-appropriate root.
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        let root_json = serde_json::to_string(root).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {root_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("a filesystem-root outputPath must be rejected");
+        assert!(
+            format!("{err:?}").contains("directory root"),
+            "error should mention the directory-root rejection: {err:?}"
+        );
     }
 
     #[test]

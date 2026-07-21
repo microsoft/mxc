@@ -556,6 +556,38 @@ pub struct ContainerPolicy {
     pub ui: UiPolicy,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+    /// Windows denial capture (from `processContainer.captureDenials`). When
+    /// `Some`, the runner records the sandboxed process's ungranted access
+    /// attempts to a learning-mode ETL trace. `None` disables capture.
+    pub capture_denials: Option<CaptureDenialsConfig>,
+}
+
+/// Windows denial-capture settings (from `processContainer.captureDenials`).
+/// The presence of this struct on [`ContainerPolicy::capture_denials`] enables
+/// capture; the runner records the sandboxed process's ungranted access
+/// attempts to a learning-mode ETL trace. [`CaptureDenialsConfig::mode`]
+/// decides whether each recorded access is blocked (default) or allowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureDenialsConfig {
+    /// How each ungranted access check is handled while it is recorded.
+    /// Defaults to [`CaptureDenialsMode::BlockAndLog`].
+    pub mode: CaptureDenialsMode,
+    /// Absolute path where the denial ETL trace is written. When `None`, the
+    /// runner falls back to a managed per-run temporary file.
+    pub output_path: Option<String>,
+}
+
+/// How `captureDenials` handles each ungranted access check while recording it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureDenialsMode {
+    /// The access stays denied and the denial is recorded; deny-by-default
+    /// containment is preserved. Safe default.
+    #[default]
+    BlockAndLog,
+    /// The access is allowed and recorded (audit mode); deny-by-default is
+    /// relaxed for the run. Security-sensitive — the runner warns.
+    AllowAndLog,
 }
 
 /// Port mapping for host↔container port forwarding.

@@ -38,6 +38,25 @@ export interface BaseProcessUi {
 }
 
 /**
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.
+ */
+export interface CaptureDenials {
+  /**
+   * How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block-and-log` when omitted.
+   */
+  mode?: CaptureDenialsMode | null;
+  /**
+   * Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist.
+   */
+  outputPath?: string | null;
+}
+
+/**
+ * How `captureDenials` handles each ungranted access check while recording it.
+ */
+export type CaptureDenialsMode = "block-and-log" | "allow-and-log";
+
+/**
  * Clipboard access level.
  */
 export type ClipboardPolicy = "none" | "read" | "write" | "all";
@@ -299,6 +318,10 @@ export interface ProcessContainer {
    * AppContainer capabilities (e.g. `internetClient`, `registryRead`).
    */
   capabilities?: string[] | null;
+  /**
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the learning-mode OS API.
+   */
+  captureDenials?: CaptureDenials | null;
   /**
    * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is only enabled via the `--audit` CLI flag.
    */
