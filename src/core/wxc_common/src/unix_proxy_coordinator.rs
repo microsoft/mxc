@@ -1,20 +1,22 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Coordinator for the Linux network proxy used by the Bubblewrap backend.
+//! Coordinator for the cooperative network proxy used by the Bubblewrap
+//! (Linux) and Seatbelt (macOS) backends.
 //!
 //! # Why this exists
 //!
-//! The Bubblewrap backend wants to enforce `allowedHosts` / `blockedHosts`
+//! Both backends want to route sandboxed traffic through an HTTP proxy
 //! **without** root or `CAP_NET_ADMIN`. The Windows AppContainer proxy
 //! coordinator achieves enforcement through WinHTTP policy (set by an
-//! elevated shim). On Linux, the equivalent without privilege is a
+//! elevated shim). On Unix the equivalent without privilege is a
 //! **cooperative env-var proxy**:
 //!
 //! 1. The coordinator launches an unprivileged HTTP proxy process (either a
-//!    user-supplied address, or the bundled `linux-test-proxy` binary).
-//! 2. The Bubblewrap command builder sets `HTTP_PROXY` / `HTTPS_PROXY` /
-//!    `NO_PROXY` env vars inside the sandbox.
+//!    user-supplied address, or the bundled `unix-test-proxy` binary).
+//! 2. The backend's command builder / runner sets `HTTP_PROXY` /
+//!    `HTTPS_PROXY` env vars inside the sandbox (Bubblewrap via `--setenv`,
+//!    Seatbelt via the child's cleared-then-populated environment).
 //! 3. Cooperative apps (curl, requests, etc.) honor the env vars and the
 //!    proxy applies allow/block filtering; non-cooperative apps reaching
 //!    out via raw sockets bypass enforcement (documented limitation).
@@ -24,17 +26,18 @@
 //! - **Privilege-free**: no iptables, no namespaces, no setuid binaries.
 //! - **Bind address is configurable** to allow future LXC reuse (LXC has
 //!   its own netns, so the proxy needs to bind on the bridge gateway IP).
-//!   Bubblewrap shares the host netns and passes `"127.0.0.1"`.
-//! - **Atomic ready-file**: `linux-test-proxy` writes `<file>.tmp` and
+//!   Bubblewrap and Seatbelt share the host netns and pass `"127.0.0.1"`.
+//! - **Atomic ready-file**: `unix-test-proxy` writes `<file>.tmp` and
 //!   renames into place to eliminate partial-read races.
-//! - **PR_SET_PDEATHSIG** in the child ensures the proxy dies if
-//!   `lxc-exec` crashes (orphan reaping safety net).
+//! - **Parent pipe**: the child watches stdin for EOF so it exits if the
+//!   executor crashes, on both Linux and macOS.
 //! - **`Drop` is silent**: never writes to stderr or `Logger`, because
 //!   destructors can run at unpredictable times (e.g. during panic
-//!   propagation) and noisy drops would corrupt the JSON envelope on
-//!   `lxc-exec`'s stderr.
+//!   propagation) and noisy drops would corrupt the JSON envelope on the
+//!   executor's stderr.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,11 +84,7 @@ fn create_private_temp_dir(unique_id: &str) -> Result<PathBuf, WxcError> {
     })?;
 
     // Best-effort 0700 chmod so other users cannot snoop the ready file.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-    }
+    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
 
     Ok(dir)
 }
@@ -116,7 +115,7 @@ fn resolve_sibling_binary(name: &str) -> Result<PathBuf, WxcError> {
     }
 }
 
-/// Bookkeeping for a running `linux-test-proxy` child process.
+/// Bookkeeping for a running `unix-test-proxy` child process.
 struct TestProxyChild {
     child: Child,
     ready_file: PathBuf,
@@ -157,26 +156,24 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> bool {
     }
 }
 
-/// Coordinator for the network proxy used by the Bubblewrap backend.
+/// Coordinator for the network proxy used by Unix backends.
 ///
 /// Cooperative model: launches an unprivileged HTTP proxy (either external
-/// or the bundled `linux-test-proxy`), and the caller is responsible for
+/// or the bundled `unix-test-proxy`), and the caller is responsible for
 /// setting `HTTP_PROXY` / `HTTPS_PROXY` env vars inside the sandbox.
 ///
 /// The coordinator is **not** active until [`start`](Self::start) succeeds,
 /// and is automatically cleaned up by [`stop`](Self::stop) or `Drop`.
-pub struct LinuxProxyCoordinator {
+#[derive(Default)]
+pub struct UnixProxyCoordinator {
     proxy_address: Option<ProxyAddress>,
     test_proxy: Option<TestProxyChild>,
 }
 
-impl LinuxProxyCoordinator {
+impl UnixProxyCoordinator {
     /// Create an inactive coordinator. Call [`start`](Self::start) to launch.
     pub fn new() -> Self {
-        Self {
-            proxy_address: None,
-            test_proxy: None,
-        }
+        Self::default()
     }
 
     /// Returns `true` once a proxy has been started.
@@ -192,7 +189,7 @@ impl LinuxProxyCoordinator {
     /// Activate the proxy.
     ///
     /// - If `proxy_config.builtin_test_server` is `true`, launches the
-    ///   bundled `linux-test-proxy` binary on `bind_address:0` and reads
+    ///   bundled `unix-test-proxy` binary on `bind_address:0` and reads
     ///   the assigned port from the proxy's ready file. `allowed_hosts`,
     ///   `blocked_hosts`, and `default_policy` are passed to the test
     ///   proxy as `--allow-host` / `--block-host` / `--default-policy`
@@ -218,7 +215,7 @@ impl LinuxProxyCoordinator {
     ) -> Result<(), WxcError> {
         if self.is_active() {
             return Err(WxcError::NetworkProxy(
-                "Linux network proxy is already active".into(),
+                "Unix network proxy is already active".into(),
             ));
         }
 
@@ -245,17 +242,13 @@ impl LinuxProxyCoordinator {
             ));
         };
 
+        logger.log_line(&format!("Unix network proxy active: {}", address.to_url(),));
         self.proxy_address = Some(address);
-
-        logger.log_line(&format!(
-            "Linux network proxy active: {}",
-            self.proxy_address.as_ref().unwrap().to_url(),
-        ));
 
         Ok(())
     }
 
-    /// Spawn `linux-test-proxy` and read its port from the ready file.
+    /// Spawn `unix-test-proxy` and read its port from the ready file.
     ///
     /// On any post-spawn error this method kills the child, waits briefly,
     /// and removes the temp directory before returning -- callers must
@@ -269,7 +262,7 @@ impl LinuxProxyCoordinator {
         logger: &mut Logger,
     ) -> Result<u16, WxcError> {
         logger.log_line(
-            "WARNING: Starting builtin linux-test-proxy -- this is for integration \
+            "WARNING: Starting builtin unix-test-proxy -- this is for integration \
              testing only, NOT for production use.",
         );
 
@@ -277,7 +270,7 @@ impl LinuxProxyCoordinator {
         let temp_dir = create_private_temp_dir(&unique_id)?;
         let ready_file = temp_dir.join("ready.port");
 
-        let proxy_exe = match resolve_sibling_binary("linux-test-proxy") {
+        let proxy_exe = match resolve_sibling_binary("unix-test-proxy") {
             Ok(path) => path,
             Err(err) => {
                 remove_temp_dir(&temp_dir);
@@ -303,10 +296,11 @@ impl LinuxProxyCoordinator {
         for host in block_hosts {
             cmd.arg("--block-host").arg(host);
         }
-        // Use a null stderr to avoid corrupting the JSON envelope that
-        // lxc-exec writes on its own stderr stream (the proxy may emit
-        // diagnostic lines).
-        cmd.stdin(Stdio::null())
+        // Keep a private stdin pipe open for the child's parent-lifetime
+        // watcher. If the executor exits unexpectedly, EOF tells the proxy to
+        // shut down. Null stdout/stderr avoid corrupting the executor's JSON
+        // envelope with proxy diagnostics.
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
@@ -315,7 +309,7 @@ impl LinuxProxyCoordinator {
             Err(err) => {
                 remove_temp_dir(&temp_dir);
                 return Err(WxcError::NetworkProxy(format!(
-                    "Failed to launch linux-test-proxy: {}",
+                    "Failed to launch unix-test-proxy: {}",
                     err
                 )));
             }
@@ -342,7 +336,7 @@ impl LinuxProxyCoordinator {
         });
 
         logger.log_line(&format!(
-            "linux-test-proxy listening on {}:{}",
+            "unix-test-proxy listening on {}:{}",
             bind_address, port
         ));
 
@@ -354,13 +348,13 @@ impl LinuxProxyCoordinator {
     pub fn stop(&mut self, logger: &mut Logger) {
         if let Some(mut tp) = self.test_proxy.take() {
             let pid = tp.child.id();
-            logger.log_line("Stopping linux-test-proxy...");
+            logger.log_line("Stopping unix-test-proxy...");
             send_sigterm(pid);
             if wait_with_timeout(&mut tp.child, STOP_TIMEOUT) {
-                logger.log_line("linux-test-proxy exited.");
+                logger.log_line("unix-test-proxy exited.");
             } else {
                 logger
-                    .log_line("Warning: linux-test-proxy did not exit within 5s; sending SIGKILL.");
+                    .log_line("Warning: unix-test-proxy did not exit within 5s; sending SIGKILL.");
                 send_sigkill(pid);
                 let _ = tp.child.wait();
             }
@@ -371,13 +365,7 @@ impl LinuxProxyCoordinator {
     }
 }
 
-impl Default for LinuxProxyCoordinator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for LinuxProxyCoordinator {
+impl Drop for UnixProxyCoordinator {
     /// Silent best-effort cleanup if the coordinator is still active at
     /// drop time. **Never** writes to stderr or `Logger` because the drop
     /// may run during panic unwinding and we must not corrupt the JSON
@@ -408,14 +396,14 @@ fn poll_for_port(ready_file: &Path, child: &mut Child) -> Result<u16, WxcError> 
         match child.try_wait() {
             Ok(Some(status)) => {
                 return Err(WxcError::NetworkProxy(format!(
-                    "linux-test-proxy exited before becoming ready (status: {:?})",
+                    "unix-test-proxy exited before becoming ready (status: {:?})",
                     status
                 )));
             }
             Ok(None) => {}
             Err(err) => {
                 return Err(WxcError::NetworkProxy(format!(
-                    "Failed to query linux-test-proxy status: {}",
+                    "Failed to query unix-test-proxy status: {}",
                     err
                 )));
             }
@@ -428,7 +416,7 @@ fn poll_for_port(ready_file: &Path, child: &mut Child) -> Result<u16, WxcError> 
 
         if Instant::now() >= deadline {
             return Err(WxcError::NetworkProxy(format!(
-                "Timed out waiting for linux-test-proxy ready file ({:?})",
+                "Timed out waiting for unix-test-proxy ready file ({:?})",
                 READY_TIMEOUT
             )));
         }
@@ -449,12 +437,12 @@ fn poll_for_port(ready_file: &Path, child: &mut Child) -> Result<u16, WxcError> 
     //    port is useless to the caller and must surface as an error.
     match child.try_wait() {
         Ok(Some(status)) => Err(WxcError::NetworkProxy(format!(
-            "linux-test-proxy exited immediately after publishing port (status: {:?})",
+            "unix-test-proxy exited immediately after publishing port (status: {:?})",
             status
         ))),
         Ok(None) => Ok(port),
         Err(err) => Err(WxcError::NetworkProxy(format!(
-            "Failed to re-check linux-test-proxy status: {}",
+            "Failed to re-check unix-test-proxy status: {}",
             err
         ))),
     }
@@ -470,20 +458,20 @@ mod tests {
 
     #[test]
     fn new_coordinator_is_inactive() {
-        let c = LinuxProxyCoordinator::new();
+        let c = UnixProxyCoordinator::new();
         assert!(!c.is_active());
         assert!(c.address().is_none());
     }
 
     #[test]
     fn default_coordinator_is_inactive() {
-        let c = LinuxProxyCoordinator::default();
+        let c = UnixProxyCoordinator::default();
         assert!(!c.is_active());
     }
 
     #[test]
     fn start_with_disabled_proxy_is_noop() {
-        let mut c = LinuxProxyCoordinator::new();
+        let mut c = UnixProxyCoordinator::new();
         let mut logger = make_logger();
         let cfg = ProxyConfig::default();
         assert!(!cfg.is_enabled());
@@ -501,7 +489,7 @@ mod tests {
 
     #[test]
     fn start_with_external_address_activates() {
-        let mut c = LinuxProxyCoordinator::new();
+        let mut c = UnixProxyCoordinator::new();
         let mut logger = make_logger();
         let cfg = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 8888)),
@@ -528,7 +516,7 @@ mod tests {
 
     #[test]
     fn start_is_rejected_if_already_active() {
-        let mut c = LinuxProxyCoordinator::new();
+        let mut c = UnixProxyCoordinator::new();
         let mut logger = make_logger();
         let cfg = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 9001)),
@@ -562,7 +550,7 @@ mod tests {
 
     #[test]
     fn stop_is_idempotent() {
-        let mut c = LinuxProxyCoordinator::new();
+        let mut c = UnixProxyCoordinator::new();
         let mut logger = make_logger();
         c.stop(&mut logger);
         c.stop(&mut logger);
@@ -606,7 +594,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("sleep is available on Linux test hosts");
+            .expect("sleep is available on Unix test hosts");
 
         // Override the timeout: use a short window for the test by
         // temporarily inlining the polling logic.
@@ -651,7 +639,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("true is available on Linux test hosts");
+            .expect("true is available on Unix test hosts");
 
         // Give the child a moment to exit.
         std::thread::sleep(Duration::from_millis(100));

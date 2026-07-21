@@ -1,0 +1,20 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "wslc-denied-masking",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "V=/mnt/c/wslcmask; if cat \"$V/visible/control.txt\" 2>/dev/null | grep -q VISIBLE_SECRET; then echo VISIBLE_OK; else echo VISIBLE_MISSING; fi; if cat \"$V/secret_file.txt\" 2>/dev/null | grep -q FILE_SECRET; then echo FILE_LEAK; else echo FILE_MASKED_OK; fi; if ls \"$V/secret_dir\" 2>/dev/null | grep -q .; then echo DIR_LEAK; else echo DIR_MASKED_OK; fi"
+  },
+  "filesystem": {
+    "readwritePaths": ["C:\\wslcmask\\visible"],
+    "deniedPaths": ["C:\\wslcmask\\secret_file.txt", "C:\\wslcmask\\secret_dir"]
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

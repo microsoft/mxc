@@ -893,12 +893,18 @@ impl WSLContainerRunner {
         // Denied-path overlap validation: WSLC's flat volume-mount surface has no
         // overlay primitive, so a deniedPaths entry nested under a mounted
         // (readwrite/readonly) parent cannot be masked and would stay accessible
+<<<<<<< HEAD
         // through the parent mount. A lexical tier catches `..`/case/whole-drive
         // spellings; a canonicalizing tier resolves symlink/junction/8.3/`\\?\`
         // aliases (including a not-yet-created deny under an aliased parent) and
         // fails closed on unresolvable paths. Reject such configs rather than
         // silently leaving the subtree exposed. Runs after object normalization
         // so it sees the already-tightened intents.
+=======
+        // through the parent mount. Reject such configs rather than silently
+        // leaving the subtree exposed. Runs after object normalization so it sees
+        // the already-tightened intents.
+>>>>>>> origin/main
         if let Err(msg) = policy_mapping::validate_denied_path_overlap(
             &request.policy.readwrite_paths,
             &request.policy.readonly_paths,
@@ -1360,6 +1366,7 @@ mod tests {
             response.error_message
         );
     }
+<<<<<<< HEAD
 
     #[test]
     fn run_rejects_denied_alias_via_junction() {
@@ -1461,4 +1468,6 @@ mod tests {
             response.error_message
         );
     }
+=======
+>>>>>>> origin/main
 }

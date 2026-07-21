@@ -97,11 +97,11 @@ jobs:
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }} -p plm
 
-      # linux_test_proxy is a separate workspace member, not a dep of lxc.
-      - name: Build linux-test-proxy
+      # unix_test_proxy is a separate workspace member, not a dep of lxc.
+      - name: Build unix-test-proxy
         working-directory: src
         run: cargo build --locked --release --target ${{ matrix.target }}
-             -p linux_test_proxy
+             -p unix_test_proxy
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
@@ -109,6 +109,6 @@ jobs:
           name: lxc-binaries-${{ matrix.target }}
           path: |
             src/target/${{ matrix.target }}/release/lxc-exec
-            src/target/${{ matrix.target }}/release/linux-test-proxy
+            src/target/${{ matrix.target }}/release/unix-test-proxy
           if-no-files-found: error
           retention-days: 1

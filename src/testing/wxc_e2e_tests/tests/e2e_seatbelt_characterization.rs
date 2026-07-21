@@ -138,6 +138,34 @@ fn seatbelt_applies_requested_env() {
     );
 }
 
+/// A configured `network.proxy` injects `HTTP_PROXY` / `HTTPS_PROXY` into the
+/// sandboxed child (the cooperative env-var proxy model, matching Bubblewrap).
+/// Uses the external `url` variant so no bundled proxy or `--allow-testing-features`
+/// flag is required — this characterizes the env-injection wiring end-to-end.
+#[test]
+fn seatbelt_injects_proxy_env_from_network_proxy() {
+    if !has_platform_exec() {
+        return;
+    }
+    let mut cfg = config(
+        "proxy-env",
+        "printf 'P=[%s] S=[%s]\\n' \"$HTTP_PROXY\" \"$HTTPS_PROXY\"",
+    );
+    cfg["network"] = json!({
+        "defaultPolicy": "block",
+        "proxy": { "url": "http://127.0.0.1:8080" }
+    });
+    let result = run_platform_config_value("seatbelt proxy env", &cfg, &[], None);
+    assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
+    assert!(
+        result
+            .combined_output()
+            .contains("P=[http://127.0.0.1:8080] S=[http://127.0.0.1:8080]"),
+        "expected proxy env vars injected into the child. Output:\n{}",
+        result.combined_output()
+    );
+}
+
 /// CHARACTERIZES CURRENT BEHAVIOR (regression guard).
 ///
 /// With an empty `process.cwd`, the Seatbelt exec path no longer inherits the

@@ -227,7 +227,7 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
 
 1. When `network.proxy` is set, the runner launches an unprivileged HTTP
    proxy on loopback (`127.0.0.1:N`). For tests, the bundled
-   `linux-test-proxy` binary is used (`builtinTestServer: true`,
+   `unix-test-proxy` binary is used (`builtinTestServer: true`,
    testing-only and gated behind `--allow-testing-features`); in production callers
    supply their own proxy via `localhost: <port>` or `url: <url>`.
 2. The sandbox is then started **without** `--unshare-net` so the sandbox

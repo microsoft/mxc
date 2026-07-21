@@ -218,6 +218,7 @@ impl NormalizedPath {
 /// object via symlink/hard link/bind) are additionally tightened at the runner
 /// by [`wxc_common::filesystem_object::normalize_object_conflicts`].
 ///
+<<<<<<< HEAD
 /// This is a **two-tier** check. Tier 1 is a structural, lexical pre-check (no
 /// disk access): paths are parsed with drive prefix and root kept distinct,
 /// case-folded (full Unicode), and `.`/`..` folded, so traversal spellings
@@ -254,11 +255,28 @@ impl NormalizedPath {
 /// canonicalization and the SDK mount (an alias could be swapped in between);
 /// fully closing it needs handle-based mounting the WSLC SDK does not expose, so
 /// it is likewise accepted.
+=======
+/// This is a **structural, lexical** pre-check (no disk access): paths are
+/// parsed with drive prefix and root kept distinct, case-folded (full Unicode),
+/// and `.`/`..` folded, so traversal spellings (`C:\proj\sub\..`), whole-drive
+/// mounts (`C:\`, `\`), and drive-relative spellings (`C:secrets`) are caught.
+/// It does **not** fold Unicode normalization forms, nor canonicalize on-disk
+/// aliases: symlinks, junctions, hard links, 8.3 short names, or `\\?\` prefixes
+/// that redirect a mounted subtree are not resolved here. Same-object aliasing
+/// *between two policy entries* is tightened separately by the D6 pass
+/// ([`wxc_common::filesystem_object::normalize_object_conflicts`]), which fails
+/// closed on unresolvable paths when `deniedPaths` are present; but a mounted
+/// parent whose subtree *reaches* a denied object via such an alias is covered
+/// by neither layer (full canonicalization is deferred). Treat this as
+/// defense-in-depth for the flat-mount overlay gap, not a traversal-and-alias
+/// complete deny.
+>>>>>>> origin/main
 pub fn validate_denied_path_overlap(
     readwrite_paths: &[String],
     readonly_paths: &[String],
     denied_paths: &[String],
 ) -> Result<(), String> {
+<<<<<<< HEAD
     validate_denied_path_overlap_with(
         readwrite_paths,
         readonly_paths,
@@ -291,10 +309,13 @@ fn validate_denied_path_overlap_with(
     denied_paths: &[String],
     resolve: impl Fn(&str) -> PathCanonical,
 ) -> Result<(), String> {
+=======
+>>>>>>> origin/main
     if denied_paths.is_empty() {
         return Ok(());
     }
 
+<<<<<<< HEAD
     let mounts: Vec<(&String, &str)> = readwrite_paths
         .iter()
         .map(|path| (path, "readwritePaths"))
@@ -352,6 +373,24 @@ fn validate_denied_path_overlap_with(
             };
             if NormalizedPath::parse(mount_resolved).contains_strictly(&denied_norm) {
                 return Err(overlap_error(denied, mounted, list_name, true));
+=======
+    for denied in denied_paths {
+        let denied_path = NormalizedPath::parse(denied);
+
+        for (mounted, list_name) in readwrite_paths
+            .iter()
+            .map(|path| (path, "readwritePaths"))
+            .chain(readonly_paths.iter().map(|path| (path, "readonlyPaths")))
+        {
+            if NormalizedPath::parse(mounted).contains_strictly(&denied_path) {
+                return Err(format!(
+                    "WSLC: deniedPaths entry '{denied}' is nested under {list_name} entry \
+                     '{mounted}'. WSLC mounts host paths as flat volumes and has no overlay \
+                     primitive to mask a subtree of a mounted path, so this deny cannot be \
+                     enforced — the path would remain accessible through the parent mount. \
+                     Remove the denied path, or stop mounting its parent."
+                ));
+>>>>>>> origin/main
             }
         }
     }
@@ -617,6 +656,7 @@ mod tests {
         paths.iter().map(|path| (*path).to_string()).collect()
     }
 
+<<<<<<< HEAD
     /// Build a fake path resolver from explicit mappings; unmapped paths resolve
     /// to `Absent` (cleanly missing), so tier 2 skips them.
     fn resolver(map: Vec<(&'static str, PathCanonical)>) -> impl Fn(&str) -> PathCanonical {
@@ -756,6 +796,8 @@ mod tests {
             .expect("no mounts means no possible overlap");
     }
 
+=======
+>>>>>>> origin/main
     #[test]
     fn overlap_rejects_denied_child_of_readwrite_parent() {
         let err = validate_denied_path_overlap(
