@@ -163,6 +163,7 @@ Per-backend guides:
 - `docs/macos-support/seatbelt-backend.md` — macOS Seatbelt backend
 - `docs/windows-sandbox/windows-sandbox.md` / `docs/windows-sandbox/windows-sandbox-reference.md` — Windows Sandbox backend
 - `docs/wsl/wsl-container-getting-started.md` / `docs/wsl/wsl-container-support-plan.md` — WSL Container (WSLC SDK)
+- `docs/wsl/wslc-sdk-bindings.md` — WSLC SDK FFI bindings: `src/backends/wslc/common/src/wslcsdk_sys.rs` is **generated** by bindgen from `wslcsdk.h` (do NOT hand-edit); `wslc_bindings.rs` is a thin façade over it. On every SDK version bump, regenerate via `scripts/generate-wslc-bindings.ps1` (needs libclang + `bindgen-cli`, required only on the regen machine — normal/CI builds need neither) and commit the regenerated file with the `WSLC_SDK_VERSION` + hash change. See the doc for the full runbook.
 - `docs/nanvix-microvm/nanvix.md` / `docs/nanvix-microvm/nanvix-integration-plan.md` — MicroVM via NanVix
 
 State-aware lifecycle:
