@@ -14,7 +14,15 @@
 //!    `external/wslc-sdk/` is used as a fallback. This vendored copy is a
 //!    transitional safety net and is expected to be removed once the feed is
 //!    proven in all official build environments.
+//!
+//! Both the downloaded and vendored packages are verified against a pinned
+//! SHA-256 before extraction (see `expected_sha256`). Downloads and extractions
+//! are staged in temporary locations and published atomically, so an
+//! interrupted transfer/unpack can never poison the `OUT_DIR` cache. When the
+//! `link-wslcsdk` feature is enabled the build fails hard if the SDK cannot be
+//! acquired, rather than silently producing a binary that can't load the DLL.
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -74,8 +82,16 @@ fn main() {
                 match extract_vendored(&version, arch) {
                     Ok(path) => path,
                     Err(e2) => {
-                        println!("cargo:warning=WSLC SDK: {e2}");
-                        return;
+                        // The `link-wslcsdk` feature is explicitly enabled, so a
+                        // missing SDK is a hard error: failing here prevents CI
+                        // from publishing a green binary that cannot load the
+                        // DLL at runtime. Set WSLC_SDK_PATH for offline builds.
+                        panic!(
+                            "WSLC SDK acquisition failed with the `link-wslcsdk` feature \
+                             enabled: feed download failed ({e}) and the vendored fallback \
+                             failed ({e2}). Set WSLC_SDK_PATH to a pre-fetched SDK directory \
+                             for offline builds."
+                        );
                     }
                 }
             }
@@ -85,30 +101,29 @@ fn main() {
     // The SDK is loaded at runtime via libloading — no static linking.
     // We only need to copy wslcsdk.dll next to the final binary so it
     // can be found by LoadLibrary at runtime.
-    let dll_src = match find_dll(&sdk_dir) {
-        Some(p) => p,
-        None => {
-            println!(
-                "cargo:warning=WSLC SDK: wslcsdk.dll not found under {}. Runtime will fail to load.",
-                sdk_dir.display()
-            );
-            return;
-        }
-    };
+    let dll_src = find_dll(&sdk_dir).unwrap_or_else(|| {
+        panic!(
+            "WSLC SDK: wslcsdk.dll not found under {}. Cannot build with the \
+             `link-wslcsdk` feature enabled.",
+            sdk_dir.display()
+        )
+    });
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    if let Some(profile_dir) = out_dir
+    let profile_dir = out_dir
         .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
-    {
-        let dll_dst = profile_dir.join("wslcsdk.dll");
-        if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
-            println!(
-                "cargo:warning=WSLC SDK: failed to copy DLL to output dir: {}",
-                e
-            );
-        }
+        .unwrap_or_else(|| {
+            panic!("WSLC SDK: cannot resolve the build profile output directory from OUT_DIR")
+        });
+    let dll_dst = profile_dir.join("wslcsdk.dll");
+    if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
+        panic!(
+            "WSLC SDK: failed to copy wslcsdk.dll to {}: {}",
+            dll_dst.display(),
+            e
+        );
     }
 }
 
@@ -145,7 +160,12 @@ fn download_and_extract(version: &str, arch: &str) -> Result<PathBuf, String> {
         download(&feed_url(version), &nupkg_path)?;
     }
 
-    extract_zip(&nupkg_path, &extract_dir)?;
+    // Verify integrity before extracting: a downloaded native DLL that gets
+    // loaded into the process must match a known-good hash (defends against a
+    // compromised/mutated feed or a redirected download).
+    verify_sha256(&nupkg_path, version)?;
+
+    extract_zip_atomic(&nupkg_path, &extract_dir)?;
 
     if find_dll(&runtime_dir).is_some() {
         // Success path: keep it out of the default build output. Plain
@@ -187,7 +207,11 @@ fn extract_vendored(version: &str, arch: &str) -> Result<PathBuf, String> {
         return Ok(runtime_dir);
     }
 
-    extract_zip(&nupkg, &extract_dir)?;
+    // The vendored copy is content-reviewed in-repo, but verify it too so a
+    // corrupted checkout is caught before its DLL is loaded.
+    verify_sha256(&nupkg, version)?;
+
+    extract_zip_atomic(&nupkg, &extract_dir)?;
 
     if find_dll(&runtime_dir).is_some() {
         // Reaching the vendored fallback means the feed download did not
@@ -209,7 +233,14 @@ fn extract_vendored(version: &str, arch: &str) -> Result<PathBuf, String> {
 /// Download `url` to `dest` using `curl` (present on Windows 10+ and on the
 /// build agents). For offline / air-gapped builds, set `WSLC_SDK_PATH` to a
 /// pre-fetched SDK directory to bypass the download entirely.
+///
+/// The transfer is staged to a temporary `.part` sibling and renamed into place
+/// only on success, so an interrupted/partial/failed download never leaves a
+/// truncated file at `dest` that a later build would treat as a valid cached
+/// package (and thus skip re-downloading).
 fn download(url: &str, dest: &Path) -> Result<(), String> {
+    let tmp = dest.with_extension("part");
+    let _ = std::fs::remove_file(&tmp);
     let status = Command::new("curl")
         .args([
             "--fail",
@@ -218,10 +249,11 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
             "--location",
             "--output",
         ])
-        .arg(dest)
+        .arg(&tmp)
         .arg(url)
         .status()
         .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
             format!(
                 "failed to invoke curl to download the WSLC SDK: {}. \
                  Set WSLC_SDK_PATH to a pre-fetched SDK directory for offline builds.",
@@ -229,13 +261,110 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
             )
         })?;
     if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
         return Err(format!(
             "curl failed to download the WSLC SDK from {} ({}). \
              Set WSLC_SDK_PATH to a pre-fetched SDK directory for offline builds.",
             url, status
         ));
     }
+    std::fs::rename(&tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!(
+            "failed to finalize downloaded WSLC SDK ({} -> {}): {}",
+            tmp.display(),
+            dest.display(),
+            e
+        )
+    })?;
     Ok(())
+}
+
+/// Expected lowercase-hex SHA-256 of the `.nupkg` for `version`, used to verify
+/// package integrity before extraction. Returns `None` for versions without a
+/// pinned hash unless `WSLC_SDK_SHA256` provides one, so a custom
+/// `WSLC_SDK_VERSION` must be accompanied by its hash to be accepted.
+fn expected_sha256(version: &str) -> Option<String> {
+    if let Ok(h) = std::env::var("WSLC_SDK_SHA256") {
+        let h = h.trim().to_ascii_lowercase();
+        if !h.is_empty() {
+            return Some(h);
+        }
+    }
+    match version {
+        "2.9.3" => {
+            Some("d49b66796cb3b88ff513f5e65cd0333ddfed8fe998bf8ed3845ebdecf8563281".to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Verify the SHA-256 of the package at `nupkg_path` against the pinned hash for
+/// `version`. On mismatch the offending file is removed (so the next build
+/// re-fetches) and an error is returned. If no pinned hash is available for the
+/// requested version, the build is rejected rather than trusting arbitrary bytes.
+fn verify_sha256(nupkg_path: &Path, version: &str) -> Result<(), String> {
+    let expected = expected_sha256(version).ok_or_else(|| {
+        format!(
+            "no pinned SHA-256 for WSLC SDK v{version}; set WSLC_SDK_SHA256 to the \
+             expected package hash to authorize this version"
+        )
+    })?;
+    let bytes = std::fs::read(nupkg_path)
+        .map_err(|e| format!("cannot read {} for hashing: {}", nupkg_path.display(), e))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        let _ = std::fs::remove_file(nupkg_path);
+        return Err(format!(
+            "WSLC SDK integrity check failed for {}: expected SHA-256 {}, got {}. \
+             The package may be corrupted or tampered with; the file was removed.",
+            nupkg_path.display(),
+            expected,
+            actual
+        ));
+    }
+    Ok(())
+}
+
+/// Extract `nupkg` into `extract_dir` atomically: unpack into a temporary
+/// sibling directory and rename it into place only after a complete extraction.
+/// A partial/interrupted extraction therefore never leaves a half-populated
+/// cache dir that a later build — or the vendored fallback, which shares this
+/// same `extract_dir` — would mistake for a valid SDK.
+fn extract_zip_atomic(nupkg: &Path, extract_dir: &Path) -> Result<(), String> {
+    if let Some(parent) = extract_dir.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
+    }
+    let name = extract_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("wslc-sdk");
+    let tmp_dir = extract_dir.with_file_name(format!("{name}.tmp.{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let result = extract_zip(nupkg, &tmp_dir);
+    if let Err(e) = result {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+
+    // Publish atomically: drop any prior (possibly partial) dir, then rename.
+    let _ = std::fs::remove_dir_all(extract_dir);
+    std::fs::rename(&tmp_dir, extract_dir).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        format!(
+            "failed to publish extracted WSLC SDK to {}: {}",
+            extract_dir.display(),
+            e
+        )
+    })
 }
 
 /// Extract a `.nupkg` (a zip archive) into `extract_dir`.

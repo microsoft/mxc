@@ -3235,6 +3235,7 @@ name = "wslc_common"
 version = "0.7.0"
 dependencies = [
  "libloading",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "windows",
