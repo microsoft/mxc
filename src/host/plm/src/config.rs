@@ -526,10 +526,7 @@ mod tests {
             time_created: chrono::Utc::now(),
             process_id: 0,
             thread_id: 0,
-            learning_mode: String::new(),
-            resource_type: String::new(),
             file_path: path.to_string(),
-            app_path: String::new(),
             access_mask: FILE_WRITE_MASK,
         }
     }
@@ -539,10 +536,7 @@ mod tests {
             time_created: chrono::Utc::now(),
             process_id: 0,
             thread_id: 0,
-            learning_mode: String::new(),
-            resource_type: String::new(),
             file_path: path.to_string(),
-            app_path: String::new(),
             access_mask: READ_DATA_MASK,
         }
     }

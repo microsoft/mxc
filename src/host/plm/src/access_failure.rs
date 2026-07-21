@@ -24,8 +24,6 @@ const MOUNT_POINT_MANAGER: &str = "\\Device\\MountPointManager";
 
 // EventData property indexes for EventID=14 (matches the PowerShell
 // parser's index map).
-const LEARNING_MODE_INDEX: usize = 0;
-const RESOURCE_TYPE_INDEX: usize = 1;
 pub(crate) const FILE_PATH_INDEX: usize = 2;
 const APP_PATH_INDEX: usize = 3;
 const ACCESS_MASK_INDEX: usize = 5;
@@ -79,16 +77,6 @@ pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedE
         return;
     }
 
-    let learning_mode = ev
-        .event_data
-        .get_mut(LEARNING_MODE_INDEX)
-        .map(std::mem::take)
-        .unwrap_or_default();
-    let resource_type = ev
-        .event_data
-        .get_mut(RESOURCE_TYPE_INDEX)
-        .map(std::mem::take)
-        .unwrap_or_default();
     let access_mask = ev
         .event_data
         .get(ACCESS_MASK_INDEX)
@@ -124,10 +112,7 @@ pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedE
             time_created: ev.time_created,
             process_id: ev.process_id,
             thread_id: ev.thread_id,
-            learning_mode,
-            resource_type,
             file_path,
-            app_path,
             access_mask,
         });
 }
