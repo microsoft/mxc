@@ -130,6 +130,20 @@ containment tier selected at runtime:
   runs sharing the same `containerId` can revoke each other's ACEs — use distinct
   `containerId` values for parallel runs.
 
+#### Path grants and root directories in Windows
+
+On Windows, a path grant in `readwritePaths` or `readonlyPaths` applies to that directory
+and its descendants with the exception of root directories. Granting access to a
+**volume root** (e.g. `C:\`) does **not** cascade to its child folders to prevent over-provisioning. 
+
+For example, `"readwritePaths": ["C:\\"]` does **not** grant access to files
+under `C:\data`.
+
+#### Upward directory traversal in Windows
+
+On Windows, many tools search **upward** from the working directory toward the volume root,
+looking for a marker file that defines their project. When such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. To avoid this error, grant the full path from the volume root down to your target.
+
 ### Fallback Policy
 
 The `fallback` section gates the runner's host-impacting fallbacks. Each flag is an explicit operator consent for a specific mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).
