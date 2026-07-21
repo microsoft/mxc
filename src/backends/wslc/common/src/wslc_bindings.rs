@@ -170,13 +170,52 @@ pub enum WslcProcessIOHandle {
     Stderr = 2,
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WslcComponentFlags {
-    None = 0,
-    VirtualMachinePlatform = 1,
-    WslPackage = 2,
-    SdkNeedsUpdate = 4,
+/// Bitmask of missing WSLC runtime components returned by
+/// `WslcGetMissingComponents` (an out-parameter).
+///
+/// Modeled as a `#[repr(transparent)]` newtype over `u32` rather than an enum
+/// because the SDK may OR several bits together (e.g.
+/// `VIRTUAL_MACHINE_PLATFORM | WSL_PACKAGE == 3` when both are missing).
+/// Materializing such a combined value into a `#[repr(u32)]` enum with no
+/// matching discriminant would be undefined behavior, so this stays a plain
+/// integer newtype and callers test individual bits.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct WslcComponentFlags(pub u32);
+
+impl WslcComponentFlags {
+    pub const NONE: Self = Self(0);
+    pub const VIRTUAL_MACHINE_PLATFORM: Self = Self(1);
+    pub const WSL_PACKAGE: Self = Self(2);
+    pub const SDK_NEEDS_UPDATE: Self = Self(4);
+
+    /// True if any missing-component bit is set.
+    pub fn any_missing(self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl core::fmt::Debug for WslcComponentFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 == 0 {
+            return write!(f, "None");
+        }
+        let mut names = Vec::new();
+        if self.0 & Self::VIRTUAL_MACHINE_PLATFORM.0 != 0 {
+            names.push("VirtualMachinePlatform");
+        }
+        if self.0 & Self::WSL_PACKAGE.0 != 0 {
+            names.push("WslPackage");
+        }
+        if self.0 & Self::SDK_NEEDS_UPDATE.0 != 0 {
+            names.push("SdkNeedsUpdate");
+        }
+        if names.is_empty() {
+            write!(f, "Unknown(0x{:x})", self.0)
+        } else {
+            write!(f, "{} (0x{:x})", names.join(" | "), self.0)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

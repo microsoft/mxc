@@ -349,12 +349,12 @@ impl WSLContainerRunner {
         };
 
         // Prerequisites check
-        let mut missing = WslcComponentFlags::None;
+        let mut missing = WslcComponentFlags::NONE;
         let hr = (sdk.WslcGetMissingComponents)(&mut missing);
         if hr != S_OK {
             return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
         }
-        if !matches!(missing, WslcComponentFlags::None) {
+        if missing.any_missing() {
             return Err(ScriptResponse::error(&format!(
                 "WSLC runtime not available. Missing components: {:?}. \
                  Ensure WSL2 and the WSLC SDK are installed.",

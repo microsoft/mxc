@@ -148,8 +148,11 @@ fn download_and_extract(version: &str, arch: &str) -> Result<PathBuf, String> {
     extract_zip(&nupkg_path, &extract_dir)?;
 
     if find_dll(&runtime_dir).is_some() {
+        // Success path: keep it out of the default build output. Plain
+        // `println!` only surfaces under `cargo build -vv`, so this doesn't add
+        // a spurious `cargo:warning` to every clean/CI build.
         println!(
-            "cargo:warning=WSLC SDK: downloaded and extracted v{} from the MxcDependencies feed",
+            "WSLC SDK: downloaded and extracted v{} from the MxcDependencies feed",
             version
         );
         Ok(runtime_dir)
@@ -187,7 +190,13 @@ fn extract_vendored(version: &str, arch: &str) -> Result<PathBuf, String> {
     extract_zip(&nupkg, &extract_dir)?;
 
     if find_dll(&runtime_dir).is_some() {
-        println!("cargo:warning=WSLC SDK: extracted vendored v{version} from external/wslc-sdk");
+        // Reaching the vendored fallback means the feed download did not
+        // succeed, which is worth surfacing as a real warning (not per-build
+        // noise -- this branch only runs when the feed is unreachable).
+        println!(
+            "cargo:warning=WSLC SDK: MxcDependencies feed unavailable; \
+             fell back to vendored v{version} from external/wslc-sdk"
+        );
         Ok(runtime_dir)
     } else {
         Err(format!(

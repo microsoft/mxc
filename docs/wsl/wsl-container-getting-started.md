@@ -18,10 +18,11 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 ## Step 1 — Install WSL 2.9.3+
 
 The WSLC SDK requires WSL version 2.9.3 or later. Update WSL to the latest
-version:
+version. Note that 2.9.3 may only be available on the pre-release channel
+until it reaches the default Store channel, so include `--pre-release`:
 
 ```powershell
-wsl --update
+wsl --update --pre-release
 ```
 
 Verify your WSL version after updating:
@@ -30,8 +31,8 @@ Verify your WSL version after updating:
 wsl --version
 ```
 
-The WSL version should be **2.9.3.0 or later**. If `wsl --update` does not
-bring you to the required version, build WSL from the `master`
+The WSL version should be **2.9.3.0 or later**. If `wsl --update --pre-release`
+does not bring you to the required version, build WSL from the `master`
 branch:
 
 ```powershell
