@@ -99,6 +99,7 @@ version = "0.7.0"
 dependencies = [
  "flatbuffers",
  "getrandom 0.2.17",
+ "learning_mode_windows",
  "sandbox_spec",
  "serde",
  "serde_json",
