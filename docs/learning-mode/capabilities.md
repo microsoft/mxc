@@ -38,26 +38,18 @@ The OS records **every** access check and **allows** it. This is an audit mode:
 it answers "what would this workload touch if nothing were blocked?" but it does
 so by **not enforcing deny-by-default** for the duration of the run.
 
-Because it defeats containment, `permissiveLearningMode` is **not** a
-free-floating capability you can drop into a policy. It is enabled **only**
-through the `--audit` CLI flag, which injects it, emits a **security warning**,
-and starts a permissive-learning-mode trace. Requesting it directly:
+Because it relaxes containment, `permissiveLearningMode` is **security-sensitive**:
+whenever it is present, both the AppContainer and BaseContainer runners emit a
+**security warning** to the log. It is a plain capability string — add it to the
+policy's `capabilities` array and it takes effect in every build.
 
-- via the config `capabilities` array is **stripped in release builds** (a
-  security note is logged); it is retained in debug builds for local
-  development, but
-- both AppContainer and BaseContainer runners **reject** any request that
-  carries `permissiveLearningMode` without `--audit` (`SECURITY:
-  permissiveLearningMode requires --audit`).
-
-Matching is case-insensitive on both the strip and the gate, because Windows
-derives the capability SID case-insensitively — a mis-cased spelling would
-otherwise take effect while slipping past an exact-match filter.
+Matching is case-insensitive because Windows derives the capability SID
+case-insensitively — a mis-cased spelling still takes effect.
 
 ## How to enable them
 
-`learningModeLogging` (deny-and-record) is a plain capability — add the string
-to the policy's `capabilities` array:
+Both learning-mode capabilities are plain capability strings — add them to the
+policy's `capabilities` array:
 
 ```jsonc
 {
@@ -65,30 +57,64 @@ to the policy's `capabilities` array:
 }
 ```
 
-`permissiveLearningMode` (audit / allow-all) is **not** enabled through the
-capabilities array. Because it relaxes enforcement, it is enabled only with the
-`--audit` CLI flag:
-
-```
-wxc-exec --audit --config <config>
+```jsonc
+{
+  "capabilities": ["permissiveLearningMode"]
+}
 ```
 
-`--audit` injects `permissiveLearningMode`, logs a security warning, and drives
-the permissive-learning-mode trace for the run. A `permissiveLearningMode`
-string placed in the `capabilities` array is stripped in release builds and is
-rejected by both runners unless `--audit` is also set.
+Capability strings are resolved to AppContainer capability SIDs and attached to
+the child process's `SECURITY_CAPABILITIES` exactly like any other capability.
+When either learning-mode capability is in effect the runner logs a diagnostic
+line describing the mode (informational for `learningModeLogging`, a security
+warning for `permissiveLearningMode`).
 
-`learningModeLogging` capability strings are resolved to AppContainer capability
-SIDs and attached to the child process's `SECURITY_CAPABILITIES` exactly like any
-other capability. When either learning-mode capability is in effect the runner
-logs a diagnostic line describing the mode (informational for
-`learningModeLogging`, a security warning for `permissiveLearningMode`).
+## Three learning-mode flows
+
+Learning-mode telemetry is consumed through three distinct flows. They differ in
+*who* runs them, *how* the capability is supplied, and *whether* deny-by-default
+stays enforced:
+
+| Flow | Audience | Entry point | Enforcement |
+| ---- | -------- | ----------- | ----------- |
+| **Developer inner-loop** | The author bringing a workload up | `--audit` CLI flag | Relaxed (allow-all) |
+| **App / user-configurable** | Apps that let end users tune their own config | `captureDenials` (`mode: "block-and-log"`) / `learningModeLogging` | Enforced (deny-and-record) |
+| **Fleet auditing** | IT admins | `captureDenials` (`mode: "allow-and-log"`) / `permissiveLearningMode` | Relaxed (allow-all) |
+
+1. **Developer inner-loop (`--audit`).** A developer runs `wxc-exec --audit` to
+   discover the capabilities and paths their process needs. `--audit` triggers
+   UAC, injects `permissiveLearningMode`, and drives a WPR/ETW
+   permissive-learning-mode trace for the run. This is typically a static config
+   the developer iterates on locally.
+
+   ```
+   wxc-exec --audit --config <config>
+   ```
+
+2. **App / user-configurable (`captureDenials` block-and-log / `learningModeLogging`).**
+   An app wants to let its users "configure" their own sandbox. Each user
+   workflow differs, so the app records what was blocked, presents it through its
+   own UX, and re-generates the config with the new paths/capabilities.
+   Deny-by-default stays enforced — the workload behaves exactly as it would in
+   production while the denials are recorded.
+
+3. **Fleet auditing (`captureDenials` allow-and-log / `permissiveLearningMode`).**
+   IT admins audit access checks across a fleet by running MXC instances in
+   permissive learning mode. This flow does **not** trigger UAC: the capability
+   is supplied through config and takes effect directly, allowing and recording
+   every access check.
 
 ## Relationship to denial capture
 
-Injecting these capabilities is only the first step. Enabling a learning-mode
-capability makes the OS *emit* learning-mode events; a separate, experimental
-`captureDenials` switch (Windows-only, behind `--experimental`) will drive
-collecting those events and surfacing the resulting denials to the caller. That
-capture pipeline is delivered incrementally and is documented separately as it
-lands.
+Injecting these capabilities makes the OS *emit* learning-mode events. The
+Windows-only `captureDenials` config switch drives collecting those events and
+surfacing the resulting denials to the caller. Its `mode` selects how each
+ungranted access is handled while it is recorded:
+
+- `mode: "block-and-log"` (default) maps onto `learningModeLogging`
+  (deny-and-record) — the app / user-configurable flow.
+- `mode: "allow-and-log"` maps onto `permissiveLearningMode` (allow-and-record)
+  — the fleet-auditing flow.
+
+The capture pipeline is delivered incrementally and is documented separately as
+it lands.

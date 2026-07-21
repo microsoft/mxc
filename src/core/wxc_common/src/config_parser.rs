@@ -688,9 +688,7 @@ fn convert_wire_config(
         // The learningMode boolean maps to the deny-and-record learning-mode
         // capability (`learningModeLogging`). AppContainer restrictions remain
         // enforced; access denials are recorded for diagnostics. This is
-        // available in every build. The allow-all auditing mode
-        // (permissiveLearningMode) is not reachable from config — it is enabled
-        // only via the `--audit` CLI flag.
+        // available in every build.
         if ac.learning_mode.unwrap_or(false) {
             policy.capabilities.push("learningModeLogging".to_string());
             logger.log(
@@ -699,34 +697,11 @@ enforced; access denials are recorded for diagnostics.\n",
             );
         }
 
-        // permissiveLearningMode (allow-all audit) defeats deny-by-default and
-        // is NOT accepted from the config `capabilities` array: the only
-        // sanctioned way to enable it is the `--audit` CLI flag, which injects
-        // it downstream with a security warning and an active PLM trace. Any
-        // permissiveLearningMode requested directly in config is stripped in
-        // release builds below (retained in debug for local development, but
-        // still gated behind `--audit` at the runner).
+        // `permissiveLearningMode` (allow-all audit) relaxes deny-by-default. It
+        // is accepted from the config `capabilities` array in every build; the
+        // runner emits a security warning whenever it is present.
         if let Some(caps) = ac.capabilities {
             policy.capabilities.extend(caps);
-        }
-
-        // SECURITY: strip config-supplied permissiveLearningMode in release
-        // builds. Case-insensitive because Windows derives the capability SID
-        // case-insensitively, so a mis-cased spelling would otherwise take
-        // effect while slipping past an exact-match filter.
-        #[cfg(not(debug_assertions))]
-        {
-            policy.capabilities.retain(|cap| {
-                if cap.eq_ignore_ascii_case("permissiveLearningMode") {
-                    logger.log(
-                        "SECURITY: Removed 'permissiveLearningMode' capability from config \
-(not allowed in release builds; use --audit)\n",
-                    );
-                    false
-                } else {
-                    true
-                }
-            });
         }
 
         // BaseProcessContainer-specific UI config.
@@ -1061,7 +1036,6 @@ enforced; access denials are recorded for diagnostics.\n",
         testing_features_enabled: false,
         experimental,
         dry_run: false,
-        audit: false,
     })
 }
 
@@ -1680,9 +1654,10 @@ mod tests {
             .contains(&"permissiveLearningMode".to_string()));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    fn permissive_learning_mode_preserved_in_debug() {
+    fn permissive_learning_mode_preserved_from_config() {
+        // permissiveLearningMode is accepted from config in every build; the
+        // runner surfaces the security warning.
         let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1692,39 +1667,6 @@ mod tests {
             .policy
             .capabilities
             .contains(&"permissiveLearningMode".to_string()));
-    }
-
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn permissive_learning_mode_stripped_in_release() {
-        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(!req
-            .policy
-            .capabilities
-            .contains(&"permissiveLearningMode".to_string()));
-        assert!(logger.get_buffer().contains("SECURITY"));
-    }
-
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn permissive_learning_mode_stripped_case_insensitively_in_release() {
-        // Windows resolves the capability SID case-insensitively, so a
-        // mis-cased spelling must be stripped too.
-        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"capabilities": ["PermissiveLearningMode"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(!req
-            .policy
-            .capabilities
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case("permissiveLearningMode")));
-        assert!(logger.get_buffer().contains("SECURITY"));
     }
 
     // ====== Tests ported from C++ ConfigurationParserTests.cpp ======

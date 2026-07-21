@@ -118,14 +118,13 @@ struct Cli {
     #[arg(long = "force-reclaim")]
     force_reclaim: bool,
 
-    /// Audit mode: inject the `permissiveLearningMode` capability into the
-    /// AppContainer policy so denied operations are logged but allowed.
-    /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
-    /// `request.audit` consumer (AppContainer) have no cross-platform
-    /// counterpart, so accepting the flag elsewhere would print a misleading
-    /// "restrictions will NOT be enforced" warning while the bubblewrap/
-    /// seatbelt backends silently ignore both the flag and the injected
-    /// capability.
+    /// Audit mode: drive the permissive-learning-mode (PLM) WPR/ETW trace
+    /// pipeline for a developer inner-loop run — inject `permissiveLearningMode`
+    /// and record every access check to a trace. Windows-only: the PLM trace
+    /// pipeline (WPR/ETW) has no cross-platform counterpart, so accepting the
+    /// flag elsewhere would print a misleading "restrictions will NOT be
+    /// enforced" warning while the bubblewrap/seatbelt backends silently ignore
+    /// the injected capability.
     #[cfg(target_os = "windows")]
     #[arg(long)]
     audit: bool,
@@ -983,10 +982,6 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
-    #[cfg(target_os = "windows")]
-    {
-        request.audit = cli.audit;
-    }
 
     // ── Telemetry init (experimental) ───────────────────────────────
     let telemetry_active = if request.experimental_enabled {
@@ -1030,9 +1025,10 @@ fn main() {
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
 
     // --audit injects permissiveLearningMode so denied operations are logged
-    // but allowed. Works in both debug and release builds; --audit is the only
-    // sanctioned way to enable permissiveLearningMode (the config path strips
-    // it in release and the runner gates it behind --audit).
+    // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
+    // developer inner-loop flow; permissiveLearningMode is also available
+    // directly from the config `capabilities` array (both paths reach the same
+    // runner behavior). Works in both debug and release builds.
     // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
     //
     // The "already present?" check is case-insensitive because Windows derives
