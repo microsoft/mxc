@@ -10,10 +10,10 @@ engine: copilot
 permissions:
   contents: read
   issues: read
-  pull-requests: read
   copilot-requests: write
 tools:
   github:
+    toolsets: [context, repos, issues]
     allowed-repos:
       - "${{ github.repository }}"
     min-integrity: none
@@ -134,7 +134,10 @@ Use `noop` only if the issue cannot be analyzed from the available title/body co
 
 ### Do not falsely report missing or filtered content
 
-- The triggering issue number is provided in the context above. Always read the issue title and body with the GitHub tools first.
-- If that read returns a title or body, you HAVE the content: proceed to triage it. Do not stop.
-- Never emit `missing_data`, and never claim the content is "filtered", "unreadable", "blocked", or "missing", when the issue read returned content.
-- `missing_data` is reserved for a genuine tool or API failure where no title or body could be retrieved at all. If a read fails, retry once before concluding anything is missing.
+- The triggering issue number is in the context above. Always read the issue
+  title and body with the GitHub tools first.
+- If the read returns a title or body, you have the content: triage it.
+- Reserve `missing_data` for a genuine tool or API failure where no title or
+  body could be retrieved; retry once before concluding anything is missing.
+  Never call content "filtered", "unreadable", "blocked", or "missing" when the
+  read returned content.
