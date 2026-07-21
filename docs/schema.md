@@ -132,7 +132,7 @@ containment tier selected at runtime:
 
 #### Path grants and root directories in Windows
 
-On Windows, a path grant in `readwritePaths` or `readonlyPaths` applies to that directory
+On Windows, a path grant in `readwritePaths` applies to that directory
 and its descendants with the exception of root directories. Granting access to a
 **volume root** (e.g. `C:\`) does **not** cascade to its child folders to prevent over-provisioning. 
 
@@ -142,7 +142,7 @@ under `C:\data`.
 #### Upward directory traversal in Windows
 
 On Windows, many tools search **upward** from the working directory toward the volume root,
-looking for a marker file that defines their project. When such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. To avoid this error, grant the full path from the volume root down to your target.
+looking for a marker file that defines their project. When such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. To avoid this error when using tools with this behavior, grant them the full path from the volume root down to your target.
 
 ### Fallback Policy
 
