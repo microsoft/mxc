@@ -49,7 +49,7 @@
       "description": "Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.",
       "properties": {
         "outputPath": {
-          "description": "Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist and be writable.",
+          "description": "Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist.",
           "type": [
             "string",
             "null"

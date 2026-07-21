@@ -7,8 +7,6 @@
   },
   "processContainer": {
     "capabilities": ["internetClient"],
-    "captureDenials": {
-      "outputPath": "C:\\logs\\mxc-denials.etl"
-    }
+    "captureDenials": {}
   }
 }

@@ -606,8 +606,16 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
         return Err(WxcError::ConfigParse(msg));
     }
     match candidate.parent() {
-        // An absolute path always has a parent; an empty parent means the path
-        // is a filesystem root, which cannot be a trace file.
+        // A filesystem root ("/", "C:\\") has either no parent (`None`) or an
+        // empty parent, and cannot name a trace file.
+        None => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath must name a file, not a \
+                 directory root: '{path}'"
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
         Some(parent) if parent.as_os_str().is_empty() => {
             let msg = format!(
                 "processContainer.captureDenials.outputPath must name a file, not a \
@@ -1822,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_denials_threads_valid_absolute_output_path() {
+    fn capture_denials_accepts_valid_absolute_output_path() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("denials.etl");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
@@ -1880,6 +1888,29 @@ mod tests {
         assert!(
             format!("{err:?}").contains("parent directory does not"),
             "error should mention the missing parent directory: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_filesystem_root_output_path_rejected() {
+        // A bare filesystem root has no parent (`Path::parent()` == None) and
+        // cannot name a trace file. Use a platform-appropriate root.
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        let root_json = serde_json::to_string(root).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {root_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("a filesystem-root outputPath must be rejected");
+        assert!(
+            format!("{err:?}").contains("directory root"),
+            "error should mention the directory-root rejection: {err:?}"
         );
     }
 

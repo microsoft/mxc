@@ -61,8 +61,9 @@ production configs and the dev schema when working on experimental features:
         "leastPrivilege": false,
         "capabilities": ["internetClient"],
         "captureDenials": {                // Windows-only: record the process's access
-            "outputPath": "C:\\logs\\denials.etl"  // attempts to a learning-mode ETL trace.
-        }                                  // Omit outputPath for a managed per-run temp file.
+            "outputPath": "C:\\logs\\denials.etl"  // attempts to a learning-mode ETL trace. The
+        }                                  // parent dir must already exist; omit outputPath
+                                           // for a managed per-run temp file.
     },
 
     "lxc": {                               // LXC-specific
