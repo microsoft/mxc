@@ -7,7 +7,7 @@ an issue has been successfully routed by automatic triage.
 
 ## Behavior
 
-When the Issue Triage workflow applies at least one allowed area label or
+When the Issue Triage workflow applies at least one allowed OS/Container/Area label or
 assigns at least one owner, its existing public triage comment will append:
 
 > **Maintainers:** Comment `/investigate` to check whether this issue or bug is
