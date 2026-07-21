@@ -54,10 +54,22 @@ pub struct EtlDenialAnalyzer;
 impl DenialAnalyzer for EtlDenialAnalyzer {
     fn analyze(&self, source_path: &Path) -> Result<Vec<DeniedResource>, AnalyzeError> {
         let events = process_trace_file(source_path)?;
-        Ok(dedup_to_resources(events.iter().filter_map(|e| {
-            extract_denial(&e.parts, e.pid, e.filetime)
-        })))
+        Ok(resources_from_events(&events))
     }
+}
+
+/// Runs the pure decode composition over already-collected events:
+/// route each event through [`extract_denial`], then normalise +
+/// de-duplicate into public [`DeniedResource`]s. Split out from
+/// [`EtlDenialAnalyzer::analyze`] so it can be tested with hand-built events
+/// that mirror real traces, without a live ETW/TDH read (which needs the
+/// provider manifests registered on the machine).
+fn resources_from_events(events: &[CollectedEvent]) -> Vec<DeniedResource> {
+    dedup_to_resources(
+        events
+            .iter()
+            .filter_map(|e| extract_denial(&e.parts, e.pid, e.filetime)),
+    )
 }
 
 /// Decodes every event in the ETL into `(event_id, props)` pairs, for
@@ -237,5 +249,164 @@ mod tests {
             .analyze(Path::new(r"C:\does\not\exist\nope.etl"))
             .unwrap_err();
         assert!(matches!(err, AnalyzeError::Open { .. }), "got {err:?}");
+    }
+
+    // ---- decode composition over real event shapes ------------------------
+    //
+    // These exercise the full `analyze` pipeline minus the OS trace read:
+    // `extract_denial` routing -> path normalisation -> dedup. The events
+    // mirror captures taken on hardware for both learning modes (see the
+    // module/extractor docs); a live ETW/TDH read isn't used because it
+    // needs the provider manifests registered on the machine.
+
+    fn event(event_id: u16, pid: u32, filetime: u64, kv: &[(&str, &str)]) -> CollectedEvent {
+        CollectedEvent {
+            pid,
+            filetime,
+            parts: DecodedEventParts {
+                event_id,
+                props: kv
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            },
+        }
+    }
+
+    /// Mirrors the real `Mode="Normal"` (block-and-log) capture: file/registry
+    /// access checks as event 14 plus a compact capability denial as event 28.
+    #[test]
+    fn block_and_log_shape_decodes_and_classifies() {
+        let events = vec![
+            // File write (DELETE | FILE_READ_DATA -> Write), \??\ prefix.
+            event(
+                14,
+                5480,
+                10,
+                &[
+                    ("Mode", "\"Normal\""),
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"\\??\\C:\\data\\test\\bin\\\""),
+                    ("AccessMask", "0x10001"),
+                ],
+            ),
+            // Registry read (KEY_READ 0x20019 -> Read) stays kernel-form.
+            event(
+                14,
+                6860,
+                11,
+                &[
+                    ("Mode", "\"Normal\""),
+                    ("ObjectType", "\"Key\""),
+                    ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
+                    ("AccessMask", "0x20019"),
+                ],
+            ),
+            // Capability denial (event 28) -> empty path, unknown access.
+            event(
+                28,
+                0,
+                12,
+                &[
+                    ("ProcessName", "\"conhost.exe\""),
+                    ("ProcessId", "0x1acc"),
+                    ("Denied", "true"),
+                ],
+            ),
+        ];
+
+        let out = resources_from_events(&events);
+        assert_eq!(out.len(), 3);
+
+        assert_eq!(out[0].path, r"C:\data\test\bin\");
+        assert_eq!(out[0].resource_type, ResourceType::File);
+        assert_eq!(out[0].access_type, AccessType::Write);
+        assert_eq!(out[0].pid, 5480);
+
+        assert_eq!(out[1].path, r"\REGISTRY\USER\.DEFAULT\Console");
+        assert_eq!(out[1].resource_type, ResourceType::Other);
+        assert_eq!(out[1].access_type, AccessType::Read);
+
+        assert_eq!(out[2].path, "");
+        assert_eq!(out[2].resource_type, ResourceType::Capability);
+        assert_eq!(out[2].access_type, AccessType::Unknown);
+        assert_eq!(out[2].pid, 0x1acc, "pid from payload ProcessId");
+    }
+
+    /// Mirrors the real `Mode="Permissive"` (allow-and-log) capture: the same
+    /// file/registry checks plus a capability check folded into an
+    /// empty-`ObjectType` event 14 (there is no event 28 in this mode).
+    #[test]
+    fn allow_and_log_shape_folds_capability_into_event_14() {
+        let events = vec![
+            event(
+                14,
+                2292,
+                20,
+                &[
+                    ("Mode", "\"Permissive\""),
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"\\??\\C:\\data\\test\\bin\\\""),
+                    ("AccessMask", "0x10001"),
+                ],
+            ),
+            // Empty ObjectType == brokered-capability check.
+            event(
+                14,
+                5900,
+                21,
+                &[
+                    ("Mode", "\"Permissive\""),
+                    ("ObjectType", "\"\""),
+                    ("ObjectName", "\"\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+        ];
+
+        let out = resources_from_events(&events);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].path, r"C:\data\test\bin\");
+        assert_eq!(out[0].access_type, AccessType::Write);
+        assert_eq!(out[1].resource_type, ResourceType::Capability);
+        assert_eq!(out[1].path, "");
+        assert_eq!(out[1].access_type, AccessType::Unknown);
+    }
+
+    /// Both a permissive empty-`ObjectType` event 14 and a block-mode event 28
+    /// capability denial reduce to the same `("", Unknown)` key, so they
+    /// collapse to a single capability resource.
+    #[test]
+    fn empty_path_capabilities_collapse_to_one() {
+        let events = vec![
+            event(
+                14,
+                1,
+                1,
+                &[
+                    ("ObjectType", "\"\""),
+                    ("ObjectName", "\"\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "true")]),
+            event(28, 0, 3, &[("ProcessId", "0x20"), ("Denied", "true")]),
+        ];
+        let out = resources_from_events(&events);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].resource_type, ResourceType::Capability);
+        assert_eq!(out[0].path, "");
+    }
+
+    /// Non-actionable object types and not-denied capability records are
+    /// dropped by the pipeline; unknown event IDs are ignored.
+    #[test]
+    fn non_actionable_events_are_dropped() {
+        let events = vec![
+            event(14, 1, 1, &[("ObjectType", "\"Section\"")]),
+            event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "false")]),
+            event(9999, 1, 3, &[("Foo", "\"bar\"")]),
+        ];
+        assert!(resources_from_events(&events).is_empty());
     }
 }
