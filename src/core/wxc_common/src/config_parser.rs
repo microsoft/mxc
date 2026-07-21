@@ -704,45 +704,23 @@ fn convert_wire_config(
             policy.least_privilege_mode = lp;
         }
 
-        // learningMode handling differs between debug and release.
+        // The learningMode boolean maps to the deny-and-record learning-mode
+        // capability (`learningModeLogging`). AppContainer restrictions remain
+        // enforced; access denials are recorded for diagnostics. This is
+        // available in every build.
         if ac.learning_mode.unwrap_or(false) {
-            #[cfg(debug_assertions)]
-            {
-                policy
-                    .capabilities
-                    .push("permissiveLearningMode".to_string());
-                logger.log("WARNING: 'learningMode' enabled - AppContainer restrictions will NOT be enforced (DEBUG BUILD ONLY)\n");
-                eprintln!(
-                    "[mxc] permissiveLearningMode injected via 'learningMode: true' - AppContainer restrictions are NOT enforced"
-                );
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                logger.log("SECURITY: 'learningMode' is disabled in release builds. This capability has been removed.\n");
-            }
+            policy.capabilities.push("learningModeLogging".to_string());
+            logger.log(
+                "NOTE: 'learningModeLogging' enabled - AppContainer restrictions remain \
+enforced; access denials are recorded for diagnostics.\n",
+            );
         }
 
+        // `permissiveLearningMode` (allow-all audit) relaxes deny-by-default. It
+        // is accepted from the config `capabilities` array in every build; the
+        // runner emits a security warning whenever it is present.
         if let Some(caps) = ac.capabilities {
-            #[cfg(debug_assertions)]
-            if caps.iter().any(|c| c == "permissiveLearningMode") {
-                eprintln!(
-                    "[mxc] permissiveLearningMode present in policy capabilities - AppContainer restrictions are NOT enforced"
-                );
-            }
             policy.capabilities.extend(caps);
-        }
-
-        // SECURITY: Strip permissiveLearningMode in release builds.
-        #[cfg(not(debug_assertions))]
-        {
-            policy.capabilities.retain(|cap| {
-                if cap == "permissiveLearningMode" {
-                    logger.log("SECURITY: Removed 'permissiveLearningMode' capability (not allowed in release builds)\n");
-                    false
-                } else {
-                    true
-                }
-            });
         }
 
         // BaseProcessContainer-specific UI config.
@@ -1077,7 +1055,6 @@ fn convert_wire_config(
         testing_features_enabled: false,
         experimental,
         dry_run: false,
-        audit: false,
     })
 }
 
@@ -1678,9 +1655,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    fn learning_mode_adds_capability_in_debug() {
+    fn learning_mode_boolean_maps_to_deny_and_record_capability() {
         let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1689,23 +1665,27 @@ mod tests {
         assert!(req
             .policy
             .capabilities
+            .contains(&"learningModeLogging".to_string()));
+        // The boolean must NOT inject the allow-all permissive capability.
+        assert!(!req
+            .policy
+            .capabilities
             .contains(&"permissiveLearningMode".to_string()));
-        assert!(logger.get_buffer().contains("WARNING"));
     }
 
-    #[cfg(not(debug_assertions))]
     #[test]
-    fn learning_mode_stripped_in_release() {
+    fn permissive_learning_mode_preserved_from_config() {
+        // permissiveLearningMode is accepted from config in every build; the
+        // runner surfaces the security warning.
         let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(!req
+        assert!(req
             .policy
             .capabilities
             .contains(&"permissiveLearningMode".to_string()));
-        assert!(logger.get_buffer().contains("SECURITY"));
     }
 
     // ====== Tests ported from C++ ConfigurationParserTests.cpp ======

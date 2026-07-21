@@ -647,7 +647,7 @@
           ]
         },
         "learningMode": {
-          "description": "AppContainer permissive learning mode.",
+          "description": "AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is only enabled via the `--audit` CLI flag.",
           "type": [
             "boolean",
             "null"

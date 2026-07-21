@@ -390,6 +390,76 @@ pub enum FilesystemMode {
     Dacl,
 }
 
+/// Config capability string that enables **learning mode**: the OS logs every
+/// *failed* access check for the AppContainer, but the access is still
+/// **denied** (deny-and-record). Containment is unchanged.
+pub(crate) const CAP_LEARNING_MODE_LOGGING: &str = "learningModeLogging";
+
+/// Config capability string that enables **permissive learning mode**: the OS
+/// logs every access check and **allows** it (audit / allow-all). This relaxes
+/// deny-by-default for the run, so it is security-sensitive; the runner emits a
+/// security warning whenever it is present.
+pub(crate) const CAP_PERMISSIVE_LEARNING_MODE: &str = "permissiveLearningMode";
+
+/// A recognized Windows learning-mode capability.
+///
+/// The two learning-mode capabilities are semantically **distinct** and must
+/// not be conflated: [`Learning`](Self::Learning) only records denials (accesses
+/// stay denied), while [`Permissive`](Self::Permissive) additionally *allows*
+/// the accesses it logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearningModeCapability {
+    /// `learningModeLogging` — log *failed* accesses; accesses remain **denied**
+    /// (deny-and-record). Containment is unchanged.
+    Learning,
+    /// `permissiveLearningMode` — log every access check and **allow** it
+    /// (audit / allow-all). Does not enforce deny-by-default.
+    Permissive,
+}
+
+impl LearningModeCapability {
+    /// Classify a policy capability string as a learning-mode capability, or
+    /// `None` if it is an unrelated capability. Matching is case-insensitive
+    /// because Windows derives the capability SID case-insensitively, so a
+    /// mis-cased spelling still takes effect and must be classified the same.
+    pub(crate) fn from_capability_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case(CAP_LEARNING_MODE_LOGGING) {
+            Some(Self::Learning)
+        } else if name.eq_ignore_ascii_case(CAP_PERMISSIVE_LEARNING_MODE) {
+            Some(Self::Permissive)
+        } else {
+            None
+        }
+    }
+}
+
+/// Return the diagnostic lines the caller should log for the learning-mode
+/// capabilities requested by a policy.
+///
+/// `learningModeLogging` (deny-and-record) is safe and emits an informational
+/// note. `permissiveLearningMode` logs *and allows* every access check (audit
+/// mode); it relaxes deny-by-default, so it emits a security warning.
+pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+    for cap in capabilities {
+        match LearningModeCapability::from_capability_name(cap) {
+            Some(LearningModeCapability::Permissive) => diagnostics.push(
+                "*** SECURITY WARNING *** permissiveLearningMode is ENABLED: every access \
+                 check is logged AND ALLOWED (audit mode); the container is not enforcing \
+                 deny-by-default."
+                    .to_string(),
+            ),
+            Some(LearningModeCapability::Learning) => diagnostics.push(
+                "learningModeLogging is ENABLED: failed access attempts are logged; accesses are \
+                 still denied (deny-and-record)."
+                    .to_string(),
+            ),
+            None => {}
+        }
+    }
+    diagnostics
+}
+
 /// Script runner that executes commands inside a Windows AppContainer.
 pub struct AppContainerScriptRunner {
     app_container_name: String,
@@ -505,21 +575,14 @@ impl AppContainerScriptRunner {
         logger: &mut Logger,
         capture: bool,
     ) -> Result<SpawnedChild, WxcError> {
-        // --- Validate permissiveLearningMode ---
-        for cap in &request.policy.capabilities {
-            if cap == "permissiveLearningMode" {
-                if request.audit {
-                    logger.log_line("*** SECURITY WARNING ***");
-                    logger.log_line(
-                        "permissiveLearningMode is ENABLED. \
-                         Container will learn and record access patterns.",
-                    );
-                } else {
-                    return Err(WxcError::Validation(
-                        "SECURITY: permissiveLearningMode requires --audit".to_string(),
-                    ));
-                }
-            }
+        // --- Learning-mode capabilities ---
+        // `learningModeLogging` (deny-and-record) and `permissiveLearningMode`
+        // (allow-all audit) are distinct. Emit per-capability diagnostics for
+        // whichever are present (informational for `learningModeLogging`, a
+        // security warning for `permissiveLearningMode`). See
+        // [`learning_mode_capability_diagnostics`].
+        for line in learning_mode_capability_diagnostics(&request.policy.capabilities) {
+            logger.log_line(&line);
         }
 
         // --- Build capability list ---
@@ -1476,6 +1539,81 @@ mod tests {
     fn attr_count_pipe_mode() {
         assert_eq!(super::compute_attr_count(false, false, true), 2);
         assert_eq!(super::compute_attr_count(true, true, true), 4);
+    }
+
+    #[test]
+    fn learning_mode_capability_classification() {
+        use super::LearningModeCapability;
+        assert_eq!(
+            LearningModeCapability::from_capability_name("learningModeLogging"),
+            Some(LearningModeCapability::Learning)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("permissiveLearningMode"),
+            Some(LearningModeCapability::Permissive)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("internetClient"),
+            None
+        );
+    }
+
+    #[test]
+    fn learning_mode_diagnostic_is_deny_and_record() {
+        let caps = vec!["learningModeLogging".to_string()];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("deny-and-record"));
+        assert!(!out[0].contains("SECURITY WARNING"));
+    }
+
+    #[test]
+    fn permissive_learning_mode_warns() {
+        // Permissive mode must surface a distinct security warning because it
+        // relaxes deny-by-default.
+        let caps = vec!["permissiveLearningMode".to_string()];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("SECURITY WARNING"));
+        assert!(out[0].contains("ALLOWED"));
+    }
+
+    #[test]
+    fn learning_mode_capability_classification_is_case_insensitive() {
+        use super::LearningModeCapability;
+        // Windows derives the capability SID case-insensitively, so mis-cased
+        // spellings must classify the same as the canonical form.
+        assert_eq!(
+            LearningModeCapability::from_capability_name("LearningModeLogging"),
+            Some(LearningModeCapability::Learning)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("PermissiveLearningMode"),
+            Some(LearningModeCapability::Permissive)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("PERMISSIVELEARNINGMODE"),
+            Some(LearningModeCapability::Permissive)
+        );
+    }
+
+    #[test]
+    fn unrelated_capabilities_produce_no_diagnostics() {
+        // Ordinary (non-learning-mode) capabilities must be ignored entirely.
+        let caps = vec!["internetClient".to_string(), "registryRead".to_string()];
+        assert!(super::learning_mode_capability_diagnostics(&caps).is_empty());
+    }
+
+    #[test]
+    fn both_learning_capabilities_are_reported_distinctly() {
+        let caps = vec![
+            "learningModeLogging".to_string(),
+            "permissiveLearningMode".to_string(),
+        ];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|l| l.contains("deny-and-record")));
+        assert!(out.iter().any(|l| l.contains("SECURITY WARNING")));
     }
 
     #[test]

@@ -300,7 +300,7 @@ export interface ProcessContainer {
    */
   capabilities?: string[] | null;
   /**
-   * AppContainer permissive learning mode.
+   * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is only enabled via the `--audit` CLI flag.
    */
   learningMode?: boolean | null;
   /**

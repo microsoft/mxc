@@ -118,14 +118,13 @@ struct Cli {
     #[arg(long = "force-reclaim")]
     force_reclaim: bool,
 
-    /// Audit mode: inject the `permissiveLearningMode` capability into the
-    /// AppContainer policy so denied operations are logged but allowed.
-    /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
-    /// `request.audit` consumer (AppContainer) have no cross-platform
-    /// counterpart, so accepting the flag elsewhere would print a misleading
-    /// "restrictions will NOT be enforced" warning while the bubblewrap/
-    /// seatbelt backends silently ignore both the flag and the injected
-    /// capability.
+    /// Audit mode: drive the permissive-learning-mode (PLM) WPR/ETW trace
+    /// pipeline for a developer inner-loop run — inject `permissiveLearningMode`
+    /// and record every access check to a trace. Windows-only: the PLM trace
+    /// pipeline (WPR/ETW) has no cross-platform counterpart, so accepting the
+    /// flag elsewhere would print a misleading "restrictions will NOT be
+    /// enforced" warning while the bubblewrap/seatbelt backends silently ignore
+    /// the injected capability.
     #[cfg(target_os = "windows")]
     #[arg(long)]
     audit: bool,
@@ -983,10 +982,6 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
-    #[cfg(target_os = "windows")]
-    {
-        request.audit = cli.audit;
-    }
 
     // ── Telemetry init (experimental) ───────────────────────────────
     let telemetry_active = if request.experimental_enabled {
@@ -1030,23 +1025,23 @@ fn main() {
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
 
     // --audit injects permissiveLearningMode so denied operations are logged
-    // but allowed. Works in both debug and release builds; in release the
-    // runner-side rejection is relaxed because request.audit is set.
+    // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
+    // developer inner-loop flow; permissiveLearningMode is also available
+    // directly from the config `capabilities` array (both paths reach the same
+    // runner behavior). Works in both debug and release builds.
     // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
     //
-    // Downstream capability lookups are case-sensitive (the AppContainer
-    // runner does exact string matches against the JSON capability name),
-    // so the "already present?" check here matches case-sensitively too.
-    // An operator who explicitly wrote a mis-cased spelling in the config
-    // gets a second, correctly-cased entry appended rather than silently
-    // relying on the mis-cased one that downstream lookups will ignore.
+    // The "already present?" check is case-insensitive because Windows derives
+    // the capability SID case-insensitively, so a mis-cased spelling already in
+    // the policy takes effect — appending a second, correctly-cased entry would
+    // be redundant.
     #[cfg(target_os = "windows")]
     if cli.audit
         && !request
             .policy
             .capabilities
             .iter()
-            .any(|c| c == "permissiveLearningMode")
+            .any(|c| c.eq_ignore_ascii_case("permissiveLearningMode"))
     {
         request
             .policy
