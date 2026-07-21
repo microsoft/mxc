@@ -251,10 +251,7 @@ mod tests {
             time_created: chrono::Utc::now(),
             process_id: 0,
             thread_id: 0,
-            learning_mode: String::new(),
-            resource_type: String::new(),
             file_path: "C:\\foo".into(),
-            app_path: String::new(),
             access_mask: 0,
         }
     }
