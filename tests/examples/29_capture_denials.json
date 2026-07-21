@@ -7,6 +7,6 @@
   },
   "processContainer": {
     "capabilities": ["internetClient"],
-    "captureDenials": {}
+    "captureDenials": { "mode": "block-and-log" }
   }
 }

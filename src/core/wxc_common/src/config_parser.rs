@@ -8,10 +8,10 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CaptureDenialsConfig, ContainerPolicy, ContainmentBackend, ExecutionRequest,
-    ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
+    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
+    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -791,15 +791,23 @@ fn convert_wire_config(
         }
 
         // captureDenials (Windows denial capture). Presence enables capture: the
-        // runner records the process's access attempts to a learning-mode ETL
-        // trace while enforcement stays unchanged. The optional outputPath names
-        // where the trace is sealed; validate it eagerly so a bad path fails at
-        // parse time rather than deep in the runner.
+        // runner records the process's ungranted access attempts to a
+        // learning-mode ETL trace. `mode` decides whether each recorded access is
+        // blocked (`block-and-log`, the default) or allowed (`allow-and-log`).
+        // The optional outputPath names where the trace is sealed; validate it
+        // eagerly so a bad path fails at parse time rather than deep in the runner.
         if let Some(cd) = ac.capture_denials {
             if let Some(path) = cd.output_path.as_deref() {
                 validate_capture_denials_output_path(path, logger)?;
             }
+            let mode = match cd.mode {
+                Some(wire::CaptureDenialsMode::AllowAndLog) => CaptureDenialsMode::AllowAndLog,
+                Some(wire::CaptureDenialsMode::BlockAndLog) | None => {
+                    CaptureDenialsMode::BlockAndLog
+                }
+            };
             policy.capture_denials = Some(CaptureDenialsConfig {
+                mode,
                 output_path: cd.output_path,
             });
         }
@@ -1827,6 +1835,56 @@ mod tests {
             .capture_denials
             .expect("captureDenials presence should enable capture");
         assert!(cd.output_path.is_none());
+        // Omitting `mode` defaults to the safe block-and-log behavior.
+        assert_eq!(cd.mode, CaptureDenialsMode::BlockAndLog);
+    }
+
+    #[test]
+    fn capture_denials_mode_block_and_log_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "block-and-log"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(cd.mode, CaptureDenialsMode::BlockAndLog);
+    }
+
+    #[test]
+    fn capture_denials_mode_allow_and_log_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "allow-and-log"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(cd.mode, CaptureDenialsMode::AllowAndLog);
+    }
+
+    #[test]
+    fn capture_denials_unknown_mode_rejected() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "audit"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("an unknown captureDenials mode must be rejected");
+        // serde surfaces the accepted variants; the message must name both so
+        // the error is actionable.
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("block-and-log") && msg.contains("allow-and-log"),
+            "error should list the valid modes: {msg}"
+        );
     }
 
     #[test]

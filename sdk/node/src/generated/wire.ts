@@ -42,10 +42,19 @@ export interface BaseProcessUi {
  */
 export interface CaptureDenials {
   /**
+   * How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block-and-log` when omitted.
+   */
+  mode?: CaptureDenialsMode | null;
+  /**
    * Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist.
    */
   outputPath?: string | null;
 }
+
+/**
+ * How `captureDenials` handles each ungranted access check while recording it.
+ */
+export type CaptureDenialsMode = "block-and-log" | "allow-and-log";
 
 /**
  * Clipboard access level.
