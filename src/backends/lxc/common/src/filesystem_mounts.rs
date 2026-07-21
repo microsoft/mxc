@@ -104,10 +104,23 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 /// protection. This is the same reason the Bubblewrap backend resolves denied
 /// paths (`resolve_denied_paths`) before masking.
 ///
-/// Returns the original path unchanged when it does not traverse a symlink or
-/// cannot be resolved. Fails closed if a resolved path is not valid UTF-8: the
-/// LXC config is a `String` pipeline that cannot represent it faithfully, and a
-/// lossy replacement could mask the wrong path and leave the target exposed.
+/// Resolution goes through [`resolve_through_symlinks`], which canonicalizes
+/// every existing prefix (following symlinks like the kernel) and folds a
+/// not-yet-existing tail lexically. An existing, non-symlink path therefore
+/// comes back in its canonical absolute form — not necessarily byte-identical to
+/// the input; only a path that resolves to nothing (empty) is returned
+/// unchanged.
+///
+/// Fails closed in two cases, because emitting the mask anyway would silently
+/// mask the wrong path or abort `lxc-start` with an opaque error:
+/// - the resolved path is not valid UTF-8 — the LXC config is a `String`
+///   pipeline that cannot represent it faithfully, and a lossy replacement could
+///   mask the wrong path and leave the target exposed; or
+/// - the resolved path is *still* a symlink — a dangling or otherwise
+///   unresolvable link. Masking over a symlink node aborts the container, and
+///   unlike Bubblewrap (which tolerates a `/dev/null` bind over a symlink node)
+///   the LXC mount pipeline cannot guarantee that, so refusing to start is the
+///   safe, deterministic choice.
 fn resolve_denied_host_path(host_path: &str) -> Result<String, String> {
     match resolve_through_symlinks(Path::new(host_path)) {
         Some(resolved) => {
@@ -118,6 +131,21 @@ fn resolve_denied_host_path(host_path: &str) -> Result<String, String> {
                     host_path
                 )
             })?;
+            // Fail closed if resolution left a symlink in place (a dangling or
+            // otherwise unresolvable link): masking over/through it would abort
+            // the container, so refuse to start rather than emit a broken mount.
+            // A non-existent (but non-symlink) tail returns `Err` from
+            // `symlink_metadata` and is treated as safe to mask as an empty dir.
+            if std::fs::symlink_metadata(real)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(format!(
+                    "deniedPaths entry {:?} resolves to {:?}, which is still a symlink (dangling \
+                     or unresolvable) and cannot be safely masked; refusing to start.",
+                    host_path, real
+                ));
+            }
             Ok(real.to_owned())
         }
         None => Ok(host_path.to_owned()),
@@ -140,6 +168,36 @@ fn has_rebound_descendant(container_path: &str, rebound: &[String]) -> bool {
     rebound.iter().any(|c| c.starts_with(&prefix))
 }
 
+/// Container-side comparison forms of a single re-bound (rw/ro) path: the path
+/// as written, and — when it traverses a symlink — its symlink-resolved real
+/// target. Both are leading-slash-trimmed for comparison against denied
+/// directories in [`has_rebound_descendant`].
+///
+/// A denied directory is masked at its *resolved* path (see
+/// [`resolve_denied_host_path`]). A child re-bound through a symlinked ancestor
+/// (e.g. `readwritePaths: ["/mnt/x/link/child"]` under
+/// `deniedPaths: ["/mnt/x/link"]`, where `link` is a host symlink visible via a
+/// parent bind) physically lands *inside* that resolved mask, so the descendant
+/// check must see the child's resolved form to select the writable mask and
+/// avoid the read-only-tmpfs `mkdir` abort. Emitting the original form too keeps
+/// the plain (no-symlink) case matching unchanged. Resolution here is
+/// best-effort (comparison only): a path that cannot be resolved contributes
+/// just its original form.
+fn rebound_comparison_paths(host_path: &str) -> Vec<String> {
+    let original = host_path.trim_start_matches('/').to_string();
+    let mut out = Vec::with_capacity(2);
+    if let Some(resolved) = resolve_through_symlinks(Path::new(host_path)) {
+        if let Some(resolved) = resolved.to_str() {
+            let resolved = resolved.trim_start_matches('/').to_string();
+            if resolved != original {
+                out.push(resolved);
+            }
+        }
+    }
+    out.push(original);
+    out
+}
+
 /// Configure filesystem bind mounts on the container based on the policy.
 ///
 /// Adds `lxc.mount.entry` config items for each path in the policy.
@@ -154,10 +212,15 @@ pub fn configure_filesystem_mounts(
     // whether a denied *directory* must be masked with a writable tmpfs so a
     // more-specific descendant's mountpoint can be created inside it. Mirrors
     // the Bubblewrap backend, which masks denied dirs with a writable `--tmpfs`.
+    // Each mount contributes both its literal path and — when it traverses a
+    // symlink — its resolved real target, because a denied directory is masked
+    // at its resolved path; a child re-bound through a symlinked ancestor lands
+    // inside that resolved mask and must still be detected as a descendant (see
+    // `rebound_comparison_paths`).
     let rebound_container_paths: Vec<String> = mounts
         .iter()
         .filter(|m| matches!(m.intent, FsIntent::ReadWrite | FsIntent::ReadOnly))
-        .map(|m| m.path.trim_start_matches('/').to_string())
+        .flat_map(|m| rebound_comparison_paths(&m.path))
         .collect();
 
     for mount in &mounts {
@@ -224,8 +287,12 @@ pub fn configure_filesystem_mounts(
                     // tmpfs so the mountpoint can be created — the host directory
                     // stays hidden underneath, only the ephemeral tmpfs is
                     // writable, and the descendant bind lands on top of it. This
-                    // mirrors the Bubblewrap backend's writable `--tmpfs`.
-                    format!("tmpfs {} tmpfs create=dir 0 0", container_path)
+                    // mirrors the Bubblewrap backend's writable `--tmpfs`. Cap it
+                    // at a small `size=1m`: the mask only needs to hold empty
+                    // mountpoint directories, so bounding it prevents sandboxed
+                    // code from exhausting host memory by writing into the
+                    // ephemeral tmpfs.
+                    format!("tmpfs {} tmpfs size=1m,create=dir 0 0", container_path)
                 } else {
                     format!("tmpfs {} tmpfs ro,size=0,create=dir 0 0", container_path)
                 };
@@ -357,15 +424,24 @@ mod tests {
         // A denied symlink is rewritten to its real target, and the mask type is
         // chosen from that target (dir -> tmpfs, file -> /dev/null).
         let resolved_dir = resolve_denied_host_path(link_to_dir.to_str().unwrap()).unwrap();
-        assert_eq!(resolved_dir, real_dir.canonicalize().unwrap().to_str().unwrap());
-        assert!(!denied_path_is_file(&resolved_dir), "symlink->dir masks as dir");
+        assert_eq!(
+            resolved_dir,
+            real_dir.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(
+            !denied_path_is_file(&resolved_dir),
+            "symlink->dir masks as dir"
+        );
 
         let resolved_file = resolve_denied_host_path(link_to_file.to_str().unwrap()).unwrap();
         assert_eq!(
             resolved_file,
             real_file.canonicalize().unwrap().to_str().unwrap()
         );
-        assert!(denied_path_is_file(&resolved_file), "symlink->file masks as file");
+        assert!(
+            denied_path_is_file(&resolved_file),
+            "symlink->file masks as file"
+        );
 
         // A path with no symlink component is returned as its canonical self.
         let plain = resolve_denied_host_path(real_file.to_str().unwrap()).unwrap();
@@ -401,6 +477,64 @@ mod tests {
             resolved,
             expected.to_str().unwrap(),
             "`..` must fold so the mask targets the real denied path, not a bystander"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A denied path that resolves to a *dangling* symlink (its target does not
+    /// exist) must fail closed: masking over the symlink node aborts the
+    /// container, so refusing to start is the safe, deterministic outcome.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_denied_host_path_fails_closed_on_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("mxc_lxc_dangling_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create base");
+        let dangling = base.join("dangling");
+        symlink(base.join("nonexistent_target"), &dangling).expect("create dangling symlink");
+
+        let err = resolve_denied_host_path(dangling.to_str().unwrap())
+            .expect_err("a dangling denied symlink must fail closed");
+        assert!(
+            err.contains("still a symlink"),
+            "error must explain the residual symlink: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A rw/ro child re-bound through a symlinked ancestor must contribute its
+    /// symlink-resolved form so a denied parent masked at its resolved path still
+    /// detects the descendant. Without the resolved form the prefix compare would
+    /// miss it, (re)select the read-only `size=0` mask, and abort when LXC tries
+    /// to create the child mountpoint inside it.
+    #[cfg(unix)]
+    #[test]
+    fn rebound_comparison_paths_detects_child_under_symlinked_denied_parent() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("mxc_lxc_rebound_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        let link = base.join("link");
+        std::fs::create_dir_all(real.join("child")).expect("create real/child");
+        symlink(&real, &link).expect("symlink link -> real");
+
+        // Denied parent "<base>/link" is masked at its resolved path "<base>/real".
+        let denied = resolve_denied_host_path(link.to_str().unwrap()).unwrap();
+        let denied_container = denied.trim_start_matches('/');
+
+        // The rw child is referenced via the symlink: "<base>/link/child".
+        let child = format!("{}/child", link.to_str().unwrap());
+        let rebound = rebound_comparison_paths(&child);
+
+        assert!(
+            has_rebound_descendant(denied_container, &rebound),
+            "resolved child must be seen as a descendant of the resolved denied parent: \
+             denied={denied_container:?} rebound={rebound:?}"
         );
 
         let _ = std::fs::remove_dir_all(&base);
