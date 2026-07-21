@@ -12,7 +12,12 @@
 use std::ffi::c_void;
 use std::fmt::Write;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::ptr;
+
+use learning_mode_windows::{
+    CaptureSession, LearningModeApi, SecurityEnvironmentApi, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+};
 
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
@@ -662,6 +667,62 @@ impl BaseContainerRunner {
 
         Self::log_sandbox_spec(&spec_bytes, logger);
 
+        // Resolve the learning-mode capture APIs when captureDenials is
+        // configured. The mode-mapped learning-mode capability was already
+        // injected into policy.capabilities (and hence the spec) by the config
+        // parser; here we obtain the OS handles that drive the ETL trace. Both
+        // exports live in the same processmodel.dll the BaseContainer launch API
+        // is loaded from, and only exist on feature-enabled (GE_CURRENT) builds,
+        // so a failed load is a clean, actionable "backend unavailable" degrade.
+        let capture_denials = request.policy.capture_denials.clone();
+        let mut capture_apis: Option<(SecurityEnvironmentApi, LearningModeApi)> = None;
+        if capture_denials.is_some() {
+            let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
+            match (SecurityEnvironmentApi::load(), LearningModeApi::load()) {
+                (Ok(se), Ok(lm)) => {
+                    let _ = writeln!(
+                        logger,
+                        "captureDenials: learning-mode trace API available (processmodel.dll)"
+                    );
+                    capture_apis = Some((se, lm));
+                }
+                (se, lm) => {
+                    let detail = match (&se, &lm) {
+                        (Err(e), _) => format!("security-environment API: {e}"),
+                        (_, Err(e)) => format!("learning-mode trace API: {e}"),
+                        _ => "unknown".to_string(),
+                    };
+                    let msg = format!(
+                        "captureDenials was requested but the learning-mode trace API is not \
+                         available on this OS build ({detail}). This feature requires a \
+                         feature-enabled Windows build that exports the learning-mode trace \
+                         APIs from processmodel.dll."
+                    );
+                    let _ = writeln!(logger, "Error: {msg}");
+                    return Err(ScriptResponse {
+                        exit_code: -1,
+                        error_message: msg.clone(),
+                        standard_err: msg,
+                        failure_phase: FailurePhase::BackendUnavailable,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        // Resolve the ETL output path: caller-specified when provided, else a
+        // managed per-run temp file the runner names (parsed / cleaned up by the
+        // consume + analyze stages).
+        let capture_output_path: Option<PathBuf> = capture_denials.as_ref().map(|cd| {
+            cd.output_path
+                .clone()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::temp_dir()
+                        .join(format!("mxc_capture_denials_{}.etl", std::process::id()))
+                })
+        });
+
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
         // 2. Dynamically load the API from processmodel.dll.
@@ -962,71 +1023,148 @@ impl BaseContainerRunner {
         let mut current_creation_flags = creation_flags;
         let mut retries_remaining: u32 = 1;
 
-        // The loop yields (api_return_code, last_win32_error_on_failure).
-        let (success, last_error) = loop {
-            pi = unsafe { std::mem::zeroed() };
+        // When captureDenials is active, launch inside a process security
+        // environment that already has a learning-mode trace started against it,
+        // instead of the one-shot CreateProcessInSandbox. `begin` creates the
+        // environment and starts the trace *before* the child launches (so no
+        // early denials are missed); the child is then launched into that
+        // environment via CreateProcessAsUserInsideSecurityEnvironment, which
+        // returns a real PROCESS_INFORMATION we own and wait on exactly like the
+        // normal path. On any early return below, `capture_session` drops and its
+        // Drop discards the trace and closes the environment (no broker leak).
+        let mut capture_session: Option<CaptureSession> = None;
+        let mut capture_se_api: Option<SecurityEnvironmentApi> = None;
+        if let Some((se_api, lm_api)) = capture_apis {
+            match CaptureSession::begin(
+                se_api,
+                lm_api,
+                &spec_bytes,
+                PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+            ) {
+                Ok(session) => {
+                    let _ = writeln!(
+                        logger,
+                        "captureDenials: security environment created and trace started"
+                    );
+                    // `SecurityEnvironmentApi` is Copy, so we keep our own copy to
+                    // call `launch_fn` at the launch site below.
+                    capture_se_api = Some(se_api);
+                    capture_session = Some(session);
+                }
+                Err(e) => {
+                    let msg = format!("captureDenials: failed to start learning-mode capture: {e}");
+                    let _ = writeln!(logger, "Error: {msg}");
+                    return Err(ScriptResponse {
+                        exit_code: -1,
+                        error_message: msg.clone(),
+                        standard_err: msg,
+                        failure_phase: FailurePhase::LaunchFailed,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
 
-            let result = unsafe {
-                create_process_in_sandbox(
-                    ptr::null(),           // applicationName (resolved from commandLine)
-                    cmd_wide.as_mut_ptr(), // commandLine
-                    ptr::null(),           // processAttributes (must be NULL)
-                    ptr::null(),           // threadAttributes  (must be NULL)
-                    // inheritHandles: must be FALSE per the OS sandbox API contract.
-                    // Unlike regular CreateProcess, CreateProcessInSandbox treats the
-                    // explicit STDIO handles in STARTUPINFO (hStdInput/hStdOutput/hStdError)
-                    // as inheritable when STARTF_USESTDHANDLES is set, but does not support
-                    // general handle inheritance.
-                    i32::from(false),        // inheritHandles
+        // The launch yields (api_return_code, last_win32_error_on_failure).
+        let (success, last_error) = if let (Some(session), Some(se_api)) =
+            (capture_session.as_ref(), capture_se_api.as_ref())
+        {
+            // Single-attempt in-environment launch. The learning-mode security
+            // environment only exists on builds that support the `environment`
+            // parameter, so the CreateProcessInSandbox env-not-supported retry
+            // does not apply here.
+            pi = unsafe { std::mem::zeroed() };
+            let launch = se_api.launch_fn();
+            // SAFETY: `launch` was resolved from processmodel.dll and matches the
+            // declared C signature. `cmd_wide` is a mutable, null-terminated
+            // UTF-16 buffer; `si`/`pi` are valid; `session.environment()` is the
+            // live handle from the just-begun session. When `current_env_ptr` is
+            // non-null, `current_creation_flags` already carries
+            // CREATE_UNICODE_ENVIRONMENT.
+            let ok = unsafe {
+                launch(
+                    HANDLE(ptr::null_mut()), // userToken: caller context
+                    ptr::null(),             // applicationName (from command line)
+                    cmd_wide.as_mut_ptr(),   // commandLine
                     current_creation_flags,  // creationFlags
                     current_env_ptr,         // environment
                     cwd_ptr,                 // currentDirectory
                     &si,                     // startupInfo
-                    identity_wide.as_ptr(),  // identity
-                    spec_bytes.as_ptr(),     // sandboxSpecification
-                    spec_bytes.len() as u32, // sandboxSpecificationSize
+                    session.environment(),   // process security environment
                     &mut pi,                 // processInformation
                 )
             };
-
-            if result != 0 {
-                break (result, None);
+            if ok != 0 {
+                (ok, None)
+            } else {
+                (0, Some(unsafe { GetLastError() }))
             }
+        } else {
+            loop {
+                pi = unsafe { std::mem::zeroed() };
 
-            // Call failed -- capture the error before any handle cleanup.
-            let err = unsafe { GetLastError() };
+                let result = unsafe {
+                    create_process_in_sandbox(
+                        ptr::null(),           // applicationName (resolved from commandLine)
+                        cmd_wide.as_mut_ptr(), // commandLine
+                        ptr::null(),           // processAttributes (must be NULL)
+                        ptr::null(),           // threadAttributes  (must be NULL)
+                        // inheritHandles: must be FALSE per the OS sandbox API contract.
+                        // Unlike regular CreateProcess, CreateProcessInSandbox treats the
+                        // explicit STDIO handles in STARTUPINFO (hStdInput/hStdOutput/hStdError)
+                        // as inheritable when STARTF_USESTDHANDLES is set, but does not support
+                        // general handle inheritance.
+                        i32::from(false),        // inheritHandles
+                        current_creation_flags,  // creationFlags
+                        current_env_ptr,         // environment
+                        cwd_ptr,                 // currentDirectory
+                        &si,                     // startupInfo
+                        identity_wide.as_ptr(),  // identity
+                        spec_bytes.as_ptr(),     // sandboxSpecification
+                        spec_bytes.len() as u32, // sandboxSpecificationSize
+                        &mut pi,                 // processInformation
+                    )
+                };
 
-            if retries_remaining > 0
-                && is_environment_not_supported(err.0, !current_env_ptr.is_null())
-            {
-                retries_remaining -= 1;
-
-                // Clean up handles from the failed attempt.
-                unsafe {
-                    if !pi.hProcess.is_invalid() {
-                        let _ = CloseHandle(pi.hProcess);
-                    }
-                    if !pi.hThread.is_invalid() {
-                        let _ = CloseHandle(pi.hThread);
-                    }
+                if result != 0 {
+                    break (result, None);
                 }
 
-                let diag = diagnose_environment_not_supported();
-                let _ = writeln!(
-                    logger,
-                    "{EMOJI_WARNING} Launch diagnostic [{}]: {}",
-                    diag.kind, diag.message
-                );
+                // Call failed -- capture the error before any handle cleanup.
+                let err = unsafe { GetLastError() };
 
-                // Retry without the environment block, but keep the child
-                // suspended (resumed after job assignment).
-                current_env_ptr = ptr::null();
-                current_creation_flags = CREATE_SUSPENDED.0 | no_window_flag;
-                continue;
+                if retries_remaining > 0
+                    && is_environment_not_supported(err.0, !current_env_ptr.is_null())
+                {
+                    retries_remaining -= 1;
+
+                    // Clean up handles from the failed attempt.
+                    unsafe {
+                        if !pi.hProcess.is_invalid() {
+                            let _ = CloseHandle(pi.hProcess);
+                        }
+                        if !pi.hThread.is_invalid() {
+                            let _ = CloseHandle(pi.hThread);
+                        }
+                    }
+
+                    let diag = diagnose_environment_not_supported();
+                    let _ = writeln!(
+                        logger,
+                        "{EMOJI_WARNING} Launch diagnostic [{}]: {}",
+                        diag.kind, diag.message
+                    );
+
+                    // Retry without the environment block, but keep the child
+                    // suspended (resumed after job assignment).
+                    current_env_ptr = ptr::null();
+                    current_creation_flags = CREATE_SUSPENDED.0 | no_window_flag;
+                    continue;
+                }
+
+                // Non-retryable failure.
+                break (result, Some(err));
             }
-
-            // Non-retryable failure.
-            break (result, Some(err));
         };
 
         if success == 0 {
@@ -1197,6 +1335,8 @@ impl BaseContainerRunner {
             identity,
             sid_string,
             proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
+            capture_session,
+            capture_output_path,
         })
     }
 }
@@ -1223,6 +1363,13 @@ struct BaseChild {
     identity: String,
     sid_string: String,
     proxy_coordinator: ProxyCoordinator,
+    /// Live learning-mode capture session (`Some` only when `captureDenials`
+    /// is configured and the OS API is available). Sealed in `run_teardown`
+    /// after the child exits.
+    capture_session: Option<CaptureSession>,
+    /// Resolved ETL output path for the capture session (caller-specified or a
+    /// managed per-run temp file). `Some` iff `capture_session` is `Some`.
+    capture_output_path: Option<PathBuf>,
 }
 
 impl SandboxBackend for BaseContainerRunner {
@@ -1309,6 +1456,11 @@ struct BaseContainerSandboxProcess {
     sid_string: String,
     proxy_coordinator: ProxyCoordinator,
     teardown_done: bool,
+    /// Live learning-mode capture session, moved from the `BaseChild`. Sealed
+    /// in `run_teardown` once the child has exited and been reaped.
+    capture_session: Option<CaptureSession>,
+    /// Resolved ETL output path for the capture session.
+    capture_output_path: Option<PathBuf>,
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
@@ -1343,6 +1495,8 @@ impl BaseContainerSandboxProcess {
             sid_string: std::mem::take(&mut child.sid_string),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
             teardown_done: false,
+            capture_session: child.capture_session.take(),
+            capture_output_path: child.capture_output_path.take(),
         }
     }
 
@@ -1352,6 +1506,27 @@ impl BaseContainerSandboxProcess {
         }
         self.teardown_done = true;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        // Seal the learning-mode ETL trace now that the child has exited and
+        // been reaped (both `wait` and `Drop` kill + reap before calling this).
+        // `finish` stops the trace to the resolved output path, then closes the
+        // security environment. The output-file path is surfaced on stderr so a
+        // caller can locate the denials (the full NDJSON contract is finalized
+        // in the output/consume stage).
+        if let Some(session) = self.capture_session.take() {
+            let output_path = self.capture_output_path.clone();
+            match session.finish(output_path.as_deref()) {
+                Ok(()) => {
+                    if let Some(path) = &output_path {
+                        eprintln!("captureDenials: denials ETL written to {}", path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("captureDenials: failed to seal denials ETL: {e}");
+                }
+            }
+        }
+
         if self.destroy_on_exit {
             run_sandbox_cleanup(
                 &self.identity,
