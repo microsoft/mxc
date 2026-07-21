@@ -784,6 +784,23 @@ enforced; access denials are recorded for diagnostics.\n",
                     CaptureDenialsMode::BlockAndLog
                 }
             };
+
+            // captureDenials drives the learning-mode ETL capture in the runner,
+            // which requires the corresponding learning-mode capability on the
+            // child token so the OS emits the access-check records the capture
+            // path collects. Inject it additively (preserving the workload's real
+            // capabilities) if it is not already present. `block-and-log` keeps
+            // deny-by-default via `learningModeLogging`; `allow-and-log` relaxes it
+            // via `permissiveLearningMode` (the runner flags that with a security
+            // warning).
+            let capture_capability = match mode {
+                CaptureDenialsMode::BlockAndLog => "learningModeLogging",
+                CaptureDenialsMode::AllowAndLog => "permissiveLearningMode",
+            };
+            if !policy.capabilities.iter().any(|c| c == capture_capability) {
+                policy.capabilities.push(capture_capability.to_string());
+            }
+
             policy.capture_denials = Some(CaptureDenialsConfig {
                 mode,
                 output_path: cd.output_path,
@@ -1845,6 +1862,103 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let cd = req.policy.capture_denials.expect("captureDenials present");
         assert_eq!(cd.mode, CaptureDenialsMode::AllowAndLog);
+    }
+
+    #[test]
+    fn capture_denials_block_and_log_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "block-and-log"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "block-and-log capture must additively inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+        assert!(
+            !req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "block-and-log must not inject permissiveLearningMode"
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_and_log_injects_permissive_learning_mode_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "allow-and-log"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "allow-and-log capture must additively inject permissiveLearningMode: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_default_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "default (block-and-log) capture must inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_capability_injection_is_additive_and_deduped() {
+        // The workload's own capabilities are preserved, and the injected
+        // learning-mode capability is not duplicated when already present.
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {
+                "capabilities": ["internetClient", "permissiveLearningMode"],
+                "captureDenials": {"mode": "allow-and-log"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"internetClient".to_string()),
+            "the workload's own capabilities must be preserved"
+        );
+        let permissive_count = req
+            .policy
+            .capabilities
+            .iter()
+            .filter(|c| *c == "permissiveLearningMode")
+            .count();
+        assert_eq!(
+            permissive_count, 1,
+            "an already-present learning-mode capability must not be duplicated: {:?}",
+            req.policy.capabilities
+        );
     }
 
     #[test]
