@@ -116,6 +116,17 @@ Post one short triage comment with `add_comment` that:
 - states which owner(s) were assigned (if any),
 - explicitly says when nothing clearly matched and `Needs-Triage` was left in place.
 
+If at least one OS/Container/Area label was applied OR at least one owner was
+assigned, append this separate paragraph:
+
+> **Maintainers:** Comment `/investigate` to check whether this issue or bug is
+> valid against the most current code. Copilot will also produce a report with
+> the changes that will be needed. For a small, unambiguous documentation or
+> test fix, it may also create one draft PR.
+
+Do not add the maintainer paragraph when no label or owner was selected and
+`Needs-Triage` remains.
+
 Use `noop` only if the issue cannot be analyzed from the available title/body content.
 
 ### Do not falsely report missing or filtered content
