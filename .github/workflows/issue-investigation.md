@@ -75,19 +75,35 @@ reporter to `SECURITY.md`.
 ## Investigation
 
 1. Read the issue and inspect relevant code, tests, and documentation.
-2. Classify it as exactly one of: `bug`, `documentation gap`, or
+2. Assess the available evidence as exactly one of: `confirmed`, `expected
+   behavior`, `insufficient information`, or `cannot reproduce`.
+   - Use `insufficient information` only when inspecting the issue, relevant
+     code, tests, and documentation leaves insufficient evidence to justify a
+     classification.
+   - For `insufficient information`, use the trusted GitHub tool context to
+     identify and mention the issue author. Request reproduction steps, expected
+     and actual behavior, MXC version, OS and build, and sanitized logs. Do not
+     create a draft PR.
+   - Do not request public diagnostics for potentially security-sensitive
+    issues; follow the minimal routing rule instead.
+3. Classify it as exactly one of: `bug`, `documentation gap`, or
    `design decision`.
    - If the report is ambiguous or requires a maintainer choice, classify it as
-     `design decision` and state the specific missing decision.
-   - If the available repository evidence supports none of the three
-     classifications, say that no classification is justified. Do not invent a
-     classification, evidence, root cause, or fix.
-3. Give concise repository evidence and one recommended maintainer next step.
-4. Post exactly one public comment using this structure:
+   `design decision` and state the specific missing decision.
+   - If the assessment is `insufficient information`, classify it as
+   `none - insufficient information`.
+   - If the assessment is `cannot reproduce` and the available repository
+   evidence supports none of the three classifications, say that no
+   classification is justified. Do not invent a classification, evidence, root
+   cause, or fix.
+4. Give concise repository evidence and one recommended maintainer next step.
+5. Post exactly one public comment using this structure:
 
    ## Investigation
-   **Classification:** `<bug | documentation gap | design decision | none - no actionable classification>`
+   **Assessment:** `<confirmed | expected behavior | insufficient information | cannot reproduce>`
+   **Classification:** `<bug | documentation gap | design decision | none - insufficient information | none - no actionable classification>`
    **Evidence:** `<concise repository evidence>`
+   **Information requested:** `<N/A, or @issue-author with reproduction steps, expected and actual behavior, MXC version, OS and build, and sanitized logs>`
    **Recommended next step:** `<one maintainer action>`
    **Draft PR:** `<created, or not created and why>`
 

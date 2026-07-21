@@ -54,8 +54,13 @@ repository's existing `issue-triage.md` pattern.
    and do not create a pull request.
 4. Inspect the relevant source, tests, and documentation.
 5. Post one concise, fixed-format public comment containing:
+   - assessment: `confirmed`, `expected behavior`, `insufficient information`,
+     or `cannot reproduce`;
    - classification: `bug`, `documentation gap`, or `design decision`;
    - supporting evidence from the repository;
+   - for insufficient information only, a mention of the issue author and a
+     request for reproduction steps, expected and actual behavior, MXC version,
+     OS/build, and sanitized logs;
    - recommended maintainer next step;
    - either no pull request, or a link to the created draft pull request.
 6. Create a draft pull request only when every draft-PR condition below holds.
@@ -118,6 +123,7 @@ enforcement.
 | Validation fails | Report the failure and do not create a PR. |
 | Path guard fails | Report the finding and explain that the change needs human-owned handling. |
 | No actionable finding | Post a concise explanation of why no classification or fix is justified. |
+| Insufficient information | Post one report that explicitly says so, mentions the issue author, requests reproduction steps, expected and actual behavior, MXC version, OS/build, and sanitized logs, and creates no PR. |
 
 ## Validation strategy
 

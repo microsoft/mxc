@@ -21,6 +21,11 @@ on an issue to request an evidence-backed classification. The workflow posts one
 public comment identifying the issue as a bug, documentation gap, or design
 decision, with a recommended next step.
 
+When the report lacks enough information to reach a classification, it explicitly
+mentions the issue author and requests reproduction steps, expected and actual
+behavior, MXC version, OS/build, and sanitized logs. It does not create a PR for
+that outcome.
+
 For a small, unambiguous documentation or test-only change, it may also create
 one draft PR. It never merges, releases, assigns owners, changes labels, or
 updates an existing PR. It does not create PRs for production code, schemas,
