@@ -48,8 +48,15 @@ impl WslcSdk {
     /// Load `wslcsdk.dll` at runtime and resolve all required function pointers.
     ///
     /// Loads from the same directory as the running executable to avoid DLL
-    /// search-order hijacking. Returns an error if the DLL is not found or any
-    /// function cannot be resolved.
+    /// search-order hijacking. Returns an error if the DLL is not found, or if
+    /// any function this crate depends on cannot be resolved.
+    ///
+    /// The generated `WslcSdk::new` (bindgen `--dynamic-loading`) succeeds as
+    /// long as the DLL itself opens, storing each unresolved symbol as an `Err`
+    /// that would otherwise only surface as a panic on first use. To fail fast
+    /// against an incompatible SDK runtime (version skew), `load` additionally
+    /// validates that every function actually called by this crate resolved,
+    /// via [`ensure_required_symbols`](Self::ensure_required_symbols).
     pub fn load() -> Result<Self, String> {
         let dll_path = std::env::current_exe()
             .map_err(|e| format!("Failed to determine current executable path: {e}"))?
@@ -57,9 +64,8 @@ impl WslcSdk {
             .ok_or_else(|| "Failed to determine current executable directory".to_string())?
             .join("wslcsdk.dll");
 
-        // SAFETY: loading a DLL and resolving symbols is inherently unsafe; the
-        // generated `WslcSdk::new` validates every symbol resolves.
-        unsafe {
+        // SAFETY: loading a DLL and resolving symbols is inherently unsafe.
+        let sdk = unsafe {
             Self::new(&dll_path).map_err(|e| {
                 format!(
                     "Failed to load wslcsdk.dll from {}: {e}. \
@@ -67,8 +73,78 @@ impl WslcSdk {
                      in the same directory as the running executable.",
                     dll_path.display()
                 )
-            })
+            })?
+        };
+        sdk.ensure_required_symbols(&dll_path)?;
+        Ok(sdk)
+    }
+
+    /// Verify that every SDK export this crate calls resolved during `new`.
+    ///
+    /// bindgen's `--dynamic-loading` defers per-symbol resolution failures to
+    /// first use (a panic). This restores the old eager fail-fast behavior:
+    /// if the loaded `wslcsdk.dll` is missing any function we depend on (an
+    /// incompatible/older SDK runtime), return a descriptive error naming the
+    /// missing exports instead of panicking later at the call site.
+    ///
+    /// The list below must mirror the SDK functions invoked by
+    /// `wsl_container_runner.rs` and the RAII guards. Intentionally excludes
+    /// header-declared functions this crate never calls, since SDK headers may
+    /// declare exports ahead of what the shipping runtime implements.
+    fn ensure_required_symbols(&self, dll_path: &std::path::Path) -> Result<(), String> {
+        let mut missing: Vec<&'static str> = Vec::new();
+        macro_rules! require {
+            ($($f:ident),* $(,)?) => {
+                $( if self.$f.is_err() { missing.push(stringify!($f)); } )*
+            };
         }
+        require!(
+            WslcInitSessionSettings,
+            WslcCreateSession,
+            WslcSetSessionSettingsCpuCount,
+            WslcSetSessionSettingsMemory,
+            WslcSetSessionSettingsTimeout,
+            WslcSetSessionSettingsFeatureFlags,
+            WslcTerminateSession,
+            WslcReleaseSession,
+            WslcInitContainerSettings,
+            WslcCreateContainer,
+            WslcStartContainer,
+            WslcSetContainerSettingsInitProcess,
+            WslcSetContainerSettingsNetworkingMode,
+            WslcSetContainerSettingsFlags,
+            WslcSetContainerSettingsPortMappings,
+            WslcSetContainerSettingsVolumes,
+            WslcCreateContainerProcess,
+            WslcReleaseContainer,
+            WslcGetContainerInitProcess,
+            WslcStopContainer,
+            WslcDeleteContainer,
+            WslcInitProcessSettings,
+            WslcSetProcessSettingsWorkingDirectory,
+            WslcSetProcessSettingsCmdLine,
+            WslcSetProcessSettingsEnvVariables,
+            WslcSetProcessSettingsCallbacks,
+            WslcGetProcessExitEvent,
+            WslcGetProcessExitCode,
+            WslcReleaseProcess,
+            WslcPullSessionImage,
+            WslcImportSessionImageFromFile,
+            WslcLoadSessionImageFromFile,
+            WslcListSessionImages,
+            WslcGetMissingComponents,
+        );
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "wslcsdk.dll at {} is missing {} required export(s): {}. \
+             The installed WSLC SDK runtime is incompatible with this build \
+             (expected a newer version). Update the WSL/WSLC runtime.",
+            dll_path.display(),
+            missing.len(),
+            missing.join(", ")
+        ))
     }
 
     /// Raw `WslcTerminateSession` pointer, for the session RAII guard.
