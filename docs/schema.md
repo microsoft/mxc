@@ -75,7 +75,7 @@ production configs and the dev schema when working on experimental features:
             "memoryMb": 2048,              // Memory in MB for WSLC session
             "gpu": false,                  // GPU passthrough
             "storagePath": "C:\\wslc-storage",  // Image store path
-            "portMappings": [              // Host<->container port forwarding. TCP only -- the vendored WSLC SDK 2.8.1 runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
+            "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
         },
