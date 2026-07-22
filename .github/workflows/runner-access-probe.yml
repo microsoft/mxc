@@ -1,0 +1,70 @@
+name: Runner Access Probe
+
+# Empirical probe to check whether this repository can schedule a GitHub *larger*
+# runner (a.k.a. premium / custom-size hosted runner). This exists because the repo
+# Settings -> Actions -> Runners page is not visible to non-admins in this org, so the
+# only reliable way to check access is to try to schedule a job and watch what happens.
+#
+# HOW IT WORKS
+#   The "larger-runner-probe" job requests a candidate runner label. Then:
+#     * It starts and prints its specs  => the repo HAS access to that label.
+#     * It stays "Queued / Waiting for a runner" and never starts => NO access.
+#       (That is your answer -- cancel the run.)
+#
+# HOW TO USE ON A DRAFT PR
+#   1. Push once as-is. Both jobs run on ubuntu-latest and should go green -- this
+#      confirms the workflow itself is valid.
+#   2. Change the single literal marked  <<< EDIT LABEL HERE >>>  below to the larger
+#      runner label you want to test (e.g. ubuntu-24.04-16core), then push again.
+#   3. Open the PR's Checks tab and watch the "larger-runner-probe" job.
+#        - Started + green  => access confirmed (specs are in the log).
+#        - Stuck "Waiting for a runner" for more than ~1-2 min => no access; cancel it.
+#
+# AFTER THIS FILE IS ON THE DEFAULT BRANCH
+#   You can also re-run it from the Actions tab via "Run workflow" and type any label
+#   in the input box, without editing the file.
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Larger-runner label to probe (e.g. ubuntu-24.04-16core)
+        required: false
+        default: ubuntu-latest
+
+permissions: {}
+
+jobs:
+  baseline:
+    name: Baseline (ubuntu-latest control)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report runner details
+        shell: bash
+        run: |
+          echo "This is the standard-runner control -- it should always run."
+          echo "runner.name = ${RUNNER_NAME}"
+          echo "runner.os   = ${RUNNER_OS}"
+          echo "runner.arch = ${RUNNER_ARCH}"
+          node -e "const o=require('os');console.log('cpus  =',o.cpus().length);console.log('memGB =',(o.totalmem()/1e9).toFixed(1));console.log('plat  =',o.platform(),o.arch())"
+
+  larger-runner-probe:
+    name: Larger runner probe
+    # On a pull_request run there is no dispatch input, so the literal below is used.
+    #                                                     vvvvvvvvvvvvv  <<< EDIT LABEL HERE >>>
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    # Never fail the PR because of this probe -- a missing runner shows up as a
+    # cancelled/queued job, not a red required check.
+    continue-on-error: true
+    steps:
+      - name: Report runner details
+        shell: bash
+        run: |
+          echo "A runner picked up this job -- the requested label IS available to this repo."
+          echo "runner.name = ${RUNNER_NAME}"
+          echo "runner.os   = ${RUNNER_OS}"
+          echo "runner.arch = ${RUNNER_ARCH}"
+          node -e "const o=require('os');console.log('cpus  =',o.cpus().length);console.log('memGB =',(o.totalmem()/1e9).toFixed(1));console.log('plat  =',o.platform(),o.arch())"
