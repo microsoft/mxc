@@ -53,8 +53,10 @@ jobs:
   larger-runner-probe:
     name: Larger runner probe
     # On a pull_request run there is no dispatch input, so the literal below is used.
-    #                                                     vvvvvvvvvvvvv  <<< EDIT LABEL HERE >>>
-    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
+    # NOTE: 'ubuntu-latest-4-cores' is a GUESS at a common larger-runner naming
+    # convention -- this org's real label may differ. Swap it for the actual label
+    # if you know one.                                    vvvvvvvvvvvvvvvvvvvvvv  <<< EDIT LABEL HERE >>>
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest-4-cores' }}
     timeout-minutes: 10
     # Never fail the PR because of this probe -- a missing runner shows up as a
     # cancelled/queued job, not a red required check.
