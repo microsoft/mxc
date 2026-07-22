@@ -165,7 +165,16 @@ fn write_filesystem_allow(out: &mut String, request: &ExecutionRequest) -> Resul
         out.push_str("(allow file-read* file-write*\n");
         for p in &policy.readwrite_paths {
             let expanded = expand_tilde(p)?;
-            let _ = writeln!(out, "    (subpath {})", quote_scheme(&expanded));
+            match darwin_temp_sibling_grants(&expanded) {
+                Some(siblings) => {
+                    for sibling in siblings {
+                        let _ = writeln!(out, "    (subpath {})", quote_scheme(&sibling));
+                    }
+                }
+                None => {
+                    let _ = writeln!(out, "    (subpath {})", quote_scheme(&expanded));
+                }
+            }
         }
         out.push_str(")\n");
     }
@@ -483,6 +492,59 @@ pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
     }
 }
 
+/// Expand a read-write grant that targets a per-user macOS Darwin temp/cache
+/// leaf into read-write grants for its three well-known per-user siblings
+/// (`T`, `C`, `0`). Returns `None` when the path is not such a leaf.
+///
+/// On macOS `$TMPDIR` is the per-user `_CS_DARWIN_USER_TEMP_DIR`
+/// (`/var/folders/<a>/<b>/T/`); its siblings `C` (`_CS_DARWIN_USER_CACHE_DIR`)
+/// and `0` (misc) share the same per-user container but are otherwise
+/// unwritable. Granting only the `T` leaf denies tools that stage under the
+/// per-user cache, so a `T`/`C`/`0` grant is expanded to cover all three
+/// siblings — and *only* those three. The enclosing `/var/folders/<a>/<b>`
+/// container itself is never granted, so no other directory under it becomes
+/// writable and a caller keeps least-privilege access to everything outside the
+/// `T`/`C`/`0` triad.
+///
+/// Applied unconditionally (not host-gated): a Seatbelt profile is always a
+/// macOS artifact regardless of the build host, matching the platform-agnostic
+/// `/private/var/folders` grant emitted for `guiAccess`. `deniedPaths` still
+/// override the expanded grants, since they are emitted after the allow rules
+/// (last-match-wins) — so a caller can still carve any one sibling back out.
+///
+/// The guard is strict — it expands only when the path is exactly
+/// `/var/folders/<a>/<b>/<leaf>` with `<leaf>` one of `T`, `C`, or `0`
+/// (optionally under `/private`, the post-canonicalization form) and `<a>`/`<b>`
+/// are ordinary path segments (never empty, `.`, or `..`). A too-shallow path, a
+/// deeper path, a non-temp leaf, a `.`/`..` traversal segment, or any location
+/// outside `/var/folders` yields `None`, so an expansion can never reach the
+/// container root, `/var/folders` (every user's containers), or `/`.
+fn darwin_temp_sibling_grants(path: &str) -> Option<[String; 3]> {
+    let trimmed = path.strip_suffix('/').unwrap_or(path);
+    let (private_prefix, rest) = trimmed
+        .strip_prefix("/private")
+        .map_or(("", trimmed), |rest| ("/private", rest));
+    let mut segments = rest.strip_prefix('/')?.split('/');
+    if segments.next()? != "var" || segments.next()? != "folders" {
+        return None;
+    }
+    // `<a>`/`<b>` must be ordinary segments; `.`/`..` would let the derived
+    // container escape upward (e.g. `/var/folders/ab/../T` -> `/var/folders`).
+    let ordinary = |s: &&str| !s.is_empty() && !matches!(*s, "." | "..");
+    let a = segments.next().filter(ordinary)?;
+    let b = segments.next().filter(ordinary)?;
+    let leaf = segments.next()?;
+    if segments.next().is_some() || !matches!(leaf, "T" | "C" | "0") {
+        return None;
+    }
+    let container = format!("{private_prefix}/var/folders/{a}/{b}");
+    Some([
+        format!("{container}/T"),
+        format!("{container}/C"),
+        format!("{container}/0"),
+    ])
+}
+
 /// Quote a string for use as a TinyScheme string literal, escaping
 /// embedded backslashes and double-quotes.
 fn quote_scheme(s: &str) -> String {
@@ -554,6 +616,102 @@ mod tests {
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow file-read* file-write*"));
         assert!(p.contains("(subpath \"/tmp/output\")"));
+    }
+
+    #[test]
+    fn darwin_temp_sibling_grants_expands_leaf_to_three_siblings() {
+        // Any of the temp (`T`), cache (`C`), or misc (`0`) leaves expands to
+        // the same three per-user siblings — never the container itself — with
+        // and without a trailing slash.
+        let siblings = |base: &str| {
+            [
+                format!("{base}/T"),
+                format!("{base}/C"),
+                format!("{base}/0"),
+            ]
+        };
+        for leaf in [
+            "/var/folders/ab/cd1234/T",
+            "/var/folders/ab/cd1234/C",
+            "/var/folders/ab/cd1234/0",
+            "/var/folders/ab/cd1234/T/",
+        ] {
+            assert_eq!(
+                darwin_temp_sibling_grants(leaf),
+                Some(siblings("/var/folders/ab/cd1234")),
+                "unexpected expansion for {leaf}"
+            );
+        }
+        // The `/private`-anchored (post-canonicalization) form is preserved.
+        assert_eq!(
+            darwin_temp_sibling_grants("/private/var/folders/ab/cd1234/T"),
+            Some(siblings("/private/var/folders/ab/cd1234"))
+        );
+    }
+
+    #[test]
+    fn darwin_temp_sibling_grants_rejects_non_per_user_temp() {
+        // Never reach the container root, `/var/folders` (every user), or `/`,
+        // and never touch paths outside a genuine per-user Darwin container.
+        for path in [
+            "/tmp",
+            "/tmp/output",
+            "/var/folders",                   // too shallow
+            "/var/folders/ab",                // too shallow
+            "/var/folders/ab/cd",             // the container itself, no temp leaf
+            "/var/folders/ab/cd/T/nested",    // deeper than a leaf
+            "/var/folders/ab/cd/other",       // non-temp leaf
+            "/Users/someone/tmp",             // outside /var/folders
+            "/privateer/var/folders/ab/cd/T", // not the /private mount
+            "/var/folders/ab/../T",           // `..` escapes up to /var/folders
+            "/var/folders/../ab/T",           // `..` in the first segment
+            "/var/folders/ab/./T",            // `.` collapses to a too-shallow grant
+            "/var/folders/./cd/T",            // `.` in the first segment
+        ] {
+            assert_eq!(
+                darwin_temp_sibling_grants(path),
+                None,
+                "expected no expansion for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn readwrite_temp_leaf_expands_to_siblings_in_profile() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/var/folders/ab/cd1234/T".into()];
+        let p = build_profile(&r).unwrap();
+        // All three per-user siblings are granted read-write ...
+        assert!(p.contains("(subpath \"/var/folders/ab/cd1234/T\")"));
+        assert!(p.contains("(subpath \"/var/folders/ab/cd1234/C\")"));
+        assert!(p.contains("(subpath \"/var/folders/ab/cd1234/0\")"));
+        // ... but the enclosing container itself is never granted, so no other
+        // directory under it becomes writable.
+        assert!(!p.contains("(subpath \"/var/folders/ab/cd1234\")"));
+    }
+
+    #[test]
+    fn readwrite_temp_leaf_grant_still_denies_sibling() {
+        // Granting the `T` leaf expands to allow the `C` sibling too; a
+        // `deniedPaths` entry on `C` must still win via last-match ordering.
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/var/folders/ab/cd1234/T".into()];
+        r.policy.denied_paths = vec!["/var/folders/ab/cd1234/C".into()];
+        let p = build_profile(&r).unwrap();
+        let allow_c = p
+            .find("(subpath \"/var/folders/ab/cd1234/C\")")
+            .expect("expanded grant should allow the C sibling");
+        let deny_block = p
+            .find("(deny file-read* file-write*")
+            .expect("deniedPaths should emit a deny block");
+        let deny_c = p[deny_block..]
+            .find("(subpath \"/var/folders/ab/cd1234/C\")")
+            .map(|i| deny_block + i)
+            .expect("C should appear in the deny block");
+        assert!(
+            deny_c > allow_c,
+            "the C deny must come after the expanded C allow so it wins on last-match"
+        );
     }
 
     #[test]
