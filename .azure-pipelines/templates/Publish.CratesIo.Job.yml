@@ -1,0 +1,89 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Publishes the `mxc-sdk` crate closure to crates.io through ESRP Release, under
+# the official `microsoft-oss-releases` account. Consumes the
+# `mxc-crates-package` artifact produced by the official build
+# (Package.Crates.Job.yml) -- ESRP publishes pre-built `.crate` files, so no
+# CARGO_REGISTRY_TOKEN ever lives in this repo.
+#
+# ESRP publishes via the crates.io API, which does NOT enforce dependency order
+# and offers no bulk sorting (see the ESRP crates.io docs). We therefore emit
+# one EsrpRelease task per crate, leaf-first, and confirm each crate is on the
+# crates.io index before its dependents publish. A run-time guard asserts the
+# compile-time `crateOrder` matches what was actually packaged.
+
+parameters:
+  - name: ESRPInfo
+    type: object
+  # Leaf-first crate order. MUST match the CRATES list in
+  # scripts/crates_release.py; `verify-order` enforces this at run time.
+  - name: crateOrder
+    type: object
+  - name: cratesArtifactName
+    type: string
+    default: mxc-crates-package
+
+jobs:
+  - deployment: publish_crates
+    displayName: Publish crates to crates.io (ESRP)
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: ubuntu-latest
+      os: linux
+    templateContext:
+      type: releaseJob
+      isProduction: true
+      inputs:
+        - input: pipelineArtifact
+          pipeline: MXC
+          artifactName: ${{ parameters.cratesArtifactName }}
+          targetPath: $(Pipeline.Workspace)/crates
+    variables:
+      cratesDir: $(Pipeline.Workspace)/crates
+      esrpDir: $(Pipeline.Workspace)/esrp-one
+      orderFile: $(Pipeline.Workspace)/crates/release-order.json
+      script: $(Pipeline.Workspace)/crates/crates_release.py
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            # Guard: the compile-time crate loop below and the packaged closure
+            # must agree, or we could publish in the wrong order / skip a crate.
+            - script: |
+                set -euo pipefail
+                python3 "$(script)" verify-order --order-file "$(orderFile)" --expected "$EXPECTED_ORDER"
+              displayName: Verify crate order matches package
+              env:
+                EXPECTED_ORDER: ${{ convertToJson(parameters.crateOrder) }}
+
+            - ${{ each crate in parameters.crateOrder }}:
+                - script: |
+                    set -euo pipefail
+                    python3 "$(script)" stage --order-file "$(orderFile)" --crate "${{ crate }}" --out-dir "$(esrpDir)"
+                  displayName: "Stage ${{ crate }} for ESRP"
+
+                - task: EsrpRelease@12
+                  displayName: "Publish ${{ crate }} to crates.io"
+                  inputs:
+                    connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+                    usemanagedidentity: false
+                    keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+                    authcertname: ${{ parameters.ESRPInfo.authCertName }}
+                    signcertname: ${{ parameters.ESRPInfo.signCertName }}
+                    clientid: ${{ parameters.ESRPInfo.clientId }}
+                    intent: 'PackageDistribution'
+                    contenttype: 'Rust'
+                    contentsource: 'Folder'
+                    folderlocation: $(esrpDir)
+                    owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+                    approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+                    waitforreleasecompletion: true
+                    serviceendpointurl: 'https://api.esrp.microsoft.com'
+                    mainpublisher: 'ESRPRELPACMAN'
+                    domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
+
+                - script: |
+                    set -euo pipefail
+                    python3 "$(script)" wait --order-file "$(orderFile)" --crate "${{ crate }}"
+                  displayName: "Wait for ${{ crate }} on crates.io index"

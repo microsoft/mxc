@@ -3,6 +3,8 @@ name = "appcontainer_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Windows AppContainer/BaseContainer backend support for MXC sandboxing."
 
 [features]
 # Compile-time gate for Tier 2 (AppContainer + BFS via bfscfg.exe).

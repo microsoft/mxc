@@ -55,6 +55,7 @@ strip = "debuginfo"
 version = "0.7.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/microsoft/mxc"
 
 [workspace.dependencies]
 # Pure-Rust ETW TraceLogging provider used by `mxc_telemetry` (Windows-only;
@@ -101,10 +102,10 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 roxmltree = "0.20"
-wxc_common = { path = "core/wxc_common" }
+wxc_common = { path = "core/wxc_common", version = "0.7.0" }
 mxc_engine = { path = "core/mxc_engine" }
 mxc-sdk = { path = "core/mxc-sdk" }
-appcontainer_common = { path = "backends/appcontainer/common" }
+appcontainer_common = { path = "backends/appcontainer/common", version = "0.7.0" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
 windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 isolation_session_common = { path = "backends/isolation_session/common" }
@@ -115,15 +116,15 @@ uuid = { version = "1", features = ["v4"] }
 getrandom = "0.2"
 libc = "0.2"
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
-lxc_common = { path = "backends/lxc/common" }
-bwrap_common = { path = "backends/bubblewrap/common" }
-seatbelt_common = { path = "backends/seatbelt/common" }
+lxc_common = { path = "backends/lxc/common", version = "0.7.0" }
+bwrap_common = { path = "backends/bubblewrap/common", version = "0.7.0" }
+seatbelt_common = { path = "backends/seatbelt/common", version = "0.7.0" }
 wslc_common = { path = "backends/wslc/common" }
 isolation_session_bindings = { path = "backends/isolation_session/bindings" }
-mxc_pty = { path = "core/mxc_pty" }
+mxc_pty = { path = "core/mxc_pty", version = "0.7.0" }
 flatbuffers = "25"
-sandbox_spec = { path = "core/generated/base_container_specification" }
-mxc_telemetry = { path = "mxc_telemetry" }
+sandbox_spec = { path = "core/generated/base_container_specification", version = "0.7.0" }
+mxc_telemetry = { path = "mxc_telemetry", version = "0.7.0" }
 widestring = "1"
 url = "2"
 winreg = "0.55"
