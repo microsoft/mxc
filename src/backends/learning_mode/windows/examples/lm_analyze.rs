@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Decode a sealed learning-mode `.etl` into the captureDenials RFC 7464
-//! JSON text sequence, or dump its raw ETW events for schema discovery.
+//! Decode a sealed learning-mode `.etl` into the captureDenials JSON
+//! output document, or dump its raw ETW events for schema discovery.
 //!
 //! This is a developer diagnostic for inspecting captured traces manually.
 //! End users and SDK agents do not invoke it: the BaseContainer runner seals
@@ -12,7 +12,7 @@
 //! Usage:
 //!
 //! ```text
-//! # Emit the DeniedResource JSON text sequence (0x1E-framed) to stdout:
+//! # Emit the DeniedResource JSON document to stdout:
 //! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --exit-code <code>
 //!
 //! # Dump every decoded event (id + property name/value pairs):
@@ -58,7 +58,7 @@ mod windows_impl {
                 eprintln!("--exit-code <code> is required unless --raw is used");
                 return 2;
             };
-            emit_json_sequence(path, exit_code)
+            emit_json(path, exit_code)
         }
     }
 
@@ -67,8 +67,8 @@ mod windows_impl {
         args.get(index + 1)?.parse().ok()
     }
 
-    /// Decodes denials and writes the RFC 7464 JSON text sequence to stdout.
-    fn emit_json_sequence(path: &Path, exit_code: i32) -> i32 {
+    /// Decodes denials and writes the JSON output document to stdout.
+    fn emit_json(path: &Path, exit_code: i32) -> i32 {
         let analysis = match EtlDenialAnalyzer.analyze(path) {
             Ok(d) => d,
             Err(e) => {
@@ -81,16 +81,17 @@ mod windows_impl {
             analysis.denials.len(),
             analysis.denied_resources_truncated,
         );
+        let document = emit::DenialsDocument::new(analysis.denials, summary);
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
-        if let Err(e) = emit::write_stream(&mut handle, &analysis.denials, &summary) {
+        if let Err(e) = emit::write_document(&mut handle, &document) {
             eprintln!("write failed: {e}");
             return 1;
         }
         eprintln!(
             "lm_analyze: {} unique denial(s){}",
-            analysis.denials.len(),
-            if analysis.denied_resources_truncated {
+            document.denials.len(),
+            if document.summary.denied_resources_truncated {
                 " (truncated)"
             } else {
                 ""

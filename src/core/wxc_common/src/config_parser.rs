@@ -661,9 +661,9 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
 
 /// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
 /// must be an absolute path whose parent directory already exists (the runner
-/// opens the file there when it seals the trace, under the caller's own
-/// identity). The path itself must not be an existing directory. A relative
-/// path, directory path, or missing parent yields an actionable error.
+/// writes the JSON denials output file there after the workload exits). The
+/// path itself must not be an existing directory. A relative path, directory
+/// path, or missing parent yields an actionable error.
 fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
     let candidate = std::path::Path::new(path);
     if !candidate.is_absolute() {
@@ -2641,7 +2641,7 @@ mod tests {
     #[test]
     fn capture_denials_accepts_valid_absolute_output_path() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("denials.etl");
+        let path = dir.path().join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
             r#"{{
@@ -2665,7 +2665,7 @@ mod tests {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"outputPath": "relative/denials.etl"}}
+            "processContainer": {"captureDenials": {"outputPath": "relative/denials.json"}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -2681,7 +2681,7 @@ mod tests {
     fn capture_denials_missing_parent_dir_rejected() {
         let dir = tempfile::tempdir().expect("temp dir");
         // Parent directory `nonexistent` is never created.
-        let path = dir.path().join("nonexistent").join("denials.etl");
+        let path = dir.path().join("nonexistent").join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
             r#"{{

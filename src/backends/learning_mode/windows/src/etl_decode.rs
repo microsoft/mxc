@@ -102,9 +102,9 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     fn add_raw_denial(&mut self, raw: RawDenial) {
-        let path = if raw.resource_type == learning_mode_core::ResourceType::File {
+        let resource = if raw.resource_type == learning_mode_core::ResourceType::File {
             match path_norm::to_user_visible(&raw.object_name) {
-                Some(path) if path_norm::is_user_visible_absolute(&path) => path,
+                Some(resource) if path_norm::is_user_visible_absolute(&resource) => resource,
                 Some(_) => return,
                 None if path_norm::is_user_visible_absolute(&raw.object_name) => {
                     raw.object_name.clone()
@@ -114,22 +114,25 @@ impl<'visitor> Accumulator<'visitor> {
         } else {
             path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone())
         };
-        let dedup_path = match raw.resource_type {
+        let dedup_resource = match raw.resource_type {
             learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
-                path.to_ascii_lowercase()
+                resource.to_ascii_lowercase()
             }
-            _ => path.clone(),
+            _ => resource.clone(),
         };
-        if self.seen.contains(&(dedup_path.clone(), raw.access_type)) {
+        if self
+            .seen
+            .contains(&(dedup_resource.clone(), raw.access_type))
+        {
             return;
         }
         if self.denials.len() >= MAX_UNIQUE_DENIALS {
             self.truncated = true;
             return;
         }
-        self.seen.insert((dedup_path, raw.access_type));
+        self.seen.insert((dedup_resource, raw.access_type));
         self.denials.push(DeniedResource {
-            path,
+            resource,
             resource_type: raw.resource_type,
             access_type: raw.access_type,
             pid: raw.pid,
@@ -220,9 +223,9 @@ pub fn visit_raw_events(
     Ok(accumulator.raw_event_count)
 }
 
-/// De-duplicates raw denials by `(user-visible path, accessType)`,
-/// normalising kernel paths to drive-letter form and preserving first-seen
-/// order.
+/// De-duplicates raw denials by `(user-visible resource, accessType)`,
+/// normalising case-insensitive Windows file/registry identifiers while
+/// preserving first-seen display spelling and order.
 #[cfg(test)]
 fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> AnalysisResult {
     let mut accumulator = Accumulator::analyze();
@@ -451,11 +454,11 @@ mod tests {
             raw(r"C:\b", AccessType::Read, ResourceType::File),
         ];
         let out = dedup_to_resources(denials).denials;
-        assert_eq!(out.len(), 3, "unique (path, access) pairs");
-        assert_eq!(out[0].path, r"C:\a");
+        assert_eq!(out.len(), 3, "unique (resource, access) pairs");
+        assert_eq!(out[0].resource, r"C:\a");
         assert_eq!(out[0].access_type, AccessType::Read);
         assert_eq!(out[1].access_type, AccessType::Write);
-        assert_eq!(out[2].path, r"C:\b");
+        assert_eq!(out[2].resource, r"C:\b");
     }
 
     #[test]
@@ -465,8 +468,8 @@ mod tests {
             raw(r"C:\a", AccessType::Read, ResourceType::File),
         ];
         let out = dedup_to_resources(denials).denials;
-        assert_eq!(out[0].path, r"C:\z");
-        assert_eq!(out[1].path, r"C:\a");
+        assert_eq!(out[0].resource, r"C:\z");
+        assert_eq!(out[1].resource, r"C:\a");
     }
 
     #[test]
@@ -505,7 +508,7 @@ mod tests {
         ];
         let out = dedup_to_resources(denials).denials;
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].path, r"C:\Data\File.txt");
+        assert_eq!(out[0].resource, r"C:\Data\File.txt");
     }
 
     #[test]
@@ -615,16 +618,16 @@ mod tests {
         let out = resources_from_events(&events).denials;
         assert_eq!(out.len(), 3);
 
-        assert_eq!(out[0].path, r"C:\data\test\bin\");
+        assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].resource_type, ResourceType::File);
         assert_eq!(out[0].access_type, AccessType::Write);
         assert_eq!(out[0].pid, 5480);
 
-        assert_eq!(out[1].path, r"\REGISTRY\USER\.DEFAULT\Console");
+        assert_eq!(out[1].resource, r"\REGISTRY\USER\.DEFAULT\Console");
         assert_eq!(out[1].resource_type, ResourceType::Other);
         assert_eq!(out[1].access_type, AccessType::Read);
 
-        assert_eq!(out[2].path, "S-1-15-3-1");
+        assert_eq!(out[2].resource, "internetClient");
         assert_eq!(out[2].resource_type, ResourceType::Capability);
         assert_eq!(out[2].access_type, AccessType::Unknown);
         assert_eq!(out[2].pid, 0x1acc, "pid from payload ProcessId");
@@ -663,7 +666,7 @@ mod tests {
 
         let out = resources_from_events(&events).denials;
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].path, r"C:\data\test\bin\");
+        assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].access_type, AccessType::Write);
     }
 
