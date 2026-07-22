@@ -130,6 +130,13 @@ impl NetworkIptablesManager {
     }
 
     /// Apply network firewall rules based on the container policy.
+    ///
+    /// Resolves `allowedHosts`/`blockedHosts` (DNS + warnings happen here),
+    /// delegates rule construction to the pure [`Self::build_firewall_rules`],
+    /// then executes each emitted `iptables` argument vector. Keeping argv
+    /// construction in a pure function (mirroring the bubblewrap `build_args`
+    /// and seatbelt `build_profile` backends) is what makes the emitted rule
+    /// set unit-testable without root or a live `iptables`.
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
@@ -145,131 +152,159 @@ impl NetworkIptablesManager {
             return Ok(true);
         }
 
-        logger.log_line(&format!("Creating iptables chain: {}", self.chain_name));
+        // Resolve host allow/block lists up front. DNS resolution and the
+        // per-host warning/allow/block logging live here so that the rule
+        // builder (`build_firewall_rules`) stays a pure function with no I/O
+        // and is therefore unit-testable without root or a live `iptables`.
+        let allowed_ips = self.resolve_hosts_logged(&policy.allowed_hosts, "Allowing", logger);
+        let blocked_ips = self.resolve_hosts_logged(&policy.blocked_hosts, "Blocking", logger);
 
-        // Create custom chain
-        Self::run_iptables(&["-N", &self.chain_name], logger)?;
-
-        let accept_packet_verb = "ACCEPT";
-        let drop_packet_verb = "DROP";
-
-        // ACCEPT/DROP loopback and established connections
-        let allow_local_network_verb = if policy.allow_local_network {
-            accept_packet_verb
-        } else {
-            drop_packet_verb
-        };
-
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-i",
-                "lo",
-                "-j",
-                allow_local_network_verb,
-            ],
-            logger,
-        )?;
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-m",
-                "state",
-                "--state",
-                "ESTABLISHED,RELATED",
-                "-j",
-                accept_packet_verb,
-            ],
-            logger,
-        )?;
-
-        // Allow DNS (needed for hostname resolution)
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-p",
-                "udp",
-                "--dport",
-                "53",
-                "-j",
-                accept_packet_verb,
-            ],
-            logger,
-        )?;
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-p",
-                "tcp",
-                "--dport",
-                "53",
-                "-j",
-                accept_packet_verb,
-            ],
-            logger,
-        )?;
-
-        // Add allowed host rules
-        for host in &policy.allowed_hosts {
-            let ips = Self::resolve_host(host);
-            if ips.is_empty() {
-                logger.log_line(&format!("Warning: could not resolve host '{}'", host));
-                continue;
-            }
-            for ip in &ips {
-                logger.log_line(&format!("Allowing host: {} ({})", host, ip));
-                Self::run_iptables(
-                    &["-A", &self.chain_name, "-d", ip, "-j", accept_packet_verb],
-                    logger,
-                )?;
-            }
-        }
-
-        // Add blocked host rules
-        for host in &policy.blocked_hosts {
-            let ips = Self::resolve_host(host);
-            if ips.is_empty() {
-                logger.log_line(&format!("Warning: could not resolve host '{}'", host));
-                continue;
-            }
-            for ip in &ips {
-                logger.log_line(&format!("Blocking host: {} ({})", host, ip));
-                Self::run_iptables(
-                    &["-A", &self.chain_name, "-d", ip, "-j", drop_packet_verb],
-                    logger,
-                )?;
-            }
-        }
-
-        // Append default policy at end of chain
-        let default_action = match policy.default_network_policy {
-            NetworkPolicy::Block => drop_packet_verb,
-            NetworkPolicy::Allow => accept_packet_verb,
-        };
-        logger.log_line(&format!("Default network policy: {}", default_action));
-        Self::run_iptables(&["-A", &self.chain_name, "-j", default_action], logger)?;
-
-        // Hook the chain into FORWARD for the container's traffic
-        if let Some(ref iface) = self.veth_interface {
-            Self::run_iptables(
-                &["-I", "FORWARD", "-o", iface, "-j", &self.chain_name],
-                logger,
-            )?;
-        } else {
-            // Without a veth interface, we cannot safely scope rules to the container.
-            // Refuse to apply host-wide rules to avoid affecting all host traffic.
+        if self.veth_interface.is_none() {
+            // Without a veth interface, we cannot safely scope rules to the
+            // container. `build_firewall_rules` omits the FORWARD hook in that
+            // case; warn so the operator knows the chain was built but the
+            // host-wide hook was intentionally skipped.
             logger.log_line(
                 "Warning: No veth interface set for container. \
                  Cannot scope iptables rules. Skipping FORWARD hook.",
             );
         }
 
+        logger.log_line(&format!("Creating iptables chain: {}", self.chain_name));
+        logger.log_line(&format!(
+            "Default network policy: {}",
+            match policy.default_network_policy {
+                NetworkPolicy::Block => "DROP",
+                NetworkPolicy::Allow => "ACCEPT",
+            }
+        ));
+
+        let rules = Self::build_firewall_rules(
+            &self.chain_name,
+            policy,
+            self.veth_interface.as_deref(),
+            &allowed_ips,
+            &blocked_ips,
+        );
+
+        for rule in &rules {
+            let argv: Vec<&str> = rule.iter().map(String::as_str).collect();
+            Self::run_iptables(&argv, logger)?;
+        }
+
         self.rules_applied = true;
         Ok(true)
+    }
+
+    /// Resolve a host allow/block list to IPv4 addresses, logging each
+    /// resolved mapping and warning on unresolvable hosts. Split out of the
+    /// rule builder so that the builder can stay pure (no DNS, no logging)
+    /// and therefore unit-testable. `verb` is the log prefix ("Allowing" /
+    /// "Blocking").
+    fn resolve_hosts_logged(
+        &self,
+        hosts: &[String],
+        verb: &str,
+        logger: &mut Logger,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for host in hosts {
+            let ips = Self::resolve_host(host);
+            if ips.is_empty() {
+                logger.log_line(&format!("Warning: could not resolve host '{}'", host));
+                continue;
+            }
+            for ip in ips {
+                logger.log_line(&format!("{} host: {} ({})", verb, host, ip));
+                out.push(ip);
+            }
+        }
+        out
+    }
+
+    /// Build the ordered list of `iptables` argument vectors for `policy`.
+    ///
+    /// Pure: performs no process execution, no DNS resolution, and no logging.
+    /// Every input — including the already-resolved `allowed_ips`/`blocked_ips`
+    /// — is passed in, so this compiles and can be unit-tested on any host.
+    /// This mirrors the bubblewrap `build_args` and seatbelt `build_profile`
+    /// builders. `apply_firewall_rules` resolves hosts, calls this, then
+    /// executes each returned vector.
+    ///
+    /// **Inbound control (roadmap N2 / `allowLocalNetwork`).** The chain is
+    /// hooked into the host `FORWARD` chain with `-o <veth>`, so every packet
+    /// it sees is destined *into* the container. After accepting loopback and
+    /// established/related return traffic, a single `--state NEW` rule decides
+    /// whether *new* inbound connections to the container are accepted
+    /// (`allowLocalNetwork: true`) or dropped (default). This is independent of
+    /// `default_network_policy`, which is applied as the terminal rule.
+    fn build_firewall_rules(
+        chain: &str,
+        policy: &ContainerPolicy,
+        veth: Option<&str>,
+        allowed_ips: &[String],
+        blocked_ips: &[String],
+    ) -> Vec<Vec<String>> {
+        fn argv(args: &[&str]) -> Vec<String> {
+            args.iter().map(|s| s.to_string()).collect()
+        }
+
+        let accept = "ACCEPT";
+        let drop = "DROP";
+        let mut rules: Vec<Vec<String>> = Vec::new();
+
+        // Create the container's custom chain.
+        rules.push(argv(&["-N", chain]));
+
+        // Loopback must always pass. Restored to an unconditional ACCEPT: the
+        // previous code flipped this verb for `allowLocalNetwork`, but a
+        // forwarded packet never arrives on `lo`, so it was a no-op — and a
+        // conditional `-i lo -j DROP` would become an active hazard (breaking
+        // in-container `127.0.0.1`) if the chain were ever moved to the
+        // container's INPUT path.
+        rules.push(argv(&["-A", chain, "-i", "lo", "-j", accept]));
+
+        // Accept return traffic for connections the container itself opened.
+        // MUST precede the NEW-inbound decision below so container-initiated
+        // flows survive an inbound DROP.
+        rules.push(argv(&[
+            "-A", chain, "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", accept,
+        ]));
+
+        // Inbound control (roadmap N2): accept or drop NEW inbound connections
+        // to the container based on `allowLocalNetwork`. Independent of the
+        // outbound default policy applied at the end of the chain.
+        let inbound_verb = if policy.allow_local_network { accept } else { drop };
+        rules.push(argv(&[
+            "-A", chain, "-m", "state", "--state", "NEW", "-j", inbound_verb,
+        ]));
+
+        // Allow DNS (needed for hostname resolution).
+        rules.push(argv(&["-A", chain, "-p", "udp", "--dport", "53", "-j", accept]));
+        rules.push(argv(&["-A", chain, "-p", "tcp", "--dport", "53", "-j", accept]));
+
+        // Allowed / blocked host IPs (already resolved by the caller).
+        for ip in allowed_ips {
+            rules.push(argv(&["-A", chain, "-d", ip, "-j", accept]));
+        }
+        for ip in blocked_ips {
+            rules.push(argv(&["-A", chain, "-d", ip, "-j", drop]));
+        }
+
+        // Terminal default policy.
+        let default_action = match policy.default_network_policy {
+            NetworkPolicy::Block => drop,
+            NetworkPolicy::Allow => accept,
+        };
+        rules.push(argv(&["-A", chain, "-j", default_action]));
+
+        // Hook the chain into FORWARD for the container's traffic — only when a
+        // veth is known, so rules stay scoped to the container.
+        if let Some(iface) = veth {
+            rules.push(argv(&["-I", "FORWARD", "-o", iface, "-j", chain]));
+        }
+
+        rules
     }
 
     /// Remove all iptables rules created by this manager.
@@ -379,5 +414,177 @@ mod tests {
         // IPv4-only filter must not regress the happy path.
         let ips = NetworkIptablesManager::resolve_host("10.0.0.1");
         assert_eq!(ips, vec!["10.0.0.1"]);
+    }
+
+    // ---- build_firewall_rules: pure rule-emission coverage ---------------
+    //
+    // These exercise the extracted pure builder directly (no root, no
+    // `iptables`, no DNS), mirroring how the other backends unit-test their
+    // policy→artifact builders (bubblewrap `build_args`, seatbelt
+    // `build_profile`). They pin the emitted argv so the inbound verb-flip
+    // that Gudge flagged is covered by CI.
+
+    /// A `ContainerPolicy` with the two fields these tests vary; everything
+    /// else defaults. Built via `..Default::default()` like the fixtures in
+    /// the other backends.
+    fn policy_with(allow_local: bool, default: NetworkPolicy) -> ContainerPolicy {
+        ContainerPolicy {
+            allow_local_network: allow_local,
+            default_network_policy: default,
+            ..Default::default()
+        }
+    }
+
+    /// Exact-match a single emitted rule against an expected argv.
+    fn is(rule: &[String], want: &[&str]) -> bool {
+        rule.len() == want.len() && rule.iter().zip(want).all(|(a, b)| a == b)
+    }
+
+    fn has(rules: &[Vec<String>], want: &[&str]) -> bool {
+        rules.iter().any(|r| is(r, want))
+    }
+
+    fn pos(rules: &[Vec<String>], want: &[&str]) -> Option<usize> {
+        rules.iter().position(|r| is(r, want))
+    }
+
+    fn build(allow_local: bool, default: NetworkPolicy, veth: Option<&str>) -> Vec<Vec<String>> {
+        NetworkIptablesManager::build_firewall_rules(
+            "MXC-t",
+            &policy_with(allow_local, default),
+            veth,
+            &[],
+            &[],
+        )
+    }
+
+    #[test]
+    fn loopback_always_accepts_regardless_of_allow_local() {
+        for allow in [true, false] {
+            let rules = build(allow, NetworkPolicy::Block, Some("veth0"));
+            assert!(
+                has(&rules, &["-A", "MXC-t", "-i", "lo", "-j", "ACCEPT"]),
+                "loopback must be an unconditional ACCEPT (allow_local={allow})"
+            );
+            assert!(
+                !has(&rules, &["-A", "MXC-t", "-i", "lo", "-j", "DROP"]),
+                "loopback must never be DROP (allow_local={allow})"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_local_true_accepts_new_inbound() {
+        let rules = build(true, NetworkPolicy::Block, Some("veth0"));
+        assert!(has(
+            &rules,
+            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "ACCEPT"]
+        ));
+        assert!(!has(
+            &rules,
+            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"]
+        ));
+    }
+
+    #[test]
+    fn allow_local_false_drops_new_inbound() {
+        let rules = build(false, NetworkPolicy::Block, Some("veth0"));
+        assert!(has(
+            &rules,
+            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"]
+        ));
+        assert!(!has(
+            &rules,
+            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "ACCEPT"]
+        ));
+    }
+
+    #[test]
+    fn established_precedes_new_inbound_decision() {
+        let rules = build(false, NetworkPolicy::Block, Some("veth0"));
+        let est = pos(
+            &rules,
+            &["-A", "MXC-t", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        )
+        .expect("ESTABLISHED,RELATED rule must be emitted");
+        let new = pos(
+            &rules,
+            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+        )
+        .expect("NEW rule must be emitted");
+        assert!(est < new, "ESTABLISHED,RELATED must precede the NEW-inbound rule");
+    }
+
+    #[test]
+    fn new_inbound_precedes_terminal_default() {
+        let rules = build(true, NetworkPolicy::Block, Some("veth0"));
+        let new = pos(
+            &rules,
+            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "ACCEPT"],
+        )
+        .expect("NEW rule must be emitted");
+        let def = pos(&rules, &["-A", "MXC-t", "-j", "DROP"]).expect("terminal default must be emitted");
+        assert!(new < def, "NEW-inbound accept must precede the terminal default DROP");
+    }
+
+    #[test]
+    fn forward_hook_present_with_veth() {
+        let rules = build(true, NetworkPolicy::Block, Some("veth0"));
+        assert!(has(&rules, &["-I", "FORWARD", "-o", "veth0", "-j", "MXC-t"]));
+    }
+
+    #[test]
+    fn forward_hook_absent_without_veth() {
+        let rules = build(true, NetworkPolicy::Block, None);
+        assert!(
+            !rules.iter().any(|r| r.first().map(|s| s == "-I").unwrap_or(false)),
+            "no FORWARD hook may be emitted without a veth interface"
+        );
+    }
+
+    #[test]
+    fn dns_rules_emitted() {
+        let rules = build(false, NetworkPolicy::Block, Some("veth0"));
+        assert!(has(
+            &rules,
+            &["-A", "MXC-t", "-p", "udp", "--dport", "53", "-j", "ACCEPT"]
+        ));
+        assert!(has(
+            &rules,
+            &["-A", "MXC-t", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"]
+        ));
+    }
+
+    #[test]
+    fn default_policy_maps_to_terminal_verb() {
+        let block = build(false, NetworkPolicy::Block, Some("veth0"));
+        assert!(
+            has(&block, &["-A", "MXC-t", "-j", "DROP"]),
+            "Block default must emit a terminal DROP"
+        );
+        let allow = build(false, NetworkPolicy::Allow, Some("veth0"));
+        assert!(
+            has(&allow, &["-A", "MXC-t", "-j", "ACCEPT"]),
+            "Allow default must emit a terminal ACCEPT"
+        );
+    }
+
+    #[test]
+    fn allowed_and_blocked_ips_emit_dest_rules() {
+        let rules = NetworkIptablesManager::build_firewall_rules(
+            "MXC-t",
+            &policy_with(false, NetworkPolicy::Block),
+            Some("veth0"),
+            &["1.2.3.4".to_string()],
+            &["5.6.7.8".to_string()],
+        );
+        assert!(has(&rules, &["-A", "MXC-t", "-d", "1.2.3.4", "-j", "ACCEPT"]));
+        assert!(has(&rules, &["-A", "MXC-t", "-d", "5.6.7.8", "-j", "DROP"]));
+    }
+
+    #[test]
+    fn chain_is_created_first() {
+        let rules = build(false, NetworkPolicy::Block, Some("veth0"));
+        assert!(is(&rules[0], &["-N", "MXC-t"]), "chain must be created first");
     }
 }

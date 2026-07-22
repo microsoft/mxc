@@ -117,12 +117,23 @@ fn connect(args: &[String]) {
         eprintln!("NETCHECK_SEND_FAIL {e}");
         exit(1);
     }
-    let mut buf = [0u8; 16];
-    let n = stream.read(&mut buf).unwrap_or(0);
-    if &buf[..n] == b"PONG" {
-        println!("NETCHECK_OK {target}");
-        exit(0);
+    // The server replies with exactly 4 bytes ("PONG"). A single `read` can
+    // return a short count (1..=4) and spuriously fail the comparison, so wait
+    // for all 4 bytes. A closed/blocked connection makes `read_exact` return an
+    // error, which we treat as unreachable.
+    let mut buf = [0u8; 4];
+    match stream.read_exact(&mut buf) {
+        Ok(()) if &buf == b"PONG" => {
+            println!("NETCHECK_OK {target}");
+            exit(0);
+        }
+        Ok(()) => {
+            eprintln!("NETCHECK_BAD_REPLY {target} got={:?}", &buf);
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("NETCHECK_BAD_REPLY {target} {e}");
+            exit(1);
+        }
     }
-    eprintln!("NETCHECK_BAD_REPLY {target} bytes={n}");
-    exit(1);
 }

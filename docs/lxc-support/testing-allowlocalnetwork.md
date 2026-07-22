@@ -1,9 +1,15 @@
 # Testing the LXC `allowLocalNetwork` rule
 
-A runbook for manually verifying the `network.allowLocalNetwork` schema field on
-the **LXC backend**. There is no unit test for this path — the rule is emitted
-into host-side `iptables`, so it can only be verified on a real Linux host with
-the `lxc` toolset installed. This document explains exactly what to do.
+Covers verification of the `network.allowLocalNetwork` schema field on the
+**LXC backend** at two levels:
+
+- **Unit tests** (no root, run anywhere) pin the exact `iptables` argument
+  vectors emitted by `build_firewall_rules` — including the NEW-inbound verb
+  this field controls. Run them with
+  `cargo test -p lxc_common network_iptables` (see §10).
+- **A root runbook** (this document) applies the rules on a real Linux host and
+  verifies them both by dumping the chain and by connecting over a *forwarded*
+  path, because the rule lives in the host `FORWARD` chain.
 
 Branch under test: `user/dahoehna/HonoringInboundRule`.
 
@@ -11,36 +17,48 @@ Branch under test: `user/dahoehna/HonoringInboundRule`.
 
 ## 1. What is being tested
 
-`allowLocalNetwork` is enforced by the LXC backend as a single loopback rule:
+`allowLocalNetwork` controls whether **new inbound connections** forwarded to
+the container are accepted. The LXC backend enforces it with a `--state NEW`
+rule in the container's chain (which is hooked into the host `FORWARD` chain
+with `-o <veth>`):
 
-| Config | Emitted rule |
+| Config | Emitted NEW-inbound rule |
 | --- | --- |
-| `"allowLocalNetwork": true` | `iptables -A <chain> -i lo -j ACCEPT` |
-| omitted / `false` (default) | `iptables -A <chain> -i lo -j DROP` |
+| `"allowLocalNetwork": true` | `iptables -A <chain> -m state --state NEW -j ACCEPT` |
+| omitted / `false` (default) | `iptables -A <chain> -m state --state NEW -j DROP` |
 
-- Enforcement: `src/backends/lxc/common/src/network_iptables.rs` (verb flip
-  `:157-173`, FORWARD hook `-o <veth>` `:257-261`, chain naming `:29-36`).
+Loopback is always accepted (`-i lo -j ACCEPT`, unconditional) and
+established/related return traffic is accepted *before* the NEW rule, so the
+field only gates genuinely new inbound flows and never breaks in-container
+`127.0.0.1` or the container's own outbound replies.
+
+- Rule construction: the pure `build_firewall_rules` in
+  `src/backends/lxc/common/src/network_iptables.rs` (unit-tested; see §10).
 - Rule application is host-side, after container start:
   `src/backends/lxc/common/src/lxc_runner.rs:208-221`.
 - The chain name is `MXC-` + the (sanitized, ≤20-char) `containerId`. For the
   bundled configs that is **`MXC-lxc-localnet-allow`** and
   **`MXC-lxc-localnet-deny`**.
 
-## 2. What is actually observable today (read this first)
+## 2. Which paths the rule governs (read this first)
 
-With the current code the rule is placed in the **host** `FORWARD` chain, hooked
-by `-o <veth>`. Neither of these traverses that path:
+The rule lives in the **host** `FORWARD` chain, hooked by `-o <veth>`, so it
+governs traffic **forwarded into** the container. That has two consequences for
+how you test it:
 
-- in-container `127.0.0.1` — the container has its own network namespace, so its
-  loopback never reaches the host chain; and
-- a host→container connection — that goes through the host `OUTPUT`/container
-  `INPUT` path, not host `FORWARD`.
+- **A peer/routed source is governed.** Container→container traffic (and any
+  externally-routed inbound) is forwarded by the host and hits the `-o <veth>`
+  chain, so the `--state NEW` verb decides ACCEPT vs DROP. The behavioral layer
+  below uses a **second (peer) container** as the client for exactly this
+  reason.
+- **A host→container *direct* connection is NOT governed.** Host-originated
+  packets take the host `OUTPUT` path, not `FORWARD`, so probing the container
+  IP straight from the host cannot distinguish allow vs deny — it would give
+  false confidence. Do not use it as the signal.
 
-**Consequence:** the authoritative check today is **dumping the emitted rule**
-(`iptables -S <chain>`), *not* a client/server connect. A behavioral connect
-test cannot distinguish allow vs deny until an inbound rule is placed in the
-container's `INPUT` path (which the `HonoringInboundRule` branch is expected to
-add). The harness below reports both signals and labels which is authoritative.
+So there are two authoritative signals, both checked by the harness: dumping the
+emitted rule (`iptables -S <chain>`), and a peer-container connect over the
+governed forwarded path.
 
 ## 3. Prerequisites — you need a real Linux host
 
@@ -111,7 +129,7 @@ or the VM push scripts) so the run script can find it under `src/target/...`.
 | `tests/helpers/netcheck/netcheck.rs` | std-only TCP probe. `serve --port P --hold S` binds `0.0.0.0:P`, replies `PONG`, self-exits after `hold` s. `connect --host H --port P --timeout S` exits 0 = reachable, 1 = blocked. |
 | `tests/configs/lxc_local_network_allow.json` | `containerId: lxc-localnet-allow`, `allowLocalNetwork: true`. Alpine 3.23, bind-mounts `/opt/mxc-netcheck` ro, runs `netcheck serve --port 5000 --hold 20`. |
 | `tests/configs/lxc_local_network_deny.json` | `containerId: lxc-localnet-deny`, omits `allowLocalNetwork` (default false). Otherwise identical. |
-| `tests/scripts/run_lxc_local_network_test.sh` | Orchestrator. Root-gated. Builds `netcheck` static-musl, runs each config, reports `[RULE]` + `[BEHAVIOR]`. |
+| `tests/scripts/run_lxc_local_network_test.sh` | Orchestrator. Root-gated. Builds `netcheck` static-musl, runs each config, then asserts `[RULE]` (chain dump) and `[BEHAVIOR]` (peer-container connect over the forwarded path). |
 
 The helper runs inside the **Alpine** (musl) sandbox, so it must be a static
 musl binary. The script builds it with:
@@ -128,15 +146,19 @@ sudo ./tests/scripts/run_lxc_local_network_test.sh
 Per config it: launches `lxc-exec <config>`, waits for the container IP
 (`lxc-info -iH -n <containerId>`), then:
 
-- **`[RULE]`** — dumps `iptables -S MXC-<containerId>` and asserts `-i lo -j
-  ACCEPT` (allow) / `-i lo -j DROP` (deny). **This is the pass/fail signal** and
-  the script's exit code (0 = all rules matched).
-- **`[BEHAVIOR]`** — connects from the host to the sandbox listener.
-  Informational only: with the current code it will report **reachable for both**
-  configs. It starts distinguishing allow/deny automatically once the inbound
-  `INPUT`-path rule lands.
+- **`[RULE]`** — dumps `iptables -S MXC-<containerId>` and asserts the
+  NEW-inbound verb: `-m state --state NEW -j ACCEPT` (allow) /
+  `-m state --state NEW -j DROP` (deny), plus an unconditional `-i lo -j
+  ACCEPT`. Any mismatch fails the script.
+- **`[BEHAVIOR]`** — launches a **peer container** that runs `netcheck connect`
+  against the server container's IP. Because container→container traffic is
+  forwarded, it traverses the governed `-o <veth>` chain, so it must be
+  **reachable** for the allow config and **blocked** for the deny config. A
+  decisive mismatch fails the script; if the peer container cannot start the
+  layer reports `INCONCLUSIVE` (never a silent pass).
 
-Expected today: `[RULE] pass=2 fail=0`.
+Expected: `[RULE] pass=2 fail=0` and `[BEHAVIOR] pass=2 fail=0` on a host with a
+working LXC bridge (container→container forwarding).
 
 ## 7. Minimal manual check (no script)
 
@@ -145,20 +167,20 @@ If you just want the authoritative signal by hand:
 ```bash
 # allow case
 sudo ./src/target/release/lxc-exec tests/configs/lxc_local_network_allow.json &
-sudo iptables -S MXC-lxc-localnet-allow | grep -- '-i lo'
-#   expect:  -A MXC-lxc-localnet-allow -i lo -j ACCEPT
+sudo iptables -S MXC-lxc-localnet-allow | grep -- '--state NEW'
+#   expect:  -A MXC-lxc-localnet-allow -m state --state NEW -j ACCEPT
 
 # deny case
 sudo ./src/target/release/lxc-exec tests/configs/lxc_local_network_deny.json &
-sudo iptables -S MXC-lxc-localnet-deny | grep -- '-i lo'
-#   expect:  -A MXC-lxc-localnet-deny -i lo -j DROP
+sudo iptables -S MXC-lxc-localnet-deny | grep -- '--state NEW'
+#   expect:  -A MXC-lxc-localnet-deny -m state --state NEW -j DROP
 ```
 
 ## 8. Known pitfalls
 
-- **No `-i lo` line at all** → the container didn't start or the chain wasn't
-  applied. Check `/tmp/netcheck_<containerId>.log` and confirm `lxc-info -n
-  <containerId>` shows the container running.
+- **No `--state NEW` line at all** → the container didn't start or the chain
+  wasn't applied. Check `/tmp/netcheck_<containerId>.log` and confirm `lxc-info
+  -n <containerId>` shows the container running.
 - **WSL2 bridge/NAT** → if the container never gets an IP, `lxc-net`/`lxcbr0`
   isn't up: `sudo systemctl start lxc-net` (requires `systemd` enabled in
   `/etc/wsl.conf` + `wsl --shutdown` to apply). Verified working on Ubuntu-24.04;
@@ -172,9 +194,27 @@ sudo iptables -S MXC-lxc-localnet-deny | grep -- '-i lo'
 
 | Area | Location |
 | --- | --- |
-| Rule verb flip / chain / FORWARD hook | `src/backends/lxc/common/src/network_iptables.rs:29-36,157-173,257-261` |
+| Rule construction (pure, unit-tested) | `src/backends/lxc/common/src/network_iptables.rs` — `build_firewall_rules` |
+| Chain-name sanitization (`MXC-` + ≤20 chars) | `src/backends/lxc/common/src/network_iptables.rs` — `new` (`:28-33`) |
 | Host-side rule application | `src/backends/lxc/common/src/lxc_runner.rs:208-221` |
 | Container IP discovery | `src/backends/lxc/common/src/lxc_runner.rs:59` (`lxc-info -iH`) |
 | CLI shell-out (no liblxc FFI) | `src/backends/lxc/common/src/lxc_bindings.rs:202,239,251,323,358,370` |
 | Linux build / run | `README.md:70-72,96,152`; `build.sh` |
 | LXC network CI limitation | `sdk/tests/integration/test_issues.md` |
+
+## 10. Unit tests (no root, run anywhere)
+
+The emitted rule set is unit-tested directly against the pure
+`build_firewall_rules`, mirroring how the other backends test their
+policy→artifact builders (bubblewrap `build_args`, seatbelt `build_profile`):
+
+```bash
+cd src && cargo test -p lxc_common network_iptables
+```
+
+These assert, among other things, that `allowLocalNetwork: true` emits
+`--state NEW -j ACCEPT` and the default emits `--state NEW -j DROP`, that
+loopback is an unconditional ACCEPT, that `ESTABLISHED,RELATED` precedes the NEW
+rule and the NEW rule precedes the terminal default, and that the FORWARD hook
+is present only when a veth is known. They need no root, no `iptables`, and no
+DNS, so they run in CI on any host.
