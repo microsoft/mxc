@@ -272,6 +272,129 @@ fn processcontainer_proxy() {
     assert_success(&result);
 }
 
+/// Drives `processContainer.captureDenials` end to end and asserts the
+/// output-file contract: after the child exits, MXC writes a single JSON
+/// denials document (`{ "denials": [...], "summary": {...} }`) to the
+/// caller-named `outputPath`, and prints a one-line structured pointer
+/// (`{"type":"captureDenials",...}`) to stderr.
+///
+/// Skips cleanly on hosts without the brokered learning-mode trace API (any
+/// non-GE_CURRENT build), where capture surfaces a `BackendUnavailable`
+/// error instead of running.
+fn processcontainer_capture_denials_output_file() {
+    let output_path = std::env::temp_dir().join(format!(
+        "mxc_e2e_denials_{}.json",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::remove_file(&output_path);
+
+    let config = serde_json::json!({
+        "process": { "commandLine": "cmd.exe /c echo capture-denials-e2e", "timeout": 30000 },
+        "containment": "processcontainer",
+        "processContainer": {
+            "captureDenials": {
+                "mode": "block-and-log",
+                "outputPath": output_path.to_string_lossy(),
+            }
+        }
+    });
+
+    let result = run_wxc_config_value(
+        "processcontainer_capture_denials_output_file",
+        &config,
+        &["--debug"],
+    );
+    let combined = result.combined_output_with_decoded_base64();
+
+    // Hosts without the brokered learning-mode API can't run capture at all.
+    if combined.contains("learning-mode trace API is not available") {
+        println!(
+            "SKIPPED: processcontainer_capture_denials_output_file requires the brokered \
+             learning-mode trace API (GE_CURRENT build)"
+        );
+        let _ = std::fs::remove_file(&output_path);
+        return;
+    }
+    if result.is_missing_process_prerequisite() {
+        println!(
+            "SKIPPED: processcontainer_capture_denials_output_file requires local sandbox \
+             runtime prerequisites not available here"
+        );
+        let _ = std::fs::remove_file(&output_path);
+        return;
+    }
+
+    assert_success(&result);
+
+    // The runner prints exactly one structured pointer line on stderr. Parse
+    // it: the actual deliverable path has the wxc-exec pid stamped into the
+    // stem, so we must read the path the pointer reports, not the one we
+    // requested.
+    let pointer_line = result
+        .stderr
+        .lines()
+        .find(|l| l.contains(r#""type":"captureDenials""#))
+        .unwrap_or_else(|| {
+            panic!(
+                "stderr should carry the captureDenials pointer line\n--- stderr ---\n{}",
+                result.stderr
+            )
+        });
+    let pointer: serde_json::Value =
+        serde_json::from_str(pointer_line.trim()).expect("pointer line should be valid JSON");
+    let emitted_path = pointer
+        .get("outputPath")
+        .and_then(|v| v.as_str())
+        .expect("pointer must carry outputPath");
+
+    // The emitted path must differ from the requested one by the injected pid,
+    // so concurrent instances writing to the same configured path don't clash.
+    let requested_stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("requested stem");
+    assert!(
+        emitted_path.contains(requested_stem) && emitted_path != output_path.to_string_lossy(),
+        "emitted outputPath {emitted_path} should be the requested path with a pid stamped in"
+    );
+
+    // The deliverable is a single JSON document with denials + summary.
+    let bytes = std::fs::read(emitted_path)
+        .unwrap_or_else(|e| panic!("captureDenials output file {emitted_path} should exist: {e}"));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("captureDenials output file should be valid JSON");
+    let denials = doc
+        .get("denials")
+        .and_then(|d| d.as_array())
+        .unwrap_or_else(|| panic!("output document must have a `denials` array: {doc}"));
+    // Every denial identifies its resource under the `resource` key (file path
+    // or capability name); `path` is retired.
+    for denial in denials {
+        assert!(
+            denial.get("resource").is_some(),
+            "each denial must carry a `resource` key: {denial}"
+        );
+        assert!(
+            denial.get("path").is_none(),
+            "denials must not use the retired `path` key: {denial}"
+        );
+    }
+    let summary = doc
+        .get("summary")
+        .expect("output document must have a `summary`");
+    assert!(
+        summary.get("totalDenials").is_some()
+            && summary.get("exitCode").is_some()
+            && summary.get("deniedResourcesTruncated").is_some(),
+        "summary must carry exitCode/totalDenials/deniedResourcesTruncated: {summary}"
+    );
+
+    let _ = std::fs::remove_file(emitted_path);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -294,6 +417,15 @@ fn test_processcontainer_lpac() {
     }
     assert_python();
     with_test_lock(processcontainer_lpac);
+}
+
+#[test]
+#[ignore] // Live capture needs the brokered learning-mode API (GE_CURRENT) + BFS velocity key; skips otherwise
+fn test_processcontainer_capture_denials_output_file() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    with_test_lock(processcontainer_capture_denials_output_file);
 }
 
 #[test]

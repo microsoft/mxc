@@ -1,28 +1,28 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Terminating summary frame for a captureDenials output stream.
+//! Terminating summary for a captureDenials output document.
 //!
-//! Exactly one [`DenialSummary`] is written after the last
-//! [`crate::model::DeniedResource`] in an NDJSON output file. It gives
+//! Exactly one [`DenialSummary`] accompanies the
+//! [`crate::model::DeniedResource`] array in a JSON output file. It gives
 //! consumers the child's exit code, the count of unique denials, and a
 //! flag indicating whether the decoder had to truncate the set (so a UX
 //! can tell the user "showing N of many").
 
 use serde::{Deserialize, Serialize};
 
-/// The final frame in a captureDenials output stream.
+/// The terminating summary of a captureDenials output document.
 ///
-/// `total_denials` is the number of *unique* `(path, accessType)` pairs,
-/// which matches the number of `denial` frames that preceded this one.
+/// `total_denials` is the number of *unique* `(resource, accessType)` pairs,
+/// which matches the length of the document's `denials` array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DenialSummary {
     /// Exit code of the sandboxed child process.
     pub exit_code: i32,
 
-    /// Count of unique `(path, accessType)` denials emitted (equals the
-    /// number of `denial` frames preceding this summary).
+    /// Count of unique `(resource, accessType)` denials emitted (equals the
+    /// length of the document's `denials` array).
     pub total_denials: usize,
 
     /// `true` when the decoder capped the emitted set and additional

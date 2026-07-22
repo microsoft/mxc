@@ -116,5 +116,63 @@ ungranted access is handled while it is recorded:
 - `mode: "allow-and-log"` maps onto `permissiveLearningMode` (allow-and-record)
   — the fleet-auditing flow.
 
-The capture pipeline is delivered incrementally and is documented separately as
-it lands.
+### Output file the caller consumes
+
+After the sandboxed workload exits, MXC decodes the captured denials and writes
+them to a **single JSON file** — the deliverable a host application reads to
+regenerate its sandbox policy:
+
+```json
+{
+  "denials": [
+    {
+      "resource": "C:\\Users\\test\\secret.txt",
+      "resourceType": "file",
+      "accessType": "read",
+      "pid": 1234,
+      "filetime": 132847890123456789
+    },
+    {
+      "resource": "internetClient",
+      "resourceType": "capability",
+      "accessType": "unknown",
+      "pid": 1234,
+      "filetime": 132847890123512345
+    }
+  ],
+  "summary": {
+    "exitCode": 0,
+    "totalDenials": 2,
+    "deniedResourcesTruncated": false
+  }
+}
+```
+
+- `denials` is already de-duplicated per `(resource, accessType)`, so
+  `summary.totalDenials` equals `denials.length`.
+- `resource` is the user-visible identifier for the denied resource,
+  interpreted by `resourceType`: a canonical `C:\…` path for `file`, the
+  AppContainer **capability name** (e.g. `internetClient`) for `capability`,
+  and the raw resource identifier otherwise. Well-known capability SIDs are
+  resolved to their policy name; custom (hashed) capability SIDs that can't be
+  reversed fall back to the `S-1-15-3-…` SID string.
+- `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
+  `accessType` is one of `read`, `write`, `execute`, `unknown`. (Capability
+  denials are only recorded under `allow-and-log` today — see the mode caveat.)
+
+**Locating the file.** Set `captureDenials.outputPath` to name the file
+explicitly (its parent directory must already exist). MXC inserts the
+`wxc-exec` process id into the file stem (`denials.json` →
+`denials.<pid>.json`) so multiple app instances writing to the same configured
+path don't collide. If `outputPath` is omitted, MXC writes a managed per-run
+temp file. Either way, `wxc-exec` prints **one structured pointer line** to its
+own **stderr** — carrying the *actual* path — so the caller can locate the
+deliverable without scanning the filesystem:
+
+```json
+{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
+```
+
+The pointer echoes the file's `summary`; the authoritative record is the file
+itself. The intermediate ETW `.etl` trace is an internal, runner-managed temp
+file that MXC decodes and then deletes — callers never see it.

@@ -215,10 +215,16 @@ pub struct CaptureDenials {
     /// mode only decides whether that access is blocked or allowed. Defaults to
     /// `block-and-log` when omitted.
     pub mode: Option<CaptureDenialsMode>,
-    /// Absolute path where the denial ETL trace is written. The caller names
-    /// the path; the OS opens it under the caller's own identity when the trace
-    /// is sealed. When omitted, MXC writes the trace to a managed per-run
-    /// temporary file. The parent directory must already exist.
+    /// Absolute path where the JSON denials output file is written — the
+    /// deliverable a consuming application reads to learn what the workload
+    /// was denied. It is a single JSON document `{ "denials": [...],
+    /// "summary": {...} }`. The wxc-exec process id is inserted into the file
+    /// stem (e.g. `denials.json` -> `denials.<pid>.json`) so concurrent
+    /// instances writing to the same path do not collide; the actual path is
+    /// reported on stderr. When omitted, MXC writes it to a managed per-run
+    /// temporary file and prints its path on stderr. The parent directory
+    /// must already exist. (The intermediate ETL trace is an internal,
+    /// runner-managed temp file that is decoded then deleted.)
     pub output_path: Option<String>,
 }
 

@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Decode a sealed learning-mode `.etl` into the captureDenials NDJSON
-//! output stream, or dump its raw ETW events for schema discovery.
+//! Decode a sealed learning-mode `.etl` into the captureDenials JSON
+//! output document, or dump its raw ETW events for schema discovery.
 //!
 //! Usage:
 //!
 //! ```text
-//! # Emit the DeniedResource NDJSON stream (0x1E-framed) to stdout:
+//! # Emit the DeniedResource JSON document to stdout:
 //! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl>
 //!
 //! # Dump every decoded event (id + property name/value pairs):
@@ -49,12 +49,12 @@ mod windows_impl {
         if raw {
             dump_raw(path)
         } else {
-            emit_ndjson(path)
+            emit_json(path)
         }
     }
 
-    /// Decodes denials and writes the 0x1E-framed NDJSON stream to stdout.
-    fn emit_ndjson(path: &Path) -> i32 {
+    /// Decodes denials and writes the JSON output document to stdout.
+    fn emit_json(path: &Path) -> i32 {
         let denials = match EtlDenialAnalyzer.analyze(path) {
             Ok(d) => d,
             Err(e) => {
@@ -63,13 +63,14 @@ mod windows_impl {
             }
         };
         let summary = DenialSummary::new(0, denials.len(), false);
+        let document = emit::DenialsDocument::new(denials, summary);
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
-        if let Err(e) = emit::write_stream(&mut handle, &denials, &summary) {
+        if let Err(e) = emit::write_document(&mut handle, &document) {
             eprintln!("write failed: {e}");
             return 1;
         }
-        eprintln!("lm_analyze: {} unique denial(s)", denials.len());
+        eprintln!("lm_analyze: {} unique denial(s)", document.denials.len());
         0
     }
 

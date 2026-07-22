@@ -85,18 +85,20 @@ pub fn decode_raw_events(source_path: &Path) -> Result<Vec<DecodedEventParts>, A
         .collect())
 }
 
-/// De-duplicates raw denials by `(user-visible path, accessType)`,
-/// normalising kernel paths to drive-letter form and preserving first-seen
-/// order.
+/// De-duplicates raw denials by `(user-visible resource, accessType)`,
+/// normalising kernel file paths to drive-letter form and preserving
+/// first-seen order. Non-file resources (capabilities, registry keys, UI)
+/// are not path-like, so normalisation is a no-op and their identifier is
+/// carried through unchanged.
 fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> Vec<DeniedResource> {
     let mut seen: HashSet<(String, learning_mode_core::AccessType)> = HashSet::new();
     let mut out = Vec::new();
     for raw in raws {
-        let path =
+        let resource =
             path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone());
-        if seen.insert((path.clone(), raw.access_type)) {
+        if seen.insert((resource.clone(), raw.access_type)) {
             out.push(DeniedResource {
-                path,
+                resource,
                 resource_type: raw.resource_type,
                 access_type: raw.access_type,
                 pid: raw.pid,
@@ -224,11 +226,11 @@ mod tests {
             raw(r"C:\b", AccessType::Read, ResourceType::File),
         ];
         let out = dedup_to_resources(denials);
-        assert_eq!(out.len(), 3, "unique (path, access) pairs");
-        assert_eq!(out[0].path, r"C:\a");
+        assert_eq!(out.len(), 3, "unique (resource, access) pairs");
+        assert_eq!(out[0].resource, r"C:\a");
         assert_eq!(out[0].access_type, AccessType::Read);
         assert_eq!(out[1].access_type, AccessType::Write);
-        assert_eq!(out[2].path, r"C:\b");
+        assert_eq!(out[2].resource, r"C:\b");
     }
 
     #[test]
@@ -238,8 +240,8 @@ mod tests {
             raw(r"C:\a", AccessType::Read, ResourceType::File),
         ];
         let out = dedup_to_resources(denials);
-        assert_eq!(out[0].path, r"C:\z");
-        assert_eq!(out[1].path, r"C:\a");
+        assert_eq!(out[0].resource, r"C:\z");
+        assert_eq!(out[1].resource, r"C:\a");
     }
 
     #[test]
@@ -302,7 +304,7 @@ mod tests {
                     ("AccessMask", "0x20019"),
                 ],
             ),
-            // Capability denial (event 28) -> empty path, unknown access.
+            // Capability denial (event 28) -> empty resource, unknown access.
             event(
                 28,
                 0,
@@ -318,16 +320,16 @@ mod tests {
         let out = resources_from_events(&events);
         assert_eq!(out.len(), 3);
 
-        assert_eq!(out[0].path, r"C:\data\test\bin\");
+        assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].resource_type, ResourceType::File);
         assert_eq!(out[0].access_type, AccessType::Write);
         assert_eq!(out[0].pid, 5480);
 
-        assert_eq!(out[1].path, r"\REGISTRY\USER\.DEFAULT\Console");
+        assert_eq!(out[1].resource, r"\REGISTRY\USER\.DEFAULT\Console");
         assert_eq!(out[1].resource_type, ResourceType::Other);
         assert_eq!(out[1].access_type, AccessType::Read);
 
-        assert_eq!(out[2].path, "");
+        assert_eq!(out[2].resource, "");
         assert_eq!(out[2].resource_type, ResourceType::Capability);
         assert_eq!(out[2].access_type, AccessType::Unknown);
         assert_eq!(out[2].pid, 0x1acc, "pid from payload ProcessId");
@@ -366,10 +368,10 @@ mod tests {
 
         let out = resources_from_events(&events);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].path, r"C:\data\test\bin\");
+        assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].access_type, AccessType::Write);
         assert_eq!(out[1].resource_type, ResourceType::Capability);
-        assert_eq!(out[1].path, "");
+        assert_eq!(out[1].resource, "");
         assert_eq!(out[1].access_type, AccessType::Unknown);
     }
 
@@ -395,7 +397,7 @@ mod tests {
         let out = resources_from_events(&events);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].resource_type, ResourceType::Capability);
-        assert_eq!(out[0].path, "");
+        assert_eq!(out[0].resource, "");
     }
 
     /// Non-actionable object types and not-denied capability records are

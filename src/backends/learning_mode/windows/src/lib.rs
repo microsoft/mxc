@@ -36,6 +36,8 @@ mod lifecycle;
 mod secenv;
 
 #[cfg(target_os = "windows")]
+mod capability_names;
+#[cfg(target_os = "windows")]
 mod etl_decode;
 #[cfg(target_os = "windows")]
 mod extractors;

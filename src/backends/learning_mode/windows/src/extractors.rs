@@ -33,9 +33,9 @@
 //!   record (`Denied` / `PackageSid` / `ProcessId`), emitted under
 //!   `block-and-log`; `allow-and-log` folds the same information into the
 //!   empty-`ObjectType` event 14 above. Mapped to [`ResourceType::Capability`].
-//!   The capability *name* is carried in the `PackageSid` blob and is not
-//!   yet decoded, so the resource path is left empty for now (see the crate
-//!   mode caveat).
+//!   The capability *name* is resolved from the `PackageSid` capability SID
+//!   via [`crate::capability_names`] (well-known SID → friendly name; custom
+//!   hashed capabilities fall back to the SID string).
 
 use learning_mode_core::{AccessType, ResourceType};
 
@@ -179,8 +179,9 @@ pub fn build_denial_from_learning_mode(
 /// only surface actual denials. The originating process is taken from the
 /// payload `ProcessId` (which is more precise than the ETW header pid for
 /// brokered checks) when present, else the header pid. The capability name
-/// is carried in the `PackageSid` blob and is not yet decoded, so the
-/// resource name is left empty for now.
+/// comes from the `PackageSid` capability SID, resolved to its friendly
+/// policy name via [`crate::capability_names`] (custom hashed capabilities
+/// fall back to the SID string).
 pub fn build_denial_from_capability(
     parts: &DecodedEventParts,
     pid: u32,
@@ -198,11 +199,19 @@ pub fn build_denial_from_capability(
         .and_then(|v| parse_u32(v))
         .unwrap_or(pid);
 
-    // Prefer a decoded capability name if a future decoder surfaces one;
-    // otherwise leave the name empty until the PackageSid blob is decoded.
+    // Resolve the denied capability's name. The event carries it as a
+    // capability SID (`PackageSid`, rendered `S-1-15-3-…` by the TDH SID
+    // decoder); map well-known capability SIDs to their friendly policy name
+    // and fall back to the SID string for custom (hashed) capabilities.
     let object_name = find_prop(&parts.props, "CapabilityName")
         .or_else(|| find_prop(&parts.props, "Capability"))
         .map(|v| v.trim_matches('"').to_string())
+        .or_else(|| {
+            find_prop(&parts.props, "PackageSid")
+                .or_else(|| find_prop(&parts.props, "CapabilitySid"))
+                .or_else(|| find_prop(&parts.props, "Sid"))
+                .map(|v| crate::capability_names::resolve(v.trim_matches('"')))
+        })
         .unwrap_or_default();
 
     Some(RawDenial {
@@ -481,6 +490,41 @@ mod tests {
         // pid comes from the payload ProcessId (0x1acc), not the header.
         assert_eq!(ev.pid, 0x1acc);
         assert_eq!(ev.object_name, "");
+    }
+
+    #[test]
+    fn capability_denial_resolves_well_known_sid_to_name() {
+        // PackageSid rendered by the TDH SID decoder as a legacy capability
+        // SID -> resolved to its friendly policy name.
+        let p = parts(
+            28,
+            &[
+                ("ProcessId", "0x10"),
+                ("PackageSid", "\"S-1-15-3-1\""),
+                ("Denied", "true"),
+            ],
+        );
+        let ev = extract_denial(&p, 1, FIXED_FILETIME).unwrap();
+        assert_eq!(ev.resource_type, ResourceType::Capability);
+        assert_eq!(ev.object_name, "internetClient");
+    }
+
+    #[test]
+    fn capability_denial_custom_sid_falls_back_to_sid_string() {
+        // A custom (hashed) capability SID cannot be reversed, so the SID
+        // string itself is surfaced.
+        let sid = "S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687";
+        let sid_quoted = format!("\"{sid}\"");
+        let p = parts(
+            28,
+            &[
+                ("ProcessId", "0x10"),
+                ("PackageSid", sid_quoted.as_str()),
+                ("Denied", "true"),
+            ],
+        );
+        let ev = extract_denial(&p, 1, FIXED_FILETIME).unwrap();
+        assert_eq!(ev.object_name, sid);
     }
 
     #[test]

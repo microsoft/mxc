@@ -30,6 +30,7 @@ const TDH_INTYPE_BOOLEAN: u16 = 13;
 const TDH_INTYPE_POINTER: u16 = 16;
 const TDH_INTYPE_HEXINT32: u16 = 20;
 const TDH_INTYPE_HEXINT64: u16 = 21;
+const TDH_INTYPE_SID: u16 = 19;
 
 /// Decodes an `EVENT_RECORD` into `DecodedEventParts`.
 ///
@@ -208,11 +209,56 @@ fn format_property_value(
             format!("{:#x}", unsafe { (data.cast::<u64>()).read_unaligned() }),
             8,
         ),
+        TDH_INTYPE_SID if available >= 8 => format_sid(data, available),
         // Unknown / unsupported InType: emit a placeholder. Consume the
         // declared length when one is given so offset arithmetic stays
         // consistent; otherwise consume zero.
         _ => ("<unsupported>".to_string(), declared_length.min(available)),
     }
+}
+
+/// Formats a binary SID (`TDH_INTYPE_SID`) into canonical `S-1-…` string form.
+///
+/// The on-wire SID layout is: `Revision` (1 byte) | `SubAuthorityCount` (1
+/// byte) | `IdentifierAuthority` (6 bytes, **big-endian**) | `SubAuthority`
+/// ×N (each a little-endian `u32`). The structure is self-describing, so the
+/// number of bytes consumed is derived from `SubAuthorityCount` rather than
+/// the declared length (which is `0` for variable-length SID properties).
+///
+/// The result is quoted to match the other string in-types, so the
+/// quote-trimming in the extractors applies uniformly. Capability denials
+/// carry a capability SID here (e.g. `S-1-15-3-1` == `internetClient`).
+fn format_sid(data: *const u8, available: usize) -> (String, usize) {
+    // SAFETY: the caller guarantees `available` (>= 8) valid bytes at `data`.
+    let header = unsafe { std::slice::from_raw_parts(data, available) };
+    let revision = header[0];
+    let sub_count = header[1] as usize;
+    let total = 8 + sub_count * 4;
+    if total > available {
+        // Truncated / malformed SID: consume what is present, emit a
+        // placeholder so downstream keeps a stable, non-panicking value.
+        return ("\"<malformed-sid>\"".to_string(), available);
+    }
+    // IdentifierAuthority is a 6-byte big-endian value.
+    let authority = u64::from(header[2]) << 40
+        | u64::from(header[3]) << 32
+        | u64::from(header[4]) << 24
+        | u64::from(header[5]) << 16
+        | u64::from(header[6]) << 8
+        | u64::from(header[7]);
+    let mut s = format!("S-{revision}-{authority}");
+    for i in 0..sub_count {
+        let off = 8 + i * 4;
+        let sub = u32::from_le_bytes([
+            header[off],
+            header[off + 1],
+            header[off + 2],
+            header[off + 3],
+        ]);
+        s.push('-');
+        s.push_str(&sub.to_string());
+    }
+    (format!("\"{s}\""), total)
 }
 
 fn wide_str_at(buf: &[u8], offset: u32) -> Option<String> {
@@ -303,5 +349,60 @@ mod tests {
         let (val, consumed) = format_property_value(TDH_INTYPE_UINT32, 4, std::ptr::null(), 0);
         assert_eq!(val, "<no data>");
         assert_eq!(consumed, 0);
+    }
+
+    #[test]
+    fn format_property_value_sid_decodes_capability_sid() {
+        // Capability SID S-1-15-3-1 (== `internetClient`):
+        // revision 1, sub-authority count 2, authority 15 (big-endian in the
+        // low byte), then RIDs 3 and 1 as little-endian u32s.
+        let mut bytes = vec![1u8, 2];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 15]); // 6-byte BE authority = 15
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
+        assert_eq!(val, "\"S-1-15-3-1\"");
+        assert_eq!(consumed, bytes.len()); // 8 header + 2*4 sub-authorities
+    }
+
+    #[test]
+    fn format_property_value_sid_decodes_package_sid() {
+        // A package SID (S-1-15-2-...): authority 15, first sub-authority 2
+        // (package type), then 7 hash RIDs — 8 sub-authorities total.
+        let rids: [u32; 8] = [
+            2, 1596788311, 800953881, 392591971, 523554621, 937337662, 1483227527, 333310193,
+        ];
+        let mut bytes = vec![1u8, rids.len() as u8];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 15]); // authority 15
+        for rid in rids {
+            bytes.extend_from_slice(&rid.to_le_bytes());
+        }
+        let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
+        assert_eq!(
+            val,
+            "\"S-1-15-2-1596788311-800953881-392591971-523554621-937337662-1483227527-333310193\""
+        );
+        assert_eq!(consumed, bytes.len()); // 8 header + 8*4 sub-authorities
+    }
+
+    #[test]
+    fn format_property_value_sid_decodes_well_known_local_system() {
+        // A 1-sub-authority well-known SID: S-1-5-18 (LocalSystem), the shape
+        // carried by the event-28 `UserSid` field.
+        let mut bytes = vec![1u8, 1];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 5]); // authority 5 (NT)
+        bytes.extend_from_slice(&18u32.to_le_bytes());
+        let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
+        assert_eq!(val, "\"S-1-5-18\"");
+        assert_eq!(consumed, bytes.len());
+    }
+
+    #[test]
+    fn format_property_value_sid_truncated_is_placeholder() {
+        // SubAuthorityCount claims 3 (needs 20 bytes) but only 8 present.
+        let bytes = [1u8, 3, 0, 0, 0, 0, 0, 15];
+        let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
+        assert_eq!(val, "\"<malformed-sid>\"");
+        assert_eq!(consumed, bytes.len());
     }
 }

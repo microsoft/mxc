@@ -41,9 +41,9 @@ pub enum AnalyzeError {
 
 /// Decodes a platform-native capture source into de-duplicated denials.
 ///
-/// Implementors return the unique `(path, accessType)` observations found
+/// Implementors return the unique `(resource, accessType)` observations found
 /// in `source_path`; the caller wraps them with a
-/// [`crate::summary::DenialSummary`] and emits an NDJSON stream via
+/// [`crate::summary::DenialSummary`] and writes the JSON output document via
 /// [`crate::emit`].
 pub trait DenialAnalyzer {
     /// Analyses the capture at `source_path`, returning the denials it
@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn analyzer_is_object_safe_and_returns_denials() {
         let denials = vec![DeniedResource {
-            path: r"C:\a".to_string(),
+            resource: r"C:\a".to_string(),
             resource_type: ResourceType::File,
             access_type: AccessType::Read,
             pid: 1,

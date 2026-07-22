@@ -12,11 +12,15 @@
 use std::ffi::c_void;
 use std::fmt::Write;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
+use learning_mode_core::{
+    write_document, DenialAnalyzer, DenialSummary, DenialsDocument, DenialsOutputPointer,
+};
 use learning_mode_windows::{
-    CaptureSession, LearningModeApi, SecurityEnvironmentApi, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    CaptureSession, EtlDenialAnalyzer, LearningModeApi, SecurityEnvironmentApi,
+    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 
 use windows::Win32::Foundation::{
@@ -710,17 +714,26 @@ impl BaseContainerRunner {
             }
         }
 
-        // Resolve the ETL output path: caller-specified when provided, else a
-        // managed per-run temp file the runner names (parsed / cleaned up by the
-        // consume + analyze stages).
+        // Resolve two paths for the capture:
+        //   * `capture_etl_path` — an always-internal, runner-managed temp `.etl`
+        //     that the OS broker seals into. It is decoded then deleted in
+        //     `run_teardown`; callers never see it.
+        //   * `capture_output_path` — the JSON denials deliverable that consuming
+        //     apps read: caller-specified via `captureDenials.outputPath` when
+        //     provided, else a managed per-run temp `.json` file.
+        let capture_etl_path: Option<PathBuf> = capture_denials.as_ref().map(|_| {
+            std::env::temp_dir().join(format!("mxc_capture_denials_{}.etl", std::process::id()))
+        });
         let capture_output_path: Option<PathBuf> = capture_denials.as_ref().map(|cd| {
-            cd.output_path
-                .clone()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::temp_dir()
-                        .join(format!("mxc_capture_denials_{}.etl", std::process::id()))
-                })
+            let pid = std::process::id();
+            match cd.output_path.as_ref() {
+                // Stamp the wxc-exec pid into the caller-specified file stem so
+                // multiple concurrent app instances pointing at the same
+                // `outputPath` each get a distinct file and their denials don't
+                // collide (`…\denials.json` -> `…\denials.<pid>.json`).
+                Some(p) => insert_pid_into_stem(Path::new(p), pid),
+                None => std::env::temp_dir().join(format!("mxc_denials_{pid}.json")),
+            }
         });
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
@@ -1336,6 +1349,7 @@ impl BaseContainerRunner {
             sid_string,
             proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
             capture_session,
+            capture_etl_path,
             capture_output_path,
         })
     }
@@ -1367,8 +1381,11 @@ struct BaseChild {
     /// is configured and the OS API is available). Sealed in `run_teardown`
     /// after the child exits.
     capture_session: Option<CaptureSession>,
-    /// Resolved ETL output path for the capture session (caller-specified or a
-    /// managed per-run temp file). `Some` iff `capture_session` is `Some`.
+    /// Internal runner-managed temp `.etl` the broker seals into. Decoded
+    /// then deleted in `run_teardown`. `Some` iff `capture_session` is `Some`.
+    capture_etl_path: Option<PathBuf>,
+    /// Resolved JSON denials deliverable path (caller-specified or a managed
+    /// per-run temp file). `Some` iff `capture_session` is `Some`.
     capture_output_path: Option<PathBuf>,
 }
 
@@ -1459,8 +1476,13 @@ struct BaseContainerSandboxProcess {
     /// Live learning-mode capture session, moved from the `BaseChild`. Sealed
     /// in `run_teardown` once the child has exited and been reaped.
     capture_session: Option<CaptureSession>,
-    /// Resolved ETL output path for the capture session.
+    /// Internal runner-managed temp `.etl` the broker seals into.
+    capture_etl_path: Option<PathBuf>,
+    /// Resolved JSON denials deliverable path.
     capture_output_path: Option<PathBuf>,
+    /// Exit code of the child, recorded by `wait` before teardown so the
+    /// denials summary can carry it. `None` on the `Drop`/early-exit path.
+    last_exit_code: Option<i32>,
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
@@ -1496,7 +1518,9 @@ impl BaseContainerSandboxProcess {
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
             teardown_done: false,
             capture_session: child.capture_session.take(),
+            capture_etl_path: child.capture_etl_path.take(),
             capture_output_path: child.capture_output_path.take(),
+            last_exit_code: None,
         }
     }
 
@@ -1509,21 +1533,28 @@ impl BaseContainerSandboxProcess {
 
         // Seal the learning-mode ETL trace now that the child has exited and
         // been reaped (both `wait` and `Drop` kill + reap before calling this).
-        // `finish` stops the trace to the resolved output path, then closes the
-        // security environment. The output-file path is surfaced on stderr so a
-        // caller can locate the denials (the full NDJSON contract is finalized
-        // in the output/consume stage).
+        // The ETL is an internal temp: seal it, decode it into the JSON denials
+        // deliverable that consuming apps read, delete the temp, and print a
+        // one-line pointer to the deliverable on our own stderr so a caller can
+        // locate it. Failures degrade gracefully — the child's result is never
+        // affected by capture teardown.
         if let Some(session) = self.capture_session.take() {
+            let etl_path = self.capture_etl_path.clone();
             let output_path = self.capture_output_path.clone();
-            match session.finish(output_path.as_deref()) {
+            let exit_code = self.last_exit_code.unwrap_or(-1);
+            match session.finish(etl_path.as_deref()) {
                 Ok(()) => {
-                    if let Some(path) = &output_path {
-                        eprintln!("captureDenials: denials ETL written to {}", path.display());
+                    if let (Some(etl), Some(output)) = (&etl_path, &output_path) {
+                        Self::decode_and_emit_denials(etl, output, exit_code);
                     }
                 }
                 Err(e) => {
                     eprintln!("captureDenials: failed to seal denials ETL: {e}");
                 }
+            }
+            // Best-effort: the internal ETL temp is never handed to callers.
+            if let Some(etl) = &etl_path {
+                let _ = std::fs::remove_file(etl);
             }
         }
 
@@ -1537,6 +1568,81 @@ impl BaseContainerSandboxProcess {
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
         self.proxy_coordinator.stop(&mut logger);
+    }
+
+    /// Decodes the sealed ETL at `etl_path` into the JSON denials document at
+    /// `output_path`, then prints a one-line [`DenialsOutputPointer`] to stderr.
+    ///
+    /// Best-effort: any decode / write failure is logged to stderr and the
+    /// child's result is left untouched (capture is observational only).
+    fn decode_and_emit_denials(
+        etl_path: &std::path::Path,
+        output_path: &std::path::Path,
+        exit_code: i32,
+    ) {
+        let denials = match EtlDenialAnalyzer.analyze(etl_path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("captureDenials: failed to decode denials ETL: {e}");
+                return;
+            }
+        };
+
+        // No truncation cap today: the full unique set is always emitted.
+        let summary = DenialSummary::new(exit_code, denials.len(), false);
+        let document = DenialsDocument::new(denials, summary);
+
+        let file = match std::fs::File::create(output_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "captureDenials: failed to create denials output file {}: {e}",
+                    output_path.display()
+                );
+                return;
+            }
+        };
+        let mut writer = std::io::BufWriter::new(file);
+        if let Err(e) = write_document(&mut writer, &document) {
+            eprintln!(
+                "captureDenials: failed to write denials output file {}: {e}",
+                output_path.display()
+            );
+            return;
+        }
+
+        // Surface a single structured pointer line on our own stderr so a
+        // caller can locate the deliverable (the authoritative summary lives in
+        // the file).
+        let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
+        eprintln!("{}", pointer.to_line());
+    }
+}
+
+/// Inserts `pid` into a denials output path's file stem so concurrent
+/// `wxc-exec` invocations writing to the same configured `outputPath` produce
+/// distinct files instead of clobbering one another.
+///
+/// `C:\app\denials.json` → `C:\app\denials.<pid>.json`. A path with no
+/// extension gets `<name>.<pid>`; a bare filename (no parent) keeps its
+/// directory-less form.
+fn insert_pid_into_stem(path: &Path, pid: u32) -> PathBuf {
+    let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+        return path.to_path_buf();
+    };
+    let new_name = match path.extension().and_then(|s| s.to_str()) {
+        Some(ext) => {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(file_name);
+            format!("{stem}.{pid}.{ext}")
+        }
+        None => format!("{file_name}.{pid}"),
+    };
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(new_name),
+        _ => PathBuf::from(new_name),
     }
 }
 
@@ -1632,6 +1738,9 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
+        // Record the child's exit code so `run_teardown` can stamp it into the
+        // denials summary. On a timeout / wait failure there is no exit code.
+        self.last_exit_code = result.as_ref().ok().copied();
         self.run_teardown();
         result
     }
@@ -1684,6 +1793,30 @@ mod tests {
 
     fn expected_mask(r: EffectiveUiRestrictions) -> u64 {
         to_job_object_uilimit_mask(&r) as u64
+    }
+
+    #[test]
+    fn insert_pid_into_stem_injects_pid_before_extension() {
+        let got = insert_pid_into_stem(Path::new(r"C:\app\denials.json"), 1234);
+        assert_eq!(got, PathBuf::from(r"C:\app\denials.1234.json"));
+    }
+
+    #[test]
+    fn insert_pid_into_stem_handles_no_extension() {
+        let got = insert_pid_into_stem(Path::new(r"C:\app\denials"), 77);
+        assert_eq!(got, PathBuf::from(r"C:\app\denials.77"));
+    }
+
+    #[test]
+    fn insert_pid_into_stem_handles_bare_filename() {
+        let got = insert_pid_into_stem(Path::new("denials.json"), 9);
+        assert_eq!(got, PathBuf::from("denials.9.json"));
+    }
+
+    #[test]
+    fn insert_pid_into_stem_preserves_multi_dot_stem() {
+        let got = insert_pid_into_stem(Path::new(r"C:\app\out.denials.json"), 5);
+        assert_eq!(got, PathBuf::from(r"C:\app\out.denials.5.json"));
     }
 
     #[test]

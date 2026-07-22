@@ -6,8 +6,8 @@
 //! [`DeniedResource`] is the shape every backend decoder emits, every
 //! transport carries, and every SDK consumer parses. New OS backends
 //! produce it from their native sources (Windows ETW today; Linux/macOS
-//! later); the NDJSON output file (see [`crate::emit`]) is just a framed
-//! stream of these records plus a trailing [`crate::summary::DenialSummary`].
+//! later); the JSON output file (see [`crate::emit`]) is just an array of
+//! these records plus a trailing [`crate::summary::DenialSummary`].
 //!
 //! The types stay tiny and cross-platform so the wire format never
 //! accidentally encodes a Windows-only assumption. The Windows ETL
@@ -53,10 +53,10 @@ pub enum AccessType {
     Unknown,
 }
 
-/// One denied `(path, accessType)` observation surfaced to consumers.
+/// One denied `(resource, accessType)` observation surfaced to consumers.
 ///
 /// A `DeniedResource` describes a single resource the sandboxed workload
-/// was denied access to. Per-`(path, accessType)` de-duplication happens
+/// was denied access to. Per-`(resource, accessType)` de-duplication happens
 /// in the decoder, so consumers can treat the emitted stream as already
 /// unique.
 ///
@@ -66,7 +66,7 @@ pub enum AccessType {
 /// use learning_mode_core::{AccessType, DeniedResource, ResourceType};
 ///
 /// let denial = DeniedResource {
-///     path: r"C:\Users\test\secret.txt".to_string(),
+///     resource: r"C:\Users\test\secret.txt".to_string(),
 ///     resource_type: ResourceType::File,
 ///     access_type: AccessType::Read,
 ///     pid: 1234,
@@ -79,11 +79,19 @@ pub enum AccessType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeniedResource {
-    /// User-visible canonicalised resource identifier. On Windows this is
-    /// drive-letter form (`C:\Users\...`) with NT-device-namespace
-    /// prefixes (`\??\`, `\Device\HarddiskVolumeN\`) already stripped by
-    /// the decoder. Network endpoints (when implemented) use `host:port`.
-    pub path: String,
+    /// User-visible identifier for the denied resource, interpreted per
+    /// [`resource_type`](Self::resource_type):
+    /// - [`File`](ResourceType::File): canonicalised drive-letter path
+    ///   (`C:\Users\...`) with NT-device-namespace prefixes (`\??\`,
+    ///   `\Device\HarddiskVolumeN\`) already stripped by the decoder.
+    /// - [`Capability`](ResourceType::Capability): the AppContainer
+    ///   capability name (e.g. `internetClient`), resolved from the
+    ///   capability SID; unresolved custom capabilities fall back to the
+    ///   `S-1-15-3-…` SID string.
+    /// - [`Network`](ResourceType::Network) (when implemented): `host:port`.
+    /// - [`Ui`](ResourceType::Ui) / [`Other`](ResourceType::Other): the raw
+    ///   resource identifier the source event carried (may be empty).
+    pub resource: String,
 
     /// Type of resource (see [`ResourceType`]).
     pub resource_type: ResourceType,
@@ -102,7 +110,7 @@ pub struct DeniedResource {
     pub filetime: u64,
 }
 
-/// De-duplication key for a denial: the `(path, accessType)` pair.
+/// De-duplication key for a denial: the `(resource, accessType)` pair.
 ///
 /// Decoders collapse the many raw kernel access-check events a workload
 /// generates (locale code re-reading the same key on every `printf`,
@@ -110,12 +118,12 @@ pub struct DeniedResource {
 pub type DedupKey = (String, AccessType);
 
 impl DeniedResource {
-    /// Returns the `(path, accessType)` de-duplication key for this
-    /// denial. Cloning the path is intentional so the key can outlive a
+    /// Returns the `(resource, accessType)` de-duplication key for this
+    /// denial. Cloning the resource is intentional so the key can outlive a
     /// borrow of `self` while a decoder accumulates into a set.
     #[must_use]
     pub fn dedup_key(&self) -> DedupKey {
-        (self.path.clone(), self.access_type)
+        (self.resource.clone(), self.access_type)
     }
 }
 
@@ -129,13 +137,14 @@ mod tests {
         // camelCase keys and lowercased enum strings. A future serde
         // rename would silently break every downstream parser.
         let r = DeniedResource {
-            path: r"C:\Users\test\file.txt".to_string(),
+            resource: r"C:\Users\test\file.txt".to_string(),
             resource_type: ResourceType::File,
             access_type: AccessType::Read,
             pid: 1234,
             filetime: 132_847_890_123_456_789,
         };
         let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"resource\":\"C:"), "got {json}");
         assert!(json.contains("\"resourceType\":\"file\""), "got {json}");
         assert!(json.contains("\"accessType\":\"read\""), "got {json}");
         assert!(
@@ -147,7 +156,7 @@ mod tests {
     #[test]
     fn denied_resource_round_trips_through_json() {
         let r = DeniedResource {
-            path: r"C:\foo\bar.txt".to_string(),
+            resource: r"C:\foo\bar.txt".to_string(),
             resource_type: ResourceType::Capability,
             access_type: AccessType::Write,
             pid: 9999,
@@ -186,7 +195,7 @@ mod tests {
     #[test]
     fn dedup_key_pairs_path_and_access_type() {
         let r = DeniedResource {
-            path: r"C:\a".to_string(),
+            resource: r"C:\a".to_string(),
             resource_type: ResourceType::File,
             access_type: AccessType::Read,
             pid: 1,
