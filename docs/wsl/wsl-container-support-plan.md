@@ -14,7 +14,7 @@ the WSLC SDK self-host release. Key changes:
   `MxcDependencies` Azure Artifacts feed and provides `wslcsdk.h`,
   `wslcsdk.lib`, and `wslcsdk.dll`. API names use
   verb-first convention (e.g., `WslcInitSessionSettings` not
-  `WslcInitSessionSettings`).
+  `WslcSessionSettingsInit`).
 - **Phases 1-2 complete:** Config parsing and backend routing shipped in PR #44.
 - **Sandbox is experimental:** References to `WindowsSandboxScriptRunner` and
   `request.sandbox_config` are outdated — sandbox is now behind `--experimental`.

@@ -114,9 +114,7 @@ fn main() {
         .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
-        .unwrap_or_else(|| {
-            panic!("WSLC SDK: cannot resolve the build profile output directory from OUT_DIR")
-        });
+        .expect("WSLC SDK: cannot resolve the build profile output directory from OUT_DIR");
     let dll_dst = profile_dir.join("wslcsdk.dll");
     if let Err(e) = std::fs::copy(&dll_src, &dll_dst) {
         panic!(
@@ -291,6 +289,10 @@ fn expected_sha256(version: &str) -> Option<String> {
             return Some(h);
         }
     }
+    // Hashes are the lowercase-hex SHA-256 of the published `.nupkg`, computed
+    // with `Get-FileHash -Algorithm SHA256` (or `sha256sum`) over the nuget when pinning a
+    // version. This is an exact-bytes content pin, independent of the NuGet
+    // author signature.
     match version {
         "2.9.3" => {
             Some("d49b66796cb3b88ff513f5e65cd0333ddfed8fe998bf8ed3845ebdecf8563281".to_string())
