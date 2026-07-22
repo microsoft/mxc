@@ -44,6 +44,34 @@ impl WslcComponentFlags {
     }
 }
 
+// bindgen derives `Debug` for the generated newtype, which prints the raw
+// tuple (e.g. `WslcComponentFlags(2)`). That is not actionable in a
+// user-facing error, so the façade adds a `Display` impl (which bindgen does
+// not generate) that decodes the set bits into named components. The
+// `WslcGetMissingComponents` error path formats the value with `{}`.
+impl core::fmt::Display for WslcComponentFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 == 0 {
+            return write!(f, "None");
+        }
+        let mut names = Vec::new();
+        if self.0 & Self::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM.0 != 0 {
+            names.push("VirtualMachinePlatform");
+        }
+        if self.0 & Self::WSLC_COMPONENT_FLAG_WSL_PACKAGE.0 != 0 {
+            names.push("WslPackage");
+        }
+        if self.0 & Self::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE.0 != 0 {
+            names.push("SdkNeedsUpdate");
+        }
+        if names.is_empty() {
+            write!(f, "Unknown(0x{:x})", self.0)
+        } else {
+            write!(f, "{} (0x{:x})", names.join(" | "), self.0)
+        }
+    }
+}
+
 impl WslcSdk {
     /// Load `wslcsdk.dll` at runtime and resolve all required function pointers.
     ///
@@ -376,6 +404,26 @@ mod tests {
     fn component_flags_any_missing() {
         assert!(!WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE.any_missing());
         assert!(WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.any_missing());
+    }
+
+    #[test]
+    fn component_flags_display_names_bits() {
+        assert_eq!(
+            WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE.to_string(),
+            "None"
+        );
+        assert_eq!(
+            WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.to_string(),
+            "WslPackage (0x2)"
+        );
+        let both = WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM
+            | WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE;
+        assert_eq!(
+            both.to_string(),
+            "VirtualMachinePlatform | WslPackage (0x3)"
+        );
+        // A bit outside the known set falls back to a hex mask.
+        assert_eq!(WslcComponentFlags(0x8).to_string(), "Unknown(0x8)");
     }
 
     #[test]
