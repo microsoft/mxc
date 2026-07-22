@@ -1458,6 +1458,7 @@ dependencies = [
  "mxc_engine",
  "nanvix_binaries",
  "nanvix_build_common",
+ "serde_json",
  "wxc_common",
 ]
 

@@ -14,6 +14,7 @@ import {
   ProvisionMetadataFor,
   ProvisionResult,
   SandboxId,
+  StartConfigFor,
   StartMetadataFor,
   StopConfigFor,
   WindowsSandboxProvisionConfig,
@@ -154,6 +155,31 @@ describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () 
     assert.ok(stopCfg);
     assert.ok(deprovCfg);
     assert.ok(wrongStop);
+  });
+});
+
+describe('LxcStartConfig', () => {
+  it('accepts network fields other than proxy', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      version: '0.6.0-alpha',
+      filesystem: { readwritePaths: ['/workspace'] },
+      network: {
+        defaultPolicy: 'block',
+        allowedHosts: ['example.com'],
+        removeRulesOnExit: true,
+      },
+    };
+    assert.strictEqual(cfg.network?.defaultPolicy, 'block');
+  });
+
+  it('rejects network.proxy because the LXC runner rejects it at start', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — LXC state-aware start does not support network.proxy.
+        proxy: { builtinTestServer: true },
+      },
+    };
+    assert.ok(cfg);
   });
 });
 

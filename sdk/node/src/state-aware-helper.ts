@@ -13,19 +13,21 @@ export const STATE_AWARE_VERSION = '0.6.0-alpha';
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
-export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] as const;
+export const CROSS_CUTTING_FIELDS = ['containerId', 'filesystem', 'network', 'ui', 'process'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
 // Rust `<Backend>Runner::ID_PREFIX` const and is the leading segment of a
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
+export const LXC_ID_PREFIX = 'lxc';
 export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
 // Mapping from a sandboxId's leading prefix segment to the wire-format
 // backend key. Extended as more state-aware backends opt in.
 export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
   [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
+  [LXC_ID_PREFIX]: 'lxc',
   [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
 };
 

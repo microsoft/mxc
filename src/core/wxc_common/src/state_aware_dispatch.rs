@@ -173,6 +173,7 @@ pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBa
 fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
+        "lxc" => Ok(ContainmentBackend::Lxc),
         "wsb" => Ok(ContainmentBackend::WindowsSandbox),
         // Future state-aware backends extend this list.
         other => Err(MxcError::unsupported_containment(format!(
@@ -705,6 +706,19 @@ mod tests {
             resolve_backend(&p).unwrap(),
             ContainmentBackend::IsolationSession
         );
+    }
+
+    #[test]
+    fn resolve_backend_for_lxc_prefix_returns_lxc() {
+        let p = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Start,
+            containment: None,
+            sandbox_id: Some("lxc:mxc-abcd1234".into()),
+            correlation_vector: None,
+            experimental_raw: None,
+        };
+        assert_eq!(resolve_backend(&p).unwrap(), ContainmentBackend::Lxc);
     }
 
     #[test]

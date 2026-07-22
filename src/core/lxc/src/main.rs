@@ -6,10 +6,13 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::{load_mxc_request, ParseError};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::handle_dry_run_exit;
+use wxc_common::state_aware_dispatch::DispatchOutcome;
+use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::telemetry;
 
 use lxc_common::signal_cleanup;
@@ -112,6 +115,47 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
     }
 }
 
+fn run_state_aware_main(
+    mut parsed: ParsedStateAwareRequest,
+    dry_run: bool,
+    experimental: bool,
+    testing_features: bool,
+    logger: &mut Logger,
+) -> ! {
+    parsed.request.experimental_enabled = experimental;
+    parsed.request.testing_features_enabled = testing_features;
+    parsed.request.dry_run = dry_run;
+
+    let outcome = mxc_engine::run_state_aware(parsed, dry_run);
+    let buffered = logger.get_buffer().to_string();
+    if !buffered.is_empty() {
+        eprint!("{}", buffered);
+    }
+    match outcome {
+        Ok(DispatchOutcome::Envelope(value)) => {
+            println!("{}", value);
+            process::exit(0);
+        }
+        Ok(DispatchOutcome::ExecCompleted { exit_code }) => process::exit(exit_code),
+        Err(e) => {
+            print_error_envelope(&e);
+            process::exit(1);
+        }
+    }
+}
+
+fn print_error_envelope(error: &MxcError) {
+    let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
+    match serde_json::to_string(&envelope) {
+        Ok(s) => println!("{}", s),
+        Err(_) => {
+            println!(
+                r#"{{"error":{{"code":"backend_error","message":"failed to serialise error envelope"}}}}"#
+            );
+        }
+    }
+}
+
 fn main() {
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
@@ -195,14 +239,27 @@ fn main() {
     }
 
     // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
-        Ok(r) => r,
-        Err(_) => {
+    let request = match load_mxc_request(&config_data, &mut logger, is_base64) {
+        Ok(MxcRequest::OneShot(req)) => req,
+        Ok(MxcRequest::StateAware(parsed)) => run_state_aware_main(
+            parsed,
+            cli.dry_run,
+            cli.experimental,
+            cli.allow_testing_features,
+            &mut logger,
+        ),
+        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::StateAware(e)) => {
+            print_error_envelope(&e);
+            eprint!("{}", logger.get_buffer());
             process::exit(1);
         }
     };
 
+    let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;

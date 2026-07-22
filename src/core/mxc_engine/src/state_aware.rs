@@ -58,6 +58,11 @@ pub fn run_state_aware(
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
             wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
+        #[cfg(target_os = "linux")]
+        wxc_common::models::ContainmentBackend::Lxc => {
+            let mut runner = lxc_common::state_aware::LxcStateAwareRunner::new();
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
         _ => run_state_aware_fallback(parsed, dry_run),
     }
 }
