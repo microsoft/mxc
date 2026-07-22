@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-MostSpecific-RwParent",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "P=/mnt/msptest2/proj; if cat \"$P/notes.txt\" 2>/dev/null | grep -q PROJ_NOTES; then echo PARENT_OK; else echo PARENT_MISSING; fi; if echo w > \"$P/written.txt\" 2>/dev/null && grep -q w \"$P/written.txt\" 2>/dev/null; then echo PARENT_WRITE_OK; else echo PARENT_WRITE_FAIL; fi; if cat \"$P/secrets/key.txt\" 2>/dev/null | grep -q DEEP_SECRET || ls \"$P/secrets\" 2>/dev/null | grep -q .; then echo DEEP_LEAK; else echo DEEP_MASKED_OK; fi"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/msptest2/proj"],
+    "deniedPaths": ["/mnt/msptest2/proj/secrets"]
+  }
+}

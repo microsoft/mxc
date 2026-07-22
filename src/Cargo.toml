@@ -5,6 +5,7 @@ members = [
     "core/lxc",
     "core/mxc_darwin",
     "core/mxc-sdk",
+    "core/mxc_engine",
     "core/mxc_pty",
     "core/mxc_build_common",
     "host/plm",
@@ -13,6 +14,7 @@ members = [
     "backends/windows_sandbox/daemon",
     "backends/windows_sandbox/guest",
     "backends/windows_sandbox/common",
+    "backends/windows_sandbox/lifecycle",
     "backends/isolation_session/bindings",
     "backends/isolation_session/common",
     "backends/hyperlight/common",
@@ -29,10 +31,11 @@ members = [
     "testing/wxc_e2e_tests",
     "testing/wxc_test_driver",
     "testing/wxc_test_proxy",
-    "testing/linux_test_proxy",
+    "testing/unix_test_proxy",
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
+    "ffi/mxc_ffi",
     "mxc_telemetry",
 ]
 exclude = ["testing/fuzz"]
@@ -99,8 +102,11 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 quick-xml = "0.41"
 wxc_common = { path = "core/wxc_common" }
+mxc_engine = { path = "core/mxc_engine" }
+mxc-sdk = { path = "core/mxc-sdk" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 windows_sandbox_common = { path = "backends/windows_sandbox/common" }
+windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 isolation_session_common = { path = "backends/isolation_session/common" }
 hyperlight_common = { path = "backends/hyperlight/common" }
 nanvix_runner = { path = "backends/nanvix/runner" }

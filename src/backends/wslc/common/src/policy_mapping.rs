@@ -111,6 +111,156 @@ pub fn build_volume_mounts(
     Ok(mounts)
 }
 
+/// A Windows host path parsed for structural overlap comparison.
+///
+/// Parsing is platform-independent (no `std::path`, whose component semantics
+/// vary by build target) so results match on Windows and Linux CI. The drive
+/// prefix and root are kept distinct, and `.`/`..` are folded lexically (no disk
+/// access) so a traversal spelling like `C:\a\sub\..` compares equal to `C:\a`.
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedPath {
+    /// Lowercased drive prefix without separator (`Some("c:")`), or `None`.
+    drive: Option<String>,
+    /// Whether a separator follows the optional drive: distinguishes absolute
+    /// `C:\a` from drive-relative `C:a`, and rooted `\a` from relative `a`.
+    rooted: bool,
+    /// Lexically folded, lowercased path components.
+    components: Vec<String>,
+}
+
+impl NormalizedPath {
+    /// Parse a Windows host path: split on `/` and `\`, case-fold (full Unicode),
+    /// and fold `.`/`..`. A rooted path clamps `..` at the root (Windows
+    /// semantics) so a traversal cannot escape into a different tree.
+    fn parse(path: &str) -> Self {
+        let lowered = path.trim().to_lowercase();
+        let bytes = lowered.as_bytes();
+
+        // Drive prefix = a leading `x:` (ASCII letter + colon).
+        let (drive, rest) =
+            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                (Some(lowered[..2].to_string()), &lowered[2..])
+            } else {
+                (None, lowered.as_str())
+            };
+
+        let rooted = rest.starts_with(['/', '\\']);
+
+        let mut components: Vec<String> = Vec::new();
+        for segment in rest.split(['/', '\\']).filter(|s| !s.is_empty()) {
+            match segment {
+                "." => {}
+                ".." => {
+                    if components.last().is_some_and(|last| last != "..") {
+                        components.pop();
+                    } else if !rooted {
+                        // Relative path: a leading `..` needs a base to resolve,
+                        // so retain it. Rooted paths clamp at the root instead.
+                        components.push("..".to_string());
+                    }
+                }
+                other => components.push(other.to_string()),
+            }
+        }
+
+        NormalizedPath {
+            drive,
+            rooted,
+            components,
+        }
+    }
+
+    /// True when `self` (a mounted parent) strictly contains `child` (a denied
+    /// path) — i.e. `child` resolves strictly deeper inside `self`'s tree.
+    ///
+    /// A whole-drive/root mount (`C:\`, `\`) contains every path sharing its
+    /// drive anchor, including drive-relative spellings (`C:secrets`). An exact
+    /// match is not "strictly deeper" and returns `false` (enforceable by simply
+    /// not mounting the path). Comparison is per-component, so a partial-component
+    /// match (`C:\project` vs `C:\project2`) is correctly rejected.
+    fn contains_strictly(&self, child: &NormalizedPath) -> bool {
+        if self.rooted && self.components.is_empty() {
+            // Whole-drive mount: covers the entire drive, so any same-anchor path
+            // is unenforceable. Exclude the identical root (exact match).
+            return self.drive == child.drive && !(child.rooted && child.components.is_empty());
+        }
+
+        self.drive == child.drive
+            && self.rooted == child.rooted
+            && self.components.len() < child.components.len()
+            && self
+                .components
+                .iter()
+                .zip(child.components.iter())
+                .all(|(ancestor, descendant)| ancestor == descendant)
+    }
+}
+
+/// Reject configs where a `deniedPaths` entry is nested under a mounted
+/// (`readwritePaths` / `readonlyPaths`) parent, which WSLC cannot enforce.
+///
+/// LXC and Bubblewrap mask such a deny by overlaying it (`/dev/null` or
+/// `tmpfs`), but WSLC's flat volume-mount surface has no overlay/exclusion
+/// primitive: a denied subtree under a mounted parent would remain fully
+/// accessible through that parent mount. Rather than silently leaving it
+/// accessible, reject the config with an actionable error.
+///
+/// Non-overlapping denied paths need no masking — WSLC simply does not mount
+/// them, so they are implicitly enforced (unmounted = invisible) and pass. An
+/// exact-path match between a denied path and a mounted path is likewise
+/// enforceable (the path is not mounted) and is not treated as an overlap; such
+/// exact same-string conflicts are already collapsed most-restrictive-wins at
+/// parse time by `wxc_common`'s `normalize_filesystem_paths` (which runs for
+/// every backend), and object-identity aliases (different spellings of the same
+/// object via symlink/hard link/bind) are additionally tightened at the runner
+/// by [`wxc_common::filesystem_object::normalize_object_conflicts`].
+///
+/// This is a **structural, lexical** pre-check (no disk access): paths are
+/// parsed with drive prefix and root kept distinct, case-folded (full Unicode),
+/// and `.`/`..` folded, so traversal spellings (`C:\proj\sub\..`), whole-drive
+/// mounts (`C:\`, `\`), and drive-relative spellings (`C:secrets`) are caught.
+/// It does **not** fold Unicode normalization forms, nor canonicalize on-disk
+/// aliases: symlinks, junctions, hard links, 8.3 short names, or `\\?\` prefixes
+/// that redirect a mounted subtree are not resolved here. Same-object aliasing
+/// *between two policy entries* is tightened separately by the D6 pass
+/// ([`wxc_common::filesystem_object::normalize_object_conflicts`]), which fails
+/// closed on unresolvable paths when `deniedPaths` are present; but a mounted
+/// parent whose subtree *reaches* a denied object via such an alias is covered
+/// by neither layer (full canonicalization is deferred). Treat this as
+/// defense-in-depth for the flat-mount overlay gap, not a traversal-and-alias
+/// complete deny.
+pub fn validate_denied_path_overlap(
+    readwrite_paths: &[String],
+    readonly_paths: &[String],
+    denied_paths: &[String],
+) -> Result<(), String> {
+    if denied_paths.is_empty() {
+        return Ok(());
+    }
+
+    for denied in denied_paths {
+        let denied_path = NormalizedPath::parse(denied);
+
+        for (mounted, list_name) in readwrite_paths
+            .iter()
+            .map(|path| (path, "readwritePaths"))
+            .chain(readonly_paths.iter().map(|path| (path, "readonlyPaths")))
+        {
+            if NormalizedPath::parse(mounted).contains_strictly(&denied_path) {
+                return Err(format!(
+                    "WSLC: deniedPaths entry '{denied}' is nested under {list_name} entry \
+                     '{mounted}'. WSLC mounts host paths as flat volumes and has no overlay \
+                     primitive to mask a subtree of a mounted path, so this deny cannot be \
+                     enforced — the path would remain accessible through the parent mount. \
+                     Remove the denied path, or stop mounting its parent."
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Map the network default policy to a WSLC networking mode.
 ///
 /// The WSLC SDK provides two networking modes:
@@ -361,6 +511,202 @@ mod tests {
     fn build_mounts_empty_paths() {
         let mounts = build_volume_mounts(&[], &[]).unwrap();
         assert!(mounts.is_empty());
+    }
+
+    // -- Denied-path overlap validation tests --
+
+    fn strings(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| (*path).to_string()).collect()
+    }
+
+    #[test]
+    fn overlap_rejects_denied_child_of_readwrite_parent() {
+        let err = validate_denied_path_overlap(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\project\secrets"]),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains(r"C:\project\secrets"),
+            "error should cite the denied path: {err}"
+        );
+        assert!(
+            err.contains(r"C:\project"),
+            "error should cite the parent mount: {err}"
+        );
+        assert!(
+            err.contains("readwritePaths"),
+            "error should identify the mounting list: {err}"
+        );
+    }
+
+    #[test]
+    fn overlap_rejects_denied_child_of_readonly_parent() {
+        let err = validate_denied_path_overlap(
+            &[],
+            &strings(&[r"C:\data"]),
+            &strings(&[r"C:\data\private\keys"]),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("readonlyPaths"), "{err}");
+    }
+
+    #[test]
+    fn overlap_allows_non_overlapping_denied_path() {
+        // Denied path shares no mounted ancestor — WSLC just never mounts it.
+        validate_denied_path_overlap(&strings(&[r"C:\project"]), &[], &strings(&[r"D:\secrets"]))
+            .expect("non-overlapping denied path must be accepted");
+    }
+
+    #[test]
+    fn overlap_allows_exact_path_match() {
+        // Exact match is enforceable by simply not mounting the path; it is not
+        // a nested-under-parent overlap.
+        validate_denied_path_overlap(&strings(&[r"C:\project"]), &[], &strings(&[r"C:\project"]))
+            .expect("exact-path deny is enforceable and must be accepted");
+    }
+
+    #[test]
+    fn overlap_ignores_partial_component_prefix() {
+        // "C:\project2" is not a child of "C:\project" — component-wise compare.
+        validate_denied_path_overlap(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\project2\secrets"]),
+        )
+        .expect("partial-component prefix must not count as an overlap");
+    }
+
+    #[test]
+    fn overlap_is_case_and_separator_insensitive() {
+        // Windows paths are case-insensitive; mixed separators and casing must
+        // still be detected as an overlap.
+        let err = validate_denied_path_overlap(
+            &strings(&[r"C:\Project"]),
+            &[],
+            &strings(&["c:/project/Secrets"]),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn overlap_is_case_insensitive_for_non_ascii_components() {
+        // NTFS folds non-ASCII case (C:\Ä == c:\ä), so a denied child differing
+        // only by non-ASCII case from a mounted parent must still be rejected.
+        let err =
+            validate_denied_path_overlap(&strings(&["C:\\Ä"]), &[], &strings(&["c:\\ä\\secret"]))
+                .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn overlap_detects_child_of_mounted_drive_root() {
+        // Mounting a whole drive means any denied subpath is unenforceable.
+        let err =
+            validate_denied_path_overlap(&strings(&[r"C:\"]), &[], &strings(&[r"C:\Windows"]))
+                .unwrap_err();
+
+        assert!(err.contains(r"C:\Windows"), "{err}");
+    }
+
+    #[test]
+    fn overlap_allows_denied_parent_of_mounted_child() {
+        // The reverse nesting is out of scope: the denied parent is simply not
+        // mounted, and the explicit child mount is an intentional carve-out.
+        validate_denied_path_overlap(
+            &strings(&[r"C:\project\src"]),
+            &[],
+            &strings(&[r"C:\project"]),
+        )
+        .expect("denied ancestor of a mounted child is not this overlap case");
+    }
+
+    #[test]
+    fn overlap_empty_denied_paths_is_ok() {
+        validate_denied_path_overlap(&strings(&[r"C:\project"]), &strings(&[r"D:\data"]), &[])
+            .expect("no denied paths means nothing to validate");
+    }
+
+    #[test]
+    fn overlap_reports_first_offending_pair_across_lists() {
+        // A denied path nested under a read-only mount is caught even when a
+        // read-write mount is also present and unrelated.
+        let err = validate_denied_path_overlap(
+            &strings(&[r"D:\unrelated"]),
+            &strings(&[r"C:\app"]),
+            &strings(&[r"C:\app\config\token"]),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("readonlyPaths"), "{err}");
+        assert!(err.contains(r"C:\app\config\token"), "{err}");
+    }
+
+    #[test]
+    fn overlap_rejects_dotdot_traversal_in_denied_path() {
+        // `C:\outside\..\project\secrets` lexically folds to `C:\project\secrets`,
+        // which is under the mounted `C:\project`.
+        let err = validate_denied_path_overlap(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\outside\..\project\secrets"]),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn overlap_rejects_dotdot_traversal_in_mounted_path() {
+        // The mount `C:\project\sub\..` folds to `C:\project`, whose subtree
+        // includes the denied `C:\project\secret`.
+        let err = validate_denied_path_overlap(
+            &strings(&[r"C:\project\sub\.."]),
+            &[],
+            &strings(&[r"C:\project\secret"]),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn overlap_rejects_child_of_bare_root_mount() {
+        // A drive-less root mount (`\`) covers the whole current drive, so any
+        // same-anchor denied path under it is unenforceable.
+        let err =
+            validate_denied_path_overlap(&strings(&[r"\"]), &[], &strings(&[r"\project\secret"]))
+                .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn overlap_rejects_drive_relative_denied_under_full_drive() {
+        // A whole-drive mount (`C:\`) covers even drive-relative spellings
+        // (`C:secrets`), which resolve somewhere on the same drive.
+        let err = validate_denied_path_overlap(&strings(&[r"C:\"]), &[], &strings(&[r"C:secrets"]))
+            .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn overlap_allows_absolute_vs_relative_no_false_positive() {
+        // Rooted `\project` and relative `project\secret` have different anchors
+        // (rooted vs not), so this is not a provable overlap and must be accepted.
+        validate_denied_path_overlap(
+            &strings(&[r"\project"]),
+            &[],
+            &strings(&[r"project\secret"]),
+        )
+        .expect("absolute mount vs relative deny must not be a false rejection");
     }
 
     // -- Network policy tests --

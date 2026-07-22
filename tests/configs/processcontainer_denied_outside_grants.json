@@ -1,0 +1,20 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-ProcessContainer-DeniedOutsideGrants",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"(echo x>C:\\temp\\wxc_test_outside\\leak.txt) 2>nul && (echo LEAK:outside_write&exit 1) || (echo OK:outside_write_denied) & (type C:\\temp\\wxc_test_outside\\secret.txt 2>nul | findstr SECRET >nul) && (echo LEAK:outside_read&exit 1) || (echo OK:outside_read_denied) & (echo x>C:\\temp\\wxc_test_allowed\\inside_ok.txt) 2>nul && (echo OK:inside_write) || (echo FAIL:inside_write&exit 1) & exit 0\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "C:\\temp\\wxc_test_allowed"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
+    ]
+  },
+  "ui": {
+    "disable": false
+  }
+}

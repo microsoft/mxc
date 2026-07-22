@@ -13,30 +13,18 @@ use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::{
-    delete_app_container_profile, AppContainerScriptRunner,
-};
+use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
-#[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-use hyperlight_common::HyperlightScriptRunner;
-#[cfg(feature = "isolation_session")]
-use isolation_session_common::IsolationSessionRunner;
-#[cfg(feature = "microvm")]
-use nanvix_runner::NanVixScriptRunner;
-use windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
-    is_base_container_version, load_mxc_request_with_options, load_request, LoadOptions, ParseError,
+    load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
-use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
-use wxc_common::state_aware_dispatch::dispatch_state_aware;
-use wxc_common::state_aware_dispatch::{resolve_backend, run_state_aware, DispatchOutcome};
+use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use wxc_common::telemetry;
 
@@ -123,6 +111,13 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
+    /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
+    /// launched, instead of refusing — clears a host wedged by an orphan left
+    /// after a launcher hard-kill. DANGER: proofless, so it may also kill a
+    /// foreign sandbox. Never overrides an active mxc run or an unreadable probe.
+    #[arg(long = "force-reclaim")]
+    force_reclaim: bool,
+
     /// Audit mode: inject the `permissiveLearningMode` capability into the
     /// AppContainer policy so denied operations are logged but allowed.
     /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
@@ -195,22 +190,6 @@ fn has_cli_command(cli: &Cli) -> bool {
     !cli.command.is_empty()
 }
 
-fn command_line_context_for_backend(backend: &ContainmentBackend) -> CommandLineContext {
-    match backend {
-        ContainmentBackend::IsolationSession | ContainmentBackend::WindowsSandbox => {
-            CommandLineContext::WindowsCommandProcessor
-        }
-        ContainmentBackend::Wslc
-        | ContainmentBackend::Lxc
-        | ContainmentBackend::Seatbelt
-        | ContainmentBackend::Bubblewrap => CommandLineContext::PosixShell,
-        ContainmentBackend::ProcessContainer
-        | ContainmentBackend::Vm
-        | ContainmentBackend::MicroVm
-        | ContainmentBackend::Hyperlight => CommandLineContext::WindowsCreateProcess,
-    }
-}
-
 fn command_override_from_cli(
     cli: &Cli,
     context: CommandLineContext,
@@ -234,7 +213,7 @@ fn command_override_context_for_state_aware(
             "CLI command override is only supported for state-aware exec requests",
         ));
     }
-    resolve_backend(parsed).map(|backend| Some(command_line_context_for_backend(&backend)))
+    resolve_backend(parsed).map(|backend| Some(CommandLineContext::for_backend(&backend)))
 }
 
 fn apply_command_override(
@@ -254,68 +233,235 @@ fn apply_command_override(
     }
 }
 
+/// The correlation-vector action a state-aware phase should take, decided purely
+/// from the phase and the relayed value. Returned by [`plan_correlation_vector`]
+/// so the seed-vs-spin decision is unit-testable without touching the RNG/clock;
+/// the caller executes the plan against the (nondeterministic) operators.
+#[derive(Debug, PartialEq, Eq)]
+enum CvPlan<'a> {
+    /// Mint a fresh vector. Used for `provision`, and for any non-provision phase
+    /// whose relayed value is missing, empty, or not relayable (malformed /
+    /// hostile) — so garbage never even reaches the `spin` operator.
+    Seed,
+    /// Spin the relayed value to derive this phase's child vector. Only planned
+    /// for a value [`is_relayable`](telemetry::correlation_vector::is_relayable)
+    /// vouches for, so `spin` here always builds on a real parent rather than
+    /// silently reseeding.
+    Spin(&'a str),
+}
+
+/// Plans the Microsoft Correlation Vector (MS-CV) action for a state-aware phase.
+///
+/// Provision always seeds a fresh random base. Every later phase spins the
+/// relayed `incoming_cv` so sibling phases get distinct vectors that still share
+/// the lifecycle prefix — but only when the relayed value is actually relayable
+/// (a valid mutable or frozen vector). A missing, empty, or malformed relayed
+/// value is planned as [`CvPlan::Seed`] so the `Spin` arm never stands in for a
+/// reseed; the decision stays a pure function of `(is_provision, incoming_cv)`
+/// with no RNG, so it is deterministically testable.
+fn plan_correlation_vector(is_provision: bool, incoming_cv: Option<&str>) -> CvPlan<'_> {
+    match incoming_cv {
+        Some(cv) if !is_provision && telemetry::correlation_vector::is_relayable(cv) => {
+            CvPlan::Spin(cv)
+        }
+        _ => CvPlan::Seed,
+    }
+}
+
+/// Executes the pure [`plan_correlation_vector`] plan against the (nondeterministic)
+/// MS-CV operators, returning this phase's correlation vector. Empty when
+/// telemetry is inactive so an inactive provider does no RNG/clock work and
+/// provision output is unchanged.
+fn compute_phase_correlation(
+    telemetry_active: bool,
+    is_provision: bool,
+    incoming_cv: Option<&str>,
+) -> String {
+    if !telemetry_active {
+        return String::new();
+    }
+    match plan_correlation_vector(is_provision, incoming_cv) {
+        CvPlan::Seed => telemetry::correlation_vector::seed(),
+        CvPlan::Spin(cv) => telemetry::correlation_vector::spin(cv),
+    }
+}
+
+/// Injects the freshly-seeded correlation vector into a provision result
+/// envelope (`{ "result": { ..., "correlationVector": "<cV>" } }`) so the client
+/// can relay it into every later phase of the lifecycle. No-op when the outcome
+/// is not a result envelope (exec-completed / error paths carry no cV).
+fn inject_correlation_vector(outcome: &mut Result<DispatchOutcome, MxcError>, cv: &str) {
+    if let Ok(DispatchOutcome::Envelope(value)) = outcome {
+        if let Some(result) = value.get_mut("result").and_then(|r| r.as_object_mut()) {
+            result.insert(
+                "correlationVector".to_string(),
+                serde_json::Value::String(cv.to_string()),
+            );
+        }
+    }
+}
+
 /// Drives the state-aware dispatch flow. On envelope success, writes the
 /// JSON to stdout and exits 0. On exec success, exits with the script's
 /// exit code (output already streamed). On failure, writes a JSON error
 /// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
 /// regardless of mode (per design §7.3 stream protocol — stdout reserved
 /// for the response envelope).
-fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
-    let outcome = dispatch_state_aware_request(parsed, dry_run);
+fn run_state_aware_main(
+    parsed: ParsedStateAwareRequest,
+    dry_run: bool,
+    experimental: bool,
+    logger: &mut Logger,
+) -> ! {
+    // Resolve attribution (phase + backend) and telemetry enablement BEFORE
+    // dispatch consumes `parsed`. State-aware telemetry is gated on
+    // `--experimental` exactly like the one-shot path, and reads the same typed
+    // `experimental.telemetry` field — the state-aware parser populates it while
+    // keeping the per-backend `experimental_raw` block for dispatch. A malformed
+    // telemetry block is rejected at parse time (as a state-aware envelope), so
+    // no client-error handling is needed here.
+    let phase = parsed.phase.as_str();
+    // Whether this invocation is the provision phase. Provision seeds a fresh
+    // random correlation-vector base and returns it in the result envelope;
+    // every later phase relays that base back and spins it. We deliberately
+    // ignore any client-supplied `correlationVector` on provision so a lifecycle
+    // can never be seeded with a stale or foreign vector.
+    let is_provision = phase == "provision";
+    // The relayed correlation vector for non-provision phases (the base seeded at
+    // provision). Captured before `dispatch` consumes `parsed`. `None` for
+    // provision (which seeds its own below).
+    let incoming_cv = if is_provision {
+        None
+    } else {
+        parsed.correlation_vector.clone()
+    };
+    let resolved_backend = resolve_backend(&parsed).ok();
+    let backend = resolved_backend
+        .as_ref()
+        .map(|b| b.wire_name())
+        .unwrap_or("unknown");
+    let telemetry_active = if experimental {
+        parsed
+            .request
+            .experimental
+            .telemetry
+            .as_ref()
+            .map(|c| telemetry::init(c, logger))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // Compute this phase's Microsoft Correlation Vector (MS-CV), executing the
+    // pure seed-vs-spin plan against the operators. Only computed when telemetry
+    // is active so an inactive provider does no work and provision output is
+    // unchanged.
+    let correlation =
+        compute_phase_correlation(telemetry_active, is_provision, incoming_cv.as_deref());
+
+    // Attribute out-of-band emit paths (the console-control handler installed in
+    // `main`, and the panic hook installed just below) to the resolved backend
+    // and the lifecycle phase, and install a crash-telemetry panic hook for this
+    // dispatch — mirroring the one-shot path, which this `-> !` entry point
+    // bypasses. The shared hook chains the previous hook (default stderr
+    // backtrace still prints) and is panic-free.
+    if telemetry_active {
+        if let Some(containment) = resolved_backend.as_ref() {
+            telemetry::set_process_context(containment);
+        }
+        telemetry::set_process_phase(phase);
+        // Stash this phase's correlation vector so out-of-band events
+        // (panic / cancellation) carry the same cV as the terminal emit below.
+        telemetry::set_process_correlation_vector(&correlation);
+        telemetry::install_panic_hook();
+    }
+
+    let started = Instant::now();
+    let mut outcome = mxc_engine::run_state_aware(parsed, dry_run);
+    let elapsed = started.elapsed();
+
+    // For provision, return the freshly-seeded correlation vector to the client
+    // by injecting it into the result envelope so it can be relayed into later
+    // phases. Gated on telemetry so provision output is unchanged when telemetry
+    // is off.
+    if is_provision && telemetry_active {
+        inject_correlation_vector(&mut outcome, &correlation);
+    }
+
+    // Emit lifecycle telemetry (and shut the provider down) before flushing the
+    // diagnostic buffer / envelope. Terminal path — safe to shutdown here.
+    telemetry::emit_state_aware(
+        telemetry_active,
+        telemetry::TelemetryContext {
+            backend,
+            phase,
+            correlation_vector: &correlation,
+        },
+        &outcome,
+        elapsed,
+    );
+
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();
     if !buffered.is_empty() {
         eprint!("{}", buffered);
     }
-    match outcome {
-        Ok(DispatchOutcome::Envelope(value)) => {
-            println!("{}", value);
+    match finalize_state_aware_outcome(outcome) {
+        StateAwareExit::Envelope(json) => {
+            println!("{}", json);
             process::exit(0);
         }
-        Ok(DispatchOutcome::ExecCompleted { exit_code }) => process::exit(exit_code),
-        Err(e) => {
-            print_error_envelope(&e);
+        StateAwareExit::ExecCode(exit_code) => process::exit(exit_code),
+        StateAwareExit::Error(json) => {
+            println!("{}", json);
             process::exit(1);
         }
     }
 }
 
-/// Per-backend dispatch for state-aware requests. Resolves the requested
-/// backend and constructs its `StatefulSandboxBackend` impl from the
-/// owning backend crate (which depends on `wxc_common`, so the
-/// construction can't live inside `wxc_common` without a cycle). Falls
-/// back to `wxc_common::state_aware_dispatch::run_state_aware` for
-/// backends that have no state-aware impl, which surfaces the
-/// `unsupported_phase` envelope.
-fn dispatch_state_aware_request(
-    parsed: ParsedStateAwareRequest,
-    dry_run: bool,
-) -> Result<DispatchOutcome, MxcError> {
-    let backend = resolve_backend(&parsed)?;
-    match backend {
-        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        wxc_common::models::ContainmentBackend::IsolationSession => {
-            let mut runner = isolation_session_common::IsolationSessionRunner::new();
-            dispatch_state_aware(&mut runner, parsed, dry_run)
-        }
-        _ => run_state_aware(parsed, dry_run),
+/// The terminal action [`run_state_aware_main`] takes for a dispatch outcome,
+/// factored out of that `-> !` entry point so the outcome→exit mapping is
+/// unit-testable without spawning a process or calling [`process::exit`].
+#[cfg_attr(test, derive(Debug))]
+enum StateAwareExit {
+    /// Print this JSON success envelope to stdout, then exit 0.
+    Envelope(String),
+    /// Exit with this script exit code (its output was already streamed).
+    ExecCode(i32),
+    /// Print this JSON error envelope to stdout, then exit 1.
+    Error(String),
+}
+
+/// Map a dispatch outcome to its terminal exit action. Pure — it neither prints
+/// nor exits — so [`run_state_aware_main`]'s final branch can be exercised in a
+/// unit test. The `-> !` caller performs the actual stdout write + exit.
+fn finalize_state_aware_outcome(outcome: Result<DispatchOutcome, MxcError>) -> StateAwareExit {
+    match outcome {
+        Ok(DispatchOutcome::Envelope(value)) => StateAwareExit::Envelope(value.to_string()),
+        Ok(DispatchOutcome::ExecCompleted { exit_code }) => StateAwareExit::ExecCode(exit_code),
+        Err(e) => StateAwareExit::Error(error_envelope_string(&e)),
     }
 }
 
 fn print_error_envelope(error: &MxcError) {
+    println!("{}", error_envelope_string(error));
+}
+
+/// Serialise `error` to its JSON response-envelope string. Split out of
+/// [`print_error_envelope`] so [`finalize_state_aware_outcome`] can build the
+/// error-exit envelope without printing, and so both the print path and the
+/// state-aware exit path share one serialisation (including the last-resort
+/// fallback when the envelope itself fails to serialise).
+fn error_envelope_string(error: &MxcError) -> String {
     let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
-    match serde_json::to_string(&envelope) {
-        Ok(s) => println!("{}", s),
-        Err(_) => {
-            // Last-resort path: serialisation of the envelope itself failed —
-            // emit a minimal structurally-valid envelope so consumers that
-            // require `error.code` still parse something.
-            println!(
-                r#"{{"error":{{"code":"backend_error","message":"failed to serialise error envelope"}}}}"#
-            );
-        }
-    }
+    serde_json::to_string(&envelope).unwrap_or_else(|_| {
+        // Last-resort path: serialisation of the envelope itself failed — emit a
+        // minimal structurally-valid envelope so consumers that require
+        // `error.code` still parse something.
+        r#"{"error":{"code":"backend_error","message":"failed to serialise error envelope"}}"#
+            .to_string()
+    })
 }
 
 fn config_input(cli: &Cli) -> Option<(String, bool)> {
@@ -453,62 +599,93 @@ impl Drop for ParkedDaclGuard {
 /// first. On timeout we proceed anyway; the recovery scan on the next
 /// `wxc-exec` startup reaps anything left behind.
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
-    if let Some(slot) = DACL_CLEANUP_SLOT.get() {
-        use std::time::{Duration, Instant};
-        // The handler runs TWO bounded waits (this one + the
-        // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
-        // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
-        // ~5s OS-imposed kill budget. The per-wait budget is sourced
-        // from the shared `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`
-        // so `wxc-exec` and `plm.exe`'s `plm_ctrl_handler` cannot
-        // drift apart, and the budget invariant is pinned by a unit
-        // test (`ctrl_handler_drain_timeout_respects_os_budget`).
-        let deadline = Instant::now() + plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
-        loop {
-            if let Ok(mut guard) = slot.try_lock() {
-                // Either main already took the manager (guard is None)
-                // or it never parked one; dropping `Option::take` is
-                // a no-op in both cases. Either way, the contract — no
-                // restore thread running concurrently with the default
-                // handler's ExitProcess — is satisfied.
-                drop(guard.take());
-                break;
+    // Ordering guarantee: best-effort cancellation telemetry runs STRICTLY
+    // BEFORE the up-to-5s DACL cleanup loop, which can consume the OS
+    // shutdown-handler budget. Factored through `cancel_then_cleanup` so a
+    // future edit that reorders these two would fail a unit test rather than
+    // silently drop cancellation telemetry when the cleanup times out.
+    cancel_then_cleanup(
+        // Emit first. No-op unless telemetry is active; emits no message text
+        // and does not shut the provider down (the OS reclaims it at exit).
+        telemetry::emit_cancellation,
+        // Then the security-critical cleanup: restore host DACLs and cancel any
+        // in-flight audit trace.
+        || {
+            if let Some(slot) = DACL_CLEANUP_SLOT.get() {
+                use std::time::{Duration, Instant};
+                // The handler runs TWO bounded waits (this one + the
+                // AUDIT_START_IN_FLIGHT wait below) before `wpr -cancel`, and
+                // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
+                // ~5s OS-imposed kill budget. The per-wait budget is sourced
+                // from the shared `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`
+                // so `wxc-exec` and `plm.exe`'s `plm_ctrl_handler` cannot
+                // drift apart, and the budget invariant is pinned by a unit
+                // test (`ctrl_handler_drain_timeout_respects_os_budget`).
+                let deadline = Instant::now() + plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
+                loop {
+                    if let Ok(mut guard) = slot.try_lock() {
+                        // Either main already took the manager (guard is None)
+                        // or it never parked one; dropping `Option::take` is
+                        // a no-op in both cases. Either way, the contract — no
+                        // restore thread running concurrently with the default
+                        // handler's ExitProcess — is satisfied.
+                        drop(guard.take());
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+            // if `plm start` is still in flight when Ctrl+C arrives, wait
+            // briefly for it to complete before deciding whether to issue
+            // `wpr -cancel`. Without this wait, a cancel that races a
+            // not-yet-engaged session is a no-op and the session leaks past
+            // wxc-exec exit. On timeout we proceed anyway — the next-startup
+            // `recover_orphaned_state` scan plus a manual `wpr -cancel` would
+            // catch any residue.
+            //
+            // The wait loop is implemented by
+            // `plm::coordination::wait_until_cleared`, the same tested helper
+            // `plm.exe`'s console-control handler uses. The per-wait timeout is
+            // sourced from the shared
+            // `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` const so the
+            // wxc-exec and plm.exe handlers cannot drift apart. The const's
+            // docs (and the `ctrl_handler_drain_timeout_respects_os_budget`
+            // unit test) pin the ~5s OS kill-budget invariant.
+            let _ = plm::coordination::wait_until_cleared(
+                &AUDIT_START_IN_FLIGHT,
+                plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT,
+                std::time::Duration::from_millis(50),
+            );
+            cancel_active_audit_trace();
+        },
+    );
     // FALSE = "I did not fully handle this; run the next handler in the
     // chain (i.e. the default handler that calls ExitProcess)".
-    //
-    // if `plm start` is still in
-    // flight when Ctrl+C arrives, wait briefly for it to complete
-    // before deciding whether to issue `wpr -cancel`. Without this
-    // wait, a cancel that races a not-yet-engaged session is a no-op
-    // and the session leaks past wxc-exec exit. On timeout we proceed
-    // anyway — the next-startup `recover_orphaned_state` scan plus a
-    // manual `wpr -cancel` would catch any residue.
-    //
-    // the wait loop is
-    // implemented by `plm::coordination::wait_until_cleared`, the
-    // same tested helper `plm.exe`'s console-control handler uses.
-    //
-    // the per-wait
-    // timeout is sourced from the shared
-    // `plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT` const so the
-    // wxc-exec and plm.exe handlers cannot drift apart. The const's
-    // docs (and the
-    // `ctrl_handler_drain_timeout_respects_os_budget` unit test)
-    // pin the ~5s OS kill-budget invariant.
-    let _ = plm::coordination::wait_until_cleared(
-        &AUDIT_START_IN_FLIGHT,
-        plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT,
-        std::time::Duration::from_millis(50),
-    );
-    cancel_active_audit_trace();
     windows::core::BOOL(0)
+}
+
+/// Runs the cancellation `emit` strictly before the (possibly slow,
+/// security-critical) `cleanup`, and guarantees `cleanup` runs even if `emit`
+/// panics. Factored out of [`dacl_ctrl_handler`] so both invariants are lockable
+/// by a unit test:
+///
+/// 1. **Ordering** — `emit` runs before `cleanup`. The cleanup can burn the OS
+///    shutdown-handler budget and never return, so emitting first ensures the
+///    cancellation telemetry is not lost.
+/// 2. **Cleanup-always** — `emit` is wrapped in [`catch_unwind`] so a panic in
+///    telemetry can never skip the DACL restore (which would leave host ACEs in
+///    place) and can never unwind across the `extern "system"` `dacl_ctrl_handler`
+///    boundary (which is undefined behaviour).
+///
+/// A caught panic is intentionally swallowed: this runs on the OS
+/// shutdown-handler path where there is nothing left to propagate it to, and the
+/// security-critical `cleanup` is what must not be skipped.
+fn cancel_then_cleanup(emit: impl FnOnce(), cleanup: impl FnOnce()) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(emit));
+    cleanup();
 }
 
 /// Install the console-control handler. Idempotent — calling twice
@@ -523,6 +700,13 @@ fn install_dacl_ctrl_handler() {
 
 fn main() {
     let cli = Cli::parse().normalize_named_config_command();
+
+    // Propagate --force-reclaim via the environment so it reaches both the
+    // in-process one-shot reconcile and the detached daemon. Set before any
+    // backend dispatch or daemon spawn.
+    if cli.force_reclaim {
+        std::env::set_var("WXC_WSB_FORCE_RECLAIM", "1");
+    }
 
     // Best-effort: reap any orphaned DACL state files left behind by
     // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
@@ -769,7 +953,17 @@ fn main() {
                 command_override.as_deref(),
                 &mut logger,
             );
-            run_state_aware_main(parsed, cli.dry_run, &mut logger)
+            // Mirror what the one-shot path does at the post-dispatch stage
+            // below: copy the CLI `--experimental` flag into the parsed
+            // request so backends that gate on it (e.g. Windows Sandbox
+            // experimental features) see the same value regardless of which
+            // dispatch branch the request entered through. Without this, the
+            // state-aware path runs without the gate -- a phase-envelope request
+            // could provision/start/exec experimental backends with no
+            // `--experimental` on the CLI.
+            parsed.request.experimental_enabled = cli.experimental;
+            parsed.request.dry_run = cli.dry_run;
+            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
         }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -803,11 +997,20 @@ fn main() {
         false
     };
 
+    // Install a crash-telemetry panic hook once telemetry is active, chaining
+    // the previously-installed hook so the default stderr backtrace still
+    // prints (also satisfying the "always emit a diagnostic" contract for the
+    // panic case). The hook body is panic-free and emits no message text.
+    if telemetry_active {
+        telemetry::set_process_context(&request.containment);
+        telemetry::install_panic_hook();
+    }
+
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
     let command_override = match command_override_from_cli(
         &cli,
-        command_line_context_for_backend(&request.containment),
+        CommandLineContext::for_backend(&request.containment),
     ) {
         Ok(command_override) => command_override,
         Err(e) => {
@@ -941,220 +1144,32 @@ fn main() {
         wxc_common::diagnostic::redacted_request_json(&request)
     );
 
-    // DaclManager parking for the BaseContainer/fallback path. Parked
-    // into a global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler
-    // can drop it on signal as well as the normal-exit path below. The
-    // slot returns `None` if no DACL augmentation was required.
-
-    // Run script in selected containment backend.
-    // BaseContainer is used when --experimental is passed or schema version >= 0.5.
-    // Sandbox and MicroVM require --experimental flag.
-    let mut runner: Box<dyn ScriptRunner> = match request.containment {
-        ContainmentBackend::ProcessContainer => {
-            // Compute fallback eligibility on the ProcessContainer arm
-            // only — every other `ContainmentBackend` variant is
-            // unaffected by `use_base_container` and does not need to
-            // pay the (trivial) semver parse cost.
-            let version_implies_base_container = is_base_container_version(&request.schema_version);
-            let use_base_container = request.experimental_enabled || version_implies_base_container;
-
-            if use_base_container {
-                let reason = if version_implies_base_container {
-                    format!("schema version {}", request.schema_version)
-                } else {
-                    "--experimental".to_string()
-                };
-                let _ = writeln!(logger, "Using BaseContainer-fallback dispatcher ({reason})");
-
-                match appcontainer_common::dispatcher::dispatch_with_fallback(&request) {
-                    Ok(dispatched) => {
-                        for w in &dispatched.warnings {
-                            let _ = writeln!(logger, "warning: {w}");
-                        }
-                        let _ = writeln!(
-                            logger,
-                            "selected isolation tier: {}",
-                            dispatched.tier.as_str()
-                        );
-
-                        let (dispatched_runner, dacl_manager) = dispatched.into_runner_and_guard();
-                        if let Some(mgr) = dacl_manager {
-                            park_dacl_for_cleanup(mgr);
-                        }
-                        dispatched_runner
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        if let appcontainer_common::dispatcher::DispatchError::Dacl {
-                            warnings,
-                            ..
-                        } = &e
-                        {
-                            for w in warnings {
-                                eprintln!("  dacl warning: {w}");
-                            }
-                        }
-                        eprint!("{}", logger.get_buffer());
-                        telemetry::emit_early_exit(
-                            telemetry_active,
-                            &request.containment,
-                            telemetry::FailureReason::InitError,
-                        );
-                        process::exit(1);
-                    }
-                }
-            } else {
-                Box::new(Runner::new(AppContainerScriptRunner::new()))
+    // Run script in the selected containment backend. Backend selection and
+    // runner construction — including the ProcessContainer BaseContainer /
+    // AppContainer (BFS / DACL) fallback tiers and every experimental backend —
+    // live in `mxc_engine::resolve_runner`, the single home for one-shot backend
+    // dispatch. The DACL guard it returns for the fallback tiers is parked into
+    // the global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler can drop
+    // it on signal as well as the normal-exit path below; it is `None` when no
+    // DACL augmentation was required. Tier-selection warnings and the selected
+    // tier are logged to `logger` by the engine.
+    let mut runner: Box<dyn ScriptRunner> = match mxc_engine::resolve_runner(&request, &mut logger)
+    {
+        Ok(resolved) => {
+            if let Some(mgr) = resolved.dacl_manager {
+                park_dacl_for_cleanup(mgr);
             }
+            resolved.runner
         }
-        ContainmentBackend::Wslc => {
-            #[cfg(feature = "wslc")]
-            {
-                if !request.experimental_enabled {
-                    eprintln!("Error: WSLC is an experimental feature. Use --experimental flag.");
-                    process::exit(1);
-                }
-                let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
-                let wslc_config = request
-                    .experimental
-                    .wslc
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_default();
-                Box::new(wslc_common::wsl_container_runner::WSLContainerRunner::new(
-                    &wslc_config,
-                ))
-            }
-            #[cfg(not(feature = "wslc"))]
-            {
-                eprintln!("Error: WSLC backend not compiled. Rebuild with --features wslc.");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Lxc => {
-            eprintln!("Error: LXC backend not available on Windows");
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            eprint!("{}", logger.get_buffer());
             telemetry::emit_early_exit(
                 telemetry_active,
                 &request.containment,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
-        }
-        ContainmentBackend::Bubblewrap => {
-            eprintln!("Error: Bubblewrap backend not available on Windows");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::Seatbelt => {
-            eprintln!("Error: Seatbelt backend is only available on macOS (use mxc-exec-mac)");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::Vm => {
-            eprintln!("Error: VM backend not yet implemented");
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::InitError,
-            );
-            process::exit(1);
-        }
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                eprintln!("Error: MicroVM is an experimental feature. Use --experimental flag.");
-                process::exit(1);
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Box::new(NanVixScriptRunner::new())
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                eprintln!("Error: MicroVM backend not compiled in (build with --features microvm)");
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::Hyperlight => {
-            #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
-            {
-                if !request.experimental_enabled {
-                    eprintln!(
-                        "Error: Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
-                         Use --experimental flag."
-                    );
-                    process::exit(1);
-                }
-                Box::new(HyperlightScriptRunner::new())
-            }
-            #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
-            {
-                eprintln!(
-                    "Error: Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)"
-                );
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
-        }
-        ContainmentBackend::WindowsSandbox => {
-            if !request.experimental_enabled {
-                eprintln!(
-                    "Error: Windows Sandbox is an experimental feature. Use --experimental flag."
-                );
-                process::exit(1);
-            }
-            let sandbox_config = request
-                .experimental
-                .windows_sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
-            Box::new(WindowsSandboxScriptRunner::new(&sandbox_config))
-        }
-        ContainmentBackend::IsolationSession => {
-            #[cfg(feature = "isolation_session")]
-            {
-                if !request.experimental_enabled {
-                    eprintln!(
-                        "Error: Isolation Session is an experimental feature. Use --experimental flag."
-                    );
-                    process::exit(1);
-                }
-                Box::new(IsolationSessionRunner::new())
-            }
-            #[cfg(not(feature = "isolation_session"))]
-            {
-                eprintln!(
-                    "Error: IsolationSession backend not compiled. Rebuild with --features isolation_session."
-                );
-                telemetry::emit_early_exit(
-                    telemetry_active,
-                    &request.containment,
-                    telemetry::FailureReason::InitError,
-                );
-                process::exit(1);
-            }
         }
     };
 
@@ -1336,21 +1351,7 @@ fn main() {
     // when the runner produced an error message (one-shot flows only).
     // In PTY mode stderr is merged into the PTY output stream, so the envelope
     // appears inline -- callers (e.g. copilot) can parse it from the output.
-    if response.exit_code != 0 && !response.error_message.is_empty() {
-        let mut envelope = serde_json::json!({
-            "error": {
-                "code": "backend_error",
-                "message": response.error_message,
-            }
-        });
-        if !response.extended_error.is_empty() {
-            envelope["error"]["extended_error"] =
-                serde_json::Value::String(response.extended_error.clone());
-        }
-        if let Ok(json) = serde_json::to_string(&envelope) {
-            eprintln!("{json}");
-        }
-    }
+    wxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }
@@ -1362,6 +1363,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use wxc_common::encoding::base64_encode;
     use wxc_common::logger::Mode;
+    use wxc_common::models::ContainmentBackend;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::MxcRequest;
 
@@ -1523,7 +1525,7 @@ mod tests {
     #[test]
     fn windows_sandbox_cli_command_uses_cmd_context() {
         assert_eq!(
-            command_line_context_for_backend(&ContainmentBackend::WindowsSandbox),
+            CommandLineContext::for_backend(&ContainmentBackend::WindowsSandbox),
             CommandLineContext::WindowsCommandProcessor
         );
     }
@@ -1667,6 +1669,7 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("iso:wxc-1234".into()),
+            correlation_vector: None,
             experimental_raw: None,
         };
 
@@ -1676,5 +1679,178 @@ mod tests {
         assert!(err
             .message
             .contains("only supported for state-aware exec requests"));
+    }
+
+    #[test]
+    fn cancel_then_cleanup_emits_before_cleanup() {
+        // Locks in the dacl_ctrl_handler ordering guarantee: cancellation
+        // telemetry must be emitted BEFORE the (up-to-5s, security-critical)
+        // DACL cleanup, so a cleanup that burns the OS shutdown budget can't
+        // swallow the telemetry. Drive the extracted helper with two spies that
+        // record their call order into a shared vec.
+        use std::sync::Mutex;
+
+        let order: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        cancel_then_cleanup(
+            || order.lock().unwrap().push("emit"),
+            || order.lock().unwrap().push("cleanup"),
+        );
+
+        assert_eq!(*order.lock().unwrap(), vec!["emit", "cleanup"]);
+    }
+
+    #[test]
+    fn cancel_then_cleanup_runs_cleanup_even_if_emit_panics() {
+        // Locks in the cleanup-always guarantee: a panic in the cancellation
+        // emit (telemetry) must NEVER skip the security-critical DACL cleanup,
+        // and must not unwind across the extern "system" ctrl-handler boundary.
+        // Without the catch_unwind in cancel_then_cleanup, `cleanup` would never
+        // run and the panic would escape the handler (UB in production).
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static CLEANED: AtomicBool = AtomicBool::new(false);
+        // Suppress the default panic hook's stderr backtrace for this
+        // intentional panic so the test output stays clean.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        cancel_then_cleanup(
+            || panic!("telemetry emit blew up"),
+            || CLEANED.store(true, Ordering::SeqCst),
+        );
+        std::panic::set_hook(prev);
+
+        assert!(
+            CLEANED.load(Ordering::SeqCst),
+            "cleanup must run even when emit panics"
+        );
+    }
+
+    #[test]
+    fn plan_correlation_vector_provision_seeds_fresh_vector() {
+        // Provision ignores any relayed value and always plans a fresh seed.
+        assert_eq!(
+            plan_correlation_vector(true, Some("BBBBBBBBBBBBBBBBBBBBBB.5")),
+            CvPlan::Seed
+        );
+        assert_eq!(plan_correlation_vector(true, None), CvPlan::Seed);
+    }
+
+    #[test]
+    fn plan_correlation_vector_phase_spins_relayed_base() {
+        // A relayable relayed value is spun to derive this phase's child vector.
+        let base = "AAAAAAAAAAAAAAAAAAAAAA.0";
+        assert_eq!(
+            plan_correlation_vector(false, Some(base)),
+            CvPlan::Spin(base)
+        );
+        // A valid frozen relayed value is also relayable (spin passes it through).
+        let frozen = "AAAAAAAAAAAAAAAAAAAAAA.0!";
+        assert_eq!(
+            plan_correlation_vector(false, Some(frozen)),
+            CvPlan::Spin(frozen)
+        );
+    }
+
+    #[test]
+    fn plan_correlation_vector_phase_reseeds_for_missing_empty_or_malformed() {
+        // Missing / empty / non-relayable relayed values plan a fresh `Seed`, so
+        // the `Spin` arm never stands in for a reseed (garbage never reaches the
+        // `spin` operator).
+        for incoming in [None, Some(""), Some("garbage"), Some("short.0")] {
+            assert_eq!(
+                plan_correlation_vector(false, incoming),
+                CvPlan::Seed,
+                "non-relayable relay {incoming:?} must plan Seed"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_phase_correlation_is_empty_when_telemetry_inactive() {
+        // Inactive telemetry does no RNG/clock work regardless of phase/relay.
+        assert!(compute_phase_correlation(false, true, None).is_empty());
+        assert!(
+            compute_phase_correlation(false, false, Some("AAAAAAAAAAAAAAAAAAAAAA.0")).is_empty()
+        );
+    }
+
+    #[test]
+    fn compute_phase_correlation_spins_relayable_and_reseeds_garbage() {
+        // Active provision seeds a fresh valid vector.
+        let provisioned = compute_phase_correlation(true, true, None);
+        assert!(telemetry::correlation_vector::is_relayable(&provisioned));
+        // Active non-provision spins a relayable relay onto the shared prefix.
+        let base = "AAAAAAAAAAAAAAAAAAAAAA.0";
+        let spun = compute_phase_correlation(true, false, Some(base));
+        assert!(spun.starts_with(&format!("{base}.")), "{spun:?}");
+        // Active non-provision with garbage reseeds to a fresh, unrelated vector.
+        let reseeded = compute_phase_correlation(true, false, Some("garbage"));
+        assert!(telemetry::correlation_vector::is_relayable(&reseeded));
+        assert!(!reseeded.starts_with("garbage"));
+    }
+
+    #[test]
+    fn inject_correlation_vector_sets_field_on_envelope() {
+        let mut outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
+            serde_json::json!({ "result": { "sandboxId": "iso:wxc-abc" } }),
+        ));
+        inject_correlation_vector(&mut outcome, "AAAAAAAAAAAAAAAAAAAAAA.0");
+        match outcome {
+            Ok(DispatchOutcome::Envelope(v)) => assert_eq!(
+                v["result"]["correlationVector"],
+                serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA.0")
+            ),
+            _ => panic!("expected envelope"),
+        }
+    }
+
+    #[test]
+    fn inject_correlation_vector_noop_on_non_envelope() {
+        // Exec-completed / error outcomes carry no result envelope: injection is
+        // a no-op and must not panic.
+        let mut exit: Result<DispatchOutcome, MxcError> =
+            Ok(DispatchOutcome::ExecCompleted { exit_code: 0 });
+        inject_correlation_vector(&mut exit, "AAAAAAAAAAAAAAAAAAAAAA.0");
+        assert!(matches!(
+            exit,
+            Ok(DispatchOutcome::ExecCompleted { exit_code: 0 })
+        ));
+    }
+
+    #[test]
+    fn finalize_maps_envelope_to_stdout_exit_zero() {
+        let outcome: Result<DispatchOutcome, MxcError> =
+            Ok(DispatchOutcome::Envelope(serde_json::json!({ "ok": true })));
+        match finalize_state_aware_outcome(outcome) {
+            StateAwareExit::Envelope(json) => {
+                assert_eq!(json, r#"{"ok":true}"#);
+            }
+            other => panic!("expected Envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_maps_exec_completed_to_its_exit_code() {
+        let outcome: Result<DispatchOutcome, MxcError> =
+            Ok(DispatchOutcome::ExecCompleted { exit_code: 7 });
+        assert!(matches!(
+            finalize_state_aware_outcome(outcome),
+            StateAwareExit::ExecCode(7)
+        ));
+    }
+
+    #[test]
+    fn finalize_maps_error_to_serialised_envelope() {
+        let outcome: Result<DispatchOutcome, MxcError> =
+            Err(MxcError::malformed_request("boom".to_string()));
+        match finalize_state_aware_outcome(outcome) {
+            StateAwareExit::Error(json) => {
+                // Must be a parseable envelope carrying the error code so consumers
+                // that key off `error.code` still work.
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert!(parsed["error"]["code"].is_string(), "{json}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }

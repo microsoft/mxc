@@ -7,8 +7,10 @@ pub mod cmdline;
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
+pub mod exec_stream;
 pub mod filesystem_access;
 pub mod filesystem_object;
+pub mod filesystem_resolve;
 pub mod id;
 pub mod log_symbols;
 pub mod logger;
@@ -30,7 +32,7 @@ pub mod validator;
 pub mod wire;
 
 // TypeScript emitter for the SDK wire types (drift oracle). Walks the generated
-// schema value and emits `sdk/src/generated/wire.ts`. Compiled with the wire
+// schema value and emits `sdk/node/src/generated/wire.ts`. Compiled with the wire
 // model under the `schema-gen` feature.
 #[cfg(feature = "schema-gen")]
 pub mod ts_emit;
@@ -52,9 +54,10 @@ pub mod string_util;
 #[cfg(unix)]
 pub mod interruptible_reader;
 
-// Linux-specific modules
-#[cfg(target_os = "linux")]
-pub mod linux_proxy_coordinator;
+// Unix cooperative network proxy coordinator, used by the Bubblewrap (Linux)
+// and Seatbelt (macOS) backends.
+#[cfg(unix)]
+pub mod unix_proxy_coordinator;
 
 /// Test-only helper for env-var serialization within this crate's
 /// `filesystem_dacl` tests. The same shape lives in

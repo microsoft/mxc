@@ -59,6 +59,36 @@ pub fn run_state_aware(
     )))
 }
 
+/// Streaming counterpart of the exec phase of [`dispatch_state_aware`]: run the
+/// exec phase up to (and including) [`StatefulSandboxBackend::exec`] and return
+/// the resulting [`ExecHandle`] to the caller **without** relaying it to the
+/// executor's stdio.
+///
+/// This is what lets the library / FFI streaming path drive an exec live —
+/// wrapping the returned handle in a [`SandboxProcess`](crate::sandbox_process::SandboxProcess)
+/// via [`ExecSandboxProcess`](crate::exec_stream::ExecSandboxProcess) — instead
+/// of the run-to-completion relay that [`dispatch_state_aware`] performs for
+/// `wxc-exec`. Requires the `exec` phase; any other phase is a
+/// `malformed_request`. `dry_run` has no meaning for a streaming exec (there is
+/// nothing to stream) and is intentionally not accepted.
+pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
+    backend: &mut B,
+    parsed: ParsedStateAwareRequest,
+) -> Result<ExecHandle, MxcError> {
+    if !matches!(parsed.phase, Phase::Exec) {
+        return Err(MxcError::malformed_request(format!(
+            "streaming exec requires the exec phase, got {}",
+            parsed.phase
+        )));
+    }
+    let request = parsed.request.clone();
+    let sandbox_id = parsed.sandbox_id_required()?.to_string();
+    let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
+    validate_exec_common(&request)?;
+    backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
+    backend.exec(&sandbox_id, &request, config)
+}
+
 /// Per-backend phase router. The `run_state_aware` arm for a participating
 /// backend constructs `B` and delegates here.
 pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
@@ -143,6 +173,7 @@ pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBa
 fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
+        "wsb" => Ok(ContainmentBackend::WindowsSandbox),
         // Future state-aware backends extend this list.
         other => Err(MxcError::unsupported_containment(format!(
             "no state-aware backend registered for prefix {:?}",
@@ -463,6 +494,7 @@ mod tests {
             phase,
             containment: Some(ContainmentBackend::IsolationSession),
             sandbox_id: sandbox_id.map(String::from),
+            correlation_vector: None,
             experimental_raw: exp,
         }
     }
@@ -638,6 +670,7 @@ mod tests {
             phase: Phase::Provision,
             containment: Some(ContainmentBackend::Wslc),
             sandbox_id: None,
+            correlation_vector: None,
             experimental_raw: None,
         };
         let err = run_state_aware(p, false).unwrap_err();
@@ -651,6 +684,7 @@ mod tests {
             phase: Phase::Provision,
             containment: None,
             sandbox_id: None,
+            correlation_vector: None,
             experimental_raw: None,
         };
         let err = run_state_aware(p, false).unwrap_err();
@@ -664,11 +698,28 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("iso:wxc-abcd1234".into()),
+            correlation_vector: None,
             experimental_raw: None,
         };
         assert_eq!(
             resolve_backend(&p).unwrap(),
             ContainmentBackend::IsolationSession
+        );
+    }
+
+    #[test]
+    fn resolve_backend_for_wsb_prefix_returns_windows_sandbox() {
+        let p = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Start,
+            containment: None,
+            sandbox_id: Some("wsb:deadbeef".into()),
+            correlation_vector: None,
+            experimental_raw: None,
+        };
+        assert_eq!(
+            resolve_backend(&p).unwrap(),
+            ContainmentBackend::WindowsSandbox
         );
     }
 
@@ -679,6 +730,7 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("unknownxyz:abc".into()),
+            correlation_vector: None,
             experimental_raw: None,
         };
         let err = resolve_backend(&p).unwrap_err();
@@ -692,6 +744,7 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("no-colon".into()),
+            correlation_vector: None,
             experimental_raw: None,
         };
         let err = resolve_backend(&p).unwrap_err();

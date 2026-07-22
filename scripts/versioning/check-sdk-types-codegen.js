@@ -2,7 +2,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// SDK wire-types codegen gate: the committed `sdk/src/generated/wire.ts` must
+// SDK wire-types codegen gate: the committed `sdk/node/src/generated/wire.ts` must
 // be identical (modulo line endings) to the output of the Rust TypeScript
 // emitter (`mxc_schema_gen --ts`), so the SDK's drift oracle can never go stale
 // relative to the Rust wire model. The emitter lives in `wxc_common::ts_emit`
@@ -17,7 +17,7 @@ const os = require("os");
 const { execFileSync } = require("child_process");
 
 const repoRoot = join(__dirname, "..", "..");
-const committedPath = join(repoRoot, "sdk", "src", "generated", "wire.ts");
+const committedPath = join(repoRoot, "sdk", "node", "src", "generated", "wire.ts");
 
 function fail(msg) {
   console.error("SDK wire-types codegen check FAILED:");
@@ -58,7 +58,7 @@ try {
         `      committed:  ${JSON.stringify(c[line])}\n` +
         `      generated:  ${JSON.stringify(g[line])}\n` +
         `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
-        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/src/generated/wire.ts`
+        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts`
     );
   }
 } finally {
@@ -66,5 +66,5 @@ try {
 }
 
 console.log(
-  "SDK wire-types codegen OK: committed sdk/src/generated/wire.ts matches the Rust emitter output."
+  "SDK wire-types codegen OK: committed sdk/node/src/generated/wire.ts matches the Rust emitter output."
 );

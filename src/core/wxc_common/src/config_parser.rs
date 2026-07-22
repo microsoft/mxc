@@ -137,18 +137,37 @@ pub fn load_mxc_request_with_options(
 ) -> Result<MxcRequest, ParseError> {
     let json_str =
         decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
+    parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+}
 
+/// Parse an MXC request from a **raw JSON string** (already decoded — not a file
+/// path or base64). Discriminates one-shot vs state-aware by the `phase` key,
+/// the same as [`load_mxc_request`], but skips the file/base64 decode step so an
+/// in-memory JSON string can be parsed directly.
+pub fn load_mxc_request_from_json(
+    json_str: &str,
+    logger: &mut Logger,
+) -> Result<MxcRequest, ParseError> {
+    parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false)
+}
+
+/// Shared parse core over an already-decoded JSON string.
+fn parse_mxc_request_json(
+    json_str: &str,
+    logger: &mut Logger,
+    allow_missing_command: bool,
+) -> Result<MxcRequest, ParseError> {
     // Parse once into a generic JSON value so we can (a) discriminate one-shot
     // vs state-aware by presence of the `phase` key and (b) capture the raw
     // `experimental` block for the state-aware path, where it is typed
     // per-backend at dispatch time rather than at parse time.
-    let parsed_json: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+    let parsed_json: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
         logger.log_line("Error parsing JSON");
         ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
     })?;
 
     if parsed_json.get("phase").is_some() {
-        convert_wire_state_aware(parsed_json, logger, opts.allow_missing_command)
+        convert_wire_state_aware(parsed_json, logger, allow_missing_command)
             .map(MxcRequest::StateAware)
             .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
@@ -156,11 +175,11 @@ pub fn load_mxc_request_with_options(
         // `parsed_json`) so serde's line/column context is preserved in error
         // messages on this trust boundary; `from_value` discards it, turning a
         // typo or out-of-range field into an unlocalised "expected u16"-style dump.
-        let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
+        let cfg: wire::MxcConfig = serde_json::from_str(json_str).map_err(|e| {
             logger.log_line("Error parsing JSON");
             ParseError::OneShot(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
         })?;
-        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
@@ -203,39 +222,18 @@ pub fn decode_request_input(
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.4, <=0.8";
+const SUPPORTED_VERSION: &str = ">=0.6, <=0.8";
 
 /// Canonical "latest" schema version string used in samples and tests. Bump
 /// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
 #[cfg(test)]
 const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 
-/// The minimum schema version that implies BaseContainer backend usage.
-const BASE_CONTAINER_MIN_VERSION: &str = "0.5.0";
-
 /// Known `experimental.<backend>` keys. Used by validation code to flag
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
-
-/// Returns `true` if `version` is a BaseContainer-era schema version (>= 0.5.0).
-///
-/// Pre-release labels are stripped before comparison, so `"0.5.0-alpha"` is
-/// treated identically to `"0.5.0"`.  Returns `false` for empty or
-/// unparseable version strings.
-pub fn is_base_container_version(version: &str) -> bool {
-    if version.is_empty() {
-        return false;
-    }
-    let parsed = match semver::Version::parse(version) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
-    let threshold = semver::Version::parse(BASE_CONTAINER_MIN_VERSION).unwrap();
-    comparable >= threshold
-}
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -261,7 +259,7 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     // against a version without the pre-release label for major.minor check.
     let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
     if !req.matches(&comparable) {
-        let min = semver::VersionReq::parse(">=0.4").unwrap();
+        let min = semver::VersionReq::parse(">=0.6").unwrap();
         let msg = if !min.matches(&comparable) {
             format!(
                 "Config schema version '{}' is older than supported (supported: {}). Update your config.",
@@ -618,6 +616,11 @@ fn convert_wire_config(
         logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
+    if cfg.correlation_vector.is_some() {
+        let msg = "'correlationVector' is only valid on state-aware lifecycle requests".to_string();
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
 
     // Backend sections present in the config (captured before fields move out).
     let present_backend_sections = present_backend_sections(&cfg);
@@ -787,9 +790,10 @@ fn convert_wire_config(
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
+                && containment != ContainmentBackend::Seatbelt
             {
-                let msg = "Network proxy is only supported with the 'processcontainer' \
-                           or 'bubblewrap' containment backends";
+                let msg = "Network proxy is only supported with the 'processcontainer', \
+                           'bubblewrap', or 'seatbelt' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -829,6 +833,53 @@ fn convert_wire_config(
                        network.enforcementMode='firewall' or 'both'. The cooperative \
                        env-var proxy enforces hosts at the proxy layer; iptables-based \
                        enforcement requires privilege and is mutually exclusive.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Seatbelt has no privileged packet-filter layer on macOS: it enforces
+        // network policy through the sandbox profile (capabilities-style) and
+        // ignores enforcementMode. Combining network.proxy with a firewall mode
+        // would silently drop the firewall expectation, so reject it explicitly,
+        // mirroring the Bubblewrap guard above.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.network_proxy.is_enabled()
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Seatbelt: network.proxy cannot be combined with \
+                       network.enforcementMode='firewall' or 'both'. macOS Seatbelt \
+                       enforces network policy through the sandbox profile and has no \
+                       packet-filter layer, so a firewall mode cannot be honored.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Seatbelt scopes a *loopback* proxy's reachability to its exact port
+        // even under default-deny (profile_builder::write_proxy_reachability_rules),
+        // but it cannot filter a *remote* proxy by host: a remote proxy under
+        // defaultPolicy='block' degrades to allow-all outbound, silently turning
+        // the kernel-enforced deny into allow-all for raw-socket clients that
+        // ignore HTTP_PROXY. Reject that combination. Loopback proxies (including
+        // builtinTestServer, whose loopback address is resolved at runtime and is
+        // therefore absent here) stay port-scoped and are allowed.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.default_network_policy == NetworkPolicy::Block
+            && policy
+                .network_proxy
+                .address
+                .as_ref()
+                .is_some_and(|addr| !matches!(addr.host(), "127.0.0.1" | "::1" | "localhost"))
+        {
+            let msg = "Seatbelt: a remote network.proxy (non-loopback host) cannot be \
+                       combined with defaultPolicy='block'. Seatbelt cannot filter a remote \
+                       proxy by host, so outbound reachability degrades to allow-all, \
+                       silently weakening the deny for raw-socket clients that ignore \
+                       HTTP_PROXY. Use a loopback proxy (127.0.0.1/::1/localhost) or \
+                       'network.proxy.builtinTestServer: true' for port-scoped reachability \
+                       under deny.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
@@ -933,9 +984,8 @@ fn convert_wire_config(
                     }
                     // Only TCP is representable in the wire model
                     // (TransportProtocol is tcp-only); a `udp` value is rejected
-                    // at deserialize. The vendored WSLC SDK runtime
-                    // (Microsoft.WSL.Containers 2.8.1) returns E_NOTIMPL for UDP,
-                    // so only TCP is currently supported.
+                    // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
+                    // UDP, so only TCP is currently supported.
                     let protocol = "tcp".to_string();
                     converted.push(PortMapping {
                         windows_port: m.windows_port,
@@ -1041,6 +1091,21 @@ fn convert_wire_state_aware(
         .as_object_mut()
         .and_then(|map| map.remove("experimental"));
 
+    // Peeling `experimental` off above also removes it from the typed
+    // deserialize, so a non-object value (e.g. `"experimental": 42`) would slip
+    // through unchecked here and be silently ignored — unlike the one-shot path,
+    // where `experimental` is a typed `Option<Experimental>` and a non-object is
+    // a hard parse error. Reject a present, non-null, non-object value up front
+    // so both paths fail malformed configs consistently. (`null` maps to "absent"
+    // on both paths and is accepted.)
+    if let Some(exp) = experimental_raw.as_ref() {
+        if !exp.is_null() && !exp.is_object() {
+            let msg = "invalid `experimental`: expected an object".to_string();
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+    }
+
     let mut cfg: wire::MxcConfig = serde_json::from_value(value).map_err(|e| {
         logger.log_line("Error parsing JSON");
         WxcError::ConfigParse(format!("JSON parse error: {}", e))
@@ -1084,6 +1149,7 @@ fn convert_wire_state_aware(
     validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref(), logger)?;
 
     let sandbox_id = cfg.sandbox_id.clone();
+    let correlation_vector = cfg.correlation_vector.clone();
 
     // State-aware requests carry only cross-cutting fields (process /
     // filesystem / network / ui) plus the experimental backend block. One-shot-
@@ -1118,6 +1184,7 @@ fn convert_wire_state_aware(
     // now-validated-absent stable sections so the shared one-shot converter
     // sees a clean surrogate and its `phase`/`sandboxId` guard passes.
     cfg.sandbox_id = None;
+    cfg.correlation_vector = None;
     cfg.experimental = None;
     cfg.seatbelt = None;
     cfg.process_container = None;
@@ -1125,13 +1192,34 @@ fn convert_wire_state_aware(
     cfg.lifecycle = None;
 
     let require_process = phase == Phase::Exec;
-    let request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+
+    // Populate the typed `experimental.telemetry` field from the raw block that
+    // was peeled off above. The rest of `experimental` is typed per-backend at
+    // dispatch time (from `experimental_raw`), but telemetry is a cross-cutting,
+    // backend-independent setting consumed the same way as the one-shot path —
+    // so it belongs on the typed request, not in a parallel raw-JSON reader. A
+    // present-but-malformed `telemetry` object is a client error (rejected here,
+    // exactly like the one-shot parser), not a silent disable.
+    if let Some(telemetry_val) = experimental_raw
+        .as_ref()
+        .and_then(|exp| exp.get("telemetry"))
+    {
+        let telemetry: TelemetryConfig =
+            serde_json::from_value(telemetry_val.clone()).map_err(|e| {
+                let msg = format!("invalid experimental.telemetry: {e}");
+                logger.log_line(&msg);
+                WxcError::ConfigParse(msg)
+            })?;
+        request.experimental.telemetry = Some(telemetry);
+    }
 
     Ok(ParsedStateAwareRequest {
         request,
         phase,
         containment,
         sandbox_id,
+        correlation_vector,
         experimental_raw,
     })
 }
@@ -1284,6 +1372,89 @@ mod tests {
                     })
                 );
             }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_telemetry_populates_typed_field() {
+        // Telemetry is a cross-cutting setting: the state-aware parser must
+        // populate the typed `experimental.telemetry` field (consumed the same
+        // way as one-shot) while leaving the per-backend `experimental_raw`
+        // block intact for dispatch.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": {"enabled": true}}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                let telem = p
+                    .request
+                    .experimental
+                    .telemetry
+                    .expect("telemetry should be populated");
+                assert_eq!(telem.enabled, Some(true));
+                // The raw block is still available for per-backend dispatch.
+                assert!(p.experimental_raw.is_some());
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_without_telemetry_leaves_typed_field_unset() {
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_malformed_telemetry_is_rejected() {
+        // A present-but-malformed telemetry block is a client error rejected at
+        // parse time (surfaced as a state-aware envelope), not a silent disable.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": 42}
+        }"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_non_object_experimental_is_rejected() {
+        // A non-object `experimental` (here a bare number) is a hard parse error
+        // on the one-shot path (typed `Option<Experimental>`); the state-aware
+        // path peels `experimental` off before typed deserialize, so it must
+        // reject a non-object value explicitly to stay consistent rather than
+        // silently ignoring it.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": 42
+        }"#;
+        let r = load_mxc(json);
+        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_null_experimental_is_accepted() {
+        // `null` maps to "absent" on both the one-shot and state-aware paths, so
+        // it is accepted (leaving telemetry unset), unlike a non-object value.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": null
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
@@ -1602,7 +1773,7 @@ mod tests {
     fn network_default_policy_absent_defaults_to_block_on_any_version() {
         // wxc-exec is the trust boundary -- absent `defaultPolicy`
         // resolves to `Block` regardless of declared schema version.
-        for version in ["0.4.0-alpha", "0.5.0-alpha", "0.6.0-alpha"] {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
             let json = format!(
                 r#"{{"version": "{}", "process": {{"commandLine": "echo x"}}}}"#,
                 version
@@ -2211,6 +2382,151 @@ mod tests {
     }
 
     #[test]
+    fn proxy_accepted_with_seatbelt() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_url_accepted_with_seatbelt() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://127.0.0.1:8080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn proxy_with_seatbelt_and_firewall_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "firewall"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Seatbelt: network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_with_seatbelt_and_both_enforcement_is_rejected() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"builtinTestServer": true},
+                "enforcementMode": "both"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.proxy cannot be combined with"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_remote_url_with_seatbelt_and_default_block_is_rejected() {
+        // A remote (non-loopback) proxy under default-deny would degrade the
+        // Seatbelt profile to allow-all outbound — reject it at validation.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "proxy": {"url": "http://proxy.example.com:8080"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("remote network.proxy") && msg.contains("defaultPolicy='block'"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_loopback_url_with_seatbelt_and_default_block_is_accepted() {
+        // A loopback proxy is port-scoped under deny, so it must NOT be rejected.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "proxy": {"url": "http://127.0.0.1:8080"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_builtin_with_seatbelt_and_default_block_is_accepted() {
+        // builtinTestServer resolves to a loopback port at runtime → port-scoped,
+        // so default-deny is safe and must be accepted.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "proxy": {"builtinTestServer": true}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
     fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
@@ -2410,12 +2726,12 @@ mod tests {
 
     #[test]
     fn new_toplevel_fields_parsed() {
-        let json = r#"{"version": "0.4.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.6.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.4.0-alpha");
+        assert_eq!(req.schema_version, "0.6.0-alpha");
         assert_eq!(req.container_id, "abc-123");
     }
 
@@ -2483,26 +2799,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::MicroVm);
-    }
-
-    #[test]
-    fn schema_version_too_new_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.9.0"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn schema_version_0_7_alpha_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.7.0-alpha"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.7.0-alpha");
     }
 
     #[test]
@@ -2634,6 +2930,22 @@ mod tests {
         assert!(
             msg.contains("sandboxId") && msg.contains("state-aware"),
             "one-shot path should reject 'sandboxId', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn one_shot_rejects_correlation_vector_field() {
+        // `correlationVector` is a state-aware-only relay field; a one-shot
+        // payload carrying it must be rejected, mirroring `phase`/`sandboxId`.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("correlationVector") && msg.contains("state-aware"),
+            "one-shot path should reject 'correlationVector', got: {msg}"
         );
     }
 
@@ -2823,7 +3135,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_current_accepted() {
+    fn schema_version_max_accepted() {
         let json = format!(
             r#"{{"process": {{"commandLine": "echo hi"}}, "version": "{}"}}"#,
             CURRENT_SCHEMA_VERSION
@@ -2836,20 +3148,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_0_5_still_accepted() {
+    fn schema_version_below_min_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.5.0-alpha");
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            err.to_string().contains("older than supported"),
+            "expected an older-than-supported error, got: {err}"
+        );
     }
 
     #[test]
-    fn schema_version_state_aware_06_accepted() {
-        // 0.6 is the state-aware schema version (SDK side bumps to it for
-        // provision/start/exec/stop/deprovision envelopes); the parser must
-        // accept it on the same path used for one-shot 0.5 requests.
+    fn schema_version_min_accepted() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -2859,30 +3171,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_older_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.4.0-alpha"}"#;
+    fn schema_version_between_bounds_accepted() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.7.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.4.0-alpha");
+        assert_eq!(req.schema_version, "0.7.0-alpha");
     }
 
     #[test]
-    fn schema_version_too_old_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.3.0-alpha"}"#;
+    fn schema_version_above_max_rejected() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.9.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            err.to_string().contains("newer than supported"),
+            "expected a newer-than-supported error, got: {err}"
+        );
     }
 
     #[test]
-    fn full_config_with_0_5_0_alpha_accepted() {
+    fn full_config_with_0_6_0_alpha_accepted() {
         let json = r#"{
-            "version": "0.5.0-alpha",
-            "containerId": "test-050",
+            "version": "0.6.0-alpha",
+            "containerId": "test-060",
             "containment": "processcontainer",
             "process": { "commandLine": "echo hello", "timeout": 5000 },
             "filesystem": { "readwritePaths": ["C:\\workspace"] },
@@ -2892,8 +3207,8 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.5.0-alpha");
-        assert_eq!(req.container_id, "test-050");
+        assert_eq!(req.schema_version, "0.6.0-alpha");
+        assert_eq!(req.container_id, "test-060");
         assert_eq!(req.script_timeout, 5000);
         assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
     }
@@ -2921,16 +3236,6 @@ mod tests {
     #[test]
     fn schema_version_major_only_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "version": "2"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn schema_version_future_major_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "1.0.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3078,8 +3383,8 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_udp_rejected() {
-        // The wire model's TransportProtocol is tcp-only (the vendored WSLC SDK
-        // 2.8.1 runtime returns E_NOTIMPL for UDP), so "udp" is rejected at
+        // The wire model's TransportProtocol is tcp-only (the WSLC SDK runtime
+        // returns E_NOTIMPL for UDP), so "udp" is rejected at
         // deserialize as an unknown enum variant.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -3287,24 +3592,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
-    }
-
-    #[test]
-    fn is_base_container_version_recognizes_050() {
-        assert!(is_base_container_version("0.5.0-alpha"));
-        assert!(is_base_container_version("0.5.0"));
-        assert!(is_base_container_version("0.5.1"));
-        assert!(is_base_container_version("0.6.0"));
-        assert!(is_base_container_version("1.0.0"));
-    }
-
-    #[test]
-    fn is_base_container_version_rejects_040() {
-        assert!(!is_base_container_version("0.4.0-alpha"));
-        assert!(!is_base_container_version("0.4.0"));
-        assert!(!is_base_container_version("0.4.9"));
-        assert!(!is_base_container_version(""));
-        assert!(!is_base_container_version("not-a-version"));
     }
 
     // ====== Isolation Session containment and config tests ======
@@ -3533,9 +3820,9 @@ mod tests {
 
     // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
     // (`appcontainer`, `macos_sandbox`, and the `appContainer` /
-    // `experimental.macos_sandbox` sub-block keys) so that configs declaring
-    // earlier stable schemas (0.4.0-alpha, 0.5.0-alpha) continue to parse.
-    // Each alias maps to the canonical backend / sub-block and emits a
+    // `experimental.macos_sandbox` sub-block keys) regardless of the declared
+    // schema version, so configs carried forward from older spellings still
+    // parse. Each alias maps to the canonical backend / sub-block and emits a
     // deprecation log so callers know to migrate.
 
     #[test]
@@ -3560,9 +3847,9 @@ mod tests {
 
     #[test]
     fn legacy_app_container_subblock_alias_accepted() {
-        // Configs written against 0.4.0-alpha / 0.5.0-alpha still use the
-        // `appContainer` JSON key; serde's alias routes it to the same
-        // `processContainer` parsing path.
+        // The `appContainer` JSON key is a deprecated spelling; serde's alias
+        // routes it to the same `processContainer` parsing path regardless of
+        // the declared schema version.
         let json = r#"{
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",

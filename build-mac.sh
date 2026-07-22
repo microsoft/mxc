@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/src"
-SDK_DIR="$SCRIPT_DIR/sdk"
+SDK_DIR="$SCRIPT_DIR/sdk/node"
 
 # Parse arguments
 BUILD_TYPE="release"
@@ -96,7 +96,10 @@ echo ""
 echo "=== Building mxc-exec-mac ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
-CARGO_FLAGS=("-p" "mxc_darwin")
+# mxc-exec-mac is the seatbelt executor. unix-test-proxy is the bundled,
+# testing-only HTTP proxy that backs `network.proxy.builtinTestServer`; it is
+# spawned as a sibling of mxc-exec-mac by the proxy coordinator.
+CARGO_FLAGS=("-p" "mxc_darwin" "-p" "unix_test_proxy")
 if [ "$BUILD_TYPE" = "release" ]; then
     CARGO_FLAGS+=("--release")
 fi
@@ -128,6 +131,17 @@ copy_binary_for_target() {
         echo "Copied $src -> $bin_dir/mxc-exec-mac"
     else
         echo "Warning: $src not found, skipping copy"
+    fi
+
+    # unix-test-proxy backs network.proxy.builtinTestServer (testing only).
+    # It must sit next to mxc-exec-mac so the proxy coordinator can resolve it.
+    local proxy_src="$SRC_DIR/target/$triple/$BUILD_TYPE/unix-test-proxy"
+    if [ -f "$proxy_src" ]; then
+        cp "$proxy_src" "$bin_dir/unix-test-proxy"
+        chmod +x "$bin_dir/unix-test-proxy"
+        echo "Copied $proxy_src -> $bin_dir/unix-test-proxy"
+    else
+        echo "Warning: $proxy_src not found, skipping copy"
     fi
 }
 

@@ -92,7 +92,7 @@ BaseContainerRunner), see [process-container/guide.md](process-container/guide.m
 ## Step 3+: Implementation
 
 If your feature touches SandboxPolicy, update
-`sdk/src/types.ts`:
+`sdk/node/src/types.ts`:
 
 - Field must be optional (default-deny)
 - Default value must be the most restrictive option
@@ -100,7 +100,7 @@ If your feature touches SandboxPolicy, update
 
 If your feature adds policy or config fields, you will need
 to plumb them through `createConfigFromPolicy()` in
-`sdk/src/sandbox.ts`. See the
+`sdk/node/src/sandbox.ts`. See the
 [worked example in the Sandbox Policy spec](sandbox-policy/v1/policy.md#10-worked-example-ui-policy)
 for a walkthrough.
 
@@ -273,7 +273,7 @@ Create a test config that exercises your feature:
 
 ```json
 {
-  "version": "0.5.0-alpha",
+  "version": "0.6.0-alpha",
   "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo gpu isolation test"
@@ -309,7 +309,7 @@ Verify three things:
 ## Step 6: Update the SDK (if needed)
 
 If your feature should be accessible from the TypeScript SDK, add
-`experimental` to the `SandboxSpawnOptions` interface in `sdk/src/sandbox.ts`:
+`experimental` to the `SandboxSpawnOptions` interface in `sdk/node/src/sandbox.ts`:
 
 ```typescript
 export interface SandboxSpawnOptions {

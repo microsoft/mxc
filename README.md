@@ -12,7 +12,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 - **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
-    - **Network Policy**: Proxy support (not supported on macOS); allow/block outbound and host filtering (not yet supported on Windows)
+    - **Network Policy**: Proxy support (cooperative on Linux/macOS), allow/block outbound, and backend-dependent host filtering
     - **UI Policy**: Clipboard, display, and GUI access controls
 - **State-aware Lifecycle**: Multi-step sandbox lifecycle (provision → start → exec → stop → deprovision) for session sandboxes
 - **TypeScript SDK**: [`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk) npm package with one-shot and state-aware APIs
@@ -20,7 +20,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 
 ## Building
 
-MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK README](./sdk/README.md) for full API documentation.
+MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK README](./sdk/node/README.md) for full API documentation.
 
 ### Platforms
 
@@ -83,7 +83,7 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 
 All build scripts:
 1. Build the platform-appropriate Rust binary
-2. Copy the binary into `sdk/bin/<arch>/` (for example, `x64` or `arm64`) for SDK bundling
+2. Copy the binary into `sdk/node/bin/<arch>/` (for example, `x64` or `arm64`) for SDK bundling
 
 3. Build the TypeScript SDK
 
@@ -96,7 +96,7 @@ cargo build --release --target aarch64-pc-windows-msvc    # Windows ARM64
 cargo build --release -p lxc                               # Linux — lxc-exec (serves both LXC and Bubblewrap)
 cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS
 
-# SDK (from sdk/)
+# SDK (from sdk/node/)
 npm install && npm run build
 ```
 
@@ -109,7 +109,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Linux Rust (from src/; matches build.sh's platform-compatible crate set)
 
-cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p linux_test_proxy --all-targets -- -D warnings
+cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy --all-targets -- -D warnings
 
 # macOS Rust (from src/)
 
@@ -124,7 +124,7 @@ cargo test --workspace
 cargo test -p wxc_common                      # Single crate
 cargo test -p wxc_common -- config_parser     # Filter by test name
 
-# SDK (from sdk/)
+# SDK (from sdk/node/)
 npm test                     # Unit tests
 npm run test:integration     # Integration tests
 
@@ -197,7 +197,7 @@ import {
 } from '@microsoft/mxc-sdk';
 ```
 
-See the [SDK README](sdk/README.md) for full API documentation.
+See the [SDK README](sdk/node/README.md) for full API documentation.
 
 ## Schema Versions
 

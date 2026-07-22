@@ -1,0 +1,20 @@
+[package]
+name = "unix_test_proxy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "unix-test-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

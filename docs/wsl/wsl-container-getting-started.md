@@ -11,17 +11,18 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 | Requirement | Details |
 |---|---|
 | **Windows 11** | Required for WSL2 and the WSLC SDK |
-| **WSL 2.8.1+** | See Step 1 below for installation |
+| **WSL 2.9.3+** | See Step 1 below for installation |
 | **WSLC SDK** | `wslcsdk.dll` must be in the same directory as `wxc-exec.exe` |
 | **Container images** | Pre-pulled or available from a registry with network access |
 
-## Step 1 — Install WSL 2.8.1+
+## Step 1 — Install WSL 2.9.3+
 
-The WSLC SDK requires WSL version 2.8.1 or later. Update WSL to the latest
-version:
+The WSLC SDK requires WSL version 2.9.3 or later. Update WSL to the latest
+version. Note that 2.9.3 may only be available on the pre-release channel
+until it reaches the default Store channel, so include `--pre-release`:
 
 ```powershell
-wsl --update
+wsl --update --pre-release
 ```
 
 Verify your WSL version after updating:
@@ -30,8 +31,8 @@ Verify your WSL version after updating:
 wsl --version
 ```
 
-The WSL version should be **2.8.1.0 or later**. If `wsl --update` does not
-bring you to the required version, build WSL from the `master`
+The WSL version should be **2.9.3.0 or later**. If `wsl --update --pre-release`
+does not bring you to the required version, build WSL from the `master`
 branch:
 
 ```powershell
@@ -144,7 +145,7 @@ fields before spawning:
 import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
 
 const policy = {
-  version: '0.5.0-alpha',
+  version: '0.6.0-alpha',
   network: { allowOutbound: true },
 };
 

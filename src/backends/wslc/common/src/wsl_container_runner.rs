@@ -4,7 +4,7 @@
 //! WSL Container runner — implements `ScriptRunner` for the WSLC SDK backend.
 //!
 //! Orchestrates the full lifecycle:
-//! `WslcCanRun → Session → Image check → Process settings → Container → Start →
+//! `WslcGetMissingComponents → Session → Image check → Process settings → Container → Start →
 //!  I/O capture → Exit code → ScriptResponse`
 //!
 //! RAII guards ensure cleanup even on error paths.
@@ -349,13 +349,12 @@ impl WSLContainerRunner {
         };
 
         // Prerequisites check
-        let mut can_run: BOOL = 0;
-        let mut missing = WslcComponentFlags::None;
-        let hr = (sdk.WslcCanRun)(&mut can_run, &mut missing);
+        let mut missing = WslcComponentFlags::NONE;
+        let hr = (sdk.WslcGetMissingComponents)(&mut missing);
         if hr != S_OK {
-            return Err(sdk_error("WslcCanRun failed", hr, ""));
+            return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
         }
-        if can_run == 0 {
+        if missing.any_missing() {
             return Err(ScriptResponse::error(&format!(
                 "WSLC runtime not available. Missing components: {:?}. \
                  Ensure WSL2 and the WSLC SDK are installed.",
@@ -605,7 +604,7 @@ impl WSLContainerRunner {
             uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
             progress_callback: None,
             progress_callback_context: ptr::null_mut(),
-            auth_info: ptr::null(),
+            registry_auth: ptr::null(),
         };
         let mut pull_err = CoTaskMemPWSTR::null();
         let hr = (sdk.WslcPullSessionImage)(session, &pull_opts, pull_err.as_mut_ptr());
@@ -890,6 +889,21 @@ impl WSLContainerRunner {
             return ScriptResponse::error(&msg);
         }
 
+        // Denied-path overlap validation: WSLC's flat volume-mount surface has no
+        // overlay primitive, so a deniedPaths entry nested under a mounted
+        // (readwrite/readonly) parent cannot be masked and would stay accessible
+        // through the parent mount. Reject such configs rather than silently
+        // leaving the subtree exposed. Runs after object normalization so it sees
+        // the already-tightened intents.
+        if let Err(msg) = policy_mapping::validate_denied_path_overlap(
+            &request.policy.readwrite_paths,
+            &request.policy.readonly_paths,
+            &request.policy.denied_paths,
+        ) {
+            let _ = writeln!(logger, "[WSLC] {}", msg);
+            return ScriptResponse::error(&msg);
+        }
+
         // -- Init: COM + SDK + preflight --
         let sdk = match Self::init_and_load_sdk(logger) {
             Ok(r) => r,
@@ -982,12 +996,12 @@ impl WSLContainerRunner {
                 policy_mapping::windows_path_to_container_path(&request.working_directory)
             {
                 _cwd_cstr = format!("{}\0", container_cwd);
-                let hr = (sdk.WslcSetProcessSettingsCurrentDirectory)(
+                let hr = (sdk.WslcSetProcessSettingsWorkingDirectory)(
                     &mut process_settings,
                     _cwd_cstr.as_bytes().as_ptr() as PCSTR,
                 );
                 if hr != S_OK {
-                    return sdk_error("WslcSetProcessSettingsCurrentDirectory failed", hr, "");
+                    return sdk_error("WslcSetProcessSettingsWorkingDirectory failed", hr, "");
                 }
             }
         }
@@ -1009,12 +1023,11 @@ impl WSLContainerRunner {
         // Apply before networking mode so the SDK has the complete picture
         // when the container is created. Empty list = no forwarding (default).
         // The parser rejects `"udp"` up front: the C header declares
-        // `WSLC_PORT_PROTOCOL_UDP = 1` but the shipped runtime
-        // (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL` when UDP is
-        // actually requested. The protocol match below therefore only ever
-        // sees `"tcp"` today, but the explicit branch is retained so this
-        // code keeps compiling cleanly if/when the parser starts accepting
-        // UDP after an SDK update.
+        // `WSLC_PORT_PROTOCOL_UDP = 1` but the shipped runtime returns
+        // `E_NOTIMPL` when UDP is actually requested. The protocol match below
+        // therefore only ever sees `"tcp"` today, but the explicit branch is
+        // retained so this code keeps compiling cleanly if/when the parser
+        // starts accepting UDP after an SDK update.
         if !self.config.port_mappings.is_empty() {
             let mappings: Vec<WslcContainerPortMapping> = self
                 .config
@@ -1310,5 +1323,36 @@ mod tests {
     fn nonexistent_file_returns_error() {
         let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_rejects_denied_path_overlap_before_sdk_load() {
+        // Wiring guard: a deniedPaths entry nested under a mounted parent must be
+        // rejected at the pre-flight overlap check (run_internal, before SDK
+        // load), so no container is ever started. The pure-function unit tests
+        // in policy_mapping do not cover this call-site ordering. Uses
+        // non-existent paths so D6 (Absent) and delegation (unknown) pass through
+        // to the overlap check.
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                readwrite_paths: vec![r"C:\mxc-nonexistent-parent".to_string()],
+                denied_paths: vec![r"C:\mxc-nonexistent-parent\secrets".to_string()],
+                ..Default::default()
+            },
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&WslcConfig::default());
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert!(
+            response.error_message.contains("cannot be enforced"),
+            "expected the overlap error, got: {}",
+            response.error_message
+        );
     }
 }
