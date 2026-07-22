@@ -617,9 +617,12 @@ pub(crate) struct ParseAccumulator {
     /// Cached lowercase form of the trace's current directory with
     /// trailing `\\` trimmed (computed once at construction so the hot
     /// `is_skippable` path doesn't allocate two `String`s per event).
-    /// `None` when `current_directory` is `None` or is a bare drive
-    /// root.
+    /// `None` only when `current_directory` is `None`; a bare drive root
+    /// is still retained here for the exact-equality match.
     pub(crate) cwd_lc_trimmed: Option<String>,
+    /// Cached lowercase `"{cwd}\\"` prefix used for the under-CWD match.
+    /// `None` when `current_directory` is `None` or is a bare drive root
+    /// (a drive-root prefix would swallow every path on that volume).
     pub(crate) cwd_lc_prefix: Option<String>,
     pub(crate) verbose: bool,
     pub(crate) valid_access_events: Vec<LearningModeAccessEvent>,
