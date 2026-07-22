@@ -4,28 +4,32 @@
 # Two independent layers are reported per config:
 #
 #   [RULE]  --- authoritative; asserts the emitted enforcement rule ---
-#       Runs each config, dumps the container's iptables chain on the host,
-#       and asserts the NEW-inbound decision that actually enforces the field:
+#       Runs each config, dumps the container's iptables chain from INSIDE the
+#       container's network namespace (via `nsenter -t <init-pid> -n`), and
+#       asserts the NEW-inbound decision that actually enforces the field:
 #           allowLocalNetwork: true   =>  -m state --state NEW -j ACCEPT
 #           allowLocalNetwork: absent =>  -m state --state NEW -j DROP  (default)
 #       It also asserts loopback is an UNCONDITIONAL accept (`-i lo -j ACCEPT`)
-#       in both cases. The chain is hooked into the host FORWARD chain with
-#       `-o <veth>`, so it governs NEW connections *forwarded into* the
-#       container. See network_iptables.rs build_firewall_rules() and
-#       lxc_runner.rs:208-221.
+#       in both cases. The chain is hooked into the container's INPUT chain, so
+#       it governs NEW connections *destined to the container's sockets* — from
+#       the host or from a peer alike. See network_iptables.rs
+#       build_firewall_rules() and lxc_runner.rs (init-PID discovery ->
+#       set_netns_pid). The chain is NOT on the host, so a host-side
+#       `iptables -S MXC-<id>` shows nothing; the dump must enter the netns.
 #
 #   [BEHAVIOR]  --- end-to-end over a GOVERNED path ---
 #       Starts a `netcheck serve` listener INSIDE a server container (launched
 #       by MXC), then launches a SECOND (peer) container that runs
-#       `netcheck connect` against the server's IP. Container->container
-#       traffic is *forwarded* by the host and therefore traverses the server
-#       chain's `-o <server-veth>` hook, so the NEW-inbound rule applies:
+#       `netcheck connect` against the server's IP. Peer->server traffic is
+#       inbound to the server container and therefore traverses the server's
+#       INPUT chain, so the NEW-inbound rule applies:
 #           allowLocalNetwork: true   =>  reachable
 #           allowLocalNetwork: absent =>  blocked
-#       A host->container probe would NOT exercise the rule (host-originated
-#       packets take OUTPUT, not FORWARD), which is why the client is a peer
-#       container. If the peer container cannot be launched the layer reports
-#       INCONCLUSIVE (it never silently passes).
+#       Under the INPUT design a host->container-direct probe is now governed
+#       too (host-originated packets reach the container's INPUT); the peer
+#       container is kept as a representative external-inbound client. If the
+#       peer container cannot be launched the layer reports INCONCLUSIVE (it
+#       never silently passes).
 #
 # Requires root (container management + iptables), like run_lxc_all_tests.sh.
 set -uo pipefail
@@ -77,7 +81,7 @@ write_client_config() {
     local path="$1" sip="$2"
     cat > "$path" <<EOF
 {
-  "version": "0.4.0-alpha",
+  "version": "0.8.0-alpha",
   "containerId": "lxc-localnet-client",
   "containment": "lxc",
   "process": {
@@ -119,9 +123,30 @@ run_case() {
         sleep 0.5
     done
 
-    # [RULE] host-side chain dump — asserts the NEW-inbound enforcement verb.
-    local chain="MXC-${cid}" verb="(none)" dump
-    dump="$(iptables -S "$chain" 2>/dev/null)"
+    # [RULE] chain dump — asserts the NEW-inbound enforcement verb. The chain
+    # lives inside the CONTAINER's network namespace (hooked into its INPUT),
+    # so it is dumped via `nsenter` into the container's init PID, not on the
+    # host. A host-side `iptables -S` would show nothing.
+    #
+    # The runner exposes the container IP (wait_for_network) slightly BEFORE it
+    # discovers the init PID and applies the chain (init_pid -> nsenter), so a
+    # single dump the instant the IP appears can race ahead of rule
+    # application. Poll the netns until the chain shows a terminal NEW verb (or
+    # a bounded timeout), which makes the assertion deterministic.
+    local chain="MXC-${cid}" verb="(none)" dump="" pid="" j
+    for j in $(seq 1 20); do
+        pid="$(lxc-info -pH -n "$cid" 2>/dev/null | grep -oE '[0-9]+' | head -n1)"
+        if [ -n "$pid" ]; then
+            dump="$(nsenter -t "$pid" -n iptables -S "$chain" 2>/dev/null)"
+            if echo "$dump" | grep -q -- '-m state --state NEW -j'; then
+                break
+            fi
+        fi
+        sleep 0.5
+    done
+    if [ -z "$pid" ]; then
+        echo "[RULE] WARN  no init PID for $cid; cannot enter netns to dump $chain"
+    fi
     if echo "$dump" | grep -q -- '-m state --state NEW -j ACCEPT'; then verb="ACCEPT"; fi
     if echo "$dump" | grep -q -- '-m state --state NEW -j DROP'; then verb="DROP"; fi
 
@@ -147,8 +172,8 @@ run_case() {
         rule_fail=$((rule_fail + 1))
     fi
 
-    # [BEHAVIOR] connect from a PEER container so the traffic is forwarded and
-    # actually traverses the server chain's `-o <veth>` hook.
+    # [BEHAVIOR] connect from a PEER container so the traffic is inbound to the
+    # server container and actually traverses the server's INPUT-chain hook.
     if [ -n "$ip" ]; then
         local client_cfg="/tmp/lxc_client_${cid}.json"
         local client_log="/tmp/netcheck_client_${cid}.log"

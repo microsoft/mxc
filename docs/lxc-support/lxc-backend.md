@@ -8,7 +8,7 @@ On Linux, MXC uses LXC to create lightweight containers for script execution. Th
 
 - **Process isolation** via Linux namespaces (PID, mount, network, user)
 - **Filesystem isolation** via bind mounts with read-only/read-write/denied enforcement
-- **Network isolation** via iptables/nftables rules scoped to the container's virtual network interface
+- **Network isolation** via iptables rules applied inside the container's network namespace (INPUT chain)
 
 ## Prerequisites
 
@@ -109,20 +109,29 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 ## Network Policy
 
-Network policies are enforced via iptables/nftables rules applied to the container's virtual ethernet (veth) interface:
+Inbound network policy is enforced with `iptables` rules applied **inside the
+container's own network namespace** (via `nsenter -t <init-pid> -n`), hooked
+into the container's `INPUT` chain. This matches the GA networking spec, which
+enforces the LXC `ingress.hostLoopback` control via `INPUT`:
 
 | Policy | Implementation |
 |--------|---------------|
-| `defaultPolicy: "block"` | Default DROP rule on container veth |
-| `defaultPolicy: "allow"` | Default ACCEPT rule on container veth |
-| `allowedHosts` | ACCEPT rules for specific IPs/CIDRs |
-| `blockedHosts` | DROP rules for specific IPs/CIDRs |
-| `allowLocalNetwork: true` | ACCEPT new inbound connections to the container (enables listening servers) |
-| `allowLocalNetwork: false` | DROP new inbound connections to the container |
+| `allowLocalNetwork: true` | `-m state --state NEW -j ACCEPT` in the container `INPUT` chain — accepts new inbound connections to the container (enables listening servers) |
+| `allowLocalNetwork: false` (default) | `-m state --state NEW -j DROP` — new inbound connections are dropped |
 
-Rules are automatically cleaned up when the container exits (if `removeRulesOnExit` is `true`).
+The chain also unconditionally accepts intra-container loopback (`-i lo`) and
+`ESTABLISHED,RELATED` return traffic, and ends with a terminal `-j DROP`
+(ingress default-deny). The chain name is `MXC-<sanitized containerId>`. Rules
+are cleaned up when the container exits, and in any case vanish with the
+container's network namespace on destroy.
 
-**IPv4 only.** Firewall mode resolves `allowedHosts` / `blockedHosts` to IPv4 addresses only; AAAA (IPv6) records and IPv6 literals are silently dropped. A host that has only AAAA records is effectively unreachable from the sandbox under firewall mode.
+> **Egress is a separate control and is not enforced by this iptables path.**
+> The outbound-oriented `defaultPolicy`, `allowedHosts`, and `blockedHosts`
+> fields are accepted in the schema but the LXC backend does **not** currently
+> translate them into active iptables rules (the earlier host-`FORWARD`
+> destination rules were inert against the container's inbound hook and were
+> removed). Egress restriction for Linux backends is handled out of band (e.g.
+> the cooperative proxy), not by the container `INPUT` chain described here.
 
 ## Usage
 
