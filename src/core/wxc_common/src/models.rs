@@ -573,8 +573,14 @@ pub struct CaptureDenialsConfig {
     /// How each ungranted access check is handled while it is recorded.
     /// Defaults to [`CaptureDenialsMode::Block`].
     pub mode: CaptureDenialsMode,
-    /// Absolute path where the denial ETL trace is written. When `None`, the
-    /// runner falls back to a managed per-run temporary file.
+    /// Absolute path where the JSON denials output file is written — the
+    /// deliverable a consuming application reads. The runner inserts a per-run
+    /// identifier into the file stem (`denials.json` ->
+    /// `denials.<run-id>.json`) so concurrent and sequential captures don't
+    /// collide, and reports the actual path on stderr. When `None`, the runner
+    /// falls back to a managed per-run temporary file and prints its path on
+    /// stderr. (The intermediate ETL trace is an internal runner temp that is
+    /// decoded then deleted.)
     pub output_path: Option<String>,
 }
 

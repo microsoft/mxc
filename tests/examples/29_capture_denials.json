@@ -3,7 +3,7 @@
   "containerId": "CLI-CaptureDenials",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "python -c \"print('Capture-denials demo: ungranted access attempts are recorded to an ETL trace')\""
+    "commandLine": "python -c \"print('Capture-denials demo: ungranted access attempts are recorded to a JSON denials file')\""
   },
   "processContainer": {
     "capabilities": ["internetClient"],

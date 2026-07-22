@@ -654,6 +654,47 @@ mod tests {
         let (value, consumed) =
             format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
         assert_eq!(value, "S-1-15-3-1");
+        assert_eq!(consumed, bytes.len()); // 8 header + 2*4 sub-authorities
+    }
+
+    #[test]
+    fn format_property_value_sid_decodes_package_sid() {
+        // A package SID (S-1-15-2-...): authority 15, first sub-authority 2
+        // (package type), then 7 hash RIDs — 8 sub-authorities total.
+        let rids: [u32; 8] = [
+            2, 1596788311, 800953881, 392591971, 523554621, 937337662, 1483227527, 333310193,
+        ];
+        let mut bytes = vec![1u8, rids.len() as u8];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 15]); // authority 15
+        for rid in rids {
+            bytes.extend_from_slice(&rid.to_le_bytes());
+        }
+        let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
+        assert_eq!(
+            val,
+            "S-1-15-2-1596788311-800953881-392591971-523554621-937337662-1483227527-333310193"
+        );
+        assert_eq!(consumed, bytes.len()); // 8 header + 8*4 sub-authorities
+    }
+
+    #[test]
+    fn format_property_value_sid_decodes_well_known_local_system() {
+        // A 1-sub-authority well-known SID: S-1-5-18 (LocalSystem), the shape
+        // carried by the event-28 `UserSid` field.
+        let mut bytes = vec![1u8, 1];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0, 5]); // authority 5 (NT)
+        bytes.extend_from_slice(&18u32.to_le_bytes());
+        let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
+        assert_eq!(val, "S-1-5-18");
+        assert_eq!(consumed, bytes.len());
+    }
+
+    #[test]
+    fn format_property_value_sid_truncated_is_placeholder() {
+        // SubAuthorityCount claims 3 (needs 20 bytes) but only 8 present.
+        let bytes = [1u8, 3, 0, 0, 0, 0, 0, 15];
+        let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
+        assert_eq!(val, "<invalid SID>");
         assert_eq!(consumed, bytes.len());
     }
 }
