@@ -1,0 +1,55 @@
+name: PLM Integration Tests
+
+on:
+  workflow_call:
+
+jobs:
+  plm-integration-tests:
+    # x64-only: arm64 GitHub-hosted runners don't ship the same
+    # `wpr.exe` recording capability. GitHub-hosted Windows runners
+    # run as a local administrator (`runneradmin`), which
+    # `run_plm_test.ps1` requires for WPR.
+    name: PLM Integration Tests (windows / x64)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      # Consume the same wxc-exec + plm binaries the Build.Windows job
+      # produced so the integration harness runs against the actually
+      # shipped artifact, not a rebuild that could drift.
+      - name: Download Windows x64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: wxc-binaries-x86_64-pc-windows-msvc
+          path: bin
+
+      # `-Fs` restricts the run to filesystem fixtures. UI and
+      # capability fixtures require an interactive desktop session
+      # (clipboard, window manager, screen capture, WinRT pickers)
+      # and have no useful behavior on headless GitHub runners.
+      # `-KeepLogs` preserves each failed fixture's trace.etl +
+      # Adjusted_*.json + harness stdout/stderr for the failure-only
+      # upload-artifact step below.
+      - name: Run PLM integration tests (filesystem fixtures)
+        shell: pwsh
+        run: |
+          & "${{ github.workspace }}/tests/scripts/run_plm_test.ps1" `
+            -Release `
+            -Fs `
+            -BinDir "${{ github.workspace }}/bin" `
+            -ConfigDir "${{ github.workspace }}/tests/configs/plm_configs" `
+            -KeepLogs
+
+      # Surface PLM trace evidence to triagers when the job goes red.
+      # The script's per-fixture logs/ dirs are nested under each
+      # plm_configs/<config>/ entry.
+      - name: Upload PLM logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plm-integration-failure-logs
+          path: |
+            ${{ github.workspace }}/bin/logs/**
+            ${{ github.workspace }}/tests/configs/plm_configs/**/logs/**
+          if-no-files-found: warn
+          retention-days: 7
