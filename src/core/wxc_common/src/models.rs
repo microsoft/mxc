@@ -711,17 +711,19 @@ pub struct ExecutionRequest {
 }
 
 impl ExecutionRequest {
-    /// Resolve a working directory the sandboxed child is guaranteed to be able
-    /// to open, for backends that must **not** inherit the host process's
-    /// current directory.
+    /// Resolve a working directory for the sandboxed child, preferring a
+    /// policy-granted path over inheriting the host process's current directory,
+    /// for backends that must **not** inherit that cwd.
     ///
     /// An explicit `working_directory` always wins. Otherwise — rather than
     /// leaving it empty and letting the OS inherit the host process's cwd, which
     /// under a deny-by-default sandbox may be inaccessible to the sandboxed
-    /// token — we pick a directory the policy is guaranteed to grant: the first
-    /// `readwrite` path, else the first `readonly` path. Returns `None` only
-    /// when neither an explicit directory nor any policy path is set, leaving
-    /// the caller on the backend's own default.
+    /// token — we prefer a directory the policy grants: the first `readwrite`
+    /// path, else the first `readonly` path. This only picks the path; it does
+    /// not verify the path exists or is a directory (the config parser merely
+    /// warns on missing paths), so the launch can still fail if it doesn't.
+    /// Returns `None` when neither an explicit directory nor any policy path is
+    /// set, leaving the caller on the backend's own default.
     ///
     /// This matters most on Windows: passing a `NULL` current directory to
     /// `CreateProcessW` makes the child inherit the parent's cwd, and when the

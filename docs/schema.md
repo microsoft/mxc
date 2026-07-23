@@ -34,7 +34,7 @@ production configs and the dev schema when working on experimental features:
 
     "process": {
         "commandLine": "python app.py",    // Required: command to execute
-        "cwd": "C:\\workspace",            // Working directory (omit → first readwrite, else readonly path)
+        "cwd": "C:\\workspace",            // Working directory (optional; sandboxed backends may default it to a granted path)
         "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
