@@ -39,9 +39,11 @@ it answers "what would this workload touch if nothing were blocked?" but it does
 so by **not enforcing deny-by-default** for the duration of the run.
 
 Because it relaxes containment, `permissiveLearningMode` is **security-sensitive**:
-whenever it is present, both the AppContainer and BaseContainer runners emit a
-**security warning** to the log. It is a plain capability string — add it to the
-policy's `capabilities` array and it takes effect in every build.
+whenever it is present, both the AppContainer and BaseContainer runners emit an
+always-visible **security warning** on the host's stderr. In-process Rust callers
+can also inspect it through `Sandbox::warnings()` or `Output::warnings`. It is a
+plain capability string — add it to the policy's `capabilities` array and it
+takes effect in every build.
 
 Matching is case-insensitive because Windows derives the capability SID
 case-insensitively — a mis-cased spelling still takes effect.
@@ -53,21 +55,25 @@ policy's `capabilities` array:
 
 ```jsonc
 {
-  "capabilities": ["learningModeLogging"]
+  "processContainer": {
+    "capabilities": ["learningModeLogging"]
+  }
 }
 ```
 
 ```jsonc
 {
-  "capabilities": ["permissiveLearningMode"]
+  "processContainer": {
+    "capabilities": ["permissiveLearningMode"]
+  }
 }
 ```
 
 Capability strings are resolved to AppContainer capability SIDs and attached to
 the child process's `SECURITY_CAPABILITIES` exactly like any other capability.
-When either learning-mode capability is in effect the runner logs a diagnostic
-line describing the mode (informational for `learningModeLogging`, a security
-warning for `permissiveLearningMode`).
+When either learning-mode capability is in effect the runner emits a diagnostic
+describing the mode (informational logging for `learningModeLogging`, an
+always-visible stderr security warning for `permissiveLearningMode`).
 
 ## Three learning-mode flows
 

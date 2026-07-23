@@ -192,7 +192,8 @@ pub struct ProcessContainer {
     /// AppContainer learning mode (deny-and-record): failed access checks are
     /// logged for diagnostics while the accesses stay denied; containment is
     /// unchanged. Distinct from the allow-all `permissiveLearningMode`
-    /// capability, which is only enabled via the `--audit` CLI flag.
+    /// capability, which may be supplied explicitly in `capabilities` or
+    /// injected by the `--audit` CLI flag.
     pub learning_mode: Option<bool>,
     /// AppContainer capabilities (e.g. `internetClient`, `registryRead`).
     pub capabilities: Option<Vec<String>>,

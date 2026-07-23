@@ -612,11 +612,10 @@ impl BaseContainerRunner {
         // --- Learning-mode capabilities (parity with AppContainerScriptRunner) ---
         // Emit per-capability diagnostics (informational for `learningModeLogging`,
         // a security warning for `permissiveLearningMode`).
-        for line in crate::appcontainer_runner::learning_mode_capability_diagnostics(
+        crate::appcontainer_runner::log_learning_mode_capability_diagnostics(
             &request.policy.capabilities,
-        ) {
-            let _ = writeln!(logger, "{line}");
-        }
+            logger,
+        );
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();

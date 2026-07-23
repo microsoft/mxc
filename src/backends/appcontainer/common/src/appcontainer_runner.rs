@@ -401,6 +401,13 @@ pub(crate) const CAP_LEARNING_MODE_LOGGING: &str = "learningModeLogging";
 /// security warning whenever it is present.
 pub(crate) const CAP_PERMISSIVE_LEARNING_MODE: &str = "permissiveLearningMode";
 
+const LEARNING_MODE_INFORMATION: &str =
+    "learningModeLogging is ENABLED: failed access attempts are logged; accesses are still denied \
+     (deny-and-record).";
+const PERMISSIVE_LEARNING_MODE_WARNING: &str =
+    "*** SECURITY WARNING *** permissiveLearningMode is ENABLED: every access check is logged AND \
+     ALLOWED (audit mode); the container is not enforcing deny-by-default.";
+
 /// A recognized Windows learning-mode capability.
 ///
 /// The two learning-mode capabilities are semantically **distinct** and must
@@ -439,25 +446,38 @@ impl LearningModeCapability {
 /// `learningModeLogging` (deny-and-record) is safe and emits an informational
 /// note. `permissiveLearningMode` logs *and allows* every access check (audit
 /// mode); it relaxes deny-by-default, so it emits a security warning.
+#[cfg(test)]
 pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> Vec<String> {
     let mut diagnostics = Vec::new();
     for cap in capabilities {
         match LearningModeCapability::from_capability_name(cap) {
-            Some(LearningModeCapability::Permissive) => diagnostics.push(
-                "*** SECURITY WARNING *** permissiveLearningMode is ENABLED: every access \
-                 check is logged AND ALLOWED (audit mode); the container is not enforcing \
-                 deny-by-default."
-                    .to_string(),
-            ),
-            Some(LearningModeCapability::Learning) => diagnostics.push(
-                "learningModeLogging is ENABLED: failed access attempts are logged; accesses are \
-                 still denied (deny-and-record)."
-                    .to_string(),
-            ),
+            Some(LearningModeCapability::Permissive) => {
+                diagnostics.push(PERMISSIVE_LEARNING_MODE_WARNING.to_string())
+            }
+            Some(LearningModeCapability::Learning) => {
+                diagnostics.push(LEARNING_MODE_INFORMATION.to_string())
+            }
             None => {}
         }
     }
     diagnostics
+}
+
+pub(crate) fn log_learning_mode_capability_diagnostics(
+    capabilities: &[String],
+    logger: &mut Logger,
+) {
+    for cap in capabilities {
+        match LearningModeCapability::from_capability_name(cap) {
+            Some(LearningModeCapability::Permissive) => {
+                logger.warning_line(PERMISSIVE_LEARNING_MODE_WARNING);
+            }
+            Some(LearningModeCapability::Learning) => {
+                logger.log_line(LEARNING_MODE_INFORMATION);
+            }
+            None => {}
+        }
+    }
 }
 
 /// Script runner that executes commands inside a Windows AppContainer.
@@ -581,9 +601,7 @@ impl AppContainerScriptRunner {
         // whichever are present (informational for `learningModeLogging`, a
         // security warning for `permissiveLearningMode`). See
         // [`learning_mode_capability_diagnostics`].
-        for line in learning_mode_capability_diagnostics(&request.policy.capabilities) {
-            logger.log_line(&line);
-        }
+        log_learning_mode_capability_diagnostics(&request.policy.capabilities, logger);
 
         // --- Build capability list ---
         let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
@@ -1576,6 +1594,18 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("SECURITY WARNING"));
         assert!(out[0].contains("ALLOWED"));
+    }
+
+    #[test]
+    fn permissive_learning_mode_uses_security_warning_channel() {
+        let caps = vec!["permissiveLearningMode".to_string()];
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+
+        super::log_learning_mode_capability_diagnostics(&caps, &mut logger);
+
+        assert_eq!(logger.warnings().len(), 1);
+        assert!(logger.warnings()[0].contains("SECURITY WARNING"));
+        assert!(logger.get_buffer().is_empty());
     }
 
     #[test]

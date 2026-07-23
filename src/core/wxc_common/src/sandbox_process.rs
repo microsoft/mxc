@@ -67,6 +67,12 @@ use crate::script_runner::ScriptRunner;
 ///   before touching the other can hang on output-heavy children. Taking only
 ///   one stream (leaving the other for `wait()` to drain) is always safe.
 pub trait SandboxProcess: Send {
+    /// Security warnings associated with this sandbox, such as a policy that
+    /// intentionally relaxes containment. The default is empty.
+    fn warnings(&self) -> &[String] {
+        &[]
+    }
+
     /// Take ownership of the child's stdin so the caller can write to it.
     /// Returns `None` if already taken. Drop the writer to send EOF.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
