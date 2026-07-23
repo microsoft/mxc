@@ -356,8 +356,8 @@ impl WSLContainerRunner {
         }
         if missing.any_missing() {
             return Err(ScriptResponse::error(&format!(
-                "WSLC runtime not available. Missing components: {:?}. \
-                 Ensure WSL2 and the WSLC SDK are installed.",
+                "WSLC runtime unavailable. Missing components: {:?}. Install WSL 2.8.1 or \
+                 newer and run `wsl --update`.",
                 missing
             )));
         }

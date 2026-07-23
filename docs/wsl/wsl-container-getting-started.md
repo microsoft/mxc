@@ -239,7 +239,7 @@ the container.
 |---|---|---|
 | `WSLC backend not compiled` | Binary built without `--features wslc` | Rebuild with `build.bat --with-wslc` |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
-| `WSLC runtime not available` | WSL version too old or missing components | Update WSL with `wsl --update` or build from the [WSL repo](https://github.com/microsoft/WSL/tree/feature/wsl-for-apps) |
+| `WSLC runtime not available` | WSL is too old or missing components | Update WSL with `wsl --update` and verify the version with `wsl --version` |
 | `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
 | `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
 | `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |
