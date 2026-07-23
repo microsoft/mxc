@@ -14,6 +14,7 @@ import {
   debugSpawnOptions,
   spawnFromConfigAsync,
   startUnixTestProxy,
+  isTestProxyAvailable,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
 
@@ -87,9 +88,14 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 // "Linux + bwrap available" rather than "Linux + root". Pinned to schema
 // 0.6.0-alpha because Bubblewrap proxy support is only available in 0.6+.
 const PROXY_SCHEMA = '0.6.0-alpha';
+// The dev/test-only `unix-test-proxy` is intentionally excluded from the
+// shipped per-platform package; it is sourced out-of-band for these E2E tests.
+// See https://github.com/microsoft/mxc/issues/512 for the rationale.
 describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
   skip: !isLinuxBubblewrap
     ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
+    : !isTestProxyAvailable('unix-test-proxy')
+    ? 'unix-test-proxy unavailable (excluded from shipped package per #512; set MXC_TEST_PROXY_DIR or build the Rust binaries locally)'
     : undefined,
 }, () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-'));

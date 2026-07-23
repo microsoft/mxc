@@ -8,6 +8,25 @@
 npm install @microsoft/mxc-sdk
 ```
 
+> **Native binaries are delivered per-platform.** `@microsoft/mxc-sdk` itself
+> ships no executor binaries. It declares **five** per-platform packages
+> (`@microsoft/mxc-sdk-<os>-<arch>` for `win32`/`linux` × `x64`/`arm64`, plus
+> `darwin-arm64`; Intel macOS / `darwin-x64` is not shipped) as exact-pinned
+> `optionalDependencies`; npm's `os`/`cpu` filtering downloads only the one
+> matching your host, so an install pulls just that host's payload. In an
+> installed (production) tree the SDK resolves the executor strictly from
+> `MXC_BIN_DIR` or the identity/version-validated installed platform package at
+> runtime — planted binaries in legacy `bin/<arch>` or `src/target` paths are
+> never executed. In a monorepo source checkout (dev), the resolution order is
+> `MXC_BIN_DIR` → `sdk/platform-packages/<os>-<arch>` →
+> `src/target/<triple>/{release,debug}` → the installed package, so a fresh
+> local Rust build wins over a downloaded tarball.
+>
+> **Cross-platform / cross-arch installs:** a plain `npm install` only fetches
+> *your* host's platform package. To install for a different (supported) target
+> (e.g. when bundling a Windows build on a Linux CI agent), use npm 10+'s `--os`
+> / `--cpu` overrides, e.g. `npm install --os=win32 --cpu=x64 @microsoft/mxc-sdk`.
+
 ```typescript
 import {
   spawnSandboxFromConfig, createConfigFromPolicy,
@@ -335,7 +354,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | Error | Cause | Fix |
 | --- | --- | --- |
 | `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux: neither LXC nor Bubblewrap on PATH. On macOS: schema version < `0.6.0-alpha`. | Install LXC/Bubblewrap, or switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
-| `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
+| `wxc-exec.exe not found` / `lxc-exec not found` / `mxc-exec-mac not found` | The SDK couldn't locate the native binary. Its message names the optional platform package (`@microsoft/mxc-sdk-<os>-<arch>`) that should have provided it — optional-dependency install failures are silent, so it may have been skipped. | Reinstall with the platform package present (e.g. `npm install @microsoft/mxc-sdk-<os>-<arch>`), or set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/<binary>` exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |

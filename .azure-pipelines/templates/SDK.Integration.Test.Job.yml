@@ -5,6 +5,9 @@ parameters:
 - name: sdkArtifact
   type: string
   default: mxc-npm-sdk-package
+- name: platformArtifact
+  type: string
+  default: mxc-npm-sdk-platform-packages
 - name: debug
   type: boolean
   default: false
@@ -44,6 +47,7 @@ jobs:
     variables:
       integrationDirectory: $(Build.SourcesDirectory)/sdk/node/tests/integration
       sdkPkgDirectory: $(Build.SourcesDirectory)/sdk-pkg
+      platformPkgDirectory: $(Build.SourcesDirectory)/sdk-platform-pkg
       # Cache npm package downloads across runs (see Package.NpmSdk.Job.yml).
       npm_config_cache: $(Pipeline.Workspace)/.npm
 
@@ -69,6 +73,12 @@ jobs:
           artifact: ${{ parameters.sdkArtifact }}
           path: $(sdkPkgDirectory)
 
+      - task: DownloadPipelineArtifact@2
+        displayName: Download platform binary packages
+        inputs:
+          artifact: ${{ parameters.platformArtifact }}
+          path: $(platformPkgDirectory)
+
       - task: CopyFiles@2
         displayName: Copy .npmrc to integration tests
         inputs:
@@ -86,9 +96,26 @@ jobs:
           workingFile: '$(integrationDirectory)/.npmrc'
 
       - pwsh: |
-          $sdkTgz = (Get-Item "$(sdkPkgDirectory)/*.tgz").FullName
+          $sdkTgz = Get-ChildItem "$(sdkPkgDirectory)" -Filter *.tgz | Select-Object -First 1
+          if (-not $sdkTgz) {
+            Write-Error "Meta SDK tarball (*.tgz) not found in $(sdkPkgDirectory)"
+            exit 1
+          }
+          $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
+          $os = if ($IsWindows) { 'win32' } elseif ($IsMacOS) { 'darwin' } else { 'linux' }
+          # The meta package's optionalDependencies point at the registry, where
+          # these per-platform packages may not yet be published. Install the
+          # host's matching platform tarball explicitly so the binary resolves.
+          $platName = "microsoft-mxc-sdk-$os-$arch"
+          $platTgz = Get-ChildItem "$(platformPkgDirectory)" -Filter "$platName-*.tgz" | Select-Object -First 1
+          if (-not $platTgz) {
+            Write-Error "Platform package tarball '$platName-*.tgz' not found in $(platformPkgDirectory) — no published package for $os-$arch on this agent."
+            exit 1
+          }
+          Write-Host "Meta package:     $($sdkTgz.FullName)"
+          Write-Host "Platform package: $($platTgz.FullName)"
           npm ci
-          npm install $sdkTgz
+          npm install $sdkTgz.FullName $platTgz.FullName
         workingDirectory: $(integrationDirectory)
         displayName: Install dependencies and SDK from artifact
 
@@ -102,9 +129,36 @@ jobs:
             sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap
           displayName: Install LXC and Bubblewrap
 
-        - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
+        # Pipeline artifact downloads (npm pack/unpack) drop Unix execute bits;
+        # restore +x on the Linux executor so `sudo npm test` can launch it.
+        - script: |
+            set -euo pipefail
+            BIN=$(find node_modules/@microsoft -name lxc-exec -print -quit)
+            if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "lxc-exec not found in installed packages" && exit 1; fi
           workingDirectory: $(integrationDirectory)
-          displayName: npm test (sudo, with LXC)
+          displayName: Restore execute permission on lxc-exec
+
+        # The platform package ships the executor but NOT the dev/test-only
+        # proxies (#512). Source linux-test-proxy from the raw build artifact and
+        # REQUIRE the proxy E2E tests to run (no silent green-skip).
+        - task: DownloadPipelineArtifact@2
+          displayName: Download linux-test-proxy
+          inputs:
+            artifact: lxc-binaries-x86_64-unknown-linux-gnu
+            path: $(Build.SourcesDirectory)/test-proxy-bin
+
+        - script: |
+            set -euo pipefail
+            find "$(Build.SourcesDirectory)/test-proxy-bin" -name linux-test-proxy -exec chmod +x {} +
+          displayName: Restore execute permission on linux-test-proxy
+
+        - script: >
+            sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }}
+            MXC_TEST_PROXY_DIR=$(Build.SourcesDirectory)/test-proxy-bin
+            MXC_REQUIRE_PROXY_TESTS=1
+            npm test
+          workingDirectory: $(integrationDirectory)
+          displayName: npm test (sudo, with LXC + proxy)
 
       - ${{ if eq(target.os, 'windows') }}:
         - script: npm test
@@ -113,14 +167,20 @@ jobs:
           env:
             MXC_DEBUG: ${{ parameters.debug }}
             MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+            # Proxy-E2E enforcement is default-ON for every lane (round-3 P0-2).
+            # Windows has no runnable sandbox on the hosted runner, so the proxy
+            # describe skips via sandboxSkipReason before the availability check —
+            # this flag never trips here, but is set so the policy is uniform and
+            # a future runnable lane can't silently drop it.
+            MXC_REQUIRE_PROXY_TESTS: '1'
 
       - ${{ if eq(target.os, 'macos') }}:
         # Restore execute bit on the mac binary; pipeline artifact
         # downloads (via npm pack/unpack) drop Unix execute permissions.
         - script: |
             set -euo pipefail
-            BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
-            if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found in installed package" && exit 1; fi
+            BIN=$(find node_modules/@microsoft -name mxc-exec-mac -print -quit)
+            if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found in installed packages" && exit 1; fi
           workingDirectory: $(integrationDirectory)
           displayName: Restore execute permission on mxc-exec-mac
 
@@ -130,3 +190,4 @@ jobs:
           env:
             MXC_DEBUG: ${{ parameters.debug }}
             MXC_SKIP_OS_BUILD_DEPENDENT_TESTS: '1'
+            MXC_REQUIRE_PROXY_TESTS: '1'

@@ -197,6 +197,41 @@ jobs:
           contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
 
+      # Stage the FULL shipped payload from the platform package's `files`
+      # allowlist (the single source of truth) — most importantly the win32-x64
+      # micro-VM payload (nanvixd.exe, nanvix_rootfs.img, python3.initrd,
+      # bin/kernel.elf, snapshots/*) that `signPattern` does NOT cover —
+      # preserving the bin/ + snapshots/ substructure, and HARD-FAIL if any
+      # allowlisted artifact is missing. `npm pack` silently omits absent
+      # `files[]` entries, so without this the official build would publish a
+      # binary-deficient package that the name-only checks never catch. Reads the
+      # manifest with ConvertFrom-Json (no Node needed on the Rust build agent),
+      # mirroring the manifest-driven staging in Build.Windows.Job.yml.
+      - task: PowerShell@2
+        displayName: Stage shipped payload (manifest-driven)
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'))
+        inputs:
+          targetType: inline
+          script: |
+            $tuple = if ('$(targetTriple)' -eq 'x86_64-pc-windows-msvc') { 'win32-x64' } else { 'win32-arm64' }
+            $manifest = "$(Build.SourcesDirectory)/sdk/platform-packages/$tuple/package.json"
+            $src = "$(targetTripleDir)"
+            $dest = "$(outputDirectory)/$(targetTriple)"
+            $files = (Get-Content -Raw $manifest | ConvertFrom-Json).files | Where-Object { $_ -ne 'README.md' }
+            $missing = @()
+            foreach ($f in $files) {
+              $from = Join-Path $src $f
+              if (-not (Test-Path $from)) { $missing += $f; continue }
+              $to = Join-Path $dest $f
+              New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
+              Copy-Item $from $to -Force
+            }
+            if ($missing.Count -gt 0) {
+              Write-Error "Missing shipped payload file(s) for ${tuple}: $($missing -join ', ')"
+              exit 1
+            }
+            Write-Host "Staged $($files.Count) payload file(s) for $tuple."
+
       # Copy symbol files into a sibling `symbols/` subdir, NOT alongside the
       # binaries. Workaround for BinSkim BA2007: when the pdb is co-located,
       # BinSkim reads its S_COMPILE3 records and flags `-wd4146` in the
