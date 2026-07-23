@@ -4,7 +4,7 @@
 //! `learning_mode_windows` — runtime FFI adapter for the Windows AppInfo-brokered
 //! **Learning Mode trace API** exported by `processmodel.dll`.
 //!
-//! Windows (GE_CURRENT and later) exposes a privileged, per-client learning-mode
+//! Supported Windows builds expose a privileged, per-client learning-mode
 //! ETW trace behind two flat C exports in `processmodel.dll` — the same system DLL
 //! the BaseContainer backend already loads for `Experimental_CreateProcessInSandbox`:
 //!

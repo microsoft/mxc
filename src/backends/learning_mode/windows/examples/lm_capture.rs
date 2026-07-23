@@ -15,7 +15,7 @@
 //! 5. [`CaptureSession::finish`] — seal the ETL to a temp path + close the environment,
 //! 6. assert the ETL file was produced (non-empty).
 //!
-//! Run on a feature-enabled OS build (elevated), e.g. a GE_CURRENT DirectWinPD image:
+//! Run on a feature-enabled Windows build (elevated):
 //!
 //! ```text
 //! cargo run -p learning_mode_windows --example lm_capture

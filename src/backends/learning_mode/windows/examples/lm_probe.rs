@@ -8,8 +8,8 @@
 //! security-environment exports (`CreateProcessSecurityEnvironment` /
 //! `CreateProcessAsUserInsideSecurityEnvironment` / `CloseProcessSecurityEnvironment`),
 //! reporting the exact resolved name for each (plain vs `Experimental_`). Intended to
-//! be run on a feature-enabled OS build (e.g. a GE_CURRENT DirectWinPD image) to
-//! confirm the runtime FFI resolves against the real API.
+//! be run on a feature-enabled Windows build to confirm the runtime FFI resolves
+//! against the real API.
 //!
 //! ```text
 //! cargo run -p learning_mode_windows --example lm_probe
