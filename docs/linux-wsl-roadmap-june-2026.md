@@ -43,7 +43,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 1 | **(D1) Default-deny** | ✅ Addressed | Unlisted host paths are inaccessible inside the LXC container (rootfs isolation). No gap. | — |
 | 2 | **(D8) Subtree-implicit** | ✅ Addressed | A directory bind-mount exposes the full subtree. No gap. | — |
 | 3 | **(D7) Implicit traversal** | ✅ Addressed | Container rootfs has a full directory tree; ancestors of a mounted path are always resolvable. No gap. | — |
-| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | No path-specificity engine. Mount ordering determines behavior, not longest-prefix match. Shared path-tree resolver needed in `wxc_common`. | M |
+| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | No path-specificity engine — mount ordering determines behavior, not longest-prefix match. The shared path-tree resolver now exists in `wxc_common` (`filesystem_resolve.rs`, [PR #608](https://github.com/microsoft/mxc/pull/608)); LXC needs to consume it. | M |
 
 > **Example (D4).** Policy: `RW /workspace`, `RO /workspace/.git`, `D /workspace/.env`. The spec says writes to `.git/config` are denied (inner RO wins) and reads of `.env` are denied (inner D wins). Today LXC applies three independent `lxc.mount.entry` lines — the result depends on which mount comes last, not specificity.
 
@@ -55,7 +55,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 6 | **(D3) Delegation check** | 🟡 Actionable | Policy grants should be bounded by the invoking user's access. Add `access_check()` in `wxc_common` that verifies the user can read/write each listed path before accepting the config. | M |
+| 6 | **(D3) Delegation check** | ✅ Addressed | Policy grants are bounded by the invoking user's access: shared `check_delegation()` in `wxc_common` (`filesystem_access.rs`) verifies the user can read/write each listed path before accepting the config, wired into all three runners. Done in [PR #598](https://github.com/microsoft/mxc/pull/598). | M |
 
 > **Example (D3).** User "alice" has no read access to `/root/secrets`. Policy: `{ readonlyPaths: ["/root/secrets"] }`. Today: accepted silently. If the container runs as root, the mount succeeds and the agent reads the secrets. Spec: validator rejects at load time.
 
@@ -135,15 +135,15 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 |---|---|---|---|---|
 | 1 | **(D1) Default-deny** | ✅ Addressed | No `--bind` = no access. Bwrap namespace isolation enforces default-deny. | — |
 | 2 | **(D8) Subtree-implicit** | ✅ Addressed | `--bind` mounts the full subtree. No gap. | — |
-| 3 | **(D7) Implicit traversal** | 🟡 Actionable | If policy lists `RW /home/user/project/src` but `/home/user/project` isn't bound, the path doesn't exist inside the namespace. User must manually list ancestor dirs today. | S |
+| 3 | **(D7) Implicit traversal** | ✅ Addressed | `bwrap` auto-creates the parent directories of every `--bind` / `--ro-bind` destination as empty dirs, so a listed path (e.g. `RW /home/user/project/src`) is reachable inside the namespace even when its ancestors aren't separately bound — and no host content is exposed. The base is already deny-by-default (a curated allowlist in `BASELINE_RO_BIND_PATHS`, **not** `--ro-bind /`), and this still holds. No gap. | — |
 
-> **Example (D7).** Policy: `readwritePaths: ["/home/user/project/src"]`. Today `bwrap` fails because `/home/user/project` doesn't exist. Fix: auto-add `--dir` entries for ancestor paths (empty dirs, not host content — avoids the security risk of exposing `/home`).
+> **Note (D7).** Earlier drafts assumed the base was `--ro-bind / /` (ancestors present via the host root) and that a future default-deny base would break traversal. Both are stale: the base is now a curated deny-by-default allowlist (guarded by the `baseline_does_not_bind_mount_host_root` regression test), and `bwrap` creates each bind destination's parent dirs automatically — so `readwritePaths: ["/home/user/project/src"]` mounts correctly today without listing ancestors or exposing `/home`.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | Bwrap processes `--bind`, `--ro-bind`, `--tmpfs` left-to-right. Last matching arg wins, not longest-prefix. Shared path-tree resolver needed in `wxc_common`. | M |
+| 4 | **(D4) Most-specific-path-wins** | ✅ Addressed | Longest-prefix (most-specific-path-wins) resolution via the shared `filesystem_resolve.rs` path-tree resolver in `wxc_common`, consumed by `bwrap_command.rs` instead of relying on left-to-right arg order. Done in [PR #608](https://github.com/microsoft/mxc/pull/608). | M |
 | 5 | **(D6) Object-based — validation** | ✅ Addressed | Same as LXC — object-identity comparison (`FileIdInfo` on the Windows-hosted path side, `(st_dev, st_ino)` on Linux) with most-restrictive-wins tightening of aliases (deny > ro > rw), not rejection. Fail closed on an unresolvable path when `deniedPaths` present. In `wxc_common`. Done in [PR #593](https://github.com/microsoft/mxc/pull/593). | S |
-| 6 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC — shared `access_check()` in `wxc_common`. | M |
+| 6 | **(D3) Delegation check** | ✅ Addressed | Same as LXC — shared `check_delegation()` in `wxc_common`. Done in [PR #598](https://github.com/microsoft/mxc/pull/598). | M |
 | 7 | **Same-path conflict detection** | ✅ Addressed | Same as LXC — shared most-restrictive-wins normalization in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
 | 8 | **Paths must exist at policy-load time** | ✅ Addressed | Non-existent `--bind` paths fail at runtime with unclear errors. Shared `path_exists()` in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
 | 9 | **Denied-path file masking** | 🟡 Actionable | `--tmpfs` always treats the path as a directory. A denied *file* gets a tmpfs directory mounted over it (wrong type). Fix: use `--ro-bind /dev/null <path>` for files. | S |
@@ -223,20 +223,20 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 1 | **(D1) Default-deny** | ✅ Addressed | Unmounted host paths are invisible inside the WSL container. No gap. | — |
 | 2 | **(D8) Subtree-implicit** | ✅ Addressed | Volume mounts expose the full subtree. No gap. | — |
 | 3 | **(D7) Implicit traversal** | ✅ Addressed | WSL distro has a full directory tree; `/mnt/<drive>/` ancestors exist naturally. | — |
-| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | Flat volume-mount list with no nesting awareness. Shared path-tree resolver needed in `wxc_common`. | M |
+| 4 | **(D4) Most-specific-path-wins** | 🟡 Actionable | Flat volume-mount list with no nesting awareness. The shared path-tree resolver now exists in `wxc_common` (`filesystem_resolve.rs`, [PR #608](https://github.com/microsoft/mxc/pull/608)); WSLC needs to consume it. | M |
 
 > **Example (D4).** Policy: `RW C:\project`, `RO C:\project\.git`. WSLC generates two independent volume mounts. Whether the RO mount of `.git` actually restricts writes through the parent RW mount is undefined by the WSLC SDK — likely the parent RW mount wins and `.git` remains writable.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 5 | **`deniedPaths` overlap validation** | 🟡 Actionable | At parse time, reject configs where a `deniedPaths` entry is a child of a mounted path (since the WSLC SDK cannot enforce the deny). Accept non-overlapping denied paths as implicitly enforced (unmounted = invisible). This is a workaround; *masking* a denied subtree under a mounted parent needs an SDK exclusion primitive (see [WSLC SDK dep #4](#wslc-sdk-dependencies)). | S |
+| 5 | **`deniedPaths` overlap validation** | 🟡 Actionable | Today a `deniedPaths` entry that is a child of a mounted (`readwritePaths`/`readonlyPaths`) path is silently ignored, leaving it accessible through the parent mount. Planned: reject such configs at parse time (since the WSLC SDK cannot enforce the deny). Non-overlapping denied paths are already implicitly enforced (unmounted = invisible). This is a workaround; *masking* a denied subtree under a mounted parent needs an SDK exclusion primitive (see [WSLC SDK dep #4](#wslc-sdk-dependencies)). | S |
 
 > **Example (item 5).** Policy: `readwritePaths: ["C:\\project"]`, `deniedPaths: ["C:\\project\\secrets"]`. Today: `deniedPaths` silently ignored; `secrets` is fully accessible through the parent mount. Fix: reject at config time with "denied path is a child of a mounted path; WSLC cannot enforce this."
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 6 | **(D6) Object-based — validation** | ✅ Addressed | Same as LXC/Bwrap — object-identity comparison with most-restrictive-wins tightening of aliases (deny > ro > rw), not rejection; fail closed on an unresolvable path when `deniedPaths` present. In `wxc_common`. Done in [PR #593](https://github.com/microsoft/mxc/pull/593). | S |
-| 7 | **(D3) Delegation check** | 🟡 Actionable | Same as LXC/Bwrap — shared `access_check()` in `wxc_common`. | M |
+| 7 | **(D3) Delegation check** | ✅ Addressed | Same as LXC/Bwrap — shared `check_delegation()` in `wxc_common`. Done in [PR #598](https://github.com/microsoft/mxc/pull/598). | M |
 | 8 | **Same-path conflict detection** | ✅ Addressed | Same as LXC/Bwrap — shared most-restrictive-wins normalization in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
 | 9 | **Paths must exist at policy-load time** | ✅ Addressed | Same as LXC/Bwrap — shared `path_exists()` in `wxc_common`. Done in [PR #551](https://github.com/microsoft/mxc/pull/551). | S |
 | 10 | **Explicit `{ windowsPath, containerPath }` mount control** | 🟡 Actionable | Host paths always mounted at `/mnt/<drive>/`; let users specify the in-container mount point. `policy_mapping.rs:23-60`. | M |
@@ -305,7 +305,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > }
 > ```
 >
-> This forwards host `127.0.0.1:3000` → container `:3000`. TCP only — UDP is rejected at parse time because the shipped runtime returns `E_NOTIMPL`.
+> This forwards host `127.0.0.1:3000` → container `:3000`. TCP only — UDP is rejected at parse time because the shipped runtime (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL`.
 >
 > **⚠️ Needs to change — policy-driven posture.** The `ingress.hostLoopback` / `allowLocalNetwork` policy field is parsed (`config_parser.rs:88-89,1095-1096`) but the WSLC runner never consults it — only the imperative `portMappings` list has any effect. There is no way to express a blanket `hostLoopback: "allow"` default (host-loopback to every exposed port) or source-scoped inbound filtering (allow `127.0.0.1`/`::1` only, deny other host interfaces). Wiring the policy field and enforcing a default inbound posture needs the VM-level network policy API (SDK dep #1), since MXC has no host-side access to the container's interface inside the VM.
 
@@ -468,7 +468,7 @@ These items depend on the WSLC SDK team and are not unilaterally schedulable.
 | 1 | **VM-level network policy API** | Network #15–#24 | Extend CreateSession to accept IP/CIDR allow/deny rules, port/protocol filters, and inbound control, enforced at the VM hosting the container. Unblocks all iptables-dependent network enforcement on WSLC. |
 | 2 | **Deterministic `wslcsdk.dll` distribution** | Misc #31 (CI), Misc build | Today MXC pulls from `external/wslc-sdk/` which isn't reproducible from a fresh clone. Need a public NuGet or vendored signed channel. |
 | 3 | **Registry-auth handshake** | Private registry auth | WSLC can only pull from public registries. SDK ABI reserves the `auth_info` slot but the implementation (Basic/Bearer/ACR/GHCR/ECR, token caching, custom-CA HTTPS) isn't shipped yet. |
-| 4 | **Deny-mount / path-exclusion primitive** | Filesystem #5 (`deniedPaths` enforcement) | LXC and Bubblewrap mask a `deniedPaths` entry that sits under a mounted parent by overlaying it (`/dev/null` or `tmpfs`). The WSLC SDK exposes only a flat volume-mount surface with no overlay/exclusion primitive, so a denied subtree under a mounted parent cannot be masked. Today MXC works around this by rejecting such configs at parse time (Filesystem #5); real enforcement needs an SDK exclusion primitive. (Note: this is the *basic subtree-deny* gap — spec-exact D5 "visible + ACCESS_DENIED" remains non-actionable on every Linux backend regardless, see Filesystem #12.) |
+| 4 | **Deny-mount / path-exclusion primitive** | Filesystem #5 (`deniedPaths` enforcement) | LXC and Bubblewrap mask a `deniedPaths` entry that sits under a mounted parent by overlaying it (`/dev/null` or `tmpfs`). The WSLC SDK exposes only a flat volume-mount surface with no overlay/exclusion primitive, so a denied subtree under a mounted parent cannot be masked. Today MXC silently ignores such a denied path, leaving it accessible through the parent mount; the planned near-term mitigation is to reject these configs at parse time (Filesystem #5), but real enforcement needs an SDK exclusion primitive. (Note: this is the *basic subtree-deny* gap — spec-exact D5 "visible + ACCESS_DENIED" remains non-actionable on every Linux backend regardless, see Filesystem #12.) |
 
 > **Why network enforcement must be container-scoped (host vs. VM vs. container).** Network policy can be enforced at three layers: the Windows **host** (Windows Firewall), the WSL2 **VM**, or the **container** network namespace inside the VM. GA decision **D6 (per-sandbox scoping)** requires every sandbox's policy to be independent — concurrent WSLC containers must not affect each other's access — and names the container network namespace as WSLC's scoping identity. A machine-wide **host** firewall can't attribute traffic to one container vs. another, so it violates D6 (and per **D8**, host firewalls apply *on top of* enforcement, never *as* it). A **VM-wide** rule fails the same way when one utility VM hosts multiple containers — sandbox A's rules would bleed into sandbox B. Only the **container namespace** is inherently per-sandbox, which is why it's the required enforcement point. The catch: MXC can't install rules into that namespace today (`Privileged` doesn't grant `CAP_NET_ADMIN`, and the VM may lack iptables tooling). Hence SDK dep #1 — a VM-level API that applies rules **scoped to a specific container's namespace**: physically enforced at the VM boundary, logically attributed to one container. 
 >
