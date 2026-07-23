@@ -46,7 +46,10 @@ working directory / env) before spawning.
 
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
-dirs), [`user_profile_policy`], and [`temporary_files_policy`].
+dirs, plus opt-in default-location dev-tool caches), [`user_profile_policy`],
+and [`temporary_files_policy`]. When the dev-tool-cache opt-in is used,
+[`materialize_tool_cache_writes`] provisions the returned write-cache grants so a
+first sandboxed build can populate them.
 
 [`platform_support`] is the Rust port of `getPlatformSupport` — reports host
 support and the available containment backends.

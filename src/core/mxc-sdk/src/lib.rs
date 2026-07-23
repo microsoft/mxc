@@ -80,9 +80,9 @@ mod sandbox;
 
 pub use mxc_engine::policy;
 pub use mxc_engine::{
-    available_tools_policy, build_request, platform_support, temporary_files_policy,
-    user_profile_policy, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport, SandboxPolicy,
-    SandboxRequest,
+    available_tools_policy, build_request, materialize_tool_cache_writes, platform_support,
+    temporary_files_policy, user_profile_policy, Error, ErrorCode, FilesystemPolicyResult,
+    PlatformSupport, SandboxPolicy, SandboxRequest,
 };
 
 pub use sandbox::{Output, Sandbox, StreamCloser, WaitOutcome};

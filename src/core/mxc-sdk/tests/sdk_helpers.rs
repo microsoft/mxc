@@ -47,9 +47,9 @@ fn available_tools_policy_filters_nonexistent_and_dedups() {
         ":"
     };
     let path_val = format!("{cwd}{sep}/this/does/not/exist/xyzzy");
-    let env = env_pairs(&[("PATH", &path_val), ("CARGO_HOME", &cwd)]);
+    let env = env_pairs(&[("PATH", &path_val), ("GOROOT", &cwd)]);
 
-    let result = available_tools_policy(Some(&env));
+    let result = available_tools_policy(Some(&env), false);
 
     assert!(
         result.readonly_paths.iter().any(|p| p.contains(&cwd)),
@@ -232,7 +232,7 @@ fn available_tools_policy_filters_system_critical() {
         return; // skip if the critical dir doesn't exist on this host
     }
     let env = env_pairs(&[("PATH", &critical)]);
-    let result = available_tools_policy(Some(&env));
+    let result = available_tools_policy(Some(&env), false);
     assert!(
         !result
             .readonly_paths

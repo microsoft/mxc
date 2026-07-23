@@ -37,8 +37,8 @@ mod state_aware;
 pub use error::{Error, ErrorCode};
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
-    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
+    available_tools_policy, build_request, materialize_tool_cache_writes, temporary_files_policy,
+    user_profile_policy, FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
 };
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
