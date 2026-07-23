@@ -189,6 +189,19 @@ fn has_cli_command(cli: &Cli) -> bool {
     !cli.command.is_empty()
 }
 
+fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
+    capabilities.retain(|capability| !capability.eq_ignore_ascii_case("learningModeLogging"));
+    if capabilities
+        .iter()
+        .any(|capability| capability.eq_ignore_ascii_case("permissiveLearningMode"))
+    {
+        false
+    } else {
+        capabilities.push("permissiveLearningMode".to_string());
+        true
+    }
+}
+
 fn command_override_from_cli(
     cli: &Cli,
     context: CommandLineContext,
@@ -1023,29 +1036,19 @@ fn main() {
 
     // --audit injects permissiveLearningMode so denied operations are logged
     // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
-    // developer inner-loop flow; permissiveLearningMode is also available
-    // directly from the config `capabilities` array (both paths reach the same
-    // runner behavior). Works in both debug and release builds.
+    // developer inner-loop flow. The capability names are reserved from direct
+    // config use, so --audit is the supported permissive entry point until the
+    // dedicated captureDenials mapping lands.
     // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
     //
-    // The "already present?" check is case-insensitive because Windows derives
-    // the capability SID case-insensitively, so a mis-cased spelling already in
-    // the policy takes effect — appending a second, correctly-cased entry would
-    // be redundant.
+    // Permissive mode is the effective mode when audit is requested, so remove
+    // deny-and-record before injecting it. Comparisons are case-insensitive
+    // because Windows derives capability SIDs case-insensitively.
     #[cfg(target_os = "windows")]
-    if cli.audit
-        && !request
-            .policy
-            .capabilities
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case("permissiveLearningMode"))
-    {
-        request
-            .policy
-            .capabilities
-            .push("permissiveLearningMode".to_string());
+    if cli.audit {
+        let injected = apply_permissive_learning_mode(&mut request.policy.capabilities);
         logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
-        if cli.audit_verbose {
+        if injected && cli.audit_verbose {
             eprintln!(
                 "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
             );
@@ -1069,12 +1072,10 @@ fn main() {
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
     let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
-        && !request
-            .policy
-            .capabilities
-            .iter()
-            .any(|c| c == "learningModeLogging")
-    {
+        && !request.policy.capabilities.iter().any(|c| {
+            c.eq_ignore_ascii_case("learningModeLogging")
+                || c.eq_ignore_ascii_case("permissiveLearningMode")
+        }) {
         request
             .policy
             .capabilities
@@ -1374,6 +1375,26 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    #[test]
+    fn audit_mode_replaces_deny_and_record_capability() {
+        let mut capabilities = vec![
+            "internetClient".to_string(),
+            "LearningModeLogging".to_string(),
+        ];
+
+        assert!(apply_permissive_learning_mode(&mut capabilities));
+        assert!(capabilities
+            .iter()
+            .any(|capability| capability == "permissiveLearningMode"));
+        assert!(!capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("learningModeLogging")));
+        assert!(capabilities
+            .iter()
+            .any(|capability| capability == "internetClient"));
+        assert!(!apply_permissive_learning_mode(&mut capabilities));
     }
 
     #[test]

@@ -42,35 +42,32 @@ Because it relaxes containment, `permissiveLearningMode` is **security-sensitive
 whenever it is present, both the AppContainer and BaseContainer runners emit an
 always-visible **security warning** on the host's stderr. In-process Rust callers
 can also inspect it through `Sandbox::warnings()` or `Output::warnings`. It is a
-plain capability string — add it to the policy's `capabilities` array and it
-takes effect in every build.
+reserved internal capability enabled by the dedicated audit/capture entry points.
 
-Matching is case-insensitive because Windows derives the capability SID
-case-insensitively — a mis-cased spelling still takes effect.
+The parser rejects both learning-mode capability names in
+`processContainer.capabilities`, case-insensitively. This prevents a policy from
+selecting contradictory modes or bypassing the security-sensitive entry points.
 
 ## How to enable them
 
-Both learning-mode capabilities are plain capability strings — add them to the
-policy's `capabilities` array:
+Enable deny-and-record through the dedicated `learningMode` setting:
 
 ```jsonc
 {
   "processContainer": {
-    "capabilities": ["learningModeLogging"]
+    "learningMode": true
   }
 }
 ```
 
-```jsonc
-{
-  "processContainer": {
-    "capabilities": ["permissiveLearningMode"]
-  }
-}
+Enable permissive audit mode through the CLI:
+
+```text
+wxc-exec --audit --config <config>
 ```
 
-Capability strings are resolved to AppContainer capability SIDs and attached to
-the child process's `SECURITY_CAPABILITIES` exactly like any other capability.
+These entry points inject the reserved capability strings internally; users
+must not add them directly to `processContainer.capabilities`.
 When either learning-mode capability is in effect the runner emits a diagnostic
 describing the mode (informational logging for `learningModeLogging`, an
 always-visible stderr security warning for `permissiveLearningMode`).

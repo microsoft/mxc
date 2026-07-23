@@ -407,6 +407,9 @@ const LEARNING_MODE_INFORMATION: &str =
 const PERMISSIVE_LEARNING_MODE_WARNING: &str =
     "*** SECURITY WARNING *** permissiveLearningMode is ENABLED: every access check is logged AND \
      ALLOWED (audit mode); the container is not enforcing deny-by-default.";
+const PERMISSIVE_OVERRIDES_LEARNING_WARNING: &str =
+    "*** SECURITY WARNING *** permissiveLearningMode overrides learningModeLogging: every access \
+     check is logged AND ALLOWED (audit mode); the container is not enforcing deny-by-default.";
 
 /// A recognized Windows learning-mode capability.
 ///
@@ -440,6 +443,46 @@ impl LearningModeCapability {
     }
 }
 
+enum LearningModeDiagnostic {
+    Information(&'static str),
+    SecurityWarning(&'static str),
+}
+
+impl LearningModeDiagnostic {
+    #[cfg(test)]
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Information(message) | Self::SecurityWarning(message) => message,
+        }
+    }
+}
+
+fn effective_learning_mode_diagnostic(capabilities: &[String]) -> Option<LearningModeDiagnostic> {
+    let mut learning = false;
+    let mut permissive = false;
+    for capability in capabilities {
+        match LearningModeCapability::from_capability_name(capability) {
+            Some(LearningModeCapability::Learning) => learning = true,
+            Some(LearningModeCapability::Permissive) => permissive = true,
+            None => {}
+        }
+    }
+
+    if permissive {
+        Some(LearningModeDiagnostic::SecurityWarning(if learning {
+            PERMISSIVE_OVERRIDES_LEARNING_WARNING
+        } else {
+            PERMISSIVE_LEARNING_MODE_WARNING
+        }))
+    } else if learning {
+        Some(LearningModeDiagnostic::Information(
+            LEARNING_MODE_INFORMATION,
+        ))
+    } else {
+        None
+    }
+}
+
 /// Return the diagnostic lines the caller should log for the learning-mode
 /// capabilities requested by a policy.
 ///
@@ -448,35 +491,19 @@ impl LearningModeCapability {
 /// mode); it relaxes deny-by-default, so it emits a security warning.
 #[cfg(test)]
 pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> Vec<String> {
-    let mut diagnostics = Vec::new();
-    for cap in capabilities {
-        match LearningModeCapability::from_capability_name(cap) {
-            Some(LearningModeCapability::Permissive) => {
-                diagnostics.push(PERMISSIVE_LEARNING_MODE_WARNING.to_string())
-            }
-            Some(LearningModeCapability::Learning) => {
-                diagnostics.push(LEARNING_MODE_INFORMATION.to_string())
-            }
-            None => {}
-        }
-    }
-    diagnostics
+    effective_learning_mode_diagnostic(capabilities)
+        .map(|diagnostic| vec![diagnostic.message().to_string()])
+        .unwrap_or_default()
 }
 
 pub(crate) fn log_learning_mode_capability_diagnostics(
     capabilities: &[String],
     logger: &mut Logger,
 ) {
-    for cap in capabilities {
-        match LearningModeCapability::from_capability_name(cap) {
-            Some(LearningModeCapability::Permissive) => {
-                logger.warning_line(PERMISSIVE_LEARNING_MODE_WARNING);
-            }
-            Some(LearningModeCapability::Learning) => {
-                logger.log_line(LEARNING_MODE_INFORMATION);
-            }
-            None => {}
-        }
+    match effective_learning_mode_diagnostic(capabilities) {
+        Some(LearningModeDiagnostic::SecurityWarning(message)) => logger.warning_line(message),
+        Some(LearningModeDiagnostic::Information(message)) => logger.log_line(message),
+        None => {}
     }
 }
 
@@ -1635,15 +1662,17 @@ mod tests {
     }
 
     #[test]
-    fn both_learning_capabilities_are_reported_distinctly() {
+    fn permissive_learning_mode_overrides_deny_and_record_diagnostic() {
         let caps = vec![
             "learningModeLogging".to_string(),
             "permissiveLearningMode".to_string(),
         ];
         let out = super::learning_mode_capability_diagnostics(&caps);
-        assert_eq!(out.len(), 2);
-        assert!(out.iter().any(|l| l.contains("deny-and-record")));
-        assert!(out.iter().any(|l| l.contains("SECURITY WARNING")));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("SECURITY WARNING"));
+        assert!(out[0].contains("overrides learningModeLogging"));
+        assert!(out[0].contains("ALLOWED"));
+        assert!(!out[0].contains("accesses are still denied"));
     }
 
     #[test]

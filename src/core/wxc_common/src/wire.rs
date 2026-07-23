@@ -196,6 +196,9 @@ pub struct ProcessContainer {
     /// injected by the `--audit` CLI flag.
     pub learning_mode: Option<bool>,
     /// AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+    /// `learningModeLogging` and `permissiveLearningMode` are reserved and
+    /// rejected here; use `learningMode`, `--audit`, or the dedicated denial
+    /// capture configuration instead.
     pub capabilities: Option<Vec<String>>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,

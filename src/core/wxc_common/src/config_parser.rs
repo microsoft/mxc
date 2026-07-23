@@ -716,10 +716,23 @@ enforced; access denials are recorded for diagnostics.\n",
             );
         }
 
-        // `permissiveLearningMode` (allow-all audit) relaxes deny-by-default. It
-        // is accepted from the config `capabilities` array in every build; the
-        // runner emits a security warning whenever it is present.
+        // Learning-mode capability names are reserved for the dedicated entry
+        // points (`learningMode`, `--audit`, and future captureDenials wiring).
+        // Reject direct capability-array use case-insensitively because Windows
+        // derives capability SIDs case-insensitively.
         if let Some(caps) = ac.capabilities {
+            if let Some(reserved) = caps.iter().find(|capability| {
+                capability.eq_ignore_ascii_case("learningModeLogging")
+                    || capability.eq_ignore_ascii_case("permissiveLearningMode")
+            }) {
+                let msg = format!(
+                    "processContainer.capabilities must not include reserved learning-mode \
+                     capability '{reserved}'; use processContainer.learningMode for \
+                     deny-and-record mode or --audit for permissive mode"
+                );
+                logger.log_line(&msg);
+                return Err(WxcError::ConfigParse(msg));
+            }
             policy.capabilities.extend(caps);
         }
 
@@ -1673,18 +1686,25 @@ mod tests {
     }
 
     #[test]
-    fn permissive_learning_mode_preserved_from_config() {
-        // permissiveLearningMode is accepted from config in every build; the
-        // runner surfaces the security warning.
-        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
+    fn explicit_learning_mode_capabilities_are_rejected_case_insensitively() {
+        for capability in [
+            "learningModeLogging",
+            "LearningModeLogging",
+            "permissiveLearningMode",
+            "PERMISSIVELEARNINGMODE",
+        ] {
+            let json = format!(
+                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req
-            .policy
-            .capabilities
-            .contains(&"permissiveLearningMode".to_string()));
+            let error = load_request(&encoded, &mut logger, true)
+                .expect_err("reserved learning-mode capability must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("reserved learning-mode capability"));
+            assert!(message.contains(capability));
+        }
     }
 
     // ====== Tests ported from C++ ConfigurationParserTests.cpp ======

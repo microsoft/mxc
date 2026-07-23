@@ -296,7 +296,7 @@ export interface Process {
  */
 export interface ProcessContainer {
   /**
-   * AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+   * AppContainer capabilities (e.g. `internetClient`, `registryRead`). `learningModeLogging` and `permissiveLearningMode` are reserved and rejected here; use `learningMode`, `--audit`, or the dedicated denial capture configuration instead.
    */
   capabilities?: string[] | null;
   /**
