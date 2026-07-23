@@ -234,6 +234,22 @@ $null = $results.Add(@{
     Reason  = $(if ($objPass) { "" } else { "object-validation test failed" })
 })
 
+# Denied-path `..`-through-junction pre-flight validation (comment 1): a deny
+# that only lands inside a mounted tree after following a junction AND folding
+# `..` across not-yet-created components must be rejected at pre-flight. Owns its
+# own directory+junction fixture, like the object test above.
+$ddtScript = Join-Path $PSScriptRoot "run_wslc_dotdot_alias_test.ps1"
+$ddtArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $ddtArgs.Debug = $true }
+& $ddtScript @ddtArgs
+$ddtPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_denied_dotdot_alias.json"
+    Pass    = $ddtPass
+    Skipped = $false
+    Reason  = $(if ($ddtPass) { "" } else { "dotdot-alias validation test failed" })
+})
+
 Write-Host "`n--- Denied Masking / Most-Specific Tests ---" -ForegroundColor Cyan
 # Denied-path masking and most-specific-path-wins on WSLC. Each is delegated to
 # a standalone script that owns its on-disk fixture (a read-write mount plus
