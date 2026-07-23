@@ -68,14 +68,19 @@ stages:
     parameters:
       targets:
         - artifact: wxc-binaries-x86_64-pc-windows-msvc
+          os: win32
           sdkArch: x64
         - artifact: wxc-binaries-aarch64-pc-windows-msvc
+          os: win32
           sdkArch: arm64
         - artifact: lxc-binaries-x86_64-unknown-linux-gnu
+          os: linux
           sdkArch: x64
         - artifact: lxc-binaries-aarch64-unknown-linux-gnu
+          os: linux
           sdkArch: arm64
         - artifact: mxc-binaries-aarch64-apple-darwin
+          os: darwin
           sdkArch: arm64
 
       ESRPInfo: ${{ parameters.ESRPInfo }}

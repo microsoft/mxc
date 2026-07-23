@@ -60,13 +60,41 @@ extends:
           inputs:
           - input: pipelineArtifact
             pipeline: MXC
+            targetPath: '$(Pipeline.Workspace)/platform-packages'
+            artifactName: mxc-npm-sdk-platform-packages
+          - input: pipelineArtifact
+            pipeline: MXC
             targetPath: '$(Pipeline.Workspace)/packages'
             artifactName: mxc-npm-sdk-package
 
         displayName: Publish to NPM
         steps:
+        # Publish the per-platform binary packages FIRST. The meta package pins
+        # them as exact-version optionalDependencies, so they must exist on the
+        # registry before the meta package is published.
         - task: EsrpRelease@10
-          displayName: 'Publish to NPM'
+          displayName: 'Publish platform packages to NPM'
+          inputs:
+            connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+            usemanagedidentity: false
+            keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+            authcertname: ${{ parameters.ESRPInfo.authCertName }}
+            signcertname: ${{ parameters.ESRPInfo.signCertName }}
+            clientid: ${{ parameters.ESRPInfo.clientId }}
+            intent: 'PackageDistribution'
+            contenttype: npm
+            contentsource: 'Folder'
+            folderlocation: '$(Pipeline.Workspace)/platform-packages'
+            owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+            approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+            waitforreleasecompletion: true
+            serviceendpointurl: 'https://api.esrp.microsoft.com'
+            mainpublisher: ESRPRELPACMAN
+            domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
+
+        # Publish the meta package LAST, once the platform packages are live.
+        - task: EsrpRelease@10
+          displayName: 'Publish meta package to NPM'
           inputs:
             connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
             usemanagedidentity: false

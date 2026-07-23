@@ -95,22 +95,46 @@ fn remove_temp_dir(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
 }
 
-/// Resolve a sibling binary next to the currently running executable.
+/// Resolve the dev/test-only proxy binary. It is intentionally NOT shipped in
+/// the per-platform package (#512), so an integration harness that provides it
+/// out-of-band sets `MXC_TEST_PROXY_DIR`. Honor that directory first, then fall
+/// back to a sibling of the currently running executable (the historical layout
+/// when all binaries shipped together next to the executor).
 fn resolve_sibling_binary(name: &str) -> Result<PathBuf, WxcError> {
     let exe = std::env::current_exe().map_err(|err| {
         WxcError::NetworkProxy(format!("cannot determine current exe path: {}", err))
     })?;
-    let dir = exe
+    let exe_dir = exe
         .parent()
         .ok_or_else(|| WxcError::NetworkProxy("current exe has no parent directory".into()))?;
-    let path = dir.join(name);
-    if path.exists() {
-        Ok(path)
+    let test_proxy_dir = std::env::var_os("MXC_TEST_PROXY_DIR").map(PathBuf::from);
+    resolve_test_proxy_path(name, test_proxy_dir.as_deref(), exe_dir)
+}
+
+/// Pure resolution used by [`resolve_sibling_binary`]: prefer `test_proxy_dir`
+/// (when set, non-empty, and containing `name`), else a sibling in `exe_dir`.
+/// Returns an error naming the sibling candidate when neither has the binary.
+fn resolve_test_proxy_path(
+    name: &str,
+    test_proxy_dir: Option<&Path>,
+    exe_dir: &Path,
+) -> Result<PathBuf, WxcError> {
+    if let Some(dir) = test_proxy_dir {
+        if !dir.as_os_str().is_empty() {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    let sibling = exe_dir.join(name);
+    if sibling.exists() {
+        Ok(sibling)
     } else {
         Err(WxcError::NetworkProxy(format!(
-            "{} not found at {}",
+            "{} not found at {} (nor in MXC_TEST_PROXY_DIR)",
             name,
-            path.display()
+            sibling.display()
         )))
     }
 }
@@ -461,6 +485,55 @@ mod tests {
         let c = UnixProxyCoordinator::new();
         assert!(!c.is_active());
         assert!(c.address().is_none());
+    }
+
+    #[test]
+    fn resolve_test_proxy_prefers_test_proxy_dir() {
+        let base = std::env::temp_dir().join("mxc-proxy-resolve-prefers");
+        let test_dir = base.join("provided");
+        let exe_dir = base.join("exe");
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&exe_dir).unwrap();
+        // Binary present in BOTH; the test-proxy dir must win.
+        fs::write(test_dir.join("linux-test-proxy"), b"x").unwrap();
+        fs::write(exe_dir.join("linux-test-proxy"), b"x").unwrap();
+        let got = resolve_test_proxy_path("linux-test-proxy", Some(test_dir.as_path()), &exe_dir)
+            .unwrap();
+        assert_eq!(got, test_dir.join("linux-test-proxy"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_test_proxy_falls_back_to_sibling() {
+        let base = std::env::temp_dir().join("mxc-proxy-resolve-fallback");
+        let test_dir = base.join("provided"); // exists but does NOT contain the binary
+        let exe_dir = base.join("exe");
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::write(exe_dir.join("linux-test-proxy"), b"x").unwrap();
+        // Provided dir lacks it -> sibling; and None for the env var -> sibling.
+        let got_a = resolve_test_proxy_path("linux-test-proxy", Some(test_dir.as_path()), &exe_dir)
+            .unwrap();
+        let got_b = resolve_test_proxy_path("linux-test-proxy", None, &exe_dir).unwrap();
+        assert_eq!(got_a, exe_dir.join("linux-test-proxy"));
+        assert_eq!(got_b, exe_dir.join("linux-test-proxy"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_test_proxy_errors_when_absent_everywhere() {
+        let base = std::env::temp_dir().join("mxc-proxy-resolve-missing");
+        let exe_dir = base.join("exe");
+        fs::create_dir_all(&exe_dir).unwrap();
+        let err = resolve_test_proxy_path("linux-test-proxy", None, &exe_dir).unwrap_err();
+        let _ = fs::remove_dir_all(&base);
+        match err {
+            WxcError::NetworkProxy(m) => {
+                assert!(m.contains("linux-test-proxy"));
+                assert!(m.contains("MXC_TEST_PROXY_DIR"));
+            }
+            other => panic!("expected NetworkProxy error, got {other:?}"),
+        }
     }
 
     #[test]
