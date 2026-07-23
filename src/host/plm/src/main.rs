@@ -252,9 +252,6 @@ enum Cmd {
         /// Path to the MXC container config (JSON) to update.
         #[arg(long)]
         config_path: Option<PathBuf>,
-        /// Override for the adjusted config output path.
-        #[arg(long)]
-        adjusted_config_path: Option<PathBuf>,
         /// Re-process a previously captured .etl instead of stopping a
         /// live WPR session. When set, `wpr -stop` is skipped and the
         /// supplied file is parsed as-is.
@@ -417,7 +414,6 @@ fn main() -> Result<()> {
             log_dir,
             bin_path,
             config_path,
-            adjusted_config_path,
             trace_file,
             verbose_logging,
         } => {
@@ -427,7 +423,6 @@ fn main() -> Result<()> {
                     log_dir,
                     bin_path,
                     config_path,
-                    adjusted_config_path,
                     trace_file,
                     verbose: verbose_logging,
                 },

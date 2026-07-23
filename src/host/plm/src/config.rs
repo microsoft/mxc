@@ -7,43 +7,175 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::access_event::LearningModeAccessEvent;
 
-// Write Masks (mirror of Get-PlmAccessMasks in stop_plm_logging.ps1)
-const FILE_WRITE_MASK: u32 = 0x2;
-const FILE_APPEND_MASK: u32 = 0x4;
-const WRITE_EXTENDED_ATTRIBUTE_WRITE_MASK: u32 = 0x10;
-const DIRECTORY_DELETE_MASK: u32 = 0x40;
-const WRITE_ATTRIBUTE_WRITE_MASK: u32 = 0x100;
-const FILE_DELETE_MASK: u32 = 0x10000;
-const FILE_WRITE_DAC: u32 = 0x40000;
-const FILE_WRITE_OWNER: u32 = 0x80000;
+/// How a single file-access-mask bit maps onto PLM's read/write policy
+/// buckets. Kept as one axis so the decode table, `READ_MASK`, and
+/// `WRITE_MASK` can all be derived from a single source of truth.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Grants data / attribute read — contributes to `READ_MASK`.
+    Read,
+    /// Grants data / attribute / metadata write — contributes to
+    /// `WRITE_MASK`.
+    Write,
+    /// Grants both (e.g. `GENERIC_ALL`) — contributes to both masks.
+    ReadWrite,
+    /// Recognized for *decoding* but grants neither data read nor
+    /// write (`SYNCHRONIZE`, `READ_CONTROL`). Present so
+    /// `decode_access_mask` prints the mnemonic instead of
+    /// `OTHER(0x…)`, but deliberately excluded from `READ_MASK` /
+    /// `WRITE_MASK` so `classify_mask` and `update_from_access_events`
+    /// don't treat a synchronize- or read-control-only event as a read.
+    None,
+}
 
-pub const WRITE_MASK: u32 = FILE_WRITE_MASK
-    | FILE_APPEND_MASK
-    | WRITE_EXTENDED_ATTRIBUTE_WRITE_MASK
-    | DIRECTORY_DELETE_MASK
-    | WRITE_ATTRIBUTE_WRITE_MASK
-    | FILE_DELETE_MASK
-    | FILE_WRITE_DAC
-    | FILE_WRITE_OWNER;
+struct MaskFlag {
+    bit: u32,
+    name: &'static str,
+    access: Access,
+}
 
-// Read Masks
-const READ_DATA_MASK: u32 = 0x1;
-const READ_EXTENDED_ATTRIBUTE_MASK: u32 = 0x8;
-const DIRECTORY_TRAVERSE_MASK: u32 = 0x20;
-const READ_ATTRIBUTE_MASK: u32 = 0x80;
-const READ_CONTROL_MASK: u32 = 0x20000;
-const SYNCHRONIZE_MASK: u32 = 0x100000;
+/// Single source of truth for the file-access-mask bits PLM recognizes
+/// (mirror of `Get-PlmAccessMasks` in `stop_plm_logging.ps1`). Both the
+/// decode names and the `READ_MASK` / `WRITE_MASK` classification masks
+/// are derived from this table, so a newly-recognized bit is added in
+/// exactly one place and can never be classified without also decoding
+/// (or vice-versa).
+const ACCESS_FLAGS: &[MaskFlag] = &[
+    // Specific rights.
+    MaskFlag {
+        bit: 0x1,
+        name: "READ_DATA",
+        access: Access::Read,
+    },
+    MaskFlag {
+        bit: 0x2,
+        name: "FILE_WRITE",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x4,
+        name: "FILE_APPEND",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x8,
+        name: "READ_EA",
+        access: Access::Read,
+    },
+    MaskFlag {
+        bit: 0x10,
+        name: "WRITE_EA",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x20,
+        name: "DIRECTORY_TRAVERSE",
+        access: Access::Read,
+    },
+    MaskFlag {
+        bit: 0x40,
+        name: "DIRECTORY_DELETE",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x80,
+        name: "READ_ATTRIBUTES",
+        access: Access::Read,
+    },
+    MaskFlag {
+        bit: 0x100,
+        name: "WRITE_ATTRIBUTES",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x10000,
+        name: "FILE_DELETE",
+        access: Access::Write,
+    },
+    // Standard rights. READ_CONTROL / SYNCHRONIZE are recognized so they
+    // decode to a mnemonic, but classify as neither read nor write:
+    // holding them grants no data access, so an event carrying only one
+    // of them must not promote a path into readonlyPaths.
+    MaskFlag {
+        bit: 0x20000,
+        name: "READ_CONTROL",
+        access: Access::None,
+    },
+    MaskFlag {
+        bit: 0x40000,
+        name: "WRITE_DAC",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x80000,
+        name: "WRITE_OWNER",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x100000,
+        name: "SYNCHRONIZE",
+        access: Access::None,
+    },
+    // Generic rights. EventID=14 usually carries specific rights (the
+    // kernel maps generic→specific via the object's GENERIC_MAPPING
+    // before the audit fires), but map them fail-closed so that a path
+    // whose event *did* surface a generic bit still classifies and gets
+    // promoted rather than silently decoding as OTHER(0x…) and being
+    // dropped. GENERIC_EXECUTE implies traverse/read-attributes, so it
+    // buckets as read.
+    MaskFlag {
+        bit: 0x1000_0000,
+        name: "GENERIC_ALL",
+        access: Access::ReadWrite,
+    },
+    MaskFlag {
+        bit: 0x2000_0000,
+        name: "GENERIC_EXECUTE",
+        access: Access::Read,
+    },
+    MaskFlag {
+        bit: 0x4000_0000,
+        name: "GENERIC_WRITE",
+        access: Access::Write,
+    },
+    MaskFlag {
+        bit: 0x8000_0000,
+        name: "GENERIC_READ",
+        access: Access::Read,
+    },
+];
 
-pub const READ_MASK: u32 = READ_DATA_MASK
-    | READ_EXTENDED_ATTRIBUTE_MASK
-    | DIRECTORY_TRAVERSE_MASK
-    | READ_ATTRIBUTE_MASK
-    | READ_CONTROL_MASK
-    | SYNCHRONIZE_MASK;
+const fn compute_mask(want_write: bool) -> u32 {
+    let mut m = 0u32;
+    let mut i = 0;
+    while i < ACCESS_FLAGS.len() {
+        let hit = match ACCESS_FLAGS[i].access {
+            Access::Write => want_write,
+            Access::Read => !want_write,
+            Access::ReadWrite => true,
+            Access::None => false,
+        };
+        if hit {
+            m |= ACCESS_FLAGS[i].bit;
+        }
+        i += 1;
+    }
+    m
+}
+
+/// Bits that, when present, mean the audited process requested write
+/// access (derived from `ACCESS_FLAGS`).
+pub const WRITE_MASK: u32 = compute_mask(true);
+
+/// Bits that, when present, mean the audited process requested read
+/// access (derived from `ACCESS_FLAGS`). Deliberately excludes
+/// `READ_CONTROL` / `SYNCHRONIZE`, which are recognized but not
+/// data-read-granting.
+pub const READ_MASK: u32 = compute_mask(false);
 
 #[derive(Debug)]
 pub struct AddedPaths {
@@ -305,6 +437,38 @@ fn is_drive_root(path: &str) -> bool {
     bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
+/// True iff any component of the (already-normalized) path looks like
+/// an NTFS 8.3 short name — a mangled base of the form `NAME~N`
+/// (optionally with a `.EXT`), e.g. `progra~1`, `secret~1`.
+///
+/// `normalize_path` is deliberately filesystem-free: it strips
+/// verbatim/device prefixes, lowercases, collapses separators, and
+/// rejects ADS / `.` / `..`, but it does **not** resolve symlinks,
+/// directory junctions / reparse points, or 8.3 short names. That
+/// leaves an aliasing gap for deny matching — an access that reaches a
+/// denied location through an 8.3 alias (`C:\secret~1\token.dat` for a
+/// denied `C:\Secrets`) would normalize to a string that doesn't share
+/// the deny prefix and would be promoted into the persisted
+/// `Adjusted_*.json`. We can detect the 8.3 case lexically and refuse
+/// to promote it (fail-closed); the reparse-point / symlink case can
+/// only be resolved with filesystem access we don't have on this hot
+/// path (paths come from ETW and the object may no longer exist), so it
+/// remains a documented limitation — deny is enforced on the literal
+/// normalized path only. See `readme.md`.
+fn has_short_name_component(norm: &str) -> bool {
+    norm.split('\\').any(|component| {
+        // The mangled base precedes any extension dot.
+        let base = component.split('.').next().unwrap_or(component);
+        match base.find('~') {
+            Some(tilde) => {
+                let suffix = &base[tilde + 1..];
+                !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+            }
+            None => false,
+        }
+    })
+}
+
 fn json_array_strings(v: &Value) -> Vec<String> {
     v.as_array()
         .map(|arr| {
@@ -381,6 +545,23 @@ pub fn update_from_access_events(
         if is_self_event {
             if verbose {
                 println!("File {} is the binary path, skipping event.", ev.file_path);
+            }
+            continue;
+        }
+
+        // Deny-alias fail-closed guard: an 8.3 short-name component can
+        // alias a denied directory (`c:\secret~1\token.dat` for a denied
+        // `C:\Secrets`) and slip past the purely-lexical deny match
+        // below, then get baked into the persisted Adjusted_*.json.
+        // Since we can't resolve the short name without filesystem
+        // access here, refuse to promote the path at all — the safe
+        // failure mode for anything we can't prove isn't a deny alias.
+        if has_short_name_component(&ev_norm) {
+            if verbose {
+                println!(
+                    "Skipping 8.3 short-name path (cannot prove it isn't a deny alias): {}",
+                    ev.file_path
+                );
             }
             continue;
         }
@@ -515,6 +696,174 @@ pub fn write_added_paths_summary(added: &AddedPaths, verbose: bool) {
     }
 }
 
+/// Derive the path the `Adjusted_*.json` should be written to, next to
+/// the operator's config snapshot (`dest_config`).
+///
+/// **Pure**: this performs only path arithmetic — no filesystem side
+/// effects — so it is trivially table-testable and never silently
+/// creates directories. The caller (`stop.rs`) is responsible for
+/// creating the parent directory (propagating any error) immediately
+/// before `save_adjusted_config`.
+///
+/// Errors rather than falling back to surprising defaults when
+/// `dest_config` has no final component (a directory or a bare root
+/// like `C:`) — `unwrap_or_default()` would have produced a file
+/// literally named `Adjusted_`, and a `Path::new(".")` parent fallback
+/// would have silently relocated the output into the current working
+/// directory.
+pub fn resolve_adjusted_config_path(dest_config: &Path) -> Result<PathBuf> {
+    let leaf = dest_config.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot derive adjusted-config path: {} has no file name",
+            dest_config.display()
+        )
+    })?;
+    let parent = dest_config.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot derive adjusted-config path: {} has no parent directory",
+            dest_config.display()
+        )
+    })?;
+    let leaf = leaf.to_string_lossy();
+    Ok(parent.join(format!("Adjusted_{leaf}")))
+}
+
+/// Write the adjusted config atomically: serialize to a uniquely-named
+/// temp file in the *same directory* as the destination, flush it to
+/// disk, then rename it over the destination. Readers therefore only
+/// ever observe the complete old file or the complete new file — never
+/// a truncated/partial write from a crash, full disk, or mid-write
+/// failure. This matters because a downstream enforcing run consumes
+/// this file directly as its policy, and `plm stop` can be re-run
+/// against an existing `Adjusted_*.json`.
+///
+/// Keeping the temp file on the same volume ensures the final rename is
+/// an atomic metadata operation rather than a cross-volume copy, and
+/// `persist` replaces the destination directory entry itself, so a
+/// symlink pre-planted at the destination name is overwritten rather
+/// than followed.
+pub fn save_adjusted_config(config: &Value, path: &Path) -> Result<()> {
+    use std::io::Write;
+
+    let pretty = serde_json::to_string_pretty(config)?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("failed to create temp file in {}", dir.display()))?;
+    tmp.write_all(pretty.as_bytes())
+        .and_then(|_| tmp.as_file().sync_all())
+        .with_context(|| format!("failed to write temp adjusted config in {}", dir.display()))?;
+    tmp.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
+/// Decode a Windows file access mask into a |-separated list of the
+/// mnemonic flag names PLM cares about. Unknown bits are reported as a
+/// trailing OTHER(0x...) token so nothing is silently dropped.
+fn decode_access_mask(mask: u32) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut covered: u32 = 0;
+    for flag in ACCESS_FLAGS {
+        if mask & flag.bit != 0 {
+            parts.push(flag.name);
+            covered |= flag.bit;
+        }
+    }
+    let leftover = mask & !covered;
+    if leftover != 0 {
+        let joined = parts.join("|");
+        if joined.is_empty() {
+            return format!("OTHER(0x{leftover:X})");
+        }
+        return format!("{joined}|OTHER(0x{leftover:X})");
+    }
+    if parts.is_empty() {
+        "NONE".to_string()
+    } else {
+        parts.join("|")
+    }
+}
+
+fn classify_mask(mask: u32) -> &'static str {
+    let w = mask & WRITE_MASK != 0;
+    let r = mask & READ_MASK != 0;
+    match (r, w) {
+        (true, true) => "RW",
+        (false, true) => "W",
+        (true, false) => "R",
+        (false, false) => "-",
+    }
+}
+
+/// Print every unique file path observed in vents with the OR-ed
+/// access mask requested against it, plus the set of capabilities
+/// discovered in the trace. UI-violation summary lands in a later PR.
+pub fn write_detection_summary(events: &[LearningModeAccessEvent], capabilities: &HashSet<String>) {
+    use std::collections::BTreeMap;
+
+    let mut per_path: BTreeMap<&str, u32> = BTreeMap::new();
+    for ev in events {
+        *per_path.entry(ev.file_path.as_str()).or_insert(0) |= ev.access_mask;
+    }
+
+    println!();
+    println!("Detected file paths ({}):", per_path.len());
+    if per_path.is_empty() {
+        println!("  (none)");
+    } else {
+        for (path, mask) in &per_path {
+            println!(
+                "  [{:2}] 0x{:08X} {} {}",
+                classify_mask(*mask),
+                mask,
+                decode_access_mask(*mask),
+                path
+            );
+        }
+    }
+
+    println!();
+    println!("Detected capabilities ({}):", capabilities.len());
+    if capabilities.is_empty() {
+        println!("  (none)");
+    } else {
+        let mut sorted: Vec<&String> = capabilities.iter().collect();
+        sorted.sort();
+        for c in sorted {
+            println!("  + {c}");
+        }
+    }
+}
+
+pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose: bool) {
+    if !verbose {
+        return;
+    }
+    println!();
+    println!("All requested capabilities ({}):", requested.len());
+    if requested.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    let mut sorted: Vec<&String> = requested.iter().collect();
+    sorted.sort();
+    for c in sorted {
+        println!("  {c}");
+    }
+}
+
+/// Merge discovered AppContainer capability names into the config's
+/// containment-backend block. Implementation arrives in the
+/// capability-extraction PR; until then this is a no-op. Callers may
+/// pass a non-empty set (e.g. when a future stop.rs wires in the
+/// EventID=14 ACE-blob parser ahead of this merge) without triggering
+/// a spurious failure — the actual merge is landed atomically in the
+/// capability-extraction PR.
+pub fn merge_capabilities(_config: &mut Value, _requested: &HashSet<String>) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,7 +876,7 @@ mod tests {
             process_id: 0,
             thread_id: 0,
             file_path: path.to_string(),
-            access_mask: FILE_WRITE_MASK,
+            access_mask: 0x2, // FILE_WRITE
         }
     }
 
@@ -537,7 +886,7 @@ mod tests {
             process_id: 0,
             thread_id: 0,
             file_path: path.to_string(),
-            access_mask: READ_DATA_MASK,
+            access_mask: 0x1, // READ_DATA
         }
     }
 
@@ -1027,5 +1376,195 @@ mod tests {
             format!("{err}").to_ascii_lowercase().contains("json")
                 || format!("{err}").contains("parse")
         );
+    }
+
+    // ---- access-mask decode / classify -----------------------------------
+
+    #[test]
+    fn read_write_masks_are_disjoint_and_exclude_non_granting_bits() {
+        // A bit is never simultaneously read-only and write-only unless
+        // it is a ReadWrite bit (the generic-all case).
+        assert_eq!(WRITE_MASK & 0x2, 0x2, "FILE_WRITE is a write bit");
+        assert_eq!(READ_MASK & 0x1, 0x1, "READ_DATA is a read bit");
+        // READ_CONTROL (0x20000) and SYNCHRONIZE (0x100000) are
+        // recognized but grant no data access — excluded from both.
+        assert_eq!(READ_MASK & 0x20000, 0, "READ_CONTROL must not be read");
+        assert_eq!(WRITE_MASK & 0x20000, 0, "READ_CONTROL must not be write");
+        assert_eq!(READ_MASK & 0x100000, 0, "SYNCHRONIZE must not be read");
+        assert_eq!(WRITE_MASK & 0x100000, 0, "SYNCHRONIZE must not be write");
+        // GENERIC_ALL sits in both.
+        assert_eq!(READ_MASK & 0x1000_0000, 0x1000_0000);
+        assert_eq!(WRITE_MASK & 0x1000_0000, 0x1000_0000);
+        // GENERIC_READ read-only, GENERIC_WRITE write-only.
+        assert_eq!(READ_MASK & 0x8000_0000, 0x8000_0000);
+        assert_eq!(WRITE_MASK & 0x8000_0000, 0);
+        assert_eq!(WRITE_MASK & 0x4000_0000, 0x4000_0000);
+        assert_eq!(READ_MASK & 0x4000_0000, 0);
+    }
+
+    #[test]
+    fn classify_mask_table() {
+        assert_eq!(classify_mask(0x0), "-");
+        assert_eq!(classify_mask(0x1), "R"); // READ_DATA
+        assert_eq!(classify_mask(0x2), "W"); // FILE_WRITE
+        assert_eq!(classify_mask(0x1 | 0x2), "RW");
+        // SYNCHRONIZE / READ_CONTROL alone are neither R nor W now.
+        assert_eq!(classify_mask(0x100000), "-", "SYNCHRONIZE-only");
+        assert_eq!(classify_mask(0x20000), "-", "READ_CONTROL-only");
+        // Generic bits classify.
+        assert_eq!(classify_mask(0x8000_0000), "R", "GENERIC_READ");
+        assert_eq!(classify_mask(0x4000_0000), "W", "GENERIC_WRITE");
+        assert_eq!(classify_mask(0x1000_0000), "RW", "GENERIC_ALL");
+    }
+
+    #[test]
+    fn decode_access_mask_table() {
+        assert_eq!(decode_access_mask(0x0), "NONE");
+        assert_eq!(decode_access_mask(0x1), "READ_DATA");
+        assert_eq!(decode_access_mask(0x2), "FILE_WRITE");
+        assert_eq!(decode_access_mask(0x1 | 0x2), "READ_DATA|FILE_WRITE");
+        // Recognized-but-non-granting bits still decode (not OTHER).
+        assert_eq!(decode_access_mask(0x100000), "SYNCHRONIZE");
+        assert_eq!(decode_access_mask(0x20000), "READ_CONTROL");
+        // Generic bits decode instead of falling through to OTHER.
+        assert_eq!(decode_access_mask(0x8000_0000), "GENERIC_READ");
+        // Unknown-only bit reports OTHER, nothing silently dropped.
+        assert_eq!(decode_access_mask(0x800), "OTHER(0x800)");
+        // Known + unknown are both surfaced.
+        assert_eq!(decode_access_mask(0x1 | 0x800), "READ_DATA|OTHER(0x800)");
+    }
+
+    #[test]
+    fn generic_only_event_is_promoted() {
+        // A path whose only observed access was a generic right must
+        // still promote (fail-closed), not silently drop.
+        let mut cfg = json!({});
+        let mut ev = ev_read("C:\\data\\gen.dat");
+        ev.access_mask = 0x8000_0000; // GENERIC_READ
+        let added = run_update(&mut cfg, &[ev], &[]);
+        assert_eq!(added.readonly, vec!["C:\\data\\gen.dat".to_string()]);
+    }
+
+    #[test]
+    fn synchronize_only_event_is_not_promoted() {
+        // SYNCHRONIZE / READ_CONTROL grant no data access, so an event
+        // carrying only one of them must not widen readonlyPaths.
+        let mut cfg = json!({});
+        let mut ev = ev_read("C:\\data\\sync.dat");
+        ev.access_mask = 0x100000; // SYNCHRONIZE
+        let added = run_update(&mut cfg, &[ev], &[]);
+        assert!(
+            added.readonly.is_empty(),
+            "SYNCHRONIZE-only must not promote"
+        );
+    }
+
+    // ---- 8.3 short-name deny-alias guard ---------------------------------
+
+    #[test]
+    fn has_short_name_component_detects_mangled_names() {
+        assert!(has_short_name_component("c:\\progra~1\\app"));
+        assert!(has_short_name_component("c:\\secret~1\\token.dat"));
+        assert!(has_short_name_component("c:\\dir\\file~12.txt"));
+        // A tilde not followed by digits is a legit long name.
+        assert!(!has_short_name_component("c:\\foo~bar\\baz"));
+        assert!(!has_short_name_component("c:\\normal\\path.txt"));
+    }
+
+    #[test]
+    fn short_name_path_is_not_promoted() {
+        // 8.3 alias of a denied dir must be refused (fail-closed) even
+        // though its normalized form doesn't share the deny prefix.
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            &[ev_write("C:\\secret~1\\token.dat")],
+            &["C:\\Secrets"],
+        );
+        assert!(
+            added.readwrite.is_empty(),
+            "8.3 short-name alias of a denied dir must not be promoted"
+        );
+    }
+
+    // Documented limitation: junction/symlink reparse aliases are NOT
+    // resolved (no filesystem access on this hot path), so a lexically
+    // distinct alias of a denied dir is NOT caught by deny matching and
+    // would be promoted. This test pins that stated limitation (see
+    // `readme.md`) so a future change that closes the gap updates it
+    // deliberately.
+    #[test]
+    fn junction_alias_of_denied_dir_is_a_known_gap() {
+        let mut cfg = json!({
+            "filesystem": { "deniedPaths": ["C:\\Secrets"] }
+        });
+        let added = run_update(
+            &mut cfg,
+            // C:\work\link is a junction to C:\Secrets on a real system.
+            &[ev_write("C:\\work\\link\\token.dat")],
+            &["C:\\Secrets"],
+        );
+        assert_eq!(
+            added.readwrite,
+            vec!["C:\\work\\link\\token.dat".to_string()],
+            "known limitation: reparse-point aliases are not resolved"
+        );
+    }
+
+    // ---- resolve_adjusted_config_path (pure) -----------------------------
+
+    #[test]
+    fn resolve_adjusted_derives_sibling_name() {
+        let got = resolve_adjusted_config_path(Path::new("C:\\logs\\config.json")).unwrap();
+        assert_eq!(got, PathBuf::from("C:\\logs\\Adjusted_config.json"));
+    }
+
+    #[test]
+    fn resolve_adjusted_relative_leaf() {
+        let got = resolve_adjusted_config_path(Path::new("config.json")).unwrap();
+        assert_eq!(got, PathBuf::from("Adjusted_config.json"));
+    }
+
+    #[test]
+    fn resolve_adjusted_errors_without_file_name() {
+        // A bare root has no file_name — error rather than emitting a
+        // file literally named `Adjusted_`.
+        assert!(resolve_adjusted_config_path(Path::new("C:\\")).is_err());
+    }
+
+    #[test]
+    fn resolve_adjusted_is_pure_no_dir_side_effect() {
+        // The resolver must not touch the filesystem: resolving a path
+        // under a non-existent directory succeeds and creates nothing.
+        let ghost = std::env::temp_dir().join(format!(
+            "plm_resolve_pure_{}_{}",
+            std::process::id(),
+            "does_not_exist"
+        ));
+        let dest = ghost.join("config.json");
+        let got = resolve_adjusted_config_path(&dest).unwrap();
+        assert_eq!(got, ghost.join("Adjusted_config.json"));
+        assert!(!ghost.exists(), "resolver must not create directories");
+    }
+
+    // ---- save_adjusted_config (atomic) -----------------------------------
+
+    #[test]
+    fn save_adjusted_config_round_trips() {
+        let dir = std::env::temp_dir().join(format!("plm_save_atomic_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Adjusted_config.json");
+        let cfg = json!({"filesystem": {"readonlyPaths": ["C:\\x"]}});
+        save_adjusted_config(&cfg, &path).unwrap();
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+        // Overwriting an existing target must succeed (temp+rename).
+        let cfg2 = json!({"filesystem": {"readonlyPaths": ["C:\\y"]}});
+        save_adjusted_config(&cfg2, &path).unwrap();
+        let back2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back2, cfg2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
