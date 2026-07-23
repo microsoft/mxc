@@ -1,0 +1,17 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "PLM-DisplaySettings-Basic",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "plmtester.exe display-settings",
+    "timeout": 30000
+  },
+  "ui": {
+    "disable": false
+  },
+  "processContainer": {
+    "ui": {
+      "systemSettings": "none"
+    }
+  }
+}

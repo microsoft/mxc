@@ -33,6 +33,7 @@ members = [
     "testing/wxc_test_proxy",
     "testing/unix_test_proxy",
     "testing/wxc_ui_probe",
+    "testing/plm_tester",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
     "ffi/mxc_ffi",
