@@ -1849,7 +1849,7 @@ dependencies = [
  "clap",
  "embed-manifest",
  "mxc_build_common",
- "roxmltree",
+ "quick-xml",
  "serde_json",
  "tempfile",
  "windows",
@@ -1894,6 +1894,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2005,12 +2014,6 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
-
-[[package]]
-name = "roxmltree"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rust-embed"
@@ -3235,6 +3238,7 @@ name = "wslc_common"
 version = "0.7.0"
 dependencies = [
  "libloading",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "windows",

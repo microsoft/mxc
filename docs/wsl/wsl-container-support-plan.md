@@ -10,10 +10,11 @@ the WSLC SDK self-host release. Key changes:
 - **Config format updated:** The JSON section is `"wslc"` (not `"container"`),
   command is `"process": { "commandLine": ... }` (not `"script"`), and timeout
   is under `"process": { "timeout": ... }`.
-- **WSLC SDK available:** The SDK (v2.8.1) has been released as a self-host
-  package with `wslcsdk.h`, `wslcsdk.lib`, and `wslcsdk.dll`. API names use
+- **WSLC SDK available:** The SDK (v2.9.3) is consumed from the
+  `MxcDependencies` Azure Artifacts feed and provides `wslcsdk.h`,
+  `wslcsdk.lib`, and `wslcsdk.dll`. API names use
   verb-first convention (e.g., `WslcInitSessionSettings` not
-  `WslcInitSessionSettings`).
+  `WslcSessionSettingsInit`).
 - **Phases 1-2 complete:** Config parsing and backend routing shipped in PR #44.
 - **Sandbox is experimental:** References to `WindowsSandboxScriptRunner` and
   `request.sandbox_config` are outdated — sandbox is now behind `--experimental`.
@@ -43,7 +44,7 @@ Both paths converge here:
     ├── Parses JSON config → sees containment = "wslc"
     ├── Checks --experimental flag → creates WSLContainerRunner
     ├── Calls WSLC SDK via Rust FFI bindings:
-    │     WslcCanRun()                         → preflight check
+    │     WslcGetMissingComponents()                         → preflight check
     │     WslcInitSessionSettings()            → init session settings (with storagePath)
     │     WslcSetSessionSettingsCpuCount() / Memory() / Timeout() → configure session
     │     WslcCreateSession()                  → create WSL2 micro-VM session
@@ -192,11 +193,11 @@ The existing `WindowsSandboxScriptRunner` already overrides `run()` entirely (it
 `script_runner.rs` or `AppContainerScriptRunner` are required.
 
 **Component A — WSLC FFI Bindings** (`wslc_bindings.rs`)
-Rust FFI declarations for the WSLC SDK C API (v2.8.1). Hand-written `extern "C"`
+Rust FFI declarations for the WSLC SDK C API (v2.9.3). Hand-written `extern "C"`
 blocks from `wslcsdk.h`. Key bindings (actual API names from the SDK):
 
 Session APIs:
-- `WslcCanRun()` — preflight: check if WSLC runtime is available
+- `WslcGetMissingComponents()` — preflight: check if WSLC runtime is available
 - `WslcGetVersion()` — verify connectivity to the WSL service
 - `WslcInitSessionSettings()` / `WslcCreateSession()` — create a WSL2 micro-VM session
 - `WslcSetSessionSettingsCpuCount()` / `WslcSetSessionSettingsMemory()` — resource limits
@@ -211,7 +212,7 @@ Container APIs:
 - `WslcSetContainerSettingsInitProcess()` — attach process settings before creation
 - `WslcSetContainerSettingsNetworkingMode()` — `NONE` (isolated) or `BRIDGED` (NAT)
 - `WslcSetContainerSettingsVolumes()` — mount Windows paths into Linux container
-- `WslcSetContainerSettingsPortMappings()` — host↔container port forwarding (TCP only; UDP is declared in the header but returns `E_NOTIMPL` in the vendored SDK 2.8.1 runtime, so the MXC parser hard-rejects `"udp"` at config-validation time)
+- `WslcSetContainerSettingsPortMappings()` — host↔container port forwarding (TCP only; UDP is declared in the header but returns `E_NOTIMPL` in the SDK runtime, so the MXC parser hard-rejects `"udp"` at config-validation time)
 - `WslcSetContainerSettingsFlags()` — `AUTO_REMOVE`, `ENABLE_GPU`, `PRIVILEGED`
 - `WslcGetContainerInitProcess()` — retrieve process handle after start
 - `WslcStopContainer()` / `WslcDeleteContainer()` / `WslcReleaseContainer()` — teardown
@@ -226,17 +227,18 @@ Process APIs:
 - `WslcGetProcessExitEvent()` — get Win32 event HANDLE to wait on process exit
 - `WslcReleaseProcess()` — cleanup
 
-Key dependency: `windows-sys` crate for Win32 types (`HANDLE`, `HRESULT`). Link
-against `wslcsdk.lib` at build time — `wslcsdk.lib` and `wslcsdk.h` are sourced
-from the WSLC SDK NuGet package (`Microsoft.WSL.Containers.2.8.1.nupkg`),
-extracted into `external/wslc-sdk/`. The `build.rs` script locates the lib by
-architecture.
+Key dependency: `windows-sys` crate for Win32 types (`HANDLE`, `HRESULT`). The
+SDK is loaded at runtime via `libloading`; `wslcsdk.h` and `wslcsdk.dll` are
+sourced from the `Microsoft.WSL.Containers` NuGet package, which `build.rs`
+downloads from the `MxcDependencies` Azure Artifacts feed at build time (with a
+vendored `.nupkg` in `external/wslc-sdk/` as an offline fallback). The `build.rs`
+script locates the DLL by architecture.
 
 **Component B — WSLContainerRunner** (`wsl_container_runner.rs`)
 Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 
 1. `initialize()`:
-   - Call `WslcCanRun()` — fail fast if WSLC runtime is not available
+   - Call `WslcGetMissingComponents()` — fail fast if WSLC runtime is not available
    - Call `WslcInitSessionSettings()` with storage path
    - Configure session: CPU count, memory, timeout from `ContainerConfig`
    - Call `WslcSessionCreate()` to start the WSL2 micro-VM
@@ -275,7 +277,7 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 **Cleanup and error handling:**
 - On normal exit: release process → stop container → delete container → terminate session (reverse creation order)
 - On crash/signal: register a `ctrlc` handler that runs the same cleanup sequence
-- If WSLC runtime is not available: `WslcCanRun()` reports missing components — fail fast with a clear message listing what needs to be installed
+- If WSLC runtime is not available: `WslcGetMissingComponents()` reports missing components — fail fast with a clear message listing what needs to be installed
 - If image is not found: fail fast with a clear error message listing the expected image name
 - HRESULT error codes from WSLC SDK are translated to descriptive Rust errors
 
@@ -309,7 +311,7 @@ Network mapping:
 Port mapping (new capability enabled by WSLC SDK):
 | Config field | WSLC SDK equivalent |
 |---|---|
-| `portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: "tcp" }]` | `WslcSetContainerSettingsPortMappings()` with `WslcContainerPortMapping` structs (TCP only; `protocol` defaults to `"tcp"`. UDP is declared by the SDK header but returns `E_NOTIMPL` at runtime in the vendored SDK 2.8.1 and is rejected by the parser.) |
+| `portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: "tcp" }]` | `WslcSetContainerSettingsPortMappings()` with `WslcContainerPortMapping` structs (TCP only; `protocol` defaults to `"tcp"`. UDP is declared by the SDK header but returns `E_NOTIMPL` at runtime in the SDK and is rejected by the parser.) |
 
 **WSLC SDK advantage:** The `WslcContainerVolume` struct directly models the Windows↔Linux path mapping with `windowsPath` (PCWSTR) and `containerPath` (PCSTR) fields. The runner applies the deterministic `/mnt/<drive>/...` mapping rule and the SDK's 9P filesystem handles the cross-OS bridging internally.
 
@@ -331,7 +333,7 @@ CLI (`wxc/src/main.rs` — Clap definition):
 - Update `platform` command to show WSLC SDK status
 
 Setup script (`scripts/setup-wslc.ps1`):
-- ✅ Verifies WSLC SDK is installed via `WslcCanRun()` (inherited from
+- ✅ Verifies WSLC SDK is installed via `WslcGetMissingComponents()` (inherited from
   `init_and_load_sdk`) before attempting any pull
 - ✅ Pre-pulls the requested images via `wxc-exec.exe --setup-wslc`
 - ✅ Honors a custom `-StoragePath` so caches outside `%TEMP%` are supported
@@ -361,7 +363,7 @@ These need team decisions before implementation:
    **Decision: Linux containers first.** This design targets Linux containers only. Windows Server containers (e.g., `nanoserver`, `servercore`) are a different workload category — they use a different runtime (`runhcs.v1`), different isolation model, and serve different use cases (typically long-running services rather than script execution). We will prioritize Windows Server container support when there is a clear need for it. The `ContainmentBackend` enum and routing architecture can accommodate a future Windows container variant without redesign.
 
 4. **Elevated privileges** — ~~The WSLC SDK may require specific Windows capabilities (VM Platform, WSL optional component). Do we invoke the install API automatically, or require users to run setup manually?~~
-   **Decision: SDK install is out of band.** MXC does not install the WSLC SDK or its dependencies at runtime. Installation of the WSLC SDK NuGet package (build time) and runtime components — VM Platform, WSL optional component, WSL package — is handled separately, outside of MXC's execution path (e.g., by IT admin tooling, a setup script, or the caller's deployment process). At runtime, `WslcCanRun()` checks if everything is in place and fails fast with a clear error if not.
+   **Decision: SDK install is out of band.** MXC does not install the WSLC SDK or its dependencies at runtime. Installation of the WSLC SDK NuGet package (build time) and runtime components — VM Platform, WSL optional component, WSL package — is handled separately, outside of MXC's execution path (e.g., by IT admin tooling, a setup script, or the caller's deployment process). At runtime, `WslcGetMissingComponents()` checks if everything is in place and fails fast with a clear error if not.
 
 5. ~~**ScriptRunner refactor strategy**~~ — **Resolved.** The existing `WindowsSandboxScriptRunner` already overrides `run()` entirely, proving the pattern. `WSLContainerRunner` does the same. No refactoring of the base trait needed.
 
@@ -505,7 +507,7 @@ management is the caller's responsibility.
 
 - Windows 11 or Windows Server 2022/2025
 - WSL2 enabled (VM Platform optional component)
-- WSLC SDK MSI installed (`wsl.2.8.1.0.x64.msi` or ARM64 variant from the
+- WSLC SDK MSI installed (`wsl.2.9.3.0.x64.msi` or ARM64 variant from the
   self-host package)
 - COM initialized on calling thread (handled by the runner)
 - `WslcGetVersion()` succeeds (verifies WSL service connectivity)
@@ -523,25 +525,25 @@ management is the caller's responsibility.
 | `ScriptRunner::run()` hardcodes BFS/firewall (Windows-specific) | `WSLContainerRunner` overrides `run()` entirely — same pattern used by `WindowsSandboxScriptRunner` |
 | WSLC SDK is in public preview — API may change | Pin to a specific SDK version; isolate all WSLC calls behind `wslc_bindings.rs` so API changes are contained to one file |
 | Rust FFI to C API requires careful memory management | Follow WSLC SDK ownership rules: caller frees `CoTaskMemAlloc`'d strings; use Rust RAII wrappers for WSLC handles (Session, Container, Process) |
-| WSL2/WSLC setup complexity for users | `WslcCanRun()` diagnoses missing components; `WslcInstallWithDependencies()` automates installation; setup script wraps both |
+| WSL2/WSLC setup complexity for users | `WslcGetMissingComponents()` diagnoses missing components; `WslcInstallWithDependencies()` automates installation; setup script wraps both |
 | New dependency on WslcSDK.lib increases coupling | Feature-gate behind `wslc` Cargo feature so AppContainer-only builds don't require the SDK. Dependency is managed via NuGet, providing controlled versioning and a standard acquisition path |
 | Windows→Linux path translation edge cases | WSLC SDK's `WslcContainerVolume` handles path bridging natively via `windowsPath`/`containerPath` fields |
 | Orphaned containers on crash | `ctrlc` handler + RAII drop impl that calls `WslcContainerStop()` → `WslcContainerDelete()` → `WslcSessionTerminate()` |
 | Session startup overhead (micro-VM per invocation) | Document as known cost; explore session pooling in future iteration (Open Question #7) |
-| WSLC SDK requires specific Windows components | `WslcCanRun()` returns `WslcComponentFlags` listing exactly what's missing (VM Platform OC, WSL OC, WSL Package) |
+| WSLC SDK requires specific Windows components | `WslcGetMissingComponents()` returns `WslcComponentFlags` listing exactly what's missing (VM Platform OC, WSL OC, WSL Package) |
 
 ## Testing Strategy
 
 - **Unit tests (Rust):** FFI binding safety, policy-to-WSLC-settings translation, config parsing — no WSLC runtime needed. These live in `wxc_common` alongside the new modules.
 - **Integration tests:** Require WSL2 + WSLC SDK runtime; run `wxc-exec.exe` end-to-end with WSLC configs, verify stdout/stderr capture and exit code propagation
 - **Regression:** Existing AppContainer tests must pass unchanged — the AppContainer code path is not modified
-- **WSLC SDK smoke test:** Ensure `alpine:latest` is pre-pulled → `WslcCanRun()` → create session → run `echo hello` → verify output → cleanup
+- **WSLC SDK smoke test:** Ensure `alpine:latest` is pre-pulled → `WslcGetMissingComponents()` → create session → run `echo hello` → verify output → cleanup
 
 ## End-User Experience (After Implementation)
 
 ```powershell
 # One-time setup: install WSLC SDK MSI
-msiexec /i wsl.2.8.1.0.x64.msi
+msiexec /i wsl.2.9.3.0.x64.msi
 
 # Verify WSLC is available
 wslc container run hello-world

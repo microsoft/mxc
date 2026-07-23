@@ -50,8 +50,11 @@ pub fn plm_exe_path() -> Option<std::path::PathBuf> {
         .and_then(|p| p.parent().map(|d| d.join("plm.exe")))
 }
 
-/// Run `plm.exe <subcommand> <args...>` synchronously and route stdio
-/// through to wxc-exec's console. Audit tracing is a best-effort
+/// Run `plm.exe <subcommand> <args...>` synchronously via
+/// `run_plm_elevated`, which captures the child's stdout/stderr into
+/// temp files (the UAC broker can't inherit our stdio) and replays
+/// them only on non-zero exit or when `verbose` is set — the happy
+/// path is deliberately silent. Audit tracing is a best-effort
 /// diagnostic: missing-binary / spawn / non-zero-exit conditions are
 /// logged and returned as `false` — this function never calls
 /// `process::exit` on its own. The caller (currently the `--audit`
@@ -185,34 +188,12 @@ pub fn mark_audit_active() {
 /// applies the same hardening in its own resolver.
 pub fn cancel_active_audit_trace() {
     if AUDIT_ACTIVE.swap(false, Ordering::SeqCst) {
-        let wpr = resolve_system32_wpr();
-        let _ = std::process::Command::new(&wpr)
+        let _ = plm::wpr_path::wpr_command()
             .arg("-cancel")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
     }
-}
-
-/// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. Reading
-/// `%SystemRoot%` from the process env is unsafe because UAC inherits
-/// env from the unelevated parent — a standard user could `setx
-/// SystemRoot=C:\\Users\\Public\\evil` and plant `wpr.exe` for a later
-/// admin run. `GetSystemDirectoryW` is kernel-published and not
-/// env-spoofable.
-fn resolve_system32_wpr() -> std::path::PathBuf {
-    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
-    let mut buf = vec![0u16; 260];
-    // SAFETY: buf is initialized; we pass valid length and own the
-    // memory for the duration of the call.
-    let n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
-    if n == 0 || (n as usize) > buf.len() {
-        return std::path::PathBuf::from("C:\\Windows\\System32\\wpr.exe");
-    }
-    let dir = wxc_common::string_util::from_wide(&buf[..n as usize]);
-    let mut p = std::path::PathBuf::from(dir);
-    p.push("wpr.exe");
-    p
 }
 
 /// Stack-owned guard: ensures the audit trace is cancelled on panic

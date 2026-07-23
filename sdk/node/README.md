@@ -226,7 +226,7 @@ Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.6
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently only implemented for `isolation_session` (Windows). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session` and `windows_sandbox` (both Windows-only; both still experimental, so every call must pass `{ experimental: true }`). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
 
 ```typescript
 import {
@@ -234,17 +234,26 @@ import {
   stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
 
-const { sandboxId, correlationVector } = await provisionSandbox('isolation_session');
-await startSandbox(sandboxId, undefined, { correlationVector });
+// Every call takes a single options object (3rd arg). Experimental backends
+// must pass `experimental: true`; relay `correlationVector` on every phase
+// after provision so telemetry shares one base prefix.
+const { sandboxId, correlationVector } = await provisionSandbox(
+  'isolation_session', undefined, { experimental: true },
+);
+const opts = { experimental: true, correlationVector };
 
-const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, { correlationVector });
-const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, { correlationVector });
+await startSandbox(sandboxId, undefined, opts);
 
-await stopSandbox(sandboxId, undefined, { correlationVector });
-await deprovisionSandbox(sandboxId, undefined, { correlationVector });
+const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, opts);
+const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, opts);
+
+await stopSandbox(sandboxId, undefined, opts);
+await deprovisionSandbox(sandboxId, undefined, opts);
 ```
 
 > **Correlating telemetry across phases:** when experimental telemetry is enabled, `provisionSandbox` returns a `correlationVector` (a Microsoft Correlation Vector). Relay it verbatim as `options.correlationVector` on every later phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The client relays the value unchanged; the executor validates it on each phase and derives that phase's own vector from it (spinning a fresh child element off a mutable base, or reseeding if it is missing or malformed). It is `undefined` when telemetry is off, and safe to omit otherwise.
+
+`windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
 Full design and API: [`docs/state-aware-lifecycle/`](https://github.com/microsoft/mxc/tree/main/docs/state-aware-lifecycle/).
 
@@ -354,7 +363,7 @@ spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | Chi
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
-// State-aware lifecycle (currently only `isolation_session` on Windows)
+// State-aware lifecycle (currently `isolation_session` and `windows_sandbox` — both Windows-only)
 provisionSandbox(containment, config?, options?) → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)       → IPty             // streaming

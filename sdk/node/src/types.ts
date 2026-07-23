@@ -232,11 +232,11 @@ export interface WslcConfig {
   /**
    * Host↔container port mappings.
    *
-   * Only TCP is currently supported by the vendored WSLC SDK runtime
-   * (Microsoft.WSL.Containers 2.8.1). UDP is declared in the SDK header
-   * but the shipped runtime returns `E_NOTIMPL` when UDP is actually
-   * requested, so the parser hard-rejects `"udp"` with a clear message at
-   * spawn time. The `protocol` field defaults to `"tcp"` when omitted.
+   * Only TCP is currently supported by the WSLC SDK runtime. UDP is declared
+   * in the SDK header but the shipped runtime returns `E_NOTIMPL` when UDP is
+   * actually requested, so the parser hard-rejects `"udp"` with a clear
+   * message at spawn time. The `protocol` field defaults to `"tcp"` when
+   * omitted.
    */
   portMappings?: PortMapping[];
 }
@@ -251,9 +251,9 @@ export interface PortMapping {
   containerPort: number;
   /**
    * Transport protocol. Only `"tcp"` is currently supported; `"udp"` is
-   * rejected by the parser because the vendored WSLC SDK runtime
-   * (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL` for UDP even
-   * though the header declares it. Defaults to `"tcp"` when omitted.
+   * rejected by the parser because the WSLC SDK runtime returns `E_NOTIMPL`
+   * for UDP even though the header declares it. Defaults to `"tcp"` when
+   * omitted.
    */
   protocol?: 'tcp';
 }

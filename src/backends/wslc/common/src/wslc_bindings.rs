@@ -40,7 +40,7 @@ pub const S_OK: HRESULT = 0;
 // Opaque settings structs (must match C alignment and size)
 // ---------------------------------------------------------------------------
 
-pub const WSLC_SESSION_OPTIONS_SIZE: usize = 80;
+pub const WSLC_SESSION_OPTIONS_SIZE: usize = 72;
 pub const WSLC_SESSION_OPTIONS_ALIGNMENT: usize = 8;
 
 #[repr(C, align(8))]
@@ -49,7 +49,7 @@ pub struct WslcSessionSettings {
     pub _opaque: [BYTE; WSLC_SESSION_OPTIONS_SIZE],
 }
 
-pub const WSLC_CONTAINER_OPTIONS_SIZE: usize = 96;
+pub const WSLC_CONTAINER_OPTIONS_SIZE: usize = 104;
 
 #[repr(C, align(8))]
 #[derive(Copy, Clone)]
@@ -170,12 +170,52 @@ pub enum WslcProcessIOHandle {
     Stderr = 2,
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WslcComponentFlags {
-    None = 0,
-    VirtualMachinePlatform = 1,
-    WslPackage = 2,
+/// Bitmask of missing WSLC runtime components returned by
+/// `WslcGetMissingComponents` (an out-parameter).
+///
+/// Modeled as a `#[repr(transparent)]` newtype over `u32` rather than an enum
+/// because the SDK may OR several bits together (e.g.
+/// `VIRTUAL_MACHINE_PLATFORM | WSL_PACKAGE == 3` when both are missing).
+/// Materializing such a combined value into a `#[repr(u32)]` enum with no
+/// matching discriminant would be undefined behavior, so this stays a plain
+/// integer newtype and callers test individual bits.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct WslcComponentFlags(pub u32);
+
+impl WslcComponentFlags {
+    pub const NONE: Self = Self(0);
+    pub const VIRTUAL_MACHINE_PLATFORM: Self = Self(1);
+    pub const WSL_PACKAGE: Self = Self(2);
+    pub const SDK_NEEDS_UPDATE: Self = Self(4);
+
+    /// True if any missing-component bit is set.
+    pub fn any_missing(self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl core::fmt::Debug for WslcComponentFlags {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 == 0 {
+            return write!(f, "None");
+        }
+        let mut names = Vec::new();
+        if self.0 & Self::VIRTUAL_MACHINE_PLATFORM.0 != 0 {
+            names.push("VirtualMachinePlatform");
+        }
+        if self.0 & Self::WSL_PACKAGE.0 != 0 {
+            names.push("WslPackage");
+        }
+        if self.0 & Self::SDK_NEEDS_UPDATE.0 != 0 {
+            names.push("SdkNeedsUpdate");
+        }
+        if names.is_empty() {
+            write!(f, "Unknown(0x{:x})", self.0)
+        } else {
+            write!(f, "{} (0x{:x})", names.join(" | "), self.0)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,10 +244,9 @@ pub enum WslcPortProtocol {
 /// MXC always passes `null`, which lets the SDK select the default address.
 ///
 /// Note: although the C header declares `WSLC_PORT_PROTOCOL_UDP = 1`, the
-/// shipped SDK runtime (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL`
-/// when UDP is actually requested. The parser rejects `"udp"` up front; this
-/// enum keeps the discriminant so it stays in sync with the C ABI if a future
-/// SDK ships UDP support.
+/// shipped SDK runtime returns `E_NOTIMPL` when UDP is actually requested. The
+/// parser rejects `"udp"` up front; this enum keeps the discriminant so it
+/// stays in sync with the C ABI if a future SDK ships UDP support.
 #[repr(C)]
 pub struct WslcContainerPortMapping {
     pub windows_port: u16,
@@ -232,7 +271,7 @@ pub struct WslcPullImageOptions {
     pub uri: PCSTR,
     pub progress_callback: Option<WslcContainerImageProgressCallback>,
     pub progress_callback_context: *mut c_void,
-    pub auth_info: *const c_void, // WslcRegistryAuthenticationInformation*
+    pub registry_auth: PCSTR,
 }
 
 pub type WslcContainerImageProgressCallback = unsafe extern "system" fn(
@@ -293,8 +332,8 @@ pub struct WslcProcessCallbacks {
 mod ffi_types {
     use super::*;
 
-    pub type WslcCanRunFn =
-        unsafe extern "system" fn(*mut BOOL, *mut WslcComponentFlags) -> HRESULT;
+    pub type WslcGetMissingComponentsFn =
+        unsafe extern "system" fn(*mut WslcComponentFlags) -> HRESULT;
     pub type WslcInitSessionSettingsFn =
         unsafe extern "system" fn(PCWSTR, PCWSTR, *mut WslcSessionSettings) -> HRESULT;
     pub type WslcSetSessionSettingsCpuCountFn =
@@ -376,7 +415,7 @@ mod ffi_types {
         unsafe extern "system" fn(*mut WslcProcessSettings, *const PCSTR, usize) -> HRESULT;
     pub type WslcSetProcessSettingsEnvVariablesFn =
         unsafe extern "system" fn(*mut WslcProcessSettings, *const PCSTR, usize) -> HRESULT;
-    pub type WslcSetProcessSettingsCurrentDirectoryFn =
+    pub type WslcSetProcessSettingsWorkingDirectoryFn =
         unsafe extern "system" fn(*mut WslcProcessSettings, PCSTR) -> HRESULT;
     pub type WslcSetProcessSettingsCallbacksFn = unsafe extern "system" fn(
         *mut WslcProcessSettings,
@@ -397,7 +436,7 @@ pub struct WslcSdk {
     // Keep the library alive — function pointers are only valid while it's loaded.
     _lib: libloading::Library,
 
-    pub WslcCanRun: ffi_types::WslcCanRunFn,
+    pub WslcGetMissingComponents: ffi_types::WslcGetMissingComponentsFn,
     pub WslcInitSessionSettings: ffi_types::WslcInitSessionSettingsFn,
     pub WslcSetSessionSettingsCpuCount: ffi_types::WslcSetSessionSettingsCpuCountFn,
     pub WslcSetSessionSettingsMemory: ffi_types::WslcSetSessionSettingsMemoryFn,
@@ -426,7 +465,7 @@ pub struct WslcSdk {
     pub WslcInitProcessSettings: ffi_types::WslcInitProcessSettingsFn,
     pub WslcSetProcessSettingsCmdLine: ffi_types::WslcSetProcessSettingsCmdLineFn,
     pub WslcSetProcessSettingsEnvVariables: ffi_types::WslcSetProcessSettingsEnvVariablesFn,
-    pub WslcSetProcessSettingsCurrentDirectory: ffi_types::WslcSetProcessSettingsCurrentDirectoryFn,
+    pub WslcSetProcessSettingsWorkingDirectory: ffi_types::WslcSetProcessSettingsWorkingDirectoryFn,
     pub WslcSetProcessSettingsCallbacks: ffi_types::WslcSetProcessSettingsCallbacksFn,
     pub WslcGetProcessExitEvent: ffi_types::WslcGetProcessExitEventFn,
     pub WslcGetProcessExitCode: ffi_types::WslcGetProcessExitCodeFn,
@@ -476,7 +515,7 @@ impl WslcSdk {
             }
 
             Ok(Self {
-                WslcCanRun: load_fn!(lib, b"WslcCanRun\0"),
+                WslcGetMissingComponents: load_fn!(lib, b"WslcGetMissingComponents\0"),
                 WslcInitSessionSettings: load_fn!(lib, b"WslcInitSessionSettings\0"),
                 WslcSetSessionSettingsCpuCount: load_fn!(lib, b"WslcSetSessionSettingsCpuCount\0"),
                 WslcSetSessionSettingsMemory: load_fn!(lib, b"WslcSetSessionSettingsMemory\0"),
@@ -523,9 +562,9 @@ impl WslcSdk {
                     lib,
                     b"WslcSetProcessSettingsEnvVariables\0"
                 ),
-                WslcSetProcessSettingsCurrentDirectory: load_fn!(
+                WslcSetProcessSettingsWorkingDirectory: load_fn!(
                     lib,
-                    b"WslcSetProcessSettingsCurrentDirectory\0"
+                    b"WslcSetProcessSettingsWorkingDirectory\0"
                 ),
                 WslcSetProcessSettingsCallbacks: load_fn!(
                     lib,

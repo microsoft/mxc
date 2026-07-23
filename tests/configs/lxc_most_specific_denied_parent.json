@@ -1,0 +1,19 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-MostSpecific-DeniedParent",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "D=/mnt/msptest/data; if cat \"$D/secret_child/keep.txt\" 2>/dev/null | grep -q CHILD_KEPT; then echo CHILD_OK; else echo CHILD_MISSING; fi; if echo w > \"$D/secret_child/written.txt\" 2>/dev/null && grep -q w \"$D/secret_child/written.txt\" 2>/dev/null; then echo CHILD_WRITE_OK; else echo CHILD_WRITE_FAIL; fi; if cat \"$D/sibling.txt\" 2>/dev/null | grep -q PARENT_SECRET; then echo PARENT_LEAK; else echo PARENT_MASKED_OK; fi"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/msptest/data/secret_child"],
+    "deniedPaths": ["/mnt/msptest/data"]
+  }
+}

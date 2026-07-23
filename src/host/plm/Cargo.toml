@@ -27,7 +27,7 @@ anyhow.workspace = true
 # `windows` crate stays target-gated below.
 serde_json.workspace = true
 chrono.workspace = true
-roxmltree.workspace = true
+quick-xml.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
