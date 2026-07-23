@@ -84,7 +84,7 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
 /// are optional; `lpStartupInfo`/`processSecurityEnvironment`/`lpProcessInformation` are
 /// required. When `lpEnvironment` is non-null, `dwCreationFlags` must include
 /// `CREATE_UNICODE_ENVIRONMENT`.
-type PfnCreateProcessAsUserInsideSecurityEnvironment = unsafe extern "system" fn(
+pub type PfnCreateProcessAsUserInsideSecurityEnvironment = unsafe extern "system" fn(
     user_token: HANDLE,
     application_name: *const u16,
     command_line: *mut u16,
