@@ -120,7 +120,7 @@ The Rust workspace (`src/`) implements multiple sandboxing backends behind the `
 
 ### Config flow
 
-1. User provides JSON config (file or base64) → `config_parser.rs` deserializes into the typed wire model (`wxc_common::wire`) → validates and maps to `ExecutionRequest` (the internal execution model in `models.rs`)
+1. User provides JSON config (file or base64) → `config_deserialize.rs` performs path-aware typed deserialization into the wire model (`wxc_common::wire`) → `config_parser.rs` validates and maps it to `ExecutionRequest` (the internal execution model in `models.rs`)
 2. `ExecutionRequest` includes the containment backend selection, process config, filesystem/network policies, and optional experimental features
 3. The appropriate `ScriptRunner` implementation executes the process and returns `ScriptResponse`
 
@@ -212,7 +212,7 @@ The workspace is organized into six top-level directories under `src/`:
 
 ### Config parser pattern
 
-The parser deserializes JSON directly into the typed wire model (`wxc_common::wire`), the single source of truth for the config shape (it also generates the JSON schema). `config_parser.rs` then maps the wire types to the validated domain structs in `models.rs`. The stable surface uses `deny_unknown_fields` (closed); the `experimental` block is permissive.
+The parser deserializes JSON directly into the typed wire model (`wxc_common::wire`), the single source of truth for the config shape (it also generates the JSON schema). All typed config deserialization goes through `config_deserialize.rs`, which distinguishes syntax errors from typed policy errors and adds the complete JSON path plus source line/column when available; state-aware backend errors are prefixed with their full `experimental.<backend>.<phase>` location. `config_parser.rs` then maps the wire types to the validated domain structs in `models.rs`. The stable surface uses `deny_unknown_fields` (closed); the `experimental` block is permissive.
 
 ### TypeScript conventions
 

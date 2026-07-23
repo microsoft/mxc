@@ -233,7 +233,7 @@ fn apply_command_override(
     }
 }
 
-/// The correlation-vector action a state-aware phase should take, decided purely
+/// The plan for producing this phase's correlation vector, derived
 /// from the phase and the relayed value. Returned by [`plan_correlation_vector`]
 /// so the seed-vs-spin decision is unit-testable without touching the RNG/clock;
 /// the caller executes the plan against the (nondeterministic) operators.
@@ -299,6 +299,16 @@ fn inject_correlation_vector(outcome: &mut Result<DispatchOutcome, MxcError>, cv
             );
         }
     }
+}
+
+/// On a state-aware dispatch failure, record the error only on the auxiliary
+/// diagnostic sinks (`--log-file` and the diagnostic pipe) via
+/// [`Logger::log_diagnostic_line`]. It is deliberately kept out of the primary
+/// console/buffer output so it never interleaves with the stdout response
+/// envelope; the failure reason still reaches the client through the JSON error
+/// envelope on stdout.
+fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
+    logger.log_diagnostic_line(&error.to_string());
 }
 
 /// Drives the state-aware dispatch flow. On envelope success, writes the
@@ -401,6 +411,13 @@ fn run_state_aware_main(
         elapsed,
     );
 
+    // On dispatch failure, route the error to the auxiliary diagnostic sinks
+    // only (log file / diagnostic pipe) — never the primary buffer/stderr — so
+    // the stdout error envelope written below stays the single client-facing
+    // channel and is not shadowed by a duplicate on stderr.
+    if let Err(error) = &outcome {
+        log_state_aware_dispatch_error(logger, error);
+    }
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();
@@ -1382,6 +1399,31 @@ mod tests {
     }
 
     #[test]
+    fn state_aware_dispatch_errors_use_only_auxiliary_diagnostic_sinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let error = MxcError::malformed_request(
+            "Invalid configuration at `experimental.wslc.start.portMappings[0].windowsPort`",
+        );
+
+        log_state_aware_dispatch_error(&mut logger, &error);
+
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the JSON envelope must retain primary output ownership"
+        );
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("experimental.wslc.start.portMappings[0].windowsPort")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn cli_parses_flags_after_config_path_without_command_override() {
         let cli = parse_cli(&["wxc-exec", "policy.json", "--experimental", "--debug"]);
 
@@ -1671,6 +1713,7 @@ mod tests {
             sandbox_id: Some("iso:wxc-1234".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
 
         let err = command_override_context_for_state_aware(&parsed, true).unwrap_err();

@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::fmt::Write;
-use std::fs;
+use std::{borrow::Cow, fs};
 
+use crate::config_deserialize;
 use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
@@ -16,6 +16,8 @@ use crate::models::{
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::wire;
+use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -31,6 +33,44 @@ pub enum ParseError {
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ErrorOutput {
+    Primary,
+    DiagnosticOnly,
+}
+
+impl ParseError {
+    fn output(&self) -> ErrorOutput {
+        match self {
+            Self::Decode(_) | Self::OneShot(_) => ErrorOutput::Primary,
+            Self::StateAware(_) => ErrorOutput::DiagnosticOnly,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::Decode(error) | Self::OneShot(error) => error.to_string(),
+            Self::StateAware(error) => error.to_string(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(expecting = "a configuration object")]
+struct RequestDiscriminator<'a> {
+    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
+    phase: Option<&'a RawValue>,
+    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
+    experimental: Option<&'a RawValue>,
+}
+
+fn deserialize_present_raw<'de, D>(deserializer: D) -> Result<Option<&'de RawValue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    <&RawValue>::deserialize(deserializer).map(Some)
 }
 
 // ---------- Public API ----------
@@ -79,14 +119,16 @@ pub fn load_request_with_options(
     logger: &mut Logger,
     opts: LoadOptions,
 ) -> Result<ExecutionRequest, WxcError> {
-    let json_str = decode_request_input(input, logger, opts.is_base64)?;
+    let result = (|| {
+        let json_str = decode_request_input_without_logging(input, opts.is_base64)?;
 
-    let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
-    convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+    })();
+    log_one_shot_error(logger, &result);
+    result
 }
 
 /// Build a request from an already-parsed wire-format config [`Value`], running
@@ -101,12 +143,14 @@ pub fn load_request_from_value(
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
-    let cfg: wire::MxcConfig = serde_json::from_value(config).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
+    let result = (|| {
+        let cfg: wire::MxcConfig = config_deserialize::from_value(config)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
-    convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command)
+    })();
+    log_one_shot_error(logger, &result);
+    result
 }
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
@@ -135,9 +179,16 @@ pub fn load_mxc_request_with_options(
     logger: &mut Logger,
     opts: LoadOptions,
 ) -> Result<MxcRequest, ParseError> {
-    let json_str =
-        decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
-    parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+    let result = (|| {
+        let json_str = decode_request_input_without_logging(input, opts.is_base64)
+            .map_err(ParseError::Decode)?;
+        parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+    })();
+
+    if let Err(error) = &result {
+        log_error(logger, &error.message(), error.output());
+    }
+    result
 }
 
 /// Parse an MXC request from a **raw JSON string** (already decoded — not a file
@@ -148,73 +199,81 @@ pub fn load_mxc_request_from_json(
     json_str: &str,
     logger: &mut Logger,
 ) -> Result<MxcRequest, ParseError> {
-    parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false)
+    let result = parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false);
+    if let Err(error) = &result {
+        log_error(logger, &error.message(), error.output());
+    }
+    result
 }
 
 /// Shared parse core over an already-decoded JSON string.
+///
+/// Borrows only the discriminator and the raw state-aware backend block, then
+/// deserialises the typed model directly from source text so policy errors
+/// retain line and column information (`serde_json::Value` would discard it).
 fn parse_mxc_request_json(
     json_str: &str,
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<MxcRequest, ParseError> {
-    // Parse once into a generic JSON value so we can (a) discriminate one-shot
-    // vs state-aware by presence of the `phase` key and (b) capture the raw
-    // `experimental` block for the state-aware path, where it is typed
-    // per-backend at dispatch time rather than at parse time.
-    let parsed_json: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
-    })?;
+    let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
+        .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
 
-    if parsed_json.get("phase").is_some() {
-        convert_wire_state_aware(parsed_json, logger, allow_missing_command)
-            .map(MxcRequest::StateAware)
-            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+    if discriminator.phase.is_some() {
+        convert_wire_state_aware(
+            json_str,
+            discriminator.experimental,
+            logger,
+            allow_missing_command,
+        )
+        .map(MxcRequest::StateAware)
+        .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
-        // Re-deserialize from the source text (not the already-parsed
-        // `parsed_json`) so serde's line/column context is preserved in error
-        // messages on this trust boundary; `from_value` discards it, turning a
-        // typo or out-of-range field into an unlocalised "expected u16"-style dump.
-        let cfg: wire::MxcConfig = serde_json::from_str(json_str).map_err(|e| {
-            logger.log_line("Error parsing JSON");
-            ParseError::OneShot(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
-        })?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
+            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
 }
 
-/// Reads a request from disk or decodes it from base64. Public so the driver
-/// can decode once and reuse the JSON across multiple parse attempts; the
-/// internal `load_request` and `load_mxc_request` use it too.
-pub fn decode_request_input(
-    input: &str,
-    logger: &mut Logger,
-    is_base64: bool,
-) -> Result<String, WxcError> {
+fn log_one_shot_error<T>(logger: &mut Logger, result: &Result<T, WxcError>) {
+    if let Err(error) = result {
+        log_error(logger, &error.to_string(), ErrorOutput::Primary);
+    }
+}
+
+fn log_error(logger: &mut Logger, message: &str, output: ErrorOutput) {
+    match output {
+        ErrorOutput::Primary => logger.log_line(message),
+        ErrorOutput::DiagnosticOnly => logger.log_diagnostic_line(message),
+    }
+}
+
+/// Reads a request from disk or decodes it from base64.
+fn decode_request_input_without_logging(input: &str, is_base64: bool) -> Result<String, WxcError> {
     if is_base64 {
         let bytes = base64_decode(input).map_err(|_| {
-            let msg = "Failed to decode base64 configuration";
-            logger.log_line(msg);
-            WxcError::ConfigParse(msg.to_string())
+            WxcError::ConfigParse("Failed to decode base64 configuration".to_string())
         })?;
         String::from_utf8(bytes).map_err(|_| {
-            let msg = "Base64 decoded content is not valid UTF-8";
-            logger.log_line(msg);
-            WxcError::ConfigParse(msg.to_string())
+            WxcError::ConfigParse("Base64 decoded content is not valid UTF-8".to_string())
         })
     } else {
+        // The file path is untrusted input; on Linux/macOS it may contain
+        // newlines or terminal control characters. Escape it before embedding
+        // in diagnostics so a missing/unreadable file cannot inject forged
+        // multi-line log output.
+        let safe_input = config_deserialize::escape_diagnostic_text(input);
         if !std::path::Path::new(input).exists() {
-            let _ = write!(logger, "Configuration file not found: {}", input);
             return Err(WxcError::ConfigParse(format!(
-                "Configuration file not found: {}",
-                input
+                "Configuration file not found: {safe_input}"
             )));
         }
         fs::read_to_string(input).map_err(|e| {
-            let _ = write!(logger, "Failed to open configuration file: {}", input);
-            WxcError::ConfigParse(format!("Failed to read configuration file: {}", e))
+            WxcError::ConfigParse(format!(
+                "Failed to read configuration file '{safe_input}': {e}"
+            ))
         })
     }
 }
@@ -237,7 +296,7 @@ const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isola
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
-fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), WxcError> {
+fn validate_schema_version(version: &str) -> Result<(), WxcError> {
     if version.is_empty() {
         return Ok(());
     }
@@ -245,12 +304,10 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     // Parse the version, stripping pre-release suffix for comparison
     // (e.g., "0.4.0-alpha" is treated as "0.4.0")
     let parsed = semver::Version::parse(version).map_err(|_| {
-        let msg = format!(
+        WxcError::ConfigParse(format!(
             "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
-            version
-        );
-        logger.log_line(&msg);
-        WxcError::ConfigParse(msg)
+            config_deserialize::escape_diagnostic_text(version)
+        ))
     })?;
 
     let req = semver::VersionReq::parse(SUPPORTED_VERSION).unwrap();
@@ -260,38 +317,37 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
     if !req.matches(&comparable) {
         let min = semver::VersionReq::parse(">=0.6").unwrap();
+        let safe_version = config_deserialize::escape_diagnostic_text(version);
         let msg = if !min.matches(&comparable) {
             format!(
                 "Config schema version '{}' is older than supported (supported: {}). Update your config.",
-                version, SUPPORTED_VERSION
+                safe_version, SUPPORTED_VERSION
             )
         } else {
             format!(
                 "Config schema version '{}' is newer than supported (supported: {}). Upgrade wxc-exec.",
-                version, SUPPORTED_VERSION
+                safe_version, SUPPORTED_VERSION
             )
         };
-        logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
     Ok(())
 }
 
-fn validate_filesystem_paths(
-    policy: &ContainerPolicy,
-    logger: &mut Logger,
-) -> Result<(), WxcError> {
-    validate_paths(&policy.readonly_paths, logger)?;
-    validate_paths(&policy.readwrite_paths, logger)?;
-    validate_paths(&policy.denied_paths, logger)?;
+fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
+    validate_paths(&policy.readonly_paths)?;
+    validate_paths(&policy.readwrite_paths)?;
+    validate_paths(&policy.denied_paths)?;
     Ok(())
 }
 
-fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError> {
+fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     for path in paths {
         if path.contains('"') {
-            let msg = format!("Filesystem path '{}' contains invalid character '\"'", path);
-            logger.log_line(&msg);
+            let msg = format!(
+                "Filesystem path '{}' contains invalid character '\"'",
+                config_deserialize::escape_diagnostic_text(path)
+            );
             return Err(WxcError::ConfigParse(msg));
         }
     }
@@ -328,14 +384,14 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readwritePaths' and 'deniedPaths'; \
                  applying most-restrictive intent (denied)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else if readonly.contains(p) {
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readwritePaths' and 'readonlyPaths'; \
                  applying most-restrictive intent (readonly)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else {
@@ -347,7 +403,7 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readonlyPaths' and 'deniedPaths'; \
                  applying most-restrictive intent (denied)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else {
@@ -366,7 +422,8 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
                 logger.log_line(&format!(
                     "WARNING: filesystem path '{}' (in '{}') does not exist on the host; \
                      the backend may fail at mount time",
-                    path, list_name
+                    config_deserialize::escape_diagnostic_text(path),
+                    list_name
                 ));
             }
         }
@@ -478,7 +535,6 @@ fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
 fn validate_single_backend_section(
     containment: ContainmentBackend,
     present_sections: &[&'static str],
-    logger: &mut Logger,
 ) -> Result<(), WxcError> {
     let allowed_section = containment.section_path();
     let extras: Vec<&'static str> = present_sections
@@ -507,7 +563,6 @@ fn validate_single_backend_section(
             extras.join(", "),
         ),
     };
-    logger.log_line(&msg);
     Err(WxcError::ConfigParse(msg))
 }
 
@@ -518,7 +573,6 @@ fn validate_single_backend_section(
 fn validate_experimental_backend_keys(
     containment: Option<&ContainmentBackend>,
     experimental_raw: Option<&serde_json::Value>,
-    logger: &mut Logger,
 ) -> Result<(), WxcError> {
     let Some(serde_json::Value::Object(map)) = experimental_raw else {
         return Ok(());
@@ -554,7 +608,6 @@ fn validate_experimental_backend_keys(
          remove the unused section(s).",
         qualified.join(", "),
     );
-    logger.log_line(&msg);
     Err(WxcError::ConfigParse(msg))
 }
 
@@ -607,14 +660,14 @@ fn convert_wire_config(
     // input is a state-aware-shaped payload sent to a one-shot entry point;
     // reject it loudly rather than silently executing it as a one-shot.
     if cfg.phase.is_some() {
-        let msg = "'phase' is only valid on state-aware lifecycle requests".to_string();
-        logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
+        return Err(WxcError::ConfigParse(
+            "'phase' is only valid on state-aware lifecycle requests".to_string(),
+        ));
     }
     if cfg.sandbox_id.is_some() {
-        let msg = "'sandboxId' is only valid on state-aware lifecycle requests".to_string();
-        logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
+        return Err(WxcError::ConfigParse(
+            "'sandboxId' is only valid on state-aware lifecycle requests".to_string(),
+        ));
     }
     if cfg.correlation_vector.is_some() {
         let msg = "'correlationVector' is only valid on state-aware lifecycle requests".to_string();
@@ -628,7 +681,7 @@ fn convert_wire_config(
     let schema_version = cfg.version.unwrap_or_default();
 
     // Validate the schema version up front so an unsupported version fails fast.
-    validate_schema_version(&schema_version, logger)?;
+    validate_schema_version(&schema_version)?;
 
     let container_id = cfg.container_id.unwrap_or_default();
 
@@ -641,13 +694,11 @@ fn convert_wire_config(
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
                 Some(_) if command_required => {
-                    logger.log_line("process.commandLine cannot be empty");
                     return Err(WxcError::ConfigParse(
                         "process.commandLine cannot be empty".to_string(),
                     ));
                 }
                 None if command_required => {
-                    logger.log_line("Missing required field: process.commandLine");
                     return Err(WxcError::ConfigParse(
                         "Missing required field: process.commandLine".to_string(),
                     ));
@@ -682,7 +733,7 @@ fn convert_wire_config(
     // intents and the omitted case resolve to the OS-native backend here.
     let containment = map_wire_containment(cfg.containment.as_ref());
 
-    validate_single_backend_section(containment.clone(), &present_backend_sections, logger)?;
+    validate_single_backend_section(containment.clone(), &present_backend_sections)?;
 
     // LXC configuration
     let lxc_config = match cfg.lxc {
@@ -773,7 +824,7 @@ fn convert_wire_config(
             policy.readonly_paths = v;
         }
     }
-    validate_filesystem_paths(&policy, logger)?;
+    validate_filesystem_paths(&policy)?;
     normalize_filesystem_paths(&mut policy, logger);
 
     // Fallback section
@@ -794,7 +845,6 @@ fn convert_wire_config(
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
                            'bubblewrap', or 'seatbelt' containment backends";
-                logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
             policy.network_proxy = proxy_config;
@@ -833,7 +883,6 @@ fn convert_wire_config(
                        network.enforcementMode='firewall' or 'both'. The cooperative \
                        env-var proxy enforces hosts at the proxy layer; iptables-based \
                        enforcement requires privilege and is mutually exclusive.";
-            logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
@@ -901,7 +950,6 @@ fn convert_wire_config(
                        MXC does not forward host lists to it. Use \
                        'network.proxy.builtinTestServer: true' (testing only) for \
                        MXC-enforced host filtering, or remove the host policy.";
-            logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
@@ -972,14 +1020,12 @@ fn convert_wire_config(
                         let msg = format!(
                             "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
                         );
-                        logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
                     if m.container_port == 0 {
                         let msg = format!(
                             "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
                         );
-                        logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
                     // Only TCP is representable in the wire model
@@ -1007,7 +1053,6 @@ fn convert_wire_config(
                              for protocol '{}'",
                             pm.windows_port, pm.protocol
                         );
-                        logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
                 }
@@ -1029,7 +1074,6 @@ fn convert_wire_config(
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
                 .to_string();
-            logger.log_line(&msg);
             return Err(WxcError::ConfigParse(msg));
         }
         let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
@@ -1081,15 +1125,17 @@ fn convert_wire_config(
 }
 
 fn convert_wire_state_aware(
-    mut value: serde_json::Value,
+    json: &str,
+    experimental: Option<&RawValue>,
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    // Capture the raw `experimental` block before typed deserialize; it is typed
-    // per-backend at dispatch time, not here.
-    let experimental_raw = value
-        .as_object_mut()
-        .and_then(|map| map.remove("experimental"));
+    let experimental_raw = experimental
+        .map(|raw| {
+            config_deserialize::from_str::<serde_json::Value>(raw.get())
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))
+        })
+        .transpose()?;
 
     // Peeling `experimental` off above also removes it from the typed
     // deserialize, so a non-object value (e.g. `"experimental": 42`) would slip
@@ -1100,16 +1146,15 @@ fn convert_wire_state_aware(
     // on both paths and is accepted.)
     if let Some(exp) = experimental_raw.as_ref() {
         if !exp.is_null() && !exp.is_object() {
-            let msg = "invalid `experimental`: expected an object".to_string();
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
+            return Err(WxcError::ConfigParse(
+                "Invalid configuration at `experimental`: expected an object".to_string(),
+            ));
         }
     }
 
-    let mut cfg: wire::MxcConfig = serde_json::from_value(value).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
+    let base_json = mask_state_aware_experimental(json, experimental)?;
+    let mut cfg: wire::MxcConfig = config_deserialize::from_str(&base_json)
+        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
     // `phase` is the state-aware discriminator and is constrained by the wire
     // enum; absence here would be a logic error in the caller's discrimination.
@@ -1140,13 +1185,12 @@ fn convert_wire_state_aware(
                     "'experimental.{key}' has moved to the stable section; \
                      use top-level 'seatbelt' instead."
                 );
-                logger.log_line(&msg);
                 return Err(WxcError::ConfigParse(msg));
             }
         }
     }
 
-    validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref(), logger)?;
+    validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
 
     let sandbox_id = cfg.sandbox_id.clone();
     let correlation_vector = cfg.correlation_vector.clone();
@@ -1175,7 +1219,6 @@ fn convert_wire_state_aware(
              Remove them; per-backend policy and lifecycle are fixed at provision time.",
             stray.join(", ")
         );
-        logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
 
@@ -1207,9 +1250,13 @@ fn convert_wire_state_aware(
     {
         let telemetry: TelemetryConfig =
             serde_json::from_value(telemetry_val.clone()).map_err(|e| {
-                let msg = format!("invalid experimental.telemetry: {e}");
-                logger.log_line(&msg);
-                WxcError::ConfigParse(msg)
+                // Do not log here: state-aware parse errors are routed centrally
+                // and exactly once by the outer `load_mxc_request*` wrapper via
+                // `log_error(..., ErrorOutput::DiagnosticOnly)`. Logging here as
+                // well produced a duplicate auxiliary diagnostic (finding F2).
+                // Returning the error keeps stdout clean (envelope-owned) and
+                // yields a single auxiliary-sink line.
+                WxcError::ConfigParse(format!("invalid experimental.telemetry: {e}"))
             })?;
         request.experimental.telemetry = Some(telemetry);
     }
@@ -1221,7 +1268,76 @@ fn convert_wire_state_aware(
         sandbox_id,
         correlation_vector,
         experimental_raw,
+        // Retain the decoded request text so the dispatcher can deserialize each
+        // `experimental.<backend>.<phase>` sub-slice positionally and report
+        // typed errors with whole-file line/column (parity with base config).
+        source_text: Some(json.to_owned().into_boxed_str()),
     })
+}
+
+/// Byte range `[start, end)` of the borrowed `experimental` value within the
+/// original request text.
+///
+/// `raw` is `serde_json`'s borrowed `RawValue` for the `experimental` field,
+/// which — for `&str` input — is a sub-slice of `json`; its pointer therefore
+/// lies within `json`'s allocation and its length stays within bounds. The
+/// checks below make that invariant explicit and fail closed if a future caller
+/// ever passes a `raw` not borrowed from `json` (unreachable on the normal
+/// parser path).
+fn experimental_source_span(json: &str, raw: &str) -> Result<(usize, usize), WxcError> {
+    let locate_err = || {
+        WxcError::ConfigParse("Unable to locate the experimental configuration block".to_string())
+    };
+    let start = (raw.as_ptr() as usize)
+        .checked_sub(json.as_ptr() as usize)
+        .filter(|start| *start <= json.len())
+        .ok_or_else(locate_err)?;
+    let end = start
+        .checked_add(raw.len())
+        .filter(|end| *end <= json.len())
+        .ok_or_else(locate_err)?;
+    Ok((start, end))
+}
+
+fn mask_state_aware_experimental<'a>(
+    json: &'a str,
+    experimental: Option<&RawValue>,
+) -> Result<Cow<'a, str>, WxcError> {
+    let Some(experimental) = experimental else {
+        return Ok(Cow::Borrowed(json));
+    };
+
+    let raw = experimental.get();
+    let (start, end) = experimental_source_span(json, raw)?;
+    let (prefix, suffix) = match (json.get(..start), json.get(end..)) {
+        (Some(prefix), Some(suffix)) => (prefix, suffix),
+        _ => {
+            return Err(WxcError::ConfigParse(
+                "Unable to locate the experimental configuration block".to_string(),
+            ))
+        }
+    };
+
+    // State-aware backend config is retained separately and typed at dispatch.
+    // Replace it with an empty object of identical byte/line length so the base
+    // wire model validates cross-cutting fields without shifting source
+    // coordinates. ASCII spaces preserve byte offsets; retained CR/LF preserve
+    // lines. The caller already verified that `raw` is an object.
+    let mut masked = String::with_capacity(json.len());
+    masked.push_str(prefix);
+    let mut braces = ['{', '}'].into_iter();
+    for byte in raw.bytes() {
+        match byte {
+            b'\r' => masked.push('\r'),
+            b'\n' => masked.push('\n'),
+            _ => masked.push(braces.next().unwrap_or(' ')),
+        }
+    }
+    debug_assert!(braces.next().is_none());
+    masked.push_str(suffix);
+    debug_assert_eq!(masked.len(), json.len());
+
+    Ok(Cow::Owned(masked))
 }
 
 #[cfg(test)]
@@ -1429,6 +1545,44 @@ mod tests {
     }
 
     #[test]
+    fn state_aware_malformed_telemetry_logs_once_and_keeps_primary_clean() {
+        // F2 regression: the malformed-telemetry error must reach the auxiliary
+        // diagnostic sink exactly once (routed centrally by the outer
+        // `load_mxc_request` wrapper), never duplicated, and must never touch the
+        // primary buffer/stdout that the state-aware JSON envelope owns.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": 42}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("diag.log");
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.enable_file_sink(&log_path).unwrap();
+
+        let result = load_mxc_request(&encoded, &mut logger, true);
+        assert!(
+            matches!(result, Err(ParseError::StateAware(_))),
+            "got {result:?}"
+        );
+        assert!(
+            logger.get_buffer().is_empty(),
+            "state-aware error must not touch the primary buffer: {:?}",
+            logger.get_buffer()
+        );
+        drop(logger);
+
+        let logged = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(
+            logged.matches("invalid experimental.telemetry").count(),
+            1,
+            "expected exactly one auxiliary diagnostic, got: {logged:?}"
+        );
+    }
+
+    #[test]
     fn state_aware_non_object_experimental_is_rejected() {
         // A non-object `experimental` (here a bare number) is a hard parse error
         // on the one-shot path (typed `Option<Experimental>`); the state-aware
@@ -1486,15 +1640,163 @@ mod tests {
     #[test]
     fn state_aware_unknown_phase_is_rejected() {
         let json = r#"{"phase": "teleport"}"#;
-        let r = load_mxc(json);
-        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+        assert!(error.message.contains("Invalid configuration at `phase`"));
+        assert!(error.message.contains("unknown variant `teleport`"));
+    }
+
+    #[test]
+    fn present_null_phase_is_still_discriminated_as_state_aware() {
+        let error = match load_mxc(r#"{"phase": null}"#) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+
+        assert!(error.message.contains("Missing required field: phase"));
     }
 
     #[test]
     fn state_aware_unknown_containment_is_rejected() {
-        let json = r#"{"phase": "provision", "containment": "totally_made_up"}"#;
-        let r = load_mxc(json);
-        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+        let json = r#"{
+            "phase": "provision",
+            "containment": "totally_made_up"
+        }"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+        assert!(
+            error
+                .message
+                .contains("Invalid configuration at `containment`"),
+            "got: {}",
+            error.message
+        );
+        assert!(error.message.contains("unknown variant `totally_made_up`"));
+        assert!(error.message.contains("line 3"));
+    }
+
+    #[test]
+    fn state_aware_mask_preserves_locations_after_multiline_experimental() {
+        let json = r#"{
+            "phase": "provision",
+            "experimental": {
+                "future_backend": {
+                    "nested": true
+                }
+            },
+            "process": {"timeout": "soon"}
+        }"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+
+        assert!(
+            error
+                .message
+                .contains("Invalid configuration at `process.timeout`"),
+            "got: {}",
+            error.message
+        );
+        assert!(error.message.contains("line 8"), "got: {}", error.message);
+    }
+
+    #[test]
+    fn state_aware_mask_handles_empty_object_at_root_boundaries() {
+        for json in [
+            r#"{"experimental":{},"phase":"provision"}"#,
+            r#"{"phase":"provision","experimental":{}}"#,
+        ] {
+            let discriminator: RequestDiscriminator<'_> =
+                config_deserialize::from_str(json).unwrap();
+            let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+
+            assert_eq!(masked.len(), json.len());
+            let config: wire::MxcConfig = config_deserialize::from_str(&masked).unwrap();
+            assert!(matches!(config.phase, Some(wire::Phase::Provision)));
+        }
+    }
+
+    #[test]
+    fn state_aware_mask_handles_whitespace_only_multiline_object() {
+        let json = "{\n  \"phase\": \"provision\",\n  \"experimental\": {\r\n    \r\n  }\n}";
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+        let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+
+        assert_eq!(masked.len(), json.len());
+        assert_eq!(
+            masked.bytes().filter(|byte| *byte == b'\n').count(),
+            json.bytes().filter(|byte| *byte == b'\n').count()
+        );
+        let config: wire::MxcConfig = config_deserialize::from_str(&masked).unwrap();
+        assert!(matches!(config.phase, Some(wire::Phase::Provision)));
+    }
+
+    #[test]
+    fn experimental_source_span_locates_the_borrowed_block() {
+        let json = r#"{"phase":"provision","experimental":{"a":{"b":1}}}"#;
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+        let raw = discriminator.experimental.unwrap().get();
+
+        let (start, end) = experimental_source_span(json, raw).unwrap();
+        assert_eq!(&json[start..end], raw);
+        assert_eq!(&json[start..start + 1], "{");
+        assert_eq!(&json[end - 1..end], "}");
+    }
+
+    #[test]
+    fn experimental_source_span_rejects_a_foreign_slice() {
+        // A `raw` not borrowed from `json` must fail closed rather than compute
+        // an out-of-range offset — the invariant guard the masking relies on.
+        let json = r#"{"experimental":{}}"#;
+        let foreign = String::from("{}");
+        let error = experimental_source_span(json, foreign.as_str()).unwrap_err();
+        assert!(matches!(error, WxcError::ConfigParse(_)));
+    }
+
+    #[test]
+    fn state_aware_mask_span_contains_only_braces_spaces_and_newlines() {
+        let json = "{\n  \"experimental\": {\n    \"wslc\": { \"image\": \"py\" }\n  },\n  \"phase\": \"provision\"\n}";
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+        let raw = discriminator.experimental.unwrap().get();
+        let (start, end) = experimental_source_span(json, raw).unwrap();
+        let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+
+        // The masked span replaces content with exactly one `{`, one `}`,
+        // spaces, and preserved newlines; everything outside is byte-identical.
+        assert_eq!(masked[..start], json[..start]);
+        assert_eq!(masked[end..], json[end..]);
+        let span = &masked[start..end];
+        assert!(span
+            .bytes()
+            .all(|b| matches!(b, b'{' | b'}' | b' ' | b'\r' | b'\n')));
+        assert_eq!(span.bytes().filter(|b| *b == b'{').count(), 1);
+        assert_eq!(span.bytes().filter(|b| *b == b'}').count(), 1);
+    }
+
+    #[test]
+    fn state_aware_rejects_non_object_experimental_block() {
+        // `null` maps to "absent" and is accepted (see
+        // `state_aware_null_experimental_is_accepted`); only non-null,
+        // non-object values are rejected.
+        for value in [r#""oops""#, "42", "[]"] {
+            let json = format!(r#"{{"phase":"provision","experimental":{value}}}"#);
+            let error = match load_mxc(&json) {
+                Err(ParseError::StateAware(error)) => error,
+                other => panic!("expected state-aware error for {value}, got {other:?}"),
+            };
+            assert!(
+                error
+                    .message
+                    .ends_with("Invalid configuration at `experimental`: expected an object"),
+                "got: {}",
+                error.message
+            );
+        }
     }
 
     #[test]
@@ -1521,6 +1823,29 @@ mod tests {
         assert_eq!(req.script_code, "echo hello");
         assert_eq!(req.script_timeout, 0);
         assert!(req.working_directory.is_empty());
+    }
+
+    #[test]
+    fn load_request_from_value_reports_and_logs_typed_error_path() {
+        let config = serde_json::json!({
+            "process": {
+                "commandLine": "echo hello",
+                "timeout": "soon"
+            }
+        });
+        let mut logger = test_logger();
+
+        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Invalid configuration at `process.timeout`"));
+        assert!(message.contains("expected u32"));
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Invalid configuration at `process.timeout`")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1627,6 +1952,104 @@ mod tests {
             msg.contains("unknown variant") && msg.contains("invalid"),
             "expected serde unknown-variant rejection, got: {msg}"
         );
+        assert!(
+            msg.contains("Invalid configuration at `network.defaultPolicy`"),
+            "expected the policy path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wrong_value_type_reports_path_and_source_location() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo x",
+                "timeout": "soon"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("Invalid configuration at `process.timeout`"),
+            "expected the field path, got: {message}"
+        );
+        assert!(
+            message.contains("invalid type") && message.contains("expected u32"),
+            "expected the type mismatch, got: {message}"
+        );
+        assert!(
+            message.contains("line 4"),
+            "expected the source line, got: {message}"
+        );
+        assert_eq!(
+            logger
+                .get_buffer()
+                .lines()
+                .filter(|line| line.contains("process.timeout"))
+                .count(),
+            1,
+            "the path-aware diagnostic should be logged once"
+        );
+    }
+
+    #[test]
+    fn state_aware_parse_errors_reach_diagnostic_file_without_stderr_duplication() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let encoded = base64_encode(br#"{"phase":"teleport"}"#);
+
+        let result = load_mxc_request(&encoded, &mut logger, true);
+        assert!(matches!(result, Err(ParseError::StateAware(_))));
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the JSON error envelope owns the primary state-aware output"
+        );
+
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("Invalid configuration at `phase`"));
+        assert!(log.contains("unknown variant `teleport`"));
+    }
+
+    #[test]
+    fn out_of_range_value_reports_path() {
+        let json =
+            r#"{"process":{"commandLine":"echo x"},"network":{"proxy":{"localhost":70000}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("Invalid configuration at `network.proxy.localhost`"),
+            "expected the field path, got: {message}"
+        );
+        assert!(
+            message.contains("70000") && message.contains("expected u16"),
+            "expected the range mismatch, got: {message}"
+        );
+    }
+
+    #[test]
+    fn malformed_json_is_reported_as_syntax_not_policy_data() {
+        let json = r#"{"process":{"commandLine":"echo x"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("Invalid JSON syntax:"),
+            "expected a syntax error, got: {message}"
+        );
+        assert!(
+            !message.contains("Invalid configuration at"),
+            "syntax errors should not claim a policy path: {message}"
+        );
     }
 
     #[test]
@@ -1660,6 +2083,59 @@ mod tests {
         let mut logger = test_logger();
         let result = load_request("nonexistent.json", &mut logger, false);
         assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Configuration file not found: nonexistent.json")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn file_not_found_path_with_newline_is_escaped() {
+        // A file path is untrusted input and may contain a newline on
+        // Linux/macOS; the diagnostic must escape it so it cannot inject a
+        // forged multi-line log entry.
+        let mut logger = test_logger();
+        let result = load_request("missing\nfile.json", &mut logger, false);
+        assert!(result.is_err());
+
+        let message = match result.unwrap_err() {
+            WxcError::ConfigParse(message) => message,
+            other => panic!("expected ConfigParse error, got: {other:?}"),
+        };
+        assert!(!message.contains('\n'), "raw newline leaked: {message}");
+        assert!(message.contains("missing\\nfile.json"), "got: {message}");
+    }
+
+    #[test]
+    fn empty_file_path_error_is_logged_once() {
+        let mut logger = test_logger();
+        let result = load_request("", &mut logger, false);
+        assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Configuration file not found:")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn file_read_error_is_logged_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut logger = test_logger();
+        let result = load_request(directory.path().to_str().unwrap(), &mut logger, false);
+        assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Failed to read configuration file")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1667,6 +2143,58 @@ mod tests {
         let mut logger = test_logger();
         let result = load_request("not-valid-base64!!!", &mut logger, true);
         assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .lines()
+                .filter(|line| line.contains("Failed to decode base64 configuration"))
+                .count(),
+            1,
+            "the fatal diagnostic should be logged once"
+        );
+    }
+
+    #[test]
+    fn console_mode_logs_decode_errors_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = Logger::new(Mode::Console);
+        logger.enable_file_sink(&log_path).unwrap();
+
+        let result = load_request("not-valid-base64!!!", &mut logger, true);
+        assert!(result.is_err());
+
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("Failed to decode base64 configuration").count(),
+            1,
+            "console mode should emit one decode diagnostic"
+        );
+    }
+
+    #[test]
+    fn state_aware_semantic_errors_stay_off_primary_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let encoded = base64_encode(br#"{"phase":"provision","experimental":{"seatbelt":{}}}"#);
+
+        let result = load_mxc_request(&encoded, &mut logger, true);
+        assert!(matches!(result, Err(ParseError::StateAware(_))));
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the JSON envelope owns primary state-aware error output"
+        );
+
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("'experimental.seatbelt' has moved").count(),
+            1,
+            "state-aware diagnostics should reach auxiliary sinks exactly once"
+        );
     }
 
     #[test]
@@ -1675,6 +2203,7 @@ mod tests {
         let mut logger = test_logger();
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+        assert!(logger.get_buffer().contains("Invalid JSON syntax:"));
     }
 
     #[cfg(debug_assertions)]
@@ -2840,6 +3369,10 @@ mod tests {
             msg.contains("unknown field") && msg.contains("bogus"),
             "nested unknown field should be rejected, got: {msg}"
         );
+        assert!(
+            msg.contains("Invalid configuration at `process.bogus`"),
+            "expected the unknown field path, got: {msg}"
+        );
     }
 
     #[test]
@@ -3241,6 +3774,43 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_error_escapes_control_characters() {
+        // The invalid version is free-form user input echoed into a manual
+        // (non-serde) diagnostic; it must not carry raw ESC / newline bytes.
+        let error = validate_schema_version("1.\u{1b}[31m0\nX").unwrap_err();
+        let message = error.to_string();
+        assert!(!message.contains('\u{1b}'), "got: {message}");
+        assert!(!message.contains('\n'), "got: {message}");
+        assert!(
+            message.contains("\\u{1b}") || message.contains("\\x1b"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn root_object_expecting_text_is_pinned_across_both_parse_passes() {
+        // serde's `expecting` attribute requires a string literal, so the
+        // wording is duplicated on `RequestDiscriminator` and `wire::MxcConfig`.
+        // Pin both diagnostics so the two parse passes cannot drift.
+        let discriminator_err =
+            match config_deserialize::from_str::<RequestDiscriminator<'_>>(r#""not an object""#) {
+                Ok(_) => panic!("non-object root must fail discriminator parse"),
+                Err(error) => error,
+            };
+        let wire_err = match config_deserialize::from_str::<wire::MxcConfig>(r#""not an object""#) {
+            Ok(_) => panic!("non-object root must fail wire parse"),
+            Err(error) => error,
+        };
+
+        assert!(discriminator_err
+            .to_string()
+            .contains("expected a configuration object"));
+        assert!(wire_err
+            .to_string()
+            .contains("expected a configuration object"));
     }
 
     #[test]

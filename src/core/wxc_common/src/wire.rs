@@ -35,7 +35,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(title = "MXC Configuration"))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    expecting = "a configuration object"
+)]
 pub struct MxcConfig {
     /// Optional JSON Schema reference for editor validation. Accepted but
     /// ignored by the parser.
@@ -386,6 +390,8 @@ pub enum LaunchMethod {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 pub struct Experimental {
+    // Keep every direct field optional: state-aware parsing temporarily
+    // substitutes `{}` while validating cross-cutting fields from source text.
     /// Placeholder feature for testing experimental infrastructure.
     pub test: Option<TestFeature>,
     /// Windows Sandbox backend config.

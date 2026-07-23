@@ -174,6 +174,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
 
         let error = run_state_aware(parsed, false).unwrap_err();
