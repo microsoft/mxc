@@ -180,6 +180,7 @@ unsafe fn resolve_export(
     match GetProcAddress(hmodule, PCSTR(name.as_ptr().cast())) {
         Some(proc) => Ok(proc),
         None => Err(LearningModeError::ExportMissing {
+            api: "Learning Mode trace",
             export: name.to_str().unwrap_or("<non-utf8 export>"),
             detail: format!(
                 "GetProcAddress returned NULL (GetLastError = {})",

@@ -312,6 +312,7 @@ unsafe fn resolve_any(
         );
     }
     Err(LearningModeError::ExportMissing {
+        api: "process security-environment",
         export: names
             .first()
             .and_then(|n| n.to_str().ok())

@@ -53,10 +53,12 @@ pub enum LearningModeError {
     #[error("failed to load processmodel.dll: {0}")]
     DllLoad(String),
 
-    /// `processmodel.dll` loaded, but a required export is missing — the OS build
-    /// predates the Learning Mode trace API (or has the feature gated off).
-    #[error("export `{export}` not found in processmodel.dll ({detail}); this OS build lacks the Learning Mode trace API")]
+    /// `processmodel.dll` loaded, but a required export is missing from the
+    /// named API surface.
+    #[error("export `{export}` not found in processmodel.dll ({detail}); this OS build lacks the required {api} API")]
     ExportMissing {
+        /// The API surface that requires the export.
+        api: &'static str,
         /// The undecorated export name that failed to resolve.
         export: &'static str,
         /// Additional diagnostic detail (e.g. the `GetLastError` code).
@@ -102,12 +104,13 @@ mod stub_tests {
     #[test]
     fn error_messages_are_actionable() {
         let e = LearningModeError::ExportMissing {
+            api: "Learning Mode trace",
             export: "StartLearningModeTrace",
             detail: "GetLastError = 127".to_string(),
         };
         let msg = e.to_string();
         assert!(msg.contains("StartLearningModeTrace"));
-        assert!(msg.contains("lacks the Learning Mode trace API"));
+        assert!(msg.contains("Learning Mode trace API"));
     }
 }
 
@@ -131,5 +134,18 @@ mod error_tests {
         let message = error.to_string();
         assert!(message.contains("StartLearningModeTrace"));
         assert!(message.contains("CloseProcessSecurityEnvironment"));
+    }
+
+    #[test]
+    fn missing_export_identifies_the_api_surface() {
+        let error = LearningModeError::ExportMissing {
+            api: "process security-environment",
+            export: "CreateProcessSecurityEnvironment",
+            detail: "GetLastError = 127".to_string(),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("process security-environment API"));
+        assert!(!message.contains("lacks the Learning Mode trace API"));
     }
 }
