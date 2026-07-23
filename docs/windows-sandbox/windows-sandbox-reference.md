@@ -67,9 +67,23 @@ A phase process sends:
 Single-flight admission returns `ERR busy` while another execution owns the
 guest slot and `ERR not_ready` while the VM is booting.
 
-The daemon restores or poisons the guest slot and releases its mutex before
-writing the terminal exit frame. This makes terminal completion the point at
-which a new execution may be admitted.
+The daemon restores or marks-unusable the guest slot and releases its mutex
+before writing the terminal exit frame. This makes terminal completion the point
+at which a new execution may be admitted.
+
+The daemon record (`daemon.json`) also carries the IPC wire-protocol version the
+daemon speaks, and the version is negotiated on the wire, not merely advertised.
+The client sends its version as the trailing token of the `EXEC` line
+(`EXEC <nonce> <proto>`), and the daemon refuses a mismatch with
+`ERR protocol …` **before** any frame exchange. Because the check is enforced by
+the daemon, it also protects a client that never consults the record. A client
+that predates versioning sends no token and is treated as the legacy version
+(`1`), so a future daemon still refuses it rather than misframing its request. A
+daemon left by a different mxc install can still authenticate (its nonce is in
+the record), but a mismatched line/frame format is rejected cleanly. Such a
+sandbox must be torn down at the process level (see `--force-reclaim`) and
+re-provisioned. `stop`/`deprovision` still use the stable single-line `STOP`
+command so an orphaned VM can always be reclaimed.
 
 ## Host State
 
@@ -94,6 +108,7 @@ which a new execution may be admitted.
   <sandbox-token>\
     record.json
     config\wxc-windows-sandbox.wsb
+    daemon.log
     rendezvous\
       bootstrap.cmd
       bootstrap.log
@@ -159,7 +174,14 @@ The daemon:
 6. Serves `PING`, `EXEC`, and `STOP`.
 
 Start polls the record until readiness or timeout. A stale daemon or VM is
-reclaimed only when recorded process identities intersect the live set.
+reclaimed only when recorded process identities intersect the live set. If the
+host's single VM slot is already held by another VM owner (a concurrent one-shot
+run or another live daemon), the daemon exits with a distinct busy code and
+start surfaces `backend_unavailable` rather than an opaque error.
+
+The detached daemon's stderr is captured to `daemon.log` in the per-sandbox
+record directory (owner-only, alongside `record.json`), so boot, teardown, and
+orphan-reclaim failures in the VM-owning process are diagnosable after the fact.
 
 ### Exec
 
@@ -175,6 +197,12 @@ guest connection mid-session, so there is no automatic recovery back to a ready
 state. Every subsequent exec fails fast with the recorded reason, while `stop`
 and `deprovision` continue to work. To run again, tear the sandbox down
 (`stop`/`deprovision`) and provision a fresh one.
+
+A host-side watchdog bounds each exec: if the guest never reports completion
+within its own `timeout` plus a fixed grace, the daemon stops waiting, marks the
+slot unusable, and returns a synthetic timeout exit frame. This keeps a
+frozen-but-alive guest from wedging the single-flight slot indefinitely — the VM
+crash watchdog only fires once the VM processes are actually gone.
 
 ### Stop and deprovision
 
@@ -264,6 +292,8 @@ Inspect state-aware records under:
 ```powershell
 $root = Join-Path $env:TEMP "wxc-wsb\state-aware"
 Get-Content (Join-Path $root "daemon.json")
+# Detached daemon diagnostics (per sandbox token):
+Get-Content (Join-Path $root "<sandbox-token>\daemon.log")
 ```
 
 Check host processes:

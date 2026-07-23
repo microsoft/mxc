@@ -35,12 +35,12 @@ const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 /// Grace added to the guest's own `timeout_ms` to form the host watchdog
 /// deadline: covers guest process teardown and final output drain. If the guest
 /// freezes and never reports, the host stops waiting after `timeout_ms + grace`.
-const HOST_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
+pub const HOST_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 
 /// Host watchdog deadline for one guest execution. `None` for an infinite guest
 /// budget (`u32::MAX`, the normalized "no timeout"); otherwise `timeout_ms +
 /// grace`, saturating against overflow.
-fn host_watchdog_deadline(timeout_ms: u32, grace: Duration) -> Option<Duration> {
+pub fn host_watchdog_deadline(timeout_ms: u32, grace: Duration) -> Option<Duration> {
     if timeout_ms == u32::MAX {
         None
     } else {
@@ -524,18 +524,29 @@ pub struct StreamExecOutcome {
     pub exit_code: i32,
     /// The guest's error message accompanying the exit (empty on success).
     pub error_message: String,
+    /// `true` if the host watchdog fired before the guest reported completion.
+    /// When set, `exit_code`/`error_message` are unspecified and the caller
+    /// synthesises the terminal frame; the guest slot must be marked unusable.
+    pub timed_out: bool,
 }
 
 /// Run one guest execution and stream stdout/stderr to the IPC client.
 ///
 /// The terminal exit frame is written separately after the guest slot is
 /// restored for reuse.
+///
+/// `deadline`, when `Some`, bounds the whole execution: it is a host watchdog
+/// for a frozen-but-alive guest. It is honoured **only at frame boundaries**
+/// (between `select!` iterations), never mid-frame, so a partially-written data
+/// frame can never be followed by the terminal frame. On expiry the loop breaks
+/// and the returned outcome has `timed_out == true`.
 pub async fn stream_exec_on_guest<R, W>(
     conn: &mut GuestConnection,
     exec_id: &str,
     req: &ExecStart,
     ipc_reader: &mut R,
     ipc: &mut W,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<StreamExecOutcome>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -563,6 +574,7 @@ where
     let mut stdout_seen: u64 = 0;
     let mut stderr_seen: u64 = 0;
     let mut exit: Option<(i32, String)> = None;
+    let mut timed_out = false;
     let mut post_exit_deadline: Option<tokio::time::Instant> = None;
     let mut ctrl_buf: Vec<u8> = Vec::with_capacity(256);
     let mut so = [0u8; 8192];
@@ -688,7 +700,35 @@ where
                 stdout_done = true;
                 stderr_done = true;
             }
+            // Host watchdog. Observed only here, between whole-frame relays, so
+            // it never interrupts a `write_data_frame_split` mid-frame. `None`
+            // (infinite budget) parks on `pending` and never fires.
+            _ = async {
+                match deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                eprintln!(
+                    "[daemon] exec {exec_id}: host watchdog fired; abandoning frozen guest"
+                );
+                timed_out = true;
+                break;
+            }
         }
+    }
+
+    if timed_out {
+        // The guest is untrustworthy; the caller marks the slot unusable and
+        // synthesises the terminal frame. Break happened at a frame boundary,
+        // so the IPC stream carries no partial data frame.
+        return Ok(StreamExecOutcome {
+            control_residual: ctrl_buf,
+            ipc_alive,
+            exit_code: -1,
+            error_message: String::new(),
+            timed_out: true,
+        });
     }
 
     let (exit_code, error_message) = match exit {
@@ -701,6 +741,7 @@ where
         ipc_alive,
         exit_code,
         error_message,
+        timed_out: false,
     })
 }
 
@@ -948,6 +989,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stream_exec_watchdog_fires_at_frame_boundary_without_partial_frame() {
+        // Regression: the streaming watchdog is honoured *inside* the relay loop
+        // at frame boundaries, so a timeout can never truncate a data frame and
+        // leave the client's decoder desynced. The guest emits output then goes
+        // silent (never Exit); the watchdog must fire, and everything written to
+        // the IPC client must be complete, decodable frames with no residue.
+        let nonce = generate_nonce().expect("generate nonce");
+        let (addr, fake_rx) = spawn_fake_guest(nonce.clone()).await;
+        let mut conn = connect_to_guest(addr, Duration::from_secs(5), &nonce)
+            .await
+            .expect("connect_to_guest must succeed");
+        // Hold `fake` for the whole call so the control channel stays open: a
+        // closed control would end the loop with an error, not a timeout.
+        let mut fake = fake_rx
+            .await
+            .expect("fake-guest oneshot")
+            .expect("fake-guest accept");
+
+        // Pre-load guest stdout; the relay drains it before parking on control.
+        fake.stdout.write_all(b"helloworld").await.unwrap();
+
+        let req = ExecStart {
+            script_code: "sleep".to_string(),
+            working_directory: String::new(),
+            timeout_ms: 60_000,
+        };
+        let mut ipc_reader: &[u8] = b"";
+        let mut ipc_writer: Vec<u8> = Vec::new();
+        let deadline = Some(tokio::time::Instant::now() + Duration::from_millis(150));
+
+        // The 5s guard turns a watchdog-never-fires regression into a failure
+        // instead of a hang; the real watchdog fires at 150ms.
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            stream_exec_on_guest(
+                &mut conn,
+                "exec-wd",
+                &req,
+                &mut ipc_reader,
+                &mut ipc_writer,
+                deadline,
+            ),
+        )
+        .await
+        .expect("watchdog must return within the guard window")
+        .expect("stream returns Ok");
+        drop(fake);
+
+        assert!(outcome.timed_out, "watchdog must report a timeout");
+
+        let mut cur = std::io::Cursor::new(ipc_writer);
+        let mut payload = Vec::new();
+        while let Some(frame) = ipc_exec::read_frame(&mut cur).unwrap() {
+            assert_eq!(
+                frame.kind,
+                Some(FrameKind::Stdout),
+                "only stdout frames expected before the (caller-written) terminal frame"
+            );
+            payload.extend_from_slice(&frame.payload);
+        }
+        assert_eq!(
+            cur.position() as usize,
+            cur.get_ref().len(),
+            "no trailing partial frame may remain in the IPC stream"
+        );
+        assert_eq!(payload, b"helloworld");
+    }
+
     // In-process guest for bridge and reconnect integration tests.
 
     struct FakeGuestSide {
@@ -1083,6 +1193,7 @@ mod tests {
             &req,
             &mut ipc_reader,
             &mut ipc_writer,
+            None,
         );
 
         let (_fake_back, outcome) = tokio::join!(fake_side, host_side);
@@ -1159,6 +1270,7 @@ mod tests {
             &req,
             &mut ipc_reader_side,
             &mut ipc_out,
+            None,
         );
 
         let (stdin_recv, outcome) = tokio::join!(fake_side, host_side);
@@ -1227,6 +1339,7 @@ mod tests {
             &req,
             &mut empty_reader,
             &mut server_write,
+            None,
         );
 
         let (_fake, outcome) = tokio::join!(fake_side, host_side);

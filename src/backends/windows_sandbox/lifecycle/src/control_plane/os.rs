@@ -296,16 +296,17 @@ pub fn terminate_processes(_targets: &[VmProcId]) -> usize {
 // Cross-process named mutexes
 // ---------------------------------------------------------------------------
 
-/// Acquire a Windows named mutex, waiting up to `timeout`. Returns the handle
-/// and whether we own it (always `true` on success; the handle must be released
-/// + closed on drop). Shared by [`TransitionLock`] and [`HostVmLock`].
+/// Try to acquire the named mutex, distinguishing contention from failure.
+/// Returns the owned handle on success (closed on drop), `Ok(None)` when the
+/// wait times out because another owner holds it (the caller may treat this as
+/// "busy"), and `Err` for a create/wait failure, which is not contention.
 #[cfg(windows)]
-fn named_mutex_acquire(
+fn named_mutex_try_acquire(
     name: &str,
     timeout: std::time::Duration,
-) -> Result<windows::Win32::Foundation::HANDLE> {
+) -> Result<Option<windows::Win32::Foundation::HANDLE>> {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -322,13 +323,35 @@ fn named_mutex_acquire(
         // WAIT_ABANDONED: a previous holder died without releasing. We now own
         // the mutex; the protected state is reconciled separately via records /
         // process-identity proof, so taking ownership here is correct.
-        Ok(handle)
-    } else {
+        Ok(Some(handle))
+    } else if wait == WAIT_TIMEOUT {
+        // Contention: another owner holds the mutex. Not an error.
         // SAFETY: closing the handle we just created; we do not own the mutex.
         unsafe {
             let _ = windows::Win32::Foundation::CloseHandle(handle);
         }
-        anyhow::bail!("timed out acquiring named mutex {name:?} after {timeout:?}");
+        Ok(None)
+    } else {
+        // WAIT_FAILED or any other unexpected result is a real failure.
+        // SAFETY: closing the handle we just created; we do not own the mutex.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+        }
+        anyhow::bail!("waiting on named mutex {name:?} failed (wait result {wait:?})");
+    }
+}
+
+/// Acquire the named mutex, returning `Err` on either contention (timeout) or a
+/// real failure. Callers that need to distinguish the two use
+/// [`named_mutex_try_acquire`].
+#[cfg(windows)]
+fn named_mutex_acquire(
+    name: &str,
+    timeout: std::time::Duration,
+) -> Result<windows::Win32::Foundation::HANDLE> {
+    match named_mutex_try_acquire(name, timeout)? {
+        Some(handle) => Ok(handle),
+        None => anyhow::bail!("timed out acquiring named mutex {name:?} after {timeout:?}"),
     }
 }
 
@@ -399,6 +422,17 @@ impl HostVmLock {
             owned: true,
         })
     }
+
+    /// Try to acquire the host VM-slot mutex. `Ok(None)` means it is held by
+    /// another VM owner ("busy"); `Err` is a real create/wait failure, not busy.
+    pub fn try_acquire(timeout: std::time::Duration) -> Result<Option<Self>> {
+        Ok(
+            named_mutex_try_acquire(HOST_VM_MUTEX_NAME, timeout)?.map(|handle| Self {
+                handle,
+                owned: true,
+            }),
+        )
+    }
 }
 
 #[cfg(windows)]
@@ -416,5 +450,55 @@ pub struct HostVmLock;
 impl HostVmLock {
     pub fn acquire(_timeout: std::time::Duration) -> Result<Self> {
         Ok(Self)
+    }
+
+    pub fn try_acquire(_timeout: std::time::Duration) -> Result<Option<Self>> {
+        Ok(Some(Self))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_mutex_try_acquire_reports_contention_as_none_not_err() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Unique name per run so the test never collides with a real host VM
+        // mutex or a concurrent test run.
+        let name = format!("Local\\mxc-test-mutex-{}", uuid::Uuid::new_v4());
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+
+        // A separate thread must own the mutex: a named mutex is recursive per
+        // thread, so the same thread could re-acquire it without contending.
+        let holder_name = name.clone();
+        let holder = std::thread::spawn(move || {
+            let handle = named_mutex_try_acquire(&holder_name, Duration::from_secs(5))
+                .expect("holder: create should succeed")
+                .expect("holder: should acquire the free mutex");
+            held_tx.send(()).unwrap();
+            release_rx.recv().ok();
+            named_mutex_release(handle, true);
+        });
+
+        held_rx.recv().expect("holder should signal ownership");
+
+        // The mutex is genuinely held elsewhere: contention must be Ok(None)
+        // (busy), never Err. Err is reserved for real create/wait failures.
+        let contended = named_mutex_try_acquire(&name, Duration::from_millis(50))
+            .expect("a contended acquire must not error");
+        assert!(contended.is_none(), "expected None (busy), got a handle");
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // Once released, a fresh try must succeed (Ok(Some)).
+        let reacquired = named_mutex_try_acquire(&name, Duration::from_secs(5))
+            .expect("create should succeed")
+            .expect("mutex should be free after the holder released it");
+        named_mutex_release(reacquired, true);
     }
 }
