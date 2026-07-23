@@ -1,12 +1,22 @@
-//! Walks a sequence of WinEvent records produced by the permissive
-//! learning-mode trace and returns the file-access events that survived
-//! filtering.
+//! Port of `event_dacl_parser.ps1`.
 //!
-//! This PR introduces filesystem extraction only. Capability extraction
-//! (`EventID=14` DACL ACE blobs) lands in a later PR; UI relaxation
-//! (`EventID=27`) lands in a later PR. `requested_capabilities` is
-//! exposed today as an always-empty placeholder so call-sites in
-//! `stop`/`log` can stay stable.
+//! Walks a sequence of WinEvent records produced by the permissive
+//! learning-mode trace and returns:
+//!   - `valid_access_events`: file-access events that survived filtering.
+//!   - `requested_capabilities`: capability names extracted from each
+//!     event's DACL ACE blob via `extract_caps`.
+//!   - `need_ui`: true if any `CONVERT_TO_GUI` violation was observed.
+//!   - `ui_operation_flags`: OR of `Detail` bits from every
+//!     `UI_OPERATION` violation.
+//!
+//! The two event-type decoders live in sibling modules:
+//!   - `crate::access_failure` — `EventID=14` (access failure)
+//!   - `crate::ui_violation`   — `EventID=27` (UI violation)
+//!
+//! This module owns the shared scaffolding: the ETW walker
+//! (`for_each_event_xml` / `render_event_xml`), the per-event XML
+//! decoder (`parse_event_xml` -> `ParsedEvent`), and the mutable
+//! accumulator (`ParseAccumulator`) that the two decoders write into.
 
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
@@ -56,16 +66,28 @@ impl Drop for EvtHandleOwned {
 
 pub struct ParseResult {
     pub valid_access_events: Vec<LearningModeAccessEvent>,
-    /// Placeholder for the capability-extraction PR. Always empty in
-    /// this PR; the field exists today so `stop`/`log` call-sites stay
-    /// stable across the split.
     pub requested_capabilities: HashSet<String>,
+    /// True when at least one `CONVERT_TO_GUI` violation was observed.
+    /// Drives `set_ui_subsystem_enabled` (flips `ui.disable` to `false`).
+    pub need_ui: bool,
+    /// Total number of EventID=27 records observed, regardless of category.
+    pub ui_event_count: u32,
+    pub ui_events: Vec<crate::ui_limits::UiEvent>,
+    /// OR of the `Detail` values from every `UI_OPERATION` violation.
+    /// Each bit is one of the `JOB_OBJECT_UILIMIT_*` constants and
+    /// indicates the specific UI limit the contained process tripped.
+    pub ui_operation_flags: u32,
 }
 
 impl ParseResult {
     /// True when the trace produced nothing mergeable into a config.
+    /// `stop::run` uses this to skip the adjusted-config write rather
+    /// than emit a file identical to the input.
     pub fn is_empty(&self) -> bool {
-        self.valid_access_events.is_empty() && self.requested_capabilities.is_empty()
+        self.valid_access_events.is_empty()
+            && self.requested_capabilities.is_empty()
+            && !self.need_ui
+            && self.ui_operation_flags == 0
     }
 }
 
@@ -429,13 +451,16 @@ fn render_event_xml(event: EVT_HANDLE, buf: &mut Vec<u16>) -> Result<String> {
     Ok(String::from_utf16_lossy(trimmed))
 }
 
-/// Decoded XML view of a single event's interesting fields.
+/// Decoded XML view of a single event's interesting fields. Shared
+/// across both event-type decoders.
 pub(crate) struct ParsedEvent {
     pub(crate) event_id: u32,
     pub(crate) time_created: DateTime<Utc>,
     pub(crate) process_id: u32,
     pub(crate) thread_id: u32,
     /// EventData/Data values in document order. May be Data or ComplexData.
+    /// For Data nodes this is the inner text; for ComplexData this is
+    /// also the inner text (concatenated hex-encoded blob).
     pub(crate) event_data: Vec<String>,
     /// Index into `event_data` of the 5th `<ComplexData>` sibling (the
     /// DACL ACE blob on `EventID=14` access events). `None` if fewer
@@ -443,6 +468,14 @@ pub(crate) struct ParsedEvent {
     /// rather than cloned to avoid a second `String` allocation of the
     /// largest per-event field.
     pub(crate) complex_data_4_idx: Option<usize>,
+    /// EventData/Data entries paired with their `Name` attribute (when
+    /// set), in document order. Used for events whose schema is
+    /// resolved at render time (`EventID=27` with provider manifest).
+    pub(crate) event_data_named: Vec<(String, String)>,
+    /// Hex-encoded `<ProcessingErrorData><EventPayload>` body for
+    /// events whose manifest schema can't be resolved at render time.
+    /// UI injection events are commonly delivered this way.
+    pub(crate) processing_error_payload: Option<String>,
 }
 
 pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
@@ -491,7 +524,9 @@ pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
         process_id: acc.process_id,
         thread_id: acc.thread_id,
         event_data: acc.event_data,
+        event_data_named: acc.event_data_named,
         complex_data_4_idx: acc.complex_data_4_idx,
+        processing_error_payload: acc.processing_error_payload,
     })
 }
 
@@ -500,7 +535,11 @@ pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 /// never captured here.
 enum Capture {
     EventId,
-    Data { is_complex: bool },
+    Payload,
+    Data {
+        is_complex: bool,
+        name: Option<String>,
+    },
 }
 
 /// Streaming replacement for the former per-event roxmltree DOM. Walks
@@ -515,21 +554,26 @@ struct StreamAcc {
     saw_system: bool,
     in_system: bool,
     in_event_data: bool,
+    in_processing_error: bool,
     // `seen_*` guards reproduce roxmltree's `find(..)` first-match
-    // semantics: a second `<EventID>`/`<TimeCreated>`/`<Execution>`
-    // must not overwrite the first, even when the first failed to parse.
+    // semantics: a second `<EventID>`/`<TimeCreated>`/`<Execution>`/
+    // `<EventPayload>` must not overwrite the first, even when the first
+    // failed to parse.
     seen_event_id: bool,
     seen_time_created: bool,
     seen_execution: bool,
+    seen_payload: bool,
     event_id: u32,
     time_created: Option<DateTime<Utc>>,
     process_id: u32,
     thread_id: u32,
     event_data: Vec<String>,
+    event_data_named: Vec<(String, String)>,
     // Position of the 5th `<ComplexData>` sibling (the DACL ACE blob),
     // tracked instead of cloning that multi-KB text a second time.
     complex_data_4_idx: Option<usize>,
     complex_index: usize,
+    processing_error_payload: Option<String>,
     capture: Option<(Capture, String)>,
 }
 
@@ -546,6 +590,11 @@ impl StreamAcc {
             b"EventData" => {
                 if !is_empty {
                     self.in_event_data = true;
+                }
+            }
+            b"ProcessingErrorData" => {
+                if !is_empty {
+                    self.in_processing_error = true;
                 }
             }
             b"EventID" if self.in_system && !self.seen_event_id => {
@@ -576,11 +625,26 @@ impl StreamAcc {
             }
             b"Data" | b"ComplexData" if self.in_event_data => {
                 let is_complex = name.local_name().as_ref() == b"ComplexData";
-                if is_empty {
-                    self.finish_data(is_complex, String::new());
+                // `Name` is only consumed by the UI-event path; skip the
+                // attribute scan + clone for every other event.
+                let name = if self.event_id == EVENT_ID_UI_VIOLATION {
+                    attr_value(e, b"Name")
                 } else {
-                    self.capture = Some((Capture::Data { is_complex }, String::new()));
+                    None
+                };
+                if is_empty {
+                    self.finish_data(is_complex, name, String::new());
+                } else {
+                    self.capture = Some((Capture::Data { is_complex, name }, String::new()));
                 }
+            }
+            b"EventPayload" if self.in_processing_error && !self.seen_payload => {
+                self.seen_payload = true;
+                if !is_empty {
+                    self.capture = Some((Capture::Payload, String::new()));
+                }
+                // Empty `<EventPayload/>` -> empty text -> filtered to
+                // `None`, which is already the default.
             }
             _ => {}
         }
@@ -596,11 +660,13 @@ impl StreamAcc {
         match local {
             b"System" => self.in_system = false,
             b"EventData" => self.in_event_data = false,
+            b"ProcessingErrorData" => self.in_processing_error = false,
             _ => {}
         }
         let matches = matches!(
             (&self.capture, local),
             (Some((Capture::EventId, _)), b"EventID")
+                | (Some((Capture::Payload, _)), b"EventPayload")
                 | (Some((Capture::Data { .. }, _)), b"Data" | b"ComplexData")
         );
         if !matches {
@@ -609,11 +675,20 @@ impl StreamAcc {
         let (kind, text) = self.capture.take().unwrap();
         match kind {
             Capture::EventId => self.event_id = text.parse::<u32>().unwrap_or(0),
-            Capture::Data { is_complex } => self.finish_data(is_complex, text),
+            Capture::Payload => {
+                if !text.trim().is_empty() {
+                    self.processing_error_payload = Some(text);
+                }
+            }
+            Capture::Data { is_complex, name } => self.finish_data(is_complex, name, text),
         }
     }
 
-    fn finish_data(&mut self, is_complex: bool, text: String) {
+    fn finish_data(&mut self, is_complex: bool, name: Option<String>, text: String) {
+        if let Some(name) = name {
+            // Clone only when we actually emit the named entry.
+            self.event_data_named.push((name, text.clone()));
+        }
         let pushed_idx = self.event_data.len();
         self.event_data.push(text);
         if is_complex {
@@ -634,9 +709,9 @@ fn attr_value(e: &BytesStart<'_>, name: &[u8]) -> Option<String> {
         .map(|v| v.into_owned())
 }
 
-/// Mutable per-trace accumulator. Fields are `pub(crate)` so the
-/// sibling event-type decoders can write into them directly without an
-/// inflated method surface.
+/// Mutable per-trace accumulator. Shared across the EventID=14 and
+/// EventID=27 decoders; fields are `pub(crate)` so the sibling modules
+/// can write into them directly without an inflated method surface.
 pub(crate) struct ParseAccumulator {
     /// Cached lowercase form of the trace's current directory with
     /// trailing `\\` trimmed (computed once at construction so the hot
@@ -666,6 +741,10 @@ pub(crate) struct ParseAccumulator {
     /// rather than aborting the trace, but the running total is surfaced
     /// at the end of a parse so silent data loss is observable.
     pub(crate) parse_failures: usize,
+    pub(crate) need_ui: bool,
+    pub(crate) ui_event_count: u32,
+    pub(crate) ui_events: Vec<crate::ui_limits::UiEvent>,
+    pub(crate) ui_operation_flags: u32,
     // Capability table is retained for tests/diagnostics that want to
     // inspect the source; per-event resolution always goes through
     // `capability_index` to avoid the O(table_size) HashMap rebuild
@@ -714,6 +793,10 @@ impl ParseAccumulator {
             access_event_index: HashMap::new(),
             requested_capabilities: HashSet::new(),
             parse_failures: 0,
+            need_ui: false,
+            ui_event_count: 0,
+            ui_events: Vec::new(),
+            ui_operation_flags: 0,
             capability_table,
             capability_index,
         }
@@ -721,7 +804,8 @@ impl ParseAccumulator {
 
     /// Hot-path CWD / drive-letter filter for access events. Uses
     /// precomputed lowercase forms of `current_directory` to avoid two
-    /// `String` allocs per event.
+    /// `String` allocs per event. Logic must stay in sync with the free
+    /// `crate::access_failure::is_skippable` used by unit tests.
     pub(crate) fn is_skippable(&self, file_path: &str) -> bool {
         if let (Some(cwd_lowercase), cwd_prefix) = (&self.cwd_lc_trimmed, &self.cwd_lc_prefix) {
             let normalized_path = file_path.trim_end_matches('\\');
@@ -768,11 +852,9 @@ impl ParseAccumulator {
         false
     }
 
-    /// Per-event entry point. Decodes the XML, dispatches by event id,
-    /// and silently swallows malformed records (so a bad event mid-trace
-    /// doesn't abort the rest). EventID=27 (UI violation) is recognized
-    /// by the XPath filter today but contributes no relaxation until the
-    /// UI-policy PR.
+    /// Per-event entry point. Decodes the XML, dispatches by event id
+    /// to the matching sibling module, and silently swallows malformed
+    /// records (so a bad event mid-trace doesn't abort the rest).
     fn consume(&mut self, xml: &str) {
         let Some(ev) = parse_event_xml(xml) else {
             self.parse_failures += 1;
@@ -782,11 +864,11 @@ impl ParseAccumulator {
             return;
         };
         match ev.event_id {
-            EVENT_ID_ACCESS_FAILURE => crate::access_failure::consume_access_failure(self, ev),
-            EVENT_ID_UI_VIOLATION => {
-                // UI-violation dispatch arrives in a later PR.
-            }
-            _ => {}
+            EVENT_ID_UI_VIOLATION => crate::ui_violation::consume_ui_violation(self, ev),
+            // EventID=14 is the only other id the XPath filter admits;
+            // any other id reaches here only via the fixture-test seam
+            // and we treat it as a (silently-rejected) access event.
+            _ => crate::access_failure::consume_access_failure(self, ev),
         }
     }
 
@@ -800,6 +882,10 @@ impl ParseAccumulator {
         ParseResult {
             valid_access_events: self.valid_access_events,
             requested_capabilities: self.requested_capabilities,
+            need_ui: self.need_ui,
+            ui_event_count: self.ui_event_count,
+            ui_events: self.ui_events,
+            ui_operation_flags: self.ui_operation_flags,
         }
     }
 }
@@ -812,8 +898,8 @@ pub fn parse_events(
 ) -> Result<ParseResult> {
     // Build the capability table once. Each entry requires a
     // `DeriveCapabilitySidsFromName` syscall + LocalAlloc/LocalFree
-    // pair; the table is process-static so doing this per-event would
-    // dominate wall-time on large traces.
+    // pair; the table is process-static so doing this per-event (the
+    // previous behavior) dominated wall-time on large traces.
     let capability_table = extract_caps::build_capability_table();
     let mut acc = ParseAccumulator::new(current_directory, verbose, capability_table);
     for_each_event_xml(trace_file, verbose, |xml| {
@@ -825,8 +911,10 @@ pub fn parse_events(
 
 /// Fixture-test seam: drive the same per-event accumulator
 /// `parse_events` uses, but pull XML strings from an iterator rather
-/// than a live ETW session. Pass an empty `capability_table` when ACE
-/// matching isn't under test.
+/// than a live ETW session. Lets tests exercise the full pipeline with
+/// canned XML strings (no `.etl` file, no `DeriveCapabilitySidsFromName`
+/// round-trip — pass an empty capability table when ACE matching isn't
+/// under test).
 pub fn parse_events_from_xml<I, S>(
     xmls: I,
     current_directory: Option<&str>,
@@ -848,7 +936,12 @@ where
 mod tests {
     use super::*;
     use crate::access_failure::{make_event_xml, FILE_PATH_INDEX};
+    use crate::ui_limits::{JOB_OBJECT_UILIMIT_WRITECLIPBOARD, UI_OPERATION};
+    use crate::ui_violation::make_ui_event_xml;
 
+    // EventData property indexes are owned by `access_failure`; this
+    // test only references `FILE_PATH_INDEX` (index 2) for parity with
+    // the historical assertion.
     const ACCESS_MASK_INDEX: usize = 5;
 
     #[test]
@@ -883,14 +976,44 @@ mod tests {
         assert!(parse_event_xml("<not-an-event/>").is_none());
     }
 
+    /// `parse_events` (the live entry point that drives `EvtQuery`
+    /// against a real `.etl`) can't run from unit tests, but the
+    /// per-event accumulator it feeds is shared with
+    /// `parse_events_from_xml`. Cover a heterogeneous mixed stream —
+    /// multiple access events, a UI event, a malformed record in the
+    /// middle, and a CWD-filtered noise event — so any regression in
+    /// the mixed-stream dispatch (event-id routing,
+    /// continue-on-malformed, CWD filter) surfaces from `cargo test`.
     #[test]
-    fn parse_events_from_xml_drives_access_failure_dispatch() {
-        // Single fs-only event; ensure the dispatcher runs and the
-        // event is collected.
-        let xml = make_event_xml("C:\\app\\foo.txt", "0x1");
-        let result = parse_events_from_xml(vec![xml], None, false, Vec::new());
-        assert_eq!(result.valid_access_events.len(), 1);
-        assert_eq!(result.valid_access_events[0].file_path, "C:\\app\\foo.txt");
+    fn parse_events_from_xml_mixed_stream_integration() {
+        let xmls: Vec<String> = vec![
+            make_event_xml("C:\\Workdir\\real_target.txt", "0x1"),
+            "<not-an-event/>".to_string(),
+            // CWD-filtered noise: under the supplied cwd, must be skipped.
+            make_event_xml("C:\\Repo\\src\\test_scaffold.rs", "0x1"),
+            make_event_xml("C:\\Workdir\\other.txt", "0x2"),
+            make_ui_event_xml(UI_OPERATION, JOB_OBJECT_UILIMIT_WRITECLIPBOARD),
+        ];
+        let result = parse_events_from_xml(xmls.iter(), Some("C:\\Repo"), false, Vec::new());
+
+        assert_eq!(
+            result.valid_access_events.len(),
+            2,
+            "expected exactly two valid access events (the other two were \
+             malformed and cwd-filtered respectively)"
+        );
+        assert_eq!(result.ui_event_count, 1);
+        assert_eq!(result.ui_operation_flags, JOB_OBJECT_UILIMIT_WRITECLIPBOARD);
+        assert!(!result.need_ui);
+
+        assert_eq!(
+            result.valid_access_events[0].file_path,
+            "C:\\Workdir\\real_target.txt"
+        );
+        assert_eq!(
+            result.valid_access_events[1].file_path,
+            "C:\\Workdir\\other.txt"
+        );
     }
 }
 
