@@ -144,6 +144,7 @@ fn build_request_host_rules_require_outbound() {
             allowed_hosts: vec!["example.com".to_string()],
             blocked_hosts: vec![],
             proxy: None,
+            ..Default::default()
         }),
         ui: None,
         timeout_ms: None,

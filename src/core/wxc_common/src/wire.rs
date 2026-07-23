@@ -273,18 +273,115 @@ pub struct Fallback {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Network {
-    /// Default outbound policy when no host rule matches.
+    /// Default outbound policy when no host rule matches (legacy schema).
     pub default_policy: Option<NetworkPolicy>,
     /// How the policy is enforced.
     pub enforcement_mode: Option<NetworkEnforcement>,
-    /// Allow binding/listening on local IPs and accepting inbound connections.
+    /// Allow binding/listening on local IPs and accepting inbound connections (legacy schema).
     pub allow_local_network: Option<bool>,
-    /// Hosts explicitly allowed.
+    /// Hosts explicitly allowed (legacy schema).
     pub allowed_hosts: Option<Vec<String>>,
-    /// Hosts explicitly blocked.
+    /// Hosts explicitly blocked (legacy schema).
     pub blocked_hosts: Option<Vec<String>>,
-    /// Proxy configuration (one of localhost / builtinTestServer / url).
+    /// GA outbound policy rules.
+    pub egress: Option<NetworkEgress>,
+    /// GA inbound policy.
+    pub ingress: Option<NetworkIngress>,
+    /// Proxy configuration (legacy localhost / builtinTestServer / url, or GA http).
     pub proxy: Option<Proxy>,
+}
+
+/// GA outbound policy rule set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkEgress {
+    /// Rules that allow matching outbound connections.
+    #[serde(default)]
+    pub allow: Vec<EgressRuleWire>,
+    /// Rules that deny matching outbound connections.
+    #[serde(default)]
+    pub deny: Vec<EgressRuleWire>,
+    /// Default outbound action when no egress rule matches (`allow` or `deny`).
+    /// When omitted, defaults to `deny` (fail-closed). Setting `default: "allow"`
+    /// expresses the "allow everything except this deny-list" model; when GA
+    /// egress is present it supersedes the legacy `defaultPolicy`.
+    #[serde(rename = "default")]
+    pub default_action: Option<EgressDefault>,
+}
+
+/// GA egress default outbound action applied when no egress rule matches.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum EgressDefault {
+    Allow,
+    Deny,
+}
+
+/// GA outbound policy rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressRuleWire {
+    /// Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
+    pub to: Vec<EgressDestinationWire>,
+    /// Destination ports and protocols. When omitted or empty, the rule matches
+    /// all ports and all protocols to the listed destinations.
+    #[serde(default)]
+    pub ports: Vec<EgressPortWire>,
+}
+
+/// GA outbound destination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressDestinationWire {
+    /// IPv4/IPv6 CIDR range, or a bare IP address.
+    pub cidr: String,
+}
+
+/// GA outbound port selector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressPortWire {
+    /// Transport protocol.
+    pub protocol: NetworkProtocol,
+    /// Destination port. Must be omitted for `icmp` (which has no ports); the
+    /// parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp`
+    /// the selector matches all ports for that protocol.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
+    pub port: Option<u16>,
+}
+
+/// GA outbound transport protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+/// GA inbound policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkIngress {
+    /// Whether host loopback can connect inbound to the sandbox.
+    #[serde(rename = "hostLoopback")]
+    pub host_loopback: Option<HostLoopbackPolicy>,
+}
+
+/// Host loopback ingress policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum HostLoopbackPolicy {
+    Allow,
+    Deny,
 }
 
 /// Default network policy.
@@ -321,6 +418,8 @@ pub struct Proxy {
     pub builtin_test_server: Option<bool>,
     /// Proxy URL (parsed into host:port).
     pub url: Option<String>,
+    /// GA HTTP proxy URL (parsed into host:port).
+    pub http: Option<String>,
 }
 
 /// Cross-platform UI isolation policy.
