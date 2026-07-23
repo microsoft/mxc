@@ -50,11 +50,10 @@ Stops the active trace (or accepts a previously captured one).
 
 ```powershell
 plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
-             [--adjusted-config-path <path>] [--trace-file <path>]
-             [--verbose-logging]
+             [--trace-file <path>] [--verbose-logging]
 ```
 
-`--config-path` drives an in-memory filesystem merge against the input config; the `Adjusted_*.json` writer that persists it arrives in the config-generation PR. `--adjusted-config-path` is accepted today so `wxc-exec --audit` can pass it through.
+`--config-path` drives an in-memory filesystem merge against the input config and persists the result as `Adjusted_<name>.json` in the log directory. The adjusted config is written next to the operator's config snapshot in `--log-dir`; there is deliberately no flag to redirect it to an arbitrary path, because `plm.exe` runs elevated and an operator-named output path would be an admin-privileged arbitrary-write primitive. The write is atomic (temp file in the same directory, then rename over the destination) so a downstream enforcing run never observes a truncated policy.
 
 ### `plm log`
 
@@ -80,6 +79,7 @@ The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`); on
 ## Limitations
 
 - **Windows-only.** Uses `wpr.exe` and Job-Object UI-limit semantics that have no portable equivalent.
+- **Deny matching is enforced on literal, lexically-normalized paths only.** `config::normalize_path` strips verbatim/device prefixes, lowercases, collapses separators, and rejects ADS / `.` / `..`, but it is filesystem-free and does **not** resolve directory junctions, symlinks/reparse points, or 8.3 short names. 8.3 short-name aliases of a denied directory are detected lexically and refused promotion (fail-closed), but a junction/symlink alias (e.g. `C:\work\link` → `C:\Secrets`) is a lexically distinct path that will **not** match a deny entry and can therefore be promoted into the persisted `Adjusted_*.json`. Operators must deny the canonical target path; aliasing the target through a reparse point is a known gap. See the deny-matching code in `src/config.rs`.
 - **No capability or UI extraction yet.** `plm stop` writes `Adjusted_<name>.json` with the discovered file paths only. Capability extraction (`EventID=14` DACL ACE blobs) and UI-policy extraction (`EventID=27`) arrive in subsequent PRs.
 
 ## See also
