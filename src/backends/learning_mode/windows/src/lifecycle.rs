@@ -37,6 +37,7 @@ use crate::LearningModeError;
 /// [`CaptureSession::environment`]; seal and tear down with [`CaptureSession::finish`].
 /// Dropping without `finish` discards the trace and closes the environment on a
 /// best-effort basis.
+#[derive(Debug)]
 pub struct CaptureSession {
     secenv_api: SecurityEnvironmentApi,
     learning_mode_api: LearningModeApi,

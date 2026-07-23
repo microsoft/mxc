@@ -74,6 +74,15 @@ pub enum LearningModeError {
         code: u32,
     },
 
+    /// A caller-provided value cannot be represented safely for the API call.
+    #[error("invalid {parameter}: {detail}")]
+    InvalidInput {
+        /// The invalid parameter.
+        parameter: &'static str,
+        /// Why the value is invalid.
+        detail: String,
+    },
+
     /// A primary operation failed and the subsequent cleanup operation also failed.
     #[error("{primary}; cleanup also failed: {cleanup}")]
     CleanupFailed {

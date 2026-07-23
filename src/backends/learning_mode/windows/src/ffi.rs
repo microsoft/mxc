@@ -133,22 +133,38 @@ impl LearningModeApi {
     /// The handle is consumed; the export nulls it internally on return.
     ///
     /// # Errors
-    /// [`LearningModeError::ApiCall`] carrying `GetLastError` if the export returns
-    /// `FALSE`.
+    /// - [`LearningModeError::InvalidInput`] if `output_path` contains an embedded NUL.
+    /// - [`LearningModeError::ApiCall`] carrying `GetLastError` if the export returns
+    ///   `FALSE`.
+    /// - [`LearningModeError::CleanupFailed`] if rejecting an invalid path also fails
+    ///   to discard the live trace.
     pub fn stop_trace(
         &self,
         trace: LearningModeTraceHandle,
         output_path: Option<&Path>,
     ) -> Result<(), LearningModeError> {
-        // Encode the path losslessly: `encode_wide` preserves non-Unicode path data that
-        // `to_string_lossy` would replace, so the ETL lands at exactly the requested path.
-        let wide_path = output_path.map(|p| {
-            p.as_os_str()
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect::<Vec<u16>>()
-        });
-        let path_ptr = wide_path.as_ref().map_or(ptr::null(), |w| w.as_ptr());
+        let wide_path = match encode_output_path(output_path) {
+            Ok(path) => path,
+            Err(primary) => {
+                let cleanup = self.stop_trace_encoded(trace, None);
+                return match cleanup {
+                    Ok(()) => Err(primary),
+                    Err(cleanup) => Err(LearningModeError::CleanupFailed {
+                        primary: Box::new(primary),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
+        };
+        self.stop_trace_encoded(trace, wide_path.as_deref())
+    }
+
+    fn stop_trace_encoded(
+        &self,
+        trace: LearningModeTraceHandle,
+        wide_path: Option<&[u16]>,
+    ) -> Result<(), LearningModeError> {
+        let path_ptr = wide_path.map_or(ptr::null(), |path| path.as_ptr());
         let mut handle = trace.0;
 
         // SAFETY: `self.stop` was resolved from `processmodel.dll` and matches the
@@ -164,6 +180,24 @@ impl LearningModeApi {
         }
         Ok(())
     }
+}
+
+fn encode_output_path(output_path: Option<&Path>) -> Result<Option<Vec<u16>>, LearningModeError> {
+    output_path
+        .map(|path| {
+            // `encode_wide` preserves non-Unicode path data that `to_string_lossy`
+            // would replace, so the ETL lands at exactly the requested path.
+            let mut wide = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+            if wide.contains(&0) {
+                return Err(LearningModeError::InvalidInput {
+                    parameter: "output_path",
+                    detail: "path contains an embedded NUL".to_string(),
+                });
+            }
+            wide.push(0);
+            Ok(wide)
+        })
+        .transpose()
 }
 
 /// Resolve a single export from an already-loaded module, mapping a missing symbol
@@ -207,6 +241,9 @@ pub fn is_learning_mode_api_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
 
     #[test]
     fn probe_does_not_panic_and_matches_load() {
@@ -237,5 +274,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn output_path_rejects_embedded_nul() {
+        let path = PathBuf::from(OsString::from_wide(&['a' as u16, 0, 'b' as u16]));
+
+        let error = encode_output_path(Some(&path)).expect_err("embedded NUL must be rejected");
+
+        assert!(matches!(
+            error,
+            LearningModeError::InvalidInput {
+                parameter: "output_path",
+                ..
+            }
+        ));
     }
 }
