@@ -275,6 +275,37 @@ and no `allowedHosts` / `blockedHosts`: the container must have outbound
 networking to reach the proxy, and host lists are not forwarded to it — configs
 that combine the proxy with a `block` default or host lists are **rejected**.
 
+### Per-host filtering is not supported
+
+WSLC **cannot** enforce per-host egress filtering. `allowedHosts` with
+`defaultPolicy: "block"` (an allowlist) or `blockedHosts` with
+`defaultPolicy: "allow"` (a blocklist) would require in-container `iptables`
+rules, but a WSLC container runs in its own network namespace **without**
+`CAP_NET_ADMIN` (the SDK's `Privileged` flag does not grant it), so those rules
+cannot be applied. Rather than fail the run at exec time, such configs are
+**rejected at config-parse time**:
+
+```
+WSLc: per-host egress filtering (allowedHosts with defaultPolicy='block', or
+blockedHosts with defaultPolicy='allow') is not supported. ...
+```
+
+Use `network.proxy` (with `defaultPolicy: "allow"`) for cooperative host
+filtering at the proxy layer, or remove the host lists. The bare
+`defaultPolicy` forms with **no** host lists remain supported: `"block"` is a
+full network cutoff and `"allow"` is full outbound (NAT).
+
+### Inbound: `allowLocalNetwork` is not supported
+
+`network.allowLocalNetwork: true` (a blanket grant to bind/listen and accept
+inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
+container runs in the NAT'd WSL2 VM and MXC does not honor a blanket
+inbound-listen grant — only explicit host→container forwards via
+`experimental.wslc` `portMappings` have any inbound effect, so accepting the
+flag would silently promise reachability the backend never delivers. Expose
+specific ports with `portMappings` instead. (`allowLocalNetwork: false`, the
+default, is a no-op and is accepted.)
+
 **Caveats**
 
 - **Cooperative model, not enforcement.** Only clients that honor the proxy

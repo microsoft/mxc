@@ -942,6 +942,46 @@ enforced; access denials are recorded for diagnostics.\n",
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
+        // WSLc cannot enforce per-host egress filtering: the runner would run
+        // iptables inside the container, but its Privileged flag does not grant
+        // CAP_NET_ADMIN, so the run aborts at exec. Reject up front instead.
+        // Mirrors the runner's `needs_host_filtering` (a 'block' default with an
+        // allowlist, or an 'allow' default with a blocklist); bare defaults with
+        // no host lists (full cutoff / full NAT) are enforceable and left as-is.
+        if containment == ContainmentBackend::Wslc {
+            let is_default_block = policy.default_network_policy == NetworkPolicy::Block;
+            let needs_host_filtering = if is_default_block {
+                !policy.allowed_hosts.is_empty()
+            } else {
+                !policy.blocked_hosts.is_empty()
+            };
+            if needs_host_filtering {
+                let msg = "WSLc: per-host egress filtering (allowedHosts with \
+                           defaultPolicy='block', or blockedHosts with \
+                           defaultPolicy='allow') is not supported. A WSLc container runs \
+                           in its own network namespace without CAP_NET_ADMIN, so \
+                           in-container iptables enforcement cannot be applied. Use \
+                           network.proxy (defaultPolicy='allow') for cooperative host \
+                           filtering, or remove the host lists.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // WSLc cannot honor a blanket inbound-listen grant. The runner only
+            // wires explicit host->container port forwards (experimental.wslc
+            // portMappings) into the WSL2 VM's NAT; it never consults
+            // allowLocalNetwork. Reject `true` and point at portMappings.
+            // (`false` is the default and a no-op.)
+            if policy.allow_local_network {
+                let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
+                           container runs in the NAT'd WSL2 VM and MXC does not honor a \
+                           blanket inbound-listen grant; expose specific ports with \
+                           experimental.wslc portMappings instead.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+        }
+
         // Bubblewrap is unprivileged by design; iptables-based enforcement
         // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
         // privilege story. Reject the combination explicitly.
@@ -3191,6 +3231,124 @@ mod tests {
             format!("{err}").contains("allowedHosts/blockedHosts"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn wslc_rejects_host_filtering_block_with_allowed_hosts() {
+        // 'block' default + an allowlist is the doomed in-container iptables path
+        // (Privileged != CAP_NET_ADMIN). Reject at parse time instead of failing
+        // the run at exec.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_host_filtering_allow_with_blocked_hosts() {
+        // 'allow' default + a blocklist is the other in-container iptables path.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_block_default_without_host_lists() {
+        // 'block' with no allowlist is a full cutoff (NetworkingMode::None) --
+        // enforceable, so it must NOT be rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        assert!(req.policy.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_accepts_allow_default_without_host_lists() {
+        // 'allow' with no blocklist is full NAT (Bridged) -- enforceable, not rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "allow"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+        assert!(req.policy.blocked_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_rejects_allow_local_network_true() {
+        // A blanket inbound-listen grant is silently ignored by the WSLc runner
+        // (only explicit portMappings have inbound effect), so accepting it would
+        // promise reachability the backend never delivers. Reject at parse time.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowLocalNetwork=true is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_allow_local_network_false() {
+        // The default/explicit `false` is a no-op and must be accepted.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": false}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
     }
 
     #[test]
