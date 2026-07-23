@@ -12,7 +12,8 @@ schema-gen = ["dep:schemars"]
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }

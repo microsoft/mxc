@@ -438,6 +438,16 @@ HRESULT EnumerateSandboxSpecVersionInfo(
 
 Negotiation failures are **typed and actionable** — never a silent fallback:
 
+- **JSON and policy-shape failures** distinguish malformed JSON syntax from
+  valid JSON that does not match the typed wire contract. Typed failures name
+  the full policy path (for example, `network.proxy.localhost`), retain Serde's
+  expected type/value information, and include source line/column when parsing
+  directly from request text. State-aware per-backend configuration errors are
+  prefixed with their full `experimental.<backend>.<phase>` location. Diagnostic
+  text escapes control characters, and errors at secret-bearing paths redact the
+  submitted value. After the root JSON value, only whitespace is accepted;
+  trailing JSON values or other trailing content are rejected as malformed
+  syntax.
 - **Schema-range failures** (Stage 1) carry a clear "older than supported" /
   "newer than supported" message telling the caller whether to update the config
   or upgrade `wxc-exec`.

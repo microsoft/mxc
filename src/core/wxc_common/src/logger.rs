@@ -232,6 +232,12 @@ impl Logger {
                 self.buffer.push('\n');
             }
         }
+        self.log_diagnostic_line(msg);
+    }
+
+    /// Write a complete line only to configured auxiliary diagnostic sinks,
+    /// without duplicating it in the primary console/buffer output.
+    pub fn log_diagnostic_line(&mut self, msg: &str) {
         if let Some(ref mut f) = self.file {
             let secs = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
