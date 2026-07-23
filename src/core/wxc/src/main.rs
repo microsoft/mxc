@@ -489,9 +489,6 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
-/// same install directory. Returns `None` when the current exe path
-/// can't be resolved.
 #[cfg(target_os = "windows")]
 use audit::{
     cancel_active_audit_trace, mark_audit_active, release_audit_singleton, run_plm_command,
