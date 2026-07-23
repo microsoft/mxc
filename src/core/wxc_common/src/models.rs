@@ -378,6 +378,52 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleAction {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EgressRule {
+    /// IP or CIDR destinations, split by backend into IPv4 and IPv6 rules.
+    pub destinations: Vec<String>,
+    /// Destination ports. Empty means all ports.
+    pub ports: Vec<u16>,
+    /// IP protocols. Empty means all protocols.
+    pub protocols: Vec<Protocol>,
+    /// Whether matching traffic is allowed or denied. A rule deserialized with
+    /// a missing `action` defaults to [`RuleAction::Deny`] (fail-closed), so an
+    /// under-specified egress rule cannot silently widen access.
+    pub action: RuleAction,
+}
+
+impl Default for EgressRule {
+    fn default() -> Self {
+        // Fail closed: an egress rule with an unspecified action denies rather
+        // than allows. `EgressRule` is `#[serde(default)]`, so a rule
+        // deserialized without an `action` inherits this default; defaulting to
+        // Allow would silently turn an under-specified security policy into an
+        // ACCEPT, which is the wrong direction for a containment boundary.
+        Self {
+            destinations: Vec::new(),
+            ports: Vec::new(),
+            protocols: Vec::new(),
+            action: RuleAction::Deny,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProxyAddress {
     pub address: String,
@@ -550,6 +596,7 @@ pub struct ContainerPolicy {
     pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
+    pub egress_rules: Vec<EgressRule>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
     /// Cross-platform UI policy.
@@ -872,5 +919,20 @@ mod tests {
             IsolationSessionConfigurationId::Medium
         );
         assert!(parsed.user.is_some());
+    }
+
+    #[test]
+    fn egress_rule_default_action_is_deny() {
+        // Security invariant: an unspecified action must fail closed.
+        assert_eq!(EgressRule::default().action, RuleAction::Deny);
+    }
+
+    #[test]
+    fn egress_rule_missing_action_deserializes_to_deny() {
+        // `#[serde(default)]` fills a missing `action` from `EgressRule::default`,
+        // so an under-specified rule denies rather than silently allowing.
+        let rule: EgressRule =
+            serde_json::from_value(json!({ "destinations": ["10.0.0.1"] })).unwrap();
+        assert_eq!(rule.action, RuleAction::Deny);
     }
 }
