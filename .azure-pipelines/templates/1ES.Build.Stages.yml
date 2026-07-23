@@ -57,6 +57,20 @@ stages:
     # scheme (mxc-binaries-<triplet>) so Package_MXC_NPM_SDK can consume it.
     - template: Mac.Build.Job.yml
       parameters:
+        triplet: aarch64-apple-darwin
+        jobName: build_arm64_MAC
+        jobDisplayName: 'Build (arm64 MAC)'
+        vmImage: macOS-15-arm64
+        isOfficialBuild: ${{ parameters.isOfficialBuild }}
+        ESRPInfo: ${{ parameters.ESRPInfo }}
+
+    # Intel (x86_64) macOS slice — built and tested natively on the Intel image.
+    - template: Mac.Build.Job.yml
+      parameters:
+        triplet: x86_64-apple-darwin
+        jobName: build_x64_MAC
+        jobDisplayName: 'Build (x64 MAC)'
+        vmImage: macOS-13
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         ESRPInfo: ${{ parameters.ESRPInfo }}
 
@@ -82,6 +96,9 @@ stages:
         - artifact: mxc-binaries-aarch64-apple-darwin
           os: darwin
           sdkArch: arm64
+        - artifact: mxc-binaries-x86_64-apple-darwin
+          os: darwin
+          sdkArch: x64
 
       ESRPInfo: ${{ parameters.ESRPInfo }}
 

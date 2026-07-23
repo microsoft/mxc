@@ -163,10 +163,10 @@ function missingBinaryMessage(binary: string, extraHint?: string): string {
   if (!isSupportedPlatformTuple()) {
     parts.push(
       `This host (${process.platform}-${process.arch}) is not a supported MXC`,
-      `target — binaries ship for win32/linux (x64, arm64) and macOS arm64 only`,
-      `(Intel macOS is not supported). Build from source, or pass an explicit`,
-      `options.executablePath, or set both skipPlatformCheck and MXC_BIN_DIR (to`,
-      `a directory whose <arch> subdirectory holds a compatible binary).`,
+      `target — binaries ship for win32/linux (x64, arm64) and macOS (x64, arm64)`,
+      `only. Build from source, or pass an explicit options.executablePath, or set`,
+      `both skipPlatformCheck and MXC_BIN_DIR (to a directory whose <arch>`,
+      `subdirectory holds a compatible binary).`,
     );
   } else {
     const pkg = getPlatformPackageName();

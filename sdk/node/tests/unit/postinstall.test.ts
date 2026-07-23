@@ -96,11 +96,10 @@ describe('postinstall-check evaluate (#512)', () => {
     assert.match(r.message ?? '', /@microsoft\/mxc-sdk-linux-arm64/);
   });
 
-  it('reports darwin-x64 (Intel macOS) as unsupported WITHOUT synthesizing a package', () => {
+  it('reports darwin-x64 (Intel macOS) as supported-but-missing (names the package)', () => {
     const r = evaluate({ ...base, platform: 'darwin', arch: 'x64' });
-    assert.strictEqual(r.action, 'unsupported');
-    // Must NOT tell the user to npm install a package that 404s.
-    assert.doesNotMatch(r.message ?? '', /npm install @microsoft\/mxc-sdk-darwin-x64/);
+    assert.strictEqual(r.action, 'warn');
+    assert.match(r.message ?? '', /@microsoft\/mxc-sdk-darwin-x64/);
   });
 
   it('reports a 32-bit host as unsupported', () => {
@@ -125,11 +124,11 @@ describe('postinstall-check runPostinstall CLI seam (#512 F6)', () => {
     assert.match(seen[0], /@microsoft\/mxc-sdk-linux-arm64/);
   });
 
-  it('emits the unsupported notice on an unsupported host (Intel macOS)', () => {
+  it('emits the unsupported notice on an unsupported host (32-bit Windows)', () => {
     const seen: string[] = [];
     runPostinstall({
-      platform: 'darwin',
-      arch: 'x64',
+      platform: 'win32',
+      arch: 'ia32',
       resolve: resolveFail,
       existsSync: noFs,
       scriptDir: '/x',

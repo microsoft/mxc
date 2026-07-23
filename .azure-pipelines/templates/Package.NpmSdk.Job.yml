@@ -34,7 +34,7 @@ jobs:
     platformPackagesDir: $(Build.SourcesDirectory)/sdk/node/platform-packages
     # Artifact carrying the meta @microsoft/mxc-sdk tarball (no binaries).
     artifactBaseName: mxc-npm-sdk-package
-    # Artifact carrying the five per-platform binary package tarballs.
+    # Artifact carrying the six per-platform binary package tarballs.
     platformArtifactName: mxc-npm-sdk-platform-packages
     # Cache npm package downloads across runs to avoid re-fetching every dependency
     # tarball from the Azure Artifacts feed on each pipeline invocation.

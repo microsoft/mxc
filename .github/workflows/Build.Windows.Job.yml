@@ -83,7 +83,7 @@ jobs:
         run: |
           $tuple = if ($env:TARGET -eq 'x86_64-pc-windows-msvc') { 'win32-x64' } else { 'win32-arm64' }
           $rel = "$env:GITHUB_WORKSPACE/src/target/${{ matrix.target }}/release"
-          $manifest = "$env:GITHUB_WORKSPACE/sdk/platform-packages/$tuple/package.json"
+          $manifest = "$env:GITHUB_WORKSPACE/sdk/node/platform-packages/$tuple/package.json"
           $stage = "$env:GITHUB_WORKSPACE/stage/${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           $files = & node "$env:GITHUB_WORKSPACE/scripts/platform-package-payload.js" $manifest

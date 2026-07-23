@@ -214,7 +214,7 @@ jobs:
           targetType: inline
           script: |
             $tuple = if ('$(targetTriple)' -eq 'x86_64-pc-windows-msvc') { 'win32-x64' } else { 'win32-arm64' }
-            $manifest = "$(Build.SourcesDirectory)/sdk/platform-packages/$tuple/package.json"
+            $manifest = "$(Build.SourcesDirectory)/sdk/node/platform-packages/$tuple/package.json"
             $src = "$(targetTripleDir)"
             $dest = "$(outputDirectory)/$(targetTriple)"
             $files = (Get-Content -Raw $manifest | ConvertFrom-Json).files | Where-Object { $_ -ne 'README.md' }

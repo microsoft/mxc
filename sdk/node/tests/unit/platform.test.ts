@@ -457,13 +457,13 @@ describe('per-platform binary package discovery', () => {
     assert.strictEqual(getExecutableBinaryName('darwin'), 'mxc-exec-mac');
   });
 
-  it('isSupportedPlatformTuple covers the shipped set and rejects darwin-x64', () => {
-    for (const t of ['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-arm64']) {
+  it('isSupportedPlatformTuple covers the shipped set and rejects 32-bit', () => {
+    for (const t of ['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-arm64', 'darwin-x64']) {
       const [p, a] = t.split('-');
       assert.strictEqual(isSupportedPlatformTuple(p as NodeJS.Platform, a), true, t);
     }
-    assert.strictEqual(isSupportedPlatformTuple('darwin', 'x64'), false, 'Intel macOS');
     assert.strictEqual(isSupportedPlatformTuple('win32', 'ia32'), false, '32-bit');
+    assert.strictEqual(isSupportedPlatformTuple('freebsd', 'x64'), false, 'unsupported OS');
   });
 
   it('findWxcExecutable prefers the platform package (production)', () => {
@@ -528,12 +528,21 @@ describe('per-platform binary package discovery', () => {
     assert.strictEqual(findWxcExecutable(), expected);
   });
 
-  it('reports darwin-x64 (Intel macOS) as unsupported', () => {
+  it('reports darwin-x64 (Intel macOS) as a supported tuple', () => {
     _setHostId({ platform: 'darwin', arch: 'x64' });
     _resetPlatformSupportCache();
     const support = getPlatformSupport();
+    // sandbox-exec presence varies by host; assert the tuple gate did NOT reject it.
+    assert.ok(!/not a supported MXC target/i.test(support.reason ?? ''));
+    _resetPlatformSupportCache();
+  });
+
+  it('reports a 32-bit host (win32-ia32) as unsupported', () => {
+    _setHostId({ platform: 'win32', arch: 'ia32' });
+    _resetPlatformSupportCache();
+    const support = getPlatformSupport();
     assert.strictEqual(support.isSupported, false);
-    assert.match(support.reason ?? '', /not a supported MXC target|Intel macOS/i);
+    assert.match(support.reason ?? '', /not a supported MXC target/i);
     _resetPlatformSupportCache();
   });
 
