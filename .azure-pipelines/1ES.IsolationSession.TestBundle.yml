@@ -1,0 +1,76 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# IsoSession-MXC-TestPackage pipeline (standalone, no 1ES template)
+#
+# Builds wxc-exec with --features isolation_session and publishes internal
+# pipeline artifacts for deployment to Windows 11 targets with IsoEnvBroker
+# (IsolationSession) APIs.
+#
+# TWO PACKAGES: one bundle per mirrored MXC branch, each under its own
+# artifact name (consumed by the OS-side MXC integration); names must match the
+# contract Packages list in scripts/devloop-contract.psd1 there):
+#   - main    -> mxc-iso-test-bundle-main-x64
+#   - feature -> mxc-iso-test-bundle-feature-x64
+#
+# these packages will be consumed by the Vpack.Package.Job.yml job.
+
+trigger: none
+
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+parameters:
+  - name: TestBundlesBranches
+    type: object
+    default:
+      Main:
+        artifactName: mxc-iso-test-bundle-main-x64
+        checkoutRepo: mxc_main
+        packageName: main
+      FeatureInternal:
+        artifactName: mxc-iso-test-bundle-feature-x64
+        checkoutRepo: mxc_iso_session_feature
+        packageName: feature
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+  - repository: mxc_main
+    type: github
+    name: microsoft/mxc
+    endpoint: MXC-GitHub-Connection
+    ref: refs/heads/main
+  - repository: mxc_iso_session_feature
+    type: github
+    name: microsoft/mxc
+    endpoint: MXC-GitHub-Connection
+    ref: refs/heads/feature/isolation-session-internal
+
+variables:
+  outputDirectory: $(Build.SourcesDirectory)/out/iso-test-bundle
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+    sdl:
+      sourceRepositoriesToScan:
+        include:
+        - repository: mxc_main
+        - repository: mxc_iso_session_feature
+
+    stages:
+    - stage: Build_IsolationSession
+      displayName: 'Isolation Session Test Bundle'
+      jobs:
+      - ${{ each item in parameters.TestBundlesBranches }}:
+        - template: /.azure-pipelines/templates/IsolationSession.TestBundle.Build.Job.yml@self
+          parameters:
+            packageName: ${{ item.value.packageName }}
+            checkoutRepo: ${{ item.value.checkoutRepo }}
+            artifactName: ${{ item.value.artifactName }}
