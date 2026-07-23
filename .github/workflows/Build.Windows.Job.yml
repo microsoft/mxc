@@ -84,5 +84,6 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/wslcsdk.dll
+            src/target/${{ matrix.target }}/release/plm.exe
           if-no-files-found: warn
           retention-days: 1

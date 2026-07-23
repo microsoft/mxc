@@ -1,0 +1,12 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "PLM-Screenshot-Basic",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "plmtester.exe screenshot screenshot.png",
+    "timeout": 30000
+  },
+  "ui": {
+    "disable": false
+  }
+}
