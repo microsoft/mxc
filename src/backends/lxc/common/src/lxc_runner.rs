@@ -204,17 +204,21 @@ impl LxcScriptRunner {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
         }
 
-        // Configure network rules
+        // Configure inbound network rules inside the container's own netns.
         let mut fw_manager = NetworkIptablesManager::new(&container_name);
 
-        // Try to discover the container's veth interface for scoped rules
-        if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
-            let _ = writeln!(logger, "Discovered veth interface: {}", veth);
-            fw_manager.set_veth_interface(&veth);
+        // Discover the container's init PID so the INPUT rules are applied
+        // inside the container's network namespace (GA enforces LXC ingress
+        // via the container's iptables INPUT chain). Without a PID the chain
+        // is built but left unhooked — never attaching to the host's own
+        // INPUT — which is the correct fail-safe.
+        if let Some(pid) = container.init_pid() {
+            let _ = writeln!(logger, "Container init PID: {}", pid);
+            fw_manager.set_netns_pid(pid);
             if self.destroy_on_exit {
-                // Tell the watchdog about the veth so signal-time cleanup
-                // can also remove the FORWARD hook, not just the chain.
-                signal_cleanup::set_active_veth(&veth);
+                // Tell the watchdog about the netns PID so signal-time cleanup
+                // can remove the container's INPUT rules before it's destroyed.
+                signal_cleanup::set_active_pid(pid);
             }
         }
 

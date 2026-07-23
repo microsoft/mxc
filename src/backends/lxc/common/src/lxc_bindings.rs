@@ -197,6 +197,32 @@ impl LxcContainer {
         }
     }
 
+    /// Return the PID of the container's init process, or `None` if the
+    /// container isn't running or the PID can't be parsed. Used to enter the
+    /// container's network namespace (`nsenter -t <pid> -n`) for inbound
+    /// iptables enforcement.
+    ///
+    /// `lxc-info -p` prints "just the container's pid"; depending on the LXC
+    /// version this is either a bare number or a `PID: <n>` line, so both
+    /// forms are accepted.
+    pub fn init_pid(&self) -> Option<u32> {
+        let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let token = line.trim();
+            let token = token.strip_prefix("PID:").map(str::trim).unwrap_or(token);
+            if let Ok(pid) = token.parse::<u32>() {
+                if pid > 0 {
+                    return Some(pid);
+                }
+            }
+        }
+        None
+    }
+
     /// Create the container from a template/distribution.
     pub fn create(&self, distribution: &str, release: &str) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-create");
