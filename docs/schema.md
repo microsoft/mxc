@@ -54,7 +54,8 @@ production configs and the dev schema when working on experimental features:
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
-                                           //  testing-only proxy; requires --allow-testing-features)
+                                           //  testing-only proxy; requires --allow-testing-features.
+                                           //  lxc can't reach a loopback proxy — use { "url": "..." })
     },
 
     "processContainer": {                  // Process-based container-specific

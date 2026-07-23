@@ -192,13 +192,14 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        // Wait for network only when the config uses network features (firewall rules
-        // or allowed/blocked hosts).
+        // Wait for network only when the config uses network features
+        // (firewall rules, allowed/blocked hosts, or proxy enforcement).
         let needs_network = matches!(
             request.policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
         ) || !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty();
+            || !request.policy.blocked_hosts.is_empty()
+            || request.policy.network_proxy.is_enabled();
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
@@ -242,10 +243,14 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let _ = writeln!(logger, "Executing script inside container...");
+        let mut exec_env = request.env.clone();
+        let force_clear_env =
+            wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
         let result = container.attach_run(
             &request.script_code,
             &request.working_directory,
-            &request.env,
+            &exec_env,
+            force_clear_env,
             timeout,
         );
 

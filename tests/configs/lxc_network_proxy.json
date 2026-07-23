@@ -1,0 +1,21 @@
+{
+  "version": "0.6.0-alpha",
+  "containerId": "CLI-LXC-Network-Proxy",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "wget -qO- https://api.github.com/zen"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "proxy": { "url": "http://proxy.example.com:8080" },
+    "allowedHosts": ["api.github.com"]
+  }
+}

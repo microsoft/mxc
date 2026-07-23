@@ -12,6 +12,12 @@ use std::process::Command;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProxyEndpoint {
+    ip: String,
+    port: u16,
+}
+
 /// Manages iptables rules for an LXC container's network policy.
 pub struct NetworkIptablesManager {
     /// Chain name unique to this container (e.g., "MXC-<container-name>").
@@ -129,6 +135,150 @@ impl NetworkIptablesManager {
         Ok(true)
     }
 
+    fn run_iptables_args(args: &[String], logger: &mut Logger) -> Result<bool, String> {
+        let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::run_iptables(&refs, logger)
+    }
+
+    fn build_ordered_egress_rules(
+        chain_name: &str,
+        blocked_ips: &[String],
+        allowed_ips: &[String],
+        default_policy: NetworkPolicy,
+        proxy_endpoints: &[ProxyEndpoint],
+    ) -> Vec<Vec<String>> {
+        let mut rules = Vec::new();
+
+        if !proxy_endpoints.is_empty() {
+            for endpoint in proxy_endpoints {
+                rules.push(vec![
+                    "-A".to_string(),
+                    chain_name.to_string(),
+                    "-p".to_string(),
+                    "tcp".to_string(),
+                    "-d".to_string(),
+                    endpoint.ip.clone(),
+                    "--dport".to_string(),
+                    endpoint.port.to_string(),
+                    "-j".to_string(),
+                    "ACCEPT".to_string(),
+                ]);
+            }
+            rules.push(vec![
+                "-A".to_string(),
+                chain_name.to_string(),
+                "-j".to_string(),
+                "DROP".to_string(),
+            ]);
+            return rules;
+        }
+
+        for ip in blocked_ips {
+            rules.push(vec![
+                "-A".to_string(),
+                chain_name.to_string(),
+                "-d".to_string(),
+                ip.clone(),
+                "-j".to_string(),
+                "DROP".to_string(),
+            ]);
+        }
+
+        for ip in allowed_ips {
+            rules.push(vec![
+                "-A".to_string(),
+                chain_name.to_string(),
+                "-d".to_string(),
+                ip.clone(),
+                "-j".to_string(),
+                "ACCEPT".to_string(),
+            ]);
+        }
+
+        let default_action = match default_policy {
+            NetworkPolicy::Block => "DROP",
+            NetworkPolicy::Allow => "ACCEPT",
+        };
+        rules.push(vec![
+            "-A".to_string(),
+            chain_name.to_string(),
+            "-j".to_string(),
+            default_action.to_string(),
+        ]);
+
+        rules
+    }
+
+    fn resolve_policy_hosts(hosts: &[String], action: &str, logger: &mut Logger) -> Vec<String> {
+        let mut resolved = Vec::new();
+
+        for host in hosts {
+            let ips = Self::resolve_host(host);
+            if ips.is_empty() {
+                logger.log_line(&format!("Warning: could not resolve host '{}'", host));
+                continue;
+            }
+            for ip in ips {
+                logger.log_line(&format!("{} host: {} ({})", action, host, ip));
+                resolved.push(ip);
+            }
+        }
+
+        resolved
+    }
+
+    /// Whether `host` is already an IP literal (v4 or v6) and therefore needs
+    /// no DNS resolution to reach. Accepts bracketed IPv6 literals (e.g.
+    /// `[::1]`) as stored by the proxy URL parser.
+    fn host_is_ip_literal(host: &str) -> bool {
+        let candidate = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        candidate.parse::<std::net::IpAddr>().is_ok()
+    }
+
+    fn resolve_proxy_endpoints(
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<Vec<ProxyEndpoint>, String> {
+        if !policy.network_proxy.is_enabled() {
+            return Ok(Vec::new());
+        }
+
+        let address = policy.network_proxy.address.as_ref().ok_or_else(|| {
+            "Network proxy is enabled but no proxy address is configured".to_string()
+        })?;
+
+        if address.port() == 0 {
+            return Err("Network proxy port must be between 1 and 65535".to_string());
+        }
+
+        let ips = Self::resolve_host(address.host());
+        if ips.is_empty() {
+            return Err(format!(
+                "Could not resolve network proxy host '{}'",
+                address.host()
+            ));
+        }
+
+        Ok(ips
+            .into_iter()
+            .map(|ip| {
+                logger.log_line(&format!(
+                    "Allowing network proxy egress: {}:{} ({})",
+                    address.host(),
+                    address.port(),
+                    ip
+                ));
+                ProxyEndpoint {
+                    ip,
+                    port: address.port(),
+                }
+            })
+            .collect())
+    }
+
     /// Apply network firewall rules based on the container policy.
     pub fn apply_firewall_rules(
         &mut self,
@@ -139,11 +289,18 @@ impl NetworkIptablesManager {
         let use_firewall = matches!(
             policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
+        ) || policy.network_proxy.is_enabled();
         if !use_firewall {
             logger.log_line("Network enforcement mode does not use firewall, skipping iptables.");
             return Ok(true);
         }
+
+        let Some(ref iface) = self.veth_interface else {
+            return Err(
+                "No veth interface set for container; cannot scope iptables FORWARD hook"
+                    .to_string(),
+            );
+        };
 
         logger.log_line(&format!("Creating iptables chain: {}", self.chain_name));
 
@@ -169,82 +326,89 @@ impl NetworkIptablesManager {
             logger,
         )?;
 
-        // Allow DNS (needed for hostname resolution)
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-p",
-                "udp",
-                "--dport",
-                "53",
-                "-j",
-                "ACCEPT",
-            ],
-            logger,
-        )?;
-        Self::run_iptables(
-            &[
-                "-A",
-                &self.chain_name,
-                "-p",
-                "tcp",
-                "--dport",
-                "53",
-                "-j",
-                "ACCEPT",
-            ],
-            logger,
-        )?;
+        let proxy_endpoints = Self::resolve_proxy_endpoints(policy, logger)?;
+        let proxy_enabled = !proxy_endpoints.is_empty();
 
-        // Add allowed host rules
-        for host in &policy.allowed_hosts {
-            let ips = Self::resolve_host(host);
-            if ips.is_empty() {
-                logger.log_line(&format!("Warning: could not resolve host '{}'", host));
-                continue;
-            }
-            for ip in &ips {
-                logger.log_line(&format!("Allowing host: {} ({})", host, ip));
-                Self::run_iptables(&["-A", &self.chain_name, "-d", ip, "-j", "ACCEPT"], logger)?;
-            }
-        }
-
-        // Add blocked host rules
-        for host in &policy.blocked_hosts {
-            let ips = Self::resolve_host(host);
-            if ips.is_empty() {
-                logger.log_line(&format!("Warning: could not resolve host '{}'", host));
-                continue;
-            }
-            for ip in &ips {
-                logger.log_line(&format!("Blocking host: {} ({})", host, ip));
-                Self::run_iptables(&["-A", &self.chain_name, "-d", ip, "-j", "DROP"], logger)?;
-            }
-        }
-
-        // Append default policy at end of chain
-        let default_action = match policy.default_network_policy {
-            NetworkPolicy::Block => "DROP",
-            NetworkPolicy::Allow => "ACCEPT",
+        // Decide whether outbound DNS (port 53) may be opened.
+        //
+        // In proxy mode the posture is "deny-all-except-proxy", so DNS is only
+        // opened when the proxy is addressed by hostname (the container has to
+        // resolve it). When the proxy is an IP literal no resolution is needed,
+        // so DNS stays closed and nothing but the proxy endpoint is reachable.
+        // Outside proxy mode DNS is required for the hostname-based allow/block
+        // lists, so it is always opened.
+        let allow_dns = if proxy_enabled {
+            policy
+                .network_proxy
+                .address
+                .as_ref()
+                .is_some_and(|addr| !Self::host_is_ip_literal(addr.host()))
+        } else {
+            true
         };
-        logger.log_line(&format!("Default network policy: {}", default_action));
-        Self::run_iptables(&["-A", &self.chain_name, "-j", default_action], logger)?;
 
-        // Hook the chain into FORWARD for the container's traffic
-        if let Some(ref iface) = self.veth_interface {
+        if allow_dns {
+            // Allow DNS (needed for hostname resolution)
             Self::run_iptables(
-                &["-I", "FORWARD", "-o", iface, "-j", &self.chain_name],
+                &[
+                    "-A",
+                    &self.chain_name,
+                    "-p",
+                    "udp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
                 logger,
             )?;
-        } else {
-            // Without a veth interface, we cannot safely scope rules to the container.
-            // Refuse to apply host-wide rules to avoid affecting all host traffic.
-            logger.log_line(
-                "Warning: No veth interface set for container. \
-                 Cannot scope iptables rules. Skipping FORWARD hook.",
-            );
+            Self::run_iptables(
+                &[
+                    "-A",
+                    &self.chain_name,
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    "53",
+                    "-j",
+                    "ACCEPT",
+                ],
+                logger,
+            )?;
         }
+
+        let (blocked_ips, allowed_ips) = if !proxy_enabled {
+            (
+                Self::resolve_policy_hosts(&policy.blocked_hosts, "Blocking", logger),
+                Self::resolve_policy_hosts(&policy.allowed_hosts, "Allowing", logger),
+            )
+        } else if allow_dns {
+            logger.log_line(
+                "Network proxy enabled: allowing proxy egress plus DNS (for proxy hostname resolution) and dropping all other outbound traffic.",
+            );
+            (Vec::new(), Vec::new())
+        } else {
+            logger.log_line(
+                "Network proxy enabled: allowing proxy egress only and dropping all other outbound traffic (including DNS).",
+            );
+            (Vec::new(), Vec::new())
+        };
+
+        for args in Self::build_ordered_egress_rules(
+            &self.chain_name,
+            &blocked_ips,
+            &allowed_ips,
+            policy.default_network_policy.clone(),
+            &proxy_endpoints,
+        ) {
+            Self::run_iptables_args(&args, logger)?;
+        }
+
+        // Hook the chain into FORWARD for the container's traffic
+        Self::run_iptables(
+            &["-I", "FORWARD", "-o", iface, "-j", &self.chain_name],
+            logger,
+        )?;
 
         self.rules_applied = true;
         Ok(true)
@@ -357,5 +521,94 @@ mod tests {
         // IPv4-only filter must not regress the happy path.
         let ips = NetworkIptablesManager::resolve_host("10.0.0.1");
         assert_eq!(ips, vec!["10.0.0.1"]);
+    }
+
+    #[test]
+    fn host_is_ip_literal_detects_ips_and_hostnames() {
+        assert!(NetworkIptablesManager::host_is_ip_literal("10.0.0.5"));
+        assert!(NetworkIptablesManager::host_is_ip_literal("127.0.0.1"));
+        // Bracketed and bare IPv6 literals both count as "no DNS needed".
+        assert!(NetworkIptablesManager::host_is_ip_literal("[::1]"));
+        assert!(NetworkIptablesManager::host_is_ip_literal("::1"));
+        // Hostnames require resolution, so they are not IP literals.
+        assert!(!NetworkIptablesManager::host_is_ip_literal(
+            "proxy.example.com"
+        ));
+        assert!(!NetworkIptablesManager::host_is_ip_literal("localhost"));
+    }
+
+    #[test]
+    fn firewall_mode_without_veth_fails_fast() {
+        let mut mgr = NetworkIptablesManager::new("no-veth");
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let err = mgr.apply_firewall_rules(&policy, &mut logger).unwrap_err();
+
+        assert!(err.contains("No veth interface set"));
+        assert!(!mgr.rules_applied());
+    }
+
+    #[test]
+    fn ordered_egress_rules_put_deny_before_allow() {
+        let blocked = vec!["10.0.0.5".to_string()];
+        let allowed = vec!["10.0.0.0".to_string()];
+
+        let rules = NetworkIptablesManager::build_ordered_egress_rules(
+            "MXC-test",
+            &blocked,
+            &allowed,
+            NetworkPolicy::Block,
+            &[],
+        );
+
+        assert_eq!(
+            rules,
+            vec![
+                vec!["-A", "MXC-test", "-d", "10.0.0.5", "-j", "DROP"],
+                vec!["-A", "MXC-test", "-d", "10.0.0.0", "-j", "ACCEPT"],
+                vec!["-A", "MXC-test", "-j", "DROP"],
+            ]
+        );
+    }
+
+    #[test]
+    fn proxy_egress_rules_allow_only_proxy_then_drop() {
+        let blocked = vec!["10.0.0.5".to_string()];
+        let allowed = vec!["10.0.0.0".to_string()];
+        let proxy = vec![ProxyEndpoint {
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+        }];
+
+        let rules = NetworkIptablesManager::build_ordered_egress_rules(
+            "MXC-test",
+            &blocked,
+            &allowed,
+            NetworkPolicy::Allow,
+            &proxy,
+        );
+
+        assert_eq!(
+            rules,
+            vec![
+                vec![
+                    "-A",
+                    "MXC-test",
+                    "-p",
+                    "tcp",
+                    "-d",
+                    "127.0.0.1",
+                    "--dport",
+                    "8080",
+                    "-j",
+                    "ACCEPT",
+                ],
+                vec!["-A", "MXC-test", "-j", "DROP"],
+            ]
+        );
     }
 }
