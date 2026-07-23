@@ -111,12 +111,13 @@ impl CaptureSession {
     /// Seal the trace to `output_path` (or discard it when `None`), then close the
     /// security environment. Call **after** the child has exited.
     ///
-    /// Both teardown steps are attempted even if the first fails; the first error
-    /// encountered is returned so a failure is never silently swallowed.
+    /// Both teardown steps are attempted even if the first fails. If both fail,
+    /// [`LearningModeError::CleanupFailed`] preserves both errors.
     ///
     /// # Errors
-    /// [`LearningModeError::ApiCall`] from `StopLearningModeTrace` or
-    /// `CloseProcessSecurityEnvironment`.
+    /// - [`LearningModeError::ApiCall`] from `StopLearningModeTrace` or
+    ///   `CloseProcessSecurityEnvironment`.
+    /// - [`LearningModeError::CleanupFailed`] if both teardown calls fail.
     pub fn finish(mut self, output_path: Option<&Path>) -> Result<(), LearningModeError> {
         let stop_result = match self.trace.take() {
             Some(trace) => self.learning_mode_api.stop_trace(trace, output_path),
@@ -126,7 +127,21 @@ impl CaptureSession {
             Some(environment) => self.secenv_api.close(environment),
             None => Ok(()),
         };
-        stop_result.and(close_result)
+        combine_teardown_results(stop_result, close_result)
+    }
+}
+
+fn combine_teardown_results(
+    stop_result: Result<(), LearningModeError>,
+    close_result: Result<(), LearningModeError>,
+) -> Result<(), LearningModeError> {
+    match (stop_result, close_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Err(cleanup)) => Err(LearningModeError::CleanupFailed {
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup),
+        }),
     }
 }
 
@@ -141,5 +156,46 @@ impl Drop for CaptureSession {
         if let Some(environment) = self.environment.take() {
             let _ = self.secenv_api.close(environment);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_error(function: &'static str, code: u32) -> LearningModeError {
+        LearningModeError::ApiCall { function, code }
+    }
+
+    #[test]
+    fn teardown_preserves_both_failures() {
+        let result = combine_teardown_results(
+            Err(api_error("StopLearningModeTrace", 5)),
+            Err(api_error("CloseProcessSecurityEnvironment", 6)),
+        );
+
+        let LearningModeError::CleanupFailed { primary, cleanup } =
+            result.expect_err("both teardown failures must be returned")
+        else {
+            panic!("expected CleanupFailed");
+        };
+        assert!(primary.to_string().contains("StopLearningModeTrace"));
+        assert!(cleanup
+            .to_string()
+            .contains("CloseProcessSecurityEnvironment"));
+    }
+
+    #[test]
+    fn teardown_returns_single_failure_unchanged() {
+        let result =
+            combine_teardown_results(Ok(()), Err(api_error("CloseProcessSecurityEnvironment", 6)));
+
+        assert!(matches!(
+            result,
+            Err(LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                code: 6
+            })
+        ));
     }
 }

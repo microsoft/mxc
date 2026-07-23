@@ -22,9 +22,9 @@
 //! Because the exports only exist on feature-enabled OS builds, this crate resolves
 //! them at runtime via `LoadLibrary`/`GetProcAddress` behind the [`is_learning_mode_api_available`]
 //! capability probe, mirroring the existing `Experimental_CreateProcessInSandbox`
-//! adapter. It compiles on every platform and degrades cleanly (the probe returns
-//! `false` and [`LearningModeApi::load`] returns [`LearningModeError::Unsupported`])
-//! wherever the API is absent.
+//! adapter. The crate compiles on every platform: the capability probe returns
+//! `false` on non-Windows targets, while the loader and capture lifecycle types are
+//! exported only on Windows.
 
 use thiserror::Error;
 
@@ -49,11 +49,6 @@ pub use secenv::{
 /// Errors surfaced while loading or invoking the Learning Mode trace API.
 #[derive(Debug, Error)]
 pub enum LearningModeError {
-    /// The Learning Mode trace API is not available on this platform (non-Windows
-    /// targets, where the `processmodel.dll` exports cannot exist).
-    #[error("the Learning Mode trace API is not supported on this platform")]
-    Unsupported,
-
     /// `processmodel.dll` itself could not be loaded from System32.
     #[error("failed to load processmodel.dll: {0}")]
     DllLoad(String),
