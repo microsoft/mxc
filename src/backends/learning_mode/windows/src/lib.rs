@@ -76,6 +76,15 @@ pub enum LearningModeError {
         /// The `GetLastError` value captured immediately after the failed call.
         code: u32,
     },
+
+    /// A primary operation failed and the subsequent cleanup operation also failed.
+    #[error("{primary}; cleanup also failed: {cleanup}")]
+    CleanupFailed {
+        /// The error that triggered cleanup.
+        primary: Box<LearningModeError>,
+        /// The error returned while attempting cleanup.
+        cleanup: Box<LearningModeError>,
+    },
 }
 
 /// Capability probe: `true` only when `processmodel.dll` exposes the Learning Mode
@@ -104,5 +113,28 @@ mod stub_tests {
         let msg = e.to_string();
         assert!(msg.contains("StartLearningModeTrace"));
         assert!(msg.contains("lacks the Learning Mode trace API"));
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_error_preserves_both_failures() {
+        let error = LearningModeError::CleanupFailed {
+            primary: Box::new(LearningModeError::ApiCall {
+                function: "StartLearningModeTrace",
+                code: 5,
+            }),
+            cleanup: Box::new(LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                code: 6,
+            }),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("StartLearningModeTrace"));
+        assert!(message.contains("CloseProcessSecurityEnvironment"));
     }
 }

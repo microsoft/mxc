@@ -47,7 +47,7 @@ mod windows_impl {
     use sandbox_spec::base_container_layout::{
         finish_sandbox_spec_buffer, SandboxSpec, SandboxSpecArgs,
     };
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, WaitForSingleObject, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
     };
@@ -146,9 +146,11 @@ mod windows_impl {
                     meta.len()
                 );
                 if meta.len() == 0 {
-                    eprintln!("warning: ETL file is empty");
+                    eprintln!("ETL validation failed: file is empty");
+                    1
+                } else {
+                    0
                 }
-                0
             }
             Err(e) => {
                 eprintln!("expected ETL at {} but none found: {e}", etl_path.display());
@@ -201,17 +203,30 @@ mod windows_impl {
 
         // SAFETY: `hProcess` is a valid process handle returned by the launch.
         let wait = unsafe { WaitForSingleObject(process_information.hProcess, INFINITE) };
-        let mut exit_code: u32 = 0;
-        if wait == WAIT_OBJECT_0 {
+        let result = if wait == WAIT_OBJECT_0 {
+            let mut exit_code: u32 = 0;
             // SAFETY: `hProcess` is valid and the process has signalled exit.
-            let _ = unsafe { GetExitCodeProcess(process_information.hProcess, &mut exit_code) };
-        }
+            unsafe { GetExitCodeProcess(process_information.hProcess, &mut exit_code) }
+                .map(|()| exit_code)
+                .map_err(|e| format!("GetExitCodeProcess failed: {e}"))
+        } else if wait == WAIT_FAILED {
+            // SAFETY: reads the last-error value set by WaitForSingleObject.
+            let err = unsafe { windows::Win32::Foundation::GetLastError() };
+            Err(format!(
+                "WaitForSingleObject failed (GetLastError = {})",
+                err.0
+            ))
+        } else {
+            Err(format!(
+                "WaitForSingleObject returned unexpected status: {wait:?}"
+            ))
+        };
 
         // SAFETY: both handles were returned by the launch and are not used again.
         unsafe {
             let _ = CloseHandle(process_information.hThread);
             let _ = CloseHandle(process_information.hProcess);
         }
-        Ok(exit_code)
+        result
     }
 }

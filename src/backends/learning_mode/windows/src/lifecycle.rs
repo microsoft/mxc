@@ -56,6 +56,8 @@ impl CaptureSession {
     /// - [`LearningModeError::ApiCall`] if `CreateProcessSecurityEnvironment` fails.
     /// - [`LearningModeError::ApiCall`] if `StartLearningModeTrace` fails — in which case
     ///   the just-created environment is closed before returning so it is not leaked.
+    /// - [`LearningModeError::CleanupFailed`] if starting the trace fails and closing
+    ///   the just-created environment also fails.
     pub fn begin(
         secenv_api: SecurityEnvironmentApi,
         learning_mode_api: LearningModeApi,
@@ -69,9 +71,13 @@ impl CaptureSession {
         let trace = match unsafe { learning_mode_api.start_trace(environment.raw()) } {
             Ok(trace) => trace,
             Err(start_err) => {
-                // Don't leak the environment if the trace could not be started.
-                let _ = secenv_api.close(environment);
-                return Err(start_err);
+                return match secenv_api.close(environment) {
+                    Ok(()) => Err(start_err),
+                    Err(cleanup) => Err(LearningModeError::CleanupFailed {
+                        primary: Box::new(start_err),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
             }
         };
 

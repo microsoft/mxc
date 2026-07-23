@@ -16,11 +16,11 @@
 //! ```
 
 fn main() {
-    let available = learning_mode_windows::is_learning_mode_api_available();
-    println!("is_learning_mode_api_available = {available}");
+    let learning_mode_available = learning_mode_windows::is_learning_mode_api_available();
+    println!("is_learning_mode_api_available = {learning_mode_available}");
 
     #[cfg(target_os = "windows")]
-    {
+    let available = {
         match learning_mode_windows::LearningModeApi::load() {
             Ok(api) => println!("LearningModeApi::load = OK  ({api:?})"),
             Err(e) => println!("LearningModeApi::load = ERR ({e})"),
@@ -38,7 +38,12 @@ fn main() {
             Ok(api) => println!("SecurityEnvironmentApi::load = OK  ({api:?})"),
             Err(e) => println!("SecurityEnvironmentApi::load = ERR ({e})"),
         }
-    }
+
+        learning_mode_available && secenv_available
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let available = false;
 
     std::process::exit(if available { 0 } else { 2 });
 }
