@@ -283,3 +283,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 ## License
 
 See [LICENSE.md](LICENSE.md) for details.
+
+<!-- Write-access verification test PR; renders as nothing and is safe to delete. -->
