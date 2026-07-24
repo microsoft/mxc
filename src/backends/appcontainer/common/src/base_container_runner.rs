@@ -670,12 +670,13 @@ impl BaseContainerRunner {
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
-        // Working directory (NULL falls back to the current directory).
+        // Empty falls back to a granted path (see `resolved_working_directory`).
+        let working_directory = request.resolved_working_directory().unwrap_or_default();
         let cwd_wide;
-        let cwd_ptr = if request.working_directory.is_empty() {
+        let cwd_ptr = if working_directory.is_empty() {
             ptr::null()
         } else {
-            cwd_wide = string_util::to_wide(&request.working_directory);
+            cwd_wide = string_util::to_wide(working_directory);
             cwd_wide.as_ptr()
         };
 

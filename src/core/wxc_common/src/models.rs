@@ -710,6 +710,29 @@ pub struct ExecutionRequest {
     pub audit: bool,
 }
 
+impl ExecutionRequest {
+    /// Resolve the working directory for the sandboxed child: an explicit
+    /// `working_directory`, else the first `readwrite` path, else the first
+    /// `readonly` path, else `None`.
+    ///
+    /// Backends that must not let the child inherit the host process's cwd use
+    /// this to fall back to a policy-granted path. It matters most on Windows:
+    /// a `NULL` current directory makes `CreateProcessW` inherit the parent's
+    /// cwd, and when the AppContainer token can't open it the kernel silently
+    /// resets the child to the drive root (`C:\`) instead of failing the launch.
+    /// The path is not checked for existence, so the launch can still fail.
+    pub fn resolved_working_directory(&self) -> Option<&str> {
+        if !self.working_directory.is_empty() {
+            return Some(self.working_directory.as_str());
+        }
+        self.policy
+            .readwrite_paths
+            .first()
+            .or_else(|| self.policy.readonly_paths.first())
+            .map(String::as_str)
+    }
+}
+
 /// Distinguishes whether an error occurred during process creation (launch)
 /// or after the process started but exited with a failure code.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -789,6 +812,42 @@ impl ScriptResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn request_with_paths(readwrite: &[&str], readonly: &[&str]) -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: readwrite.iter().map(|s| s.to_string()).collect(),
+                readonly_paths: readonly.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolved_working_directory_prefers_explicit_value() {
+        let mut req = request_with_paths(&["C:\\rw"], &["C:\\ro"]);
+        req.working_directory = "C:\\explicit".to_string();
+        assert_eq!(req.resolved_working_directory(), Some("C:\\explicit"));
+    }
+
+    #[test]
+    fn resolved_working_directory_falls_back_to_first_readwrite() {
+        let req = request_with_paths(&["C:\\rw1", "C:\\rw2"], &["C:\\ro"]);
+        assert_eq!(req.resolved_working_directory(), Some("C:\\rw1"));
+    }
+
+    #[test]
+    fn resolved_working_directory_falls_back_to_first_readonly() {
+        let req = request_with_paths(&[], &["C:\\ro1", "C:\\ro2"]);
+        assert_eq!(req.resolved_working_directory(), Some("C:\\ro1"));
+    }
+
+    #[test]
+    fn resolved_working_directory_none_when_no_dir_and_no_paths() {
+        let req = request_with_paths(&[], &[]);
+        assert_eq!(req.resolved_working_directory(), None);
+    }
 
     #[test]
     fn script_response_backend_unavailable_round_trips() {

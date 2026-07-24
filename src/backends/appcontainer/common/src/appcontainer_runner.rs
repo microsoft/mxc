@@ -833,8 +833,10 @@ impl AppContainerScriptRunner {
         // --- Build command line ---
         let mut cmd_line_wide = string_util::to_wide(&request.script_code);
 
-        let working_dir_wide = string_util::to_wide(&request.working_directory);
-        let working_dir_pcwstr = if request.working_directory.is_empty() {
+        // Empty falls back to a granted path (see `resolved_working_directory`).
+        let working_directory = request.resolved_working_directory().unwrap_or_default();
+        let working_dir_wide = string_util::to_wide(working_directory);
+        let working_dir_pcwstr = if working_directory.is_empty() {
             PCWSTR::null()
         } else {
             PCWSTR(working_dir_wide.as_ptr())
