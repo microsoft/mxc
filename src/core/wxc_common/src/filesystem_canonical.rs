@@ -37,9 +37,9 @@ pub enum PathCanonical {
 /// [`PathCanonical::Unknown`] when the object exists but cannot be examined.
 #[cfg(windows)]
 pub fn canonicalize_path(path: &str) -> PathCanonical {
-    use windows::core::PCWSTR;
+    use windows::core::{HRESULT, PCWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE,
+        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED,
@@ -78,16 +78,22 @@ pub fn canonicalize_path(path: &str) -> PathCanonical {
     };
     let handle = match handle {
         Ok(h) if !h.is_invalid() => OwnedHandle(h),
-        _ => {
-            // Distinguish a cleanly-missing path from an unexaminable one.
-            // SAFETY: reads the thread-local last error set by the failed call.
-            let err = unsafe { GetLastError() };
-            return if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
+        Err(e) => {
+            // Distinguish a cleanly-missing path from an unexaminable one using
+            // the error captured by the failed call itself (no second, racy
+            // GetLastError round-trip).
+            let code = e.code();
+            return if code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
+                || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
+            {
                 PathCanonical::Absent
             } else {
                 PathCanonical::Unknown
             };
         }
+        // CreateFileW reported success but returned an invalid handle: there is
+        // no error to read, so treat the path as unexaminable.
+        Ok(_) => return PathCanonical::Unknown,
     };
 
     let flags = GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0);

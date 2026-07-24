@@ -181,6 +181,14 @@ impl NormalizedPath {
     /// match is not "strictly deeper" and returns `false` (enforceable by simply
     /// not mounting the path). Comparison is per-component, so a partial-component
     /// match (`C:\project` vs `C:\project2`) is correctly rejected.
+    ///
+    /// Excluding exact match here is deliberate: an exact same-*string* deny==mount
+    /// is already collapsed most-restrictive-wins at parse time
+    /// (`normalize_filesystem_paths`), and an exact same-*object* alias (a deny
+    /// that canonicalizes onto the mount root) is collapsed by D6
+    /// (`normalize_object_conflicts`) before this validator runs. This check
+    /// therefore only owns the *strictly-nested* overlap that neither of those
+    /// layers can resolve (deny under a mount = distinct objects).
     fn contains_strictly(&self, child: &NormalizedPath) -> bool {
         if self.rooted && self.components.is_empty() {
             // Whole-drive mount: covers the entire drive, so any same-anchor path
