@@ -125,7 +125,7 @@ extends:
               displayName: Download isolation_session x64 (main)
               artifact: mxc-iso-test-bundle-main-x64
             
-            - download: Iso-Session-TestPackage-feature
+            - download: IsoSession-TestPackage
               displayName: Download isolation_session x64 (feature/isolation-session-internal)
               artifact: mxc-iso-test-bundle-feature-x64
 
