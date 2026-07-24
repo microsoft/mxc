@@ -48,6 +48,49 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
+ * GA egress default outbound action applied when no egress rule matches.
+ */
+export type EgressDefault = "allow" | "deny";
+
+/**
+ * GA outbound destination.
+ */
+export interface EgressDestinationWire {
+  /**
+   * IPv4/IPv6 CIDR range, or a bare IP address.
+   */
+  cidr: string;
+}
+
+/**
+ * GA outbound port selector.
+ */
+export interface EgressPortWire {
+  /**
+   * Destination port. Must be omitted for `icmp` (which has no ports); the parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp` the selector matches all ports for that protocol.
+   */
+  port?: number | null;
+  /**
+   * Transport protocol.
+   */
+  protocol: unknown;
+}
+
+/**
+ * GA outbound policy rule.
+ */
+export interface EgressRuleWire {
+  /**
+   * Destination ports and protocols. When omitted or empty, the rule matches all ports and all protocols to the listed destinations.
+   */
+  ports?: EgressPortWire[];
+  /**
+   * Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
+   */
+  to: EgressDestinationWire[];
+}
+
+/**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
  */
 export interface Experimental {
@@ -105,6 +148,11 @@ export interface Filesystem {
    */
   readwritePaths?: string[] | null;
 }
+
+/**
+ * Host loopback ingress policy.
+ */
+export type HostLoopbackPolicy = "allow" | "deny";
 
 /**
  * IsolationSession sizing profile.
@@ -210,29 +258,55 @@ export interface Lxc {
  */
 export interface Network {
   /**
-   * Allow binding/listening on local IPs and accepting inbound connections.
+   * Allow binding/listening on local IPs and accepting inbound connections (legacy schema).
    */
   allowLocalNetwork?: boolean | null;
   /**
-   * Hosts explicitly allowed.
+   * Hosts explicitly allowed (legacy schema).
    */
   allowedHosts?: string[] | null;
   /**
-   * Hosts explicitly blocked.
+   * Hosts explicitly blocked (legacy schema).
    */
   blockedHosts?: string[] | null;
   /**
-   * Default outbound policy when no host rule matches.
+   * Default outbound policy when no host rule matches (legacy schema).
    */
   defaultPolicy?: NetworkPolicy | null;
+  /**
+   * GA outbound policy rules.
+   */
+  egress?: NetworkEgress | null;
   /**
    * How the policy is enforced.
    */
   enforcementMode?: NetworkEnforcement | null;
   /**
+   * GA inbound policy.
+   */
+  ingress?: NetworkIngress | null;
+  /**
    * Proxy configuration (one of localhost / builtinTestServer / url).
    */
   proxy?: Proxy | null;
+}
+
+/**
+ * GA outbound policy rule set.
+ */
+export interface NetworkEgress {
+  /**
+   * Rules that allow matching outbound connections.
+   */
+  allow?: EgressRuleWire[];
+  /**
+   * Default outbound action when no egress rule matches (`allow` or `deny`). When omitted, defaults to `deny` (fail-closed). Setting `default: "allow"` expresses the "allow everything except this deny-list" model; when GA egress is present it supersedes the legacy `defaultPolicy`.
+   */
+  default?: EgressDefault | null;
+  /**
+   * Rules that deny matching outbound connections.
+   */
+  deny?: EgressRuleWire[];
 }
 
 /**
@@ -241,9 +315,24 @@ export interface Network {
 export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
+ * GA inbound policy.
+ */
+export interface NetworkIngress {
+  /**
+   * Whether host loopback can connect inbound to the sandbox.
+   */
+  hostLoopback?: HostLoopbackPolicy | null;
+}
+
+/**
  * Default network policy.
  */
 export type NetworkPolicy = "allow" | "block";
+
+/**
+ * GA outbound transport protocol.
+ */
+export type NetworkProtocol = "tcp" | "udp" | "icmp";
 
 /**
  * State-aware lifecycle phase.
