@@ -156,7 +156,15 @@ export interface ProcessContainerConfig {
   name?: string;
   /** Use least privilege mode with PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT (default: false) */
   leastPrivilege?: boolean;
-  /** Additional AppContainer capabilities (e.g., "registryRead", "internetClient") */
+  /**
+   * Enable deny-and-record learning mode. Failed access checks are logged while
+   * accesses remain denied and containment remains enforced.
+   */
+  learningMode?: boolean;
+  /**
+   * Additional AppContainer capabilities (e.g., "registryRead", "internetClient").
+   * The reserved learning-mode capability names must not be supplied directly.
+   */
   capabilities?: string[];
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
