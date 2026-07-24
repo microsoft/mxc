@@ -84,11 +84,12 @@ stays enforced:
 | **App / user-configurable** | Apps that let end users tune their own config | `captureDenials` (`mode: "block-and-log"`) / `learningModeLogging` | Enforced (deny-and-record) |
 | **Fleet auditing** | IT admins | `captureDenials` (`mode: "allow-and-log"`) / `permissiveLearningMode` | Relaxed (allow-all) |
 
-1. **Developer inner-loop (`--audit`).** A developer runs `wxc-exec --audit` to
-   discover the capabilities and paths their process needs. `--audit` triggers
-   UAC, injects `permissiveLearningMode`, and drives a WPR/ETW
-   permissive-learning-mode trace for the run. This is typically a static config
-   the developer iterates on locally.
+1. **Developer inner-loop (`--audit`).** A developer runs `wxc-exec --audit`
+   with ProcessContainer containment to discover the capabilities and paths
+   their process needs. `--audit` is rejected for every other Windows backend.
+   It triggers UAC, injects `permissiveLearningMode`, and drives a WPR/ETW
+   permissive-learning-mode trace for the run. This is typically a static
+   config the developer iterates on locally.
 
    ```
    wxc-exec --audit --config <config>

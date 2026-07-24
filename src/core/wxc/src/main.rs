@@ -21,7 +21,7 @@ use wxc_common::config_parser::{
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
@@ -120,11 +120,9 @@ struct Cli {
 
     /// Audit mode: drive the permissive-learning-mode (PLM) WPR/ETW trace
     /// pipeline for a developer inner-loop run — inject `permissiveLearningMode`
-    /// and record every access check to a trace. Windows-only: the PLM trace
-    /// pipeline (WPR/ETW) has no cross-platform counterpart, so accepting the
-    /// flag elsewhere would print a misleading "restrictions will NOT be
-    /// enforced" warning while the bubblewrap/seatbelt backends silently ignore
-    /// the injected capability.
+    /// and record every access check to a trace. Windows ProcessContainer only:
+    /// the PLM trace/capability path is not honored by Windows Sandbox, WSLC,
+    /// IsolationSession, or the other containment backends.
     #[cfg(target_os = "windows")]
     #[arg(long)]
     audit: bool,
@@ -199,6 +197,18 @@ fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
     } else {
         capabilities.push("permissiveLearningMode".to_string());
         true
+    }
+}
+
+fn validate_audit_containment(containment: &ContainmentBackend) -> Result<(), String> {
+    if *containment == ContainmentBackend::ProcessContainer {
+        Ok(())
+    } else {
+        Err(format!(
+            "--audit is only supported with the Windows ProcessContainer backend; \
+             resolved containment is '{}'",
+            containment.wire_name()
+        ))
     }
 }
 
@@ -1039,13 +1049,23 @@ fn main() {
     // developer inner-loop flow. The capability names are reserved from direct
     // config use, so --audit is the supported permissive entry point until the
     // dedicated captureDenials mapping lands.
-    // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
+    // Windows ProcessContainer only: reject every other resolved backend before
+    // mutating the policy or starting the PLM trace.
     //
     // Permissive mode is the effective mode when audit is requested, so remove
     // deny-and-record before injecting it. Comparisons are case-insensitive
     // because Windows derives capability SIDs case-insensitively.
     #[cfg(target_os = "windows")]
     if cli.audit {
+        if let Err(message) = validate_audit_containment(&request.containment) {
+            eprintln!("Error: {message}");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::ConfigError,
+            );
+            process::exit(1);
+        }
         let injected = apply_permissive_learning_mode(&mut request.policy.capabilities);
         logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
         if injected && cli.audit_verbose {
@@ -1359,7 +1379,6 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use wxc_common::encoding::base64_encode;
     use wxc_common::logger::Mode;
-    use wxc_common::models::ContainmentBackend;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::MxcRequest;
 
@@ -1395,6 +1414,22 @@ mod tests {
             .iter()
             .any(|capability| capability == "internetClient"));
         assert!(!apply_permissive_learning_mode(&mut capabilities));
+    }
+
+    #[test]
+    fn audit_mode_only_accepts_process_container() {
+        assert!(validate_audit_containment(&ContainmentBackend::ProcessContainer).is_ok());
+
+        for containment in [
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::MicroVm,
+        ] {
+            let error = validate_audit_containment(&containment)
+                .expect_err("non-ProcessContainer backend must reject --audit");
+            assert!(error.contains(containment.wire_name()));
+        }
     }
 
     #[test]
