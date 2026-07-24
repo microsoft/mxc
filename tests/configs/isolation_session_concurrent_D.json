@@ -2,6 +2,10 @@
   "version": "0.6.0-alpha",
   "containerId": "isolation-session-concurrent-D",
   "containment": "isolation_session",
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
   "process": {
     "commandLine": "echo D-start & ping -n 11 127.0.0.1 > nul & echo D-done",
     "timeout": 30000

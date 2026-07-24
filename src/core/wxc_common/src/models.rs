@@ -655,6 +655,13 @@ pub struct ExecutionRequest {
     pub lifecycle: LifecycleConfig,
     /// ProcessContainer-specific policy (used when containment == ProcessContainer).
     pub policy: ContainerPolicy,
+    /// Whether the caller supplied a `network` block on the wire (any field
+    /// present), captured at parse time. Distinguishes an absent network policy
+    /// from an explicit one whose values equal the defaults — the domain
+    /// `policy` alone cannot, since `default_network_policy` defaults to
+    /// `Block`. Used by backends (e.g. IsolationSession) that must reject a
+    /// network policy supplied on a phase where it is immutable.
+    pub network_specified: bool,
     /// LXC-specific configuration (used when containment == Lxc).
     pub lxc_config: LxcConfig,
     /// Seatbelt (macOS) backend configuration (used when containment == Seatbelt).

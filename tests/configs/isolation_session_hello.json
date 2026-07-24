@@ -2,6 +2,10 @@
   "version": "0.6.0-alpha",
   "containerId": "isolation-session-hello",
   "containment": "isolation_session",
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
   "process": {
     "commandLine": "echo USERNAME=%USERNAME% & echo MYVAR=%MYVAR% & echo CWD=%CD% & whoami",
     "cwd": "C:\\mxc_workdir_test",
