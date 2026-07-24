@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# IsoSession-MXC-TestPackage pipeline (standalone, no 1ES template)
+# IsoSession-MXC-TestPackage pipeline (1ES Official template)
 #
 # Builds wxc-exec with --features isolation_session and publishes internal
 # pipeline artifacts for deployment to Windows 11 targets with IsoEnvBroker
