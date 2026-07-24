@@ -135,7 +135,7 @@ jobs:
       # Test scripts
       $scripts = @(
           'run_isolation_session_tests.ps1',
-          'run_isolation_session_state_aware_tests.ps1',
+          'run_isolation_session_state_aware_tests.ps1'
       )
       foreach ($s in $scripts) {
           $src = "$(Build.SourcesDirectory)/tests/scripts/$s"
@@ -182,6 +182,7 @@ jobs:
       $manifest = @{
           format_version = 1
           produced_at    = (Get-Date).ToUniversalTime().ToString('o')
+          branch_name    = "${{ parameters.checkoutRepo }}"
           commit_sha     = "$(Build.SourceVersion)"
           build_id       = "$(Build.BuildId)"
           pipeline       = "$(Build.DefinitionName)"
