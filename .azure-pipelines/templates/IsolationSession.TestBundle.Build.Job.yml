@@ -198,45 +198,45 @@ jobs:
 
   # Test sign (CP-230072) the staged binaries so the vpack ships signed binaries.
   - task: EsrpCodeSigning@5
-        displayName: Code Sign
-        inputs:
-          ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
-          AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
-          AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
-          AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-          AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
-          AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
-          FolderPath: $(outputDirectory)
-          Pattern: |
-            **/*.dll
-            **/*.ps1
-            **/*.exe
+    displayName: Code Sign
+    inputs:
+      ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+      AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+      AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+      AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+      AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+      FolderPath: $(outputDirectory)
+      Pattern: |
+        **/*.dll
+        **/*.ps1
+        **/*.exe
 
-          UseMinimatch: true
-          signConfigType: 'inlineSignParams'
-          inlineOperation: >-
-            [
-              {
-                "KeyCode": "CP-230072", 
-                "OperationCode": "SigntoolSign",
-                "ToolName": "sign",
-                "ToolVersion": "1.0",
-                "Parameters": {
-                  "OpusName": "Microsoft",
-                  "OpusInfo": "https://www.microsoft.com",
-                  "FileDigest": "/fd SHA256",
-                  "PageHash": "/NPH",
-                  "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
-                }
-              },
-              {
-                "KeyCode": "CP-230012",
-                "OperationCode": "SigntoolVerify",
-                "ToolName": "sign",
-                "ToolVersion": "1.0",
-                "Parameters": {}
-              }
-            ]
+      UseMinimatch: true
+      signConfigType: 'inlineSignParams'
+      inlineOperation: >-
+        [
+          {
+            "KeyCode": "CP-230072", 
+            "OperationCode": "SigntoolSign",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {
+              "OpusName": "Microsoft",
+              "OpusInfo": "https://www.microsoft.com",
+              "FileDigest": "/fd SHA256",
+              "PageHash": "/NPH",
+              "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+            }
+          },
+          {
+            "KeyCode": "CP-230012",
+            "OperationCode": "SigntoolVerify",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {}
+          }
+        ]
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Isolation Test Bundle (${{ parameters.packageName }})'
