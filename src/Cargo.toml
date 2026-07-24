@@ -22,6 +22,7 @@ members = [
     "backends/nanvix/build_common",
     "backends/nanvix/binaries",
     "backends/nanvix/runner",
+    "backends/learning_mode/windows",
     "backends/lxc/common",
     "backends/bubblewrap/common",
     "backends/wslc/common",
@@ -109,6 +110,7 @@ windows_sandbox_common = { path = "backends/windows_sandbox/common" }
 windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 isolation_session_common = { path = "backends/isolation_session/common" }
 hyperlight_common = { path = "backends/hyperlight/common" }
+learning_mode_windows = { path = "backends/learning_mode/windows" }
 nanvix_runner = { path = "backends/nanvix/runner" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
