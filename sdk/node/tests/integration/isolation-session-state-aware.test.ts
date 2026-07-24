@@ -20,6 +20,7 @@ import path from 'node:path';
 import os from 'os';
 import {
   execInSandboxAsync,
+  MxcError,
   provisionSandbox,
   startSandbox,
   stopSandbox,
@@ -156,5 +157,47 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     } finally {
       await safeDeprovision(sandboxId);
     }
+  });
+
+  // --- Runtime backend guard for the network acknowledgment ----------------
+  // The TypeScript type makes `network` required (and pins its value) at
+  // provision, but a plain-JS caller can bypass that. These assert the backend
+  // itself refuses a missing or non-canonical network acknowledgment — the
+  // "respect or refuse" guarantee must not rest on the compile-time type alone.
+  // Validation runs before the OS service is touched, so no cleanup is needed.
+  type UntypedProvision = (
+    containment: 'isolation_session',
+    config: unknown,
+    options: unknown,
+  ) => Promise<unknown>;
+  const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
+
+  it('backend refuses a provision that omits the network acknowledgment', async () => {
+    await assert.rejects(
+      () => provisionUntyped('isolation_session', {}, { experimental: true }),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('backend refuses a provision with a non-canonical network (defaultPolicy=block)', async () => {
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        { network: { defaultPolicy: 'block' } },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('backend refuses a provision whose network omits allowLocalNetwork', async () => {
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        { network: { defaultPolicy: 'allow' } },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
   });
 });
