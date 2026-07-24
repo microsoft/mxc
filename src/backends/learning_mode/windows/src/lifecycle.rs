@@ -65,14 +65,14 @@ impl CaptureSession {
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<Self, LearningModeError> {
-        let environment = secenv_api.create(sandbox_specification, flags)?;
+        let mut environment = secenv_api.create(sandbox_specification, flags)?;
 
         // SAFETY: `environment` was just created by `secenv_api.create` and is live for
         // the duration of this call; `start_trace` only reads it.
         let trace = match unsafe { learning_mode_api.start_trace(environment.raw()) } {
             Ok(trace) => trace,
             Err(start_err) => {
-                return match secenv_api.close(environment) {
+                return match secenv_api.close(&mut environment) {
                     Ok(()) => Err(start_err),
                     Err(cleanup) => Err(LearningModeError::CleanupFailed {
                         primary: Box::new(start_err),
@@ -124,10 +124,13 @@ impl CaptureSession {
             Some(trace) => self.learning_mode_api.stop_trace(trace, output_path),
             None => Ok(()),
         };
-        let close_result = match self.environment.take() {
+        let close_result = match self.environment.as_mut() {
             Some(environment) => self.secenv_api.close(environment),
             None => Ok(()),
         };
+        if close_result.is_ok() {
+            self.environment.take();
+        }
         combine_teardown_results(stop_result, close_result)
     }
 }
@@ -155,7 +158,7 @@ impl Drop for CaptureSession {
             let _ = self.learning_mode_api.stop_trace(trace, None);
         }
         if let Some(environment) = self.environment.take() {
-            let _ = self.secenv_api.close(environment);
+            drop(environment);
         }
     }
 }

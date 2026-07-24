@@ -108,16 +108,55 @@ type PfnCloseProcessSecurityEnvironment =
 /// Produced by [`SecurityEnvironmentApi::create`], threaded into the trace start and
 /// the in-environment launch, and torn down by [`SecurityEnvironmentApi::close`]. The
 /// wrapped [`HANDLE`] is passed by value to the launch/trace exports and by pointer to
-/// the close export (which nulls it on return).
-#[derive(Debug)]
-pub struct ProcessSecurityEnvironment(HANDLE);
+/// the close export (which nulls it on success). If explicit close fails, the
+/// wrapper retains ownership and retries once when dropped.
+pub struct ProcessSecurityEnvironment {
+    handle: HANDLE,
+    close: PfnCloseProcessSecurityEnvironment,
+}
+
+impl std::fmt::Debug for ProcessSecurityEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessSecurityEnvironment")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
 
 impl ProcessSecurityEnvironment {
     /// The raw `HPROCESS_SECURITY_ENVIRONMENT` handle, for passing to the trace-start
     /// and in-environment launch exports.
     #[must_use]
     pub fn raw(&self) -> HANDLE {
-        self.0
+        self.handle
+    }
+
+    fn close_with(
+        &mut self,
+        close: PfnCloseProcessSecurityEnvironment,
+    ) -> Result<(), LearningModeError> {
+        if self.handle.0.is_null() {
+            return Ok(());
+        }
+
+        // SAFETY: `close` was resolved from `processmodel.dll`; `self.handle`
+        // came from a successful create call and remains owned by this wrapper.
+        let ok = unsafe { close(&mut self.handle) };
+        if ok == 0 {
+            return Err(LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                code: last_error(),
+            });
+        }
+        self.handle = HANDLE(ptr::null_mut());
+        Ok(())
+    }
+}
+
+impl Drop for ProcessSecurityEnvironment {
+    fn drop(&mut self) {
+        let close = self.close;
+        let _ = self.close_with(close);
     }
 }
 
@@ -252,28 +291,22 @@ impl SecurityEnvironmentApi {
                 code: last_error(),
             });
         }
-        Ok(ProcessSecurityEnvironment(env))
+        Ok(ProcessSecurityEnvironment {
+            handle: env,
+            close: self.close,
+        })
     }
 
     /// Close a process security environment, tearing down its server-side state and
-    /// (per the create flags) the child. The export nulls the handle on return.
+    /// (per the create flags) the child. The export nulls the handle on success.
+    /// On failure, `env` retains ownership so the caller can retry; its [`Drop`]
+    /// implementation also makes one best-effort retry.
     ///
     /// # Errors
     /// [`LearningModeError::ApiCall`] carrying `GetLastError` if the export returns
     /// `FALSE`.
-    pub fn close(&self, env: ProcessSecurityEnvironment) -> Result<(), LearningModeError> {
-        let mut handle = env.0;
-        // SAFETY: `self.close` was resolved from `processmodel.dll` and matches the
-        // declared C signature; `handle` came from a prior `create` and `&mut handle`
-        // is a valid in/out-pointer.
-        let ok = unsafe { (self.close)(&mut handle) };
-        if ok == 0 {
-            return Err(LearningModeError::ApiCall {
-                function: "CloseProcessSecurityEnvironment",
-                code: last_error(),
-            });
-        }
-        Ok(())
+    pub fn close(&self, env: &mut ProcessSecurityEnvironment) -> Result<(), LearningModeError> {
+        env.close_with(self.close)
     }
 
     /// The resolved in-environment launch export.
@@ -379,6 +412,21 @@ pub fn is_security_environment_api_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "system" fn close_fails_then_succeeds(handle: *mut HANDLE) -> i32 {
+        if CLOSE_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            0
+        } else {
+            // SAFETY: the test passes a valid pointer to its owned HANDLE.
+            unsafe {
+                *handle = HANDLE(ptr::null_mut());
+            }
+            1
+        }
+    }
 
     #[test]
     fn probe_does_not_panic_and_agrees_with_load() {
@@ -409,5 +457,29 @@ mod tests {
     #[test]
     fn flag_none_is_zero() {
         assert_eq!(PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE, 0);
+    }
+
+    #[test]
+    fn failed_close_retains_ownership_and_drop_retries() {
+        CLOSE_CALLS.store(0, Ordering::SeqCst);
+        let mut environment = ProcessSecurityEnvironment {
+            handle: HANDLE(std::ptr::dangling_mut::<c_void>()),
+            close: close_fails_then_succeeds,
+        };
+
+        let error = environment
+            .close_with(close_fails_then_succeeds)
+            .expect_err("first close must fail");
+        assert!(matches!(
+            error,
+            LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                ..
+            }
+        ));
+        assert!(!environment.raw().0.is_null());
+
+        drop(environment);
+        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 2);
     }
 }
