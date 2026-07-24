@@ -1,0 +1,189 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Parameterized "package isolation_session test bundle" job used by
+# 1ES.IsolationSession.TestBundle.yml. Builds wxc-exec with
+# --features isolation_session from the given source repo resource and
+# publishes the bundle under the given pipeline artifact name. Artfacts
+# produced by this job are intended for OS vpack consumption so they wxc-exec
+# can be invoked from the IsoEnvBroker (IsolationSession) APIs on Windows 11 targets
+# for testing.
+#
+# Two packages (main + feature/isolation-session-internal) are built by
+# invoking this template once per package.
+
+parameters:
+# The repository resource alias to check out
+- name: checkoutRepo
+  type: string
+
+# The published pipeline artifact name
+- name: artifactName
+  type: string
+
+# Short id ('main'/'feature') for a unique job name
+- name: packageName
+  type: string
+
+jobs:
+- job: package_iso_test_bundle_${{ parameters.packageName }}
+  displayName: 'Package Isolation Session Test Bundle (${{ parameters.packageName }}, x64)'
+  timeoutInMinutes: 60
+  variables:
+    triplet: x86_64-pc-windows-msvc
+    CARGO_TARGET_DIR: c:/t/target
+    artifactPrefix: wxc-binaries
+    workingDirectory: $(Pipeline.Workspace)/s/src
+    configTomlPath: $(Pipeline.Workspace)/s/.cargo/config.toml
+    npmrcPath: '$(Agent.TempDirectory)/mxc.npmrc'
+    NPM_CONFIG_USERCONFIG: '$(npmrcPath)'
+
+  templateContext:
+    rust:
+      rustToolchain:
+        toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+        version: 'ms-prod-1.93'
+      workingDirectory: $(workingDirectory)
+      authenticateOptions:
+        configFile: $(configTomlPath)
+      installOptions:
+        configFile: $(configTomlPath)
+      cacheOptions:
+        enabled: true
+        enableTargetCache: true
+      artifactOptions:
+        suffix: ${{ parameters.packageName }} 
+ 
+  steps:
+  - checkout: ${{ parameters.checkoutRepo }}
+    path: s
+
+  - powershell: |
+      Copy-Item `
+        "$(Build.SourcesDirectory)/.azure-pipelines/.npm/.npmrc" `
+        "$(npmrcPath)"
+    displayName: 'Prepare npm configuration'
+
+  - task: NpmAuthenticate@0
+    displayName: 'Authenticate npm'
+    inputs:
+      workingFile: '$(npmrcPath)'
+
+  - template: Rust.Build.Steps.Official.yml@self
+    parameters:
+      targetTriple: $(triplet)
+      workingDirectory: $(workingDirectory)
+      cargoFeatures: isolation_session
+      enableTest: 'false'
+
+  # Build the SDK and integration tests so the Node E2E suite can be
+  # included in the test bundle.  The SDK has a native dep (node-pty)
+  # that requires node-gyp; the windows-2022 image has VS build tools.
+  - task: NodeTool@1
+    displayName: Use Node.js 20
+    inputs:
+      version: '20.x'
+
+  # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe so the SDK
+  # resolves its binary at runtime.  (build.bat does this; the pipeline
+  # must replicate it since we only build wxc-exec, not the full repo.)
+  - powershell: |
+      $sdkBin = "$(Build.SourcesDirectory)/sdk/node/bin/x64"
+      New-Item -ItemType Directory -Force -Path $sdkBin | Out-Null
+      Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$sdkBin/"
+      Write-Host "  -> sdk/node/bin/x64/wxc-exec.exe"
+    displayName: 'Stage wxc-exec into SDK bin'
+
+  - script: npm ci && npm run build
+    displayName: 'Build SDK (@microsoft/mxc-sdk)'
+    workingDirectory: sdk/node
+
+  - script: npm ci && npm run build
+    displayName: 'Build SDK integration tests'
+    workingDirectory: sdk/node/tests/integration
+
+  # Stage the test bundle for publishing as a pipeline artifact.
+  - powershell: |
+      $out = "$(outputDirectory)"
+      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/test_configs", "$out/test_scripts" | Out-Null
+
+      # wxc-exec binary (isolation_session enabled)
+      Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$out/bin/x64/"
+      Write-Host "  -> bin/x64/wxc-exec.exe"
+
+      # Test configs (isolation_session subset)
+      $configs = Get-ChildItem "$(Build.SourcesDirectory)/tests/configs/isolation_session_*.json"
+      foreach ($f in $configs) {
+          Copy-Item $f.FullName "$out/test_configs/"
+          Write-Host "  -> test_configs/$($f.Name)"
+      }
+
+      # Test scripts
+      $scripts = @(
+          'run_isolation_session_tests.ps1',
+          'run_isolation_session_state_aware_tests.ps1',
+          'run_test_configs.ps1'
+      )
+      foreach ($s in $scripts) {
+          $src = "$(Build.SourcesDirectory)/tests/scripts/$s"
+          if (Test-Path $src) {
+              Copy-Item $src "$out/test_scripts/"
+              Write-Host "  -> test_scripts/$s"
+          }
+      }
+
+      # SDK integration tests (Node E2E suite)
+      $sdkInteg = "$out/sdk-integration"
+      $integSrc = "$(Build.SourcesDirectory)/sdk/node/tests/integration"
+      $sdkRoot  = "$(Build.SourcesDirectory)/sdk/node"
+      New-Item -ItemType Directory -Force -Path $sdkInteg | Out-Null
+
+      # Built test files, runner, and package.json
+      Copy-Item -Recurse "$integSrc/dist" "$sdkInteg/dist"
+      Copy-Item "$integSrc/package.json" "$sdkInteg/package.json"
+      Copy-Item "$integSrc/run-tests.js" "$sdkInteg/run-tests.js"
+
+      # node_modules — skip the @microsoft symlink (it points back into
+      # the repo and would recurse).  Copy the SDK's published shape
+      # directly into @microsoft/mxc-sdk instead.
+      $integNm = "$integSrc/node_modules"
+      $stagingNm = "$sdkInteg/node_modules"
+      New-Item -ItemType Directory -Force -Path $stagingNm | Out-Null
+      foreach ($entry in Get-ChildItem -Path $integNm -Force) {
+          if ($entry.Name -eq '@microsoft') { continue }
+          Copy-Item -Recurse -Force $entry.FullName "$stagingNm/$($entry.Name)"
+      }
+      $sdkStaged = "$stagingNm/@microsoft/mxc-sdk"
+      New-Item -ItemType Directory -Force -Path $sdkStaged | Out-Null
+      Copy-Item -Recurse "$sdkRoot/bin" "$sdkStaged/bin"
+      Copy-Item -Recurse "$sdkRoot/dist" "$sdkStaged/dist"
+      Copy-Item "$sdkRoot/package.json" "$sdkStaged/package.json"
+      if (Test-Path "$sdkRoot/LICENSE.md") {
+          Copy-Item "$sdkRoot/LICENSE.md" "$sdkStaged/LICENSE.md"
+      }
+      Copy-Item -Recurse "$sdkRoot/node_modules" "$sdkStaged/node_modules"
+      Write-Host "  -> sdk-integration/ (Node E2E suite)"
+
+      # Manifest
+      $manifest = @{
+          format_version = 1
+          produced_at    = (Get-Date).ToUniversalTime().ToString('o')
+          commit_sha     = "$(Build.SourceVersion)"
+          build_id       = "$(Build.BuildId)"
+          pipeline       = "$(Build.DefinitionName)"
+          triplet        = "x86_64-pc-windows-msvc"
+          package        = "${{ parameters.packageName }}"
+          features       = @('isolation_session')
+      }
+      $manifest | ConvertTo-Json -Depth 3 | Set-Content "$out/manifest.json" -Encoding UTF8
+      Write-Host "  -> manifest.json"
+
+      Write-Host "`n==> Bundle assembled at $out"
+      Get-ChildItem $out -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName.Replace($out, ''))" }
+    displayName: 'Assemble test bundle'
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Isolation Test Bundle (${{ parameters.packageName }})'
+    inputs:
+      path: '$(outputDirectory)'
+      artifactName: ${{ parameters.artifactName }}

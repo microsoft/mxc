@@ -37,6 +37,11 @@ resources:
       source: 'MXC-Official-Build'
       trigger: none
 
+    # Source of the isolation_session test bundle.
+    - pipeline: IsoSession-TestPackage
+      source: 'MXC-Iso-Session'
+      trigger: none
+
 extends:
   template: v2/Microsoft.Official.yml@templates
   parameters:
@@ -115,6 +120,15 @@ extends:
                 symbols/wxc-exec.pdb
                 _manifest/**
 
+            # Download both isolation_session test packages (main and feature/isolation-session-internal) to stage into the vpack.
+            - download: Iso-Session-TestPackage-main
+              displayName: Download isolation_session x64 (main)
+              artifact: mxc-iso-test-bundle-main-x64
+            
+            - download: Iso-Session-TestPackage-feature
+              displayName: Download isolation_session x64 (feature/isolation-session-internal)
+              artifact: mxc-iso-test-bundle-feature-x64
+
             - task: PowerShell@2
               displayName: Stage binaries for vpack
               inputs:
@@ -123,45 +137,27 @@ extends:
                   $src = "$(Pipeline.Workspace)\MXC"
                   Copy-Item -Recurse -Force "$src\wxc-binaries-x86_64-pc-windows-msvc"  "$(ob_outputDirectory)\x64"
                   Copy-Item -Recurse -Force "$src\wxc-binaries-aarch64-pc-windows-msvc" "$(ob_outputDirectory)\arm64"
+
                   # OneBranch's "Publish VPack SBOM Manifest" step expects
                   # _manifest/spdx_2.2/ at the top of VPackContents. The
                   # per-arch SBOMs are identical source-wise, so promote x64's.
                   Copy-Item -Recurse -Force "$(ob_outputDirectory)\x64\_manifest" "$(ob_outputDirectory)\_manifest"
 
-            # Stage the current isolation_session test collateral into the vpack
-            # under isolation_session/main/, so the OS side can run these tests.
-            # Copies every *isolation_session* file from tests/scripts and
-            # tests/configs into scripts/ and configs/ subfolders.
-            - task: PowerShell@2
-              displayName: Stage isolation_session tests for vpack
-              inputs:
-                targetType: inline
-                script: |
-                  $ErrorActionPreference = 'Stop'
-                  # Enumerate matches first so a stale/empty pattern fails fast
-                  # with a clear message, instead of a generic Copy-Item error or
-                  # a silently-empty folder in the vpack.
-                  $scriptsSrc = Get-ChildItem "$(Build.SourcesDirectory)\tests\scripts\*isolation_session*" -File
-                  $configsSrc = Get-ChildItem "$(Build.SourcesDirectory)\tests\configs\*isolation_session*" -File
-                  if (-not $scriptsSrc) { throw "No *isolation_session* scripts found under tests\scripts" }
-                  if (-not $configsSrc) { throw "No *isolation_session* configs found under tests\configs" }
-
-                  $scriptsDest = "$(ob_outputDirectory)\isolation_session\main\scripts"
-                  $configsDest = "$(ob_outputDirectory)\isolation_session\main\configs"
-                  New-Item -ItemType Directory -Force -Path $scriptsDest | Out-Null
-                  New-Item -ItemType Directory -Force -Path $configsDest | Out-Null
-                  $scriptsSrc | Copy-Item -Destination $scriptsDest -Force
-                  $configsSrc | Copy-Item -Destination $configsDest -Force
-                  Write-Host "Staged $($scriptsSrc.Count) scripts and $($configsSrc.Count) configs into isolation_session\main"
+                  # Stage isolation_session test collateral into the vpack under isolation_session/
+                  $isoSrcMain = "$(Pipeline.Workspace)\IsoSession-TestPackage\mxc-iso-test-bundle-main-x64"
+                  Copy-Item -Recurse -Force "$isoSrcMain\*" "$(ob_outputDirectory)\isolation_session\main"
+                  
+                  $isoSrcFeature = "$(Pipeline.Workspace)\IsoSession-TestPackage\mxc-iso-test-bundle-feature-x64"
+                  Copy-Item -Recurse -Force "$isoSrcFeature\*" "$(ob_outputDirectory)\isolation_session\feature"
 
             # Authenticode-sign the staged PowerShell scripts so Code Sign
             # Validation (CSV) passes and the vpack ships signed scripts. The
             # downloaded wxc binaries arrive pre-signed from MXC-Official-Build;
-            # only these source-staged .ps1 scripts need signing here.
+            # only these source-staged .ps1 scripts and binaries from iso session pipeline need signing here.
             - task: onebranch.pipeline.signing@1
               displayName: Sign isolation_session scripts
               inputs:
                 command: sign
                 signing_profile: external_distribution
-                files_to_sign: '**/*.ps1'
-                search_root: $(ob_outputDirectory)\isolation_session\main\scripts
+                files_to_sign: '**/*.ps1;**/*.dll;**/*.exe'
+                search_root: $(ob_outputDirectory)\isolation_session
