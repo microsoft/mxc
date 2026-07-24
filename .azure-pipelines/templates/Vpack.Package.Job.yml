@@ -121,7 +121,7 @@ extends:
                 _manifest/**
 
             # Download both isolation_session test packages (main and feature/isolation-session-internal) to stage into the vpack.
-            - download: Iso-Session-TestPackage-main
+            - download: IsoSession-TestPackage
               displayName: Download isolation_session x64 (main)
               artifact: mxc-iso-test-bundle-main-x64
             
