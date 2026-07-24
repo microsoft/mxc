@@ -4,8 +4,8 @@
 # Parameterized "package isolation_session test bundle" job used by
 # 1ES.IsolationSession.TestBundle.yml. Builds wxc-exec with
 # --features isolation_session from the given source repo resource and
-# publishes the bundle under the given pipeline artifact name. Artfacts
-# produced by this job are intended for OS vpack consumption so they wxc-exec
+# publishes the bundle under the given pipeline artifact name. Artifacts
+# produced by this job are intended for OS vpack consumption so that wxc-exec
 # can be invoked from the IsoEnvBroker (IsolationSession) APIs on Windows 11 targets
 # for testing.
 #
