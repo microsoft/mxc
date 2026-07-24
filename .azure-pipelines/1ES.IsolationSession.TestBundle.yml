@@ -49,7 +49,9 @@ resources:
     ref: refs/heads/feature/isolation-session-internal
 
 variables:
-  outputDirectory: $(Build.SourcesDirectory)/out/iso-test-bundle
+  - group: MXC-ESRP-Signing
+  - name: outputDirectory
+    value: $(Build.SourcesDirectory)/out/iso-test-bundle
 
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
@@ -74,3 +76,10 @@ extends:
             packageName: ${{ item.value.packageName }}
             checkoutRepo: ${{ item.value.checkoutRepo }}
             artifactName: ${{ item.value.artifactName }}
+            ESRPInfo:
+              serviceName: $(serviceName)
+              tenantId: $(tenantId)
+              azureKeyVaultName: $(azureKeyVaultName)
+              authCertName: $(authCertName)
+              signCertName: $(signCertName)
+              clientId: $(clientId)

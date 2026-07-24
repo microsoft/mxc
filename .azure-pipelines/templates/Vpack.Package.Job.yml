@@ -145,19 +145,11 @@ extends:
 
                   # Stage isolation_session test collateral into the vpack under isolation_session/
                   $isoSrcMain = "$(Pipeline.Workspace)\IsoSession-TestPackage\mxc-iso-test-bundle-main-x64"
-                  Copy-Item -Recurse -Force "$isoSrcMain\*" "$(ob_outputDirectory)\isolation_session\main"
+                  $isoDestMain = "$(ob_outputDirectory)\isolation_session\main"
+                  New-Item -ItemType Directory -Force -Path $isoDestMain | Out-Null
+                  Copy-Item -Recurse -Force "$isoSrcMain\*" $isoDestMain
                   
                   $isoSrcFeature = "$(Pipeline.Workspace)\IsoSession-TestPackage\mxc-iso-test-bundle-feature-x64"
-                  Copy-Item -Recurse -Force "$isoSrcFeature\*" "$(ob_outputDirectory)\isolation_session\feature"
-
-            # Authenticode-sign the staged PowerShell scripts so Code Sign
-            # Validation (CSV) passes and the vpack ships signed scripts. The
-            # downloaded wxc binaries arrive pre-signed from MXC-Official-Build;
-            # only these source-staged .ps1 scripts and binaries from iso session pipeline need signing here.
-            - task: onebranch.pipeline.signing@1
-              displayName: Sign isolation_session scripts
-              inputs:
-                command: sign
-                signing_profile: external_distribution
-                files_to_sign: '**/*.ps1;**/*.dll;**/*.exe'
-                search_root: $(ob_outputDirectory)\isolation_session
+                  $isoDestFeature = "$(ob_outputDirectory)\isolation_session\feature"
+                  New-Item -ItemType Directory -Force -Path $isoDestFeature | Out-Null
+                  Copy-Item -Recurse -Force "$isoSrcFeature\*" $isoDestFeature
