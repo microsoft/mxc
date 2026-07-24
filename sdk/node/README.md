@@ -237,8 +237,12 @@ import {
 // Every call takes a single options object (3rd arg). Experimental backends
 // must pass `experimental: true`; relay `correlationVector` on every phase
 // after provision so telemetry shares one base prefix.
+// isolation_session provision requires the unrestricted-network acknowledgment:
+// the container's network cannot be filtered or denied, so you must opt in.
 const { sandboxId, correlationVector } = await provisionSandbox(
-  'isolation_session', undefined, { experimental: true },
+  'isolation_session',
+  { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+  { experimental: true },
 );
 const opts = { experimental: true, correlationVector };
 
