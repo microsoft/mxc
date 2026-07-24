@@ -273,11 +273,32 @@ mod tests {
     #[test]
     fn absent_tail_on_missing_drive_is_absent() {
         // No ancestor resolves (drive absent) → Absent, not a spurious Unknown.
-        let missing = r"Q:\mxc-no-such-drive\child";
+        // Pick a genuinely unassigned drive letter at runtime rather than
+        // hard-coding one: on a host where the chosen drive exists (mapped
+        // network share, USB, subst) the root would resolve and the tail would
+        // replay to Canonical, not Absent.
+        let Some(free) = first_free_drive_letter() else {
+            eprintln!("skipping: no free drive letter available on this host");
+            return;
+        };
+        let missing = format!(r"{free}:\mxc-no-such-drive\child");
         assert_eq!(
-            canonicalize_allowing_absent_tail(missing),
+            canonicalize_allowing_absent_tail(&missing),
             PathCanonical::Absent
         );
+    }
+
+    /// Returns a drive letter (`D`..=`Z`) with no assigned volume, or `None` if
+    /// every letter is in use. Skips `A`/`B`/`C` to avoid floppy/system drives.
+    #[cfg(windows)]
+    fn first_free_drive_letter() -> Option<char> {
+        use windows::Win32::Storage::FileSystem::GetLogicalDrives;
+        // Bit i (0 = A) is set when that drive letter is assigned.
+        let mask = unsafe { GetLogicalDrives() };
+        ('D'..='Z').find(|letter| {
+            let bit = (*letter as u32) - ('A' as u32);
+            mask & (1 << bit) == 0
+        })
     }
 
     #[cfg(windows)]

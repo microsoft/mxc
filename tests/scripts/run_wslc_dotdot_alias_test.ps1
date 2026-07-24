@@ -82,9 +82,9 @@ try {
     $ErrorActionPreference = $prev
     Write-Host $output
 
-    # The container must never start; validation must reject the config with the
-    # overlap error and must not print the process output.
-    if (($output -match "cannot be enforced") -and ($output -notmatch "SHOULD_NOT_RUN")) {
+    # The container must never start; validation must reject the config with a
+    # non-zero exit AND the overlap error, and must not print the process output.
+    if (($exitCode -ne 0) -and ($output -match "cannot be enforced") -and ($output -notmatch "SHOULD_NOT_RUN")) {
         Write-Host "PASS: `..`-through-junction deny rejected at pre-flight (tail replay folded `..` into the mount)." -ForegroundColor Green
         $exit = 0
     } else {
