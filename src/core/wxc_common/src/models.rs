@@ -711,25 +711,16 @@ pub struct ExecutionRequest {
 }
 
 impl ExecutionRequest {
-    /// Resolve a working directory for the sandboxed child, preferring a
-    /// policy-granted path over inheriting the host process's current directory,
-    /// for backends that must **not** inherit that cwd.
+    /// Resolve the working directory for the sandboxed child: an explicit
+    /// `working_directory`, else the first `readwrite` path, else the first
+    /// `readonly` path, else `None`.
     ///
-    /// An explicit `working_directory` always wins. Otherwise — rather than
-    /// leaving it empty and letting the OS inherit the host process's cwd, which
-    /// under a deny-by-default sandbox may be inaccessible to the sandboxed
-    /// token — we prefer a directory the policy grants: the first `readwrite`
-    /// path, else the first `readonly` path. This only picks the path; it does
-    /// not verify the path exists or is a directory (the config parser merely
-    /// warns on missing paths), so the launch can still fail if it doesn't.
-    /// Returns `None` when neither an explicit directory nor any policy path is
-    /// set, leaving the caller on the backend's own default.
-    ///
-    /// This matters most on Windows: passing a `NULL` current directory to
-    /// `CreateProcessW` makes the child inherit the parent's cwd, and when the
-    /// AppContainer token can't open it the kernel silently resets the child to
-    /// the drive root (`C:\`) instead of failing the launch. The macOS Seatbelt
-    /// backend already avoids the same trap with an equivalent resolver.
+    /// Backends that must not let the child inherit the host process's cwd use
+    /// this to fall back to a policy-granted path. It matters most on Windows:
+    /// a `NULL` current directory makes `CreateProcessW` inherit the parent's
+    /// cwd, and when the AppContainer token can't open it the kernel silently
+    /// resets the child to the drive root (`C:\`) instead of failing the launch.
+    /// The path is not checked for existence, so the launch can still fail.
     pub fn resolved_working_directory(&self) -> Option<&str> {
         if !self.working_directory.is_empty() {
             return Some(self.working_directory.as_str());
