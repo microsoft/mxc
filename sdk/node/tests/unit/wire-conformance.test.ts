@@ -199,10 +199,8 @@ type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, nev
 type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
 
-// `processContainer.learningMode` is a wire field the SDK does not expose (the
-// AppContainer permissive learning mode is not surfaced through the policy API).
 type _ProcessContainerWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'learningMode'>
+  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, never>
 >;
 
 // `seatbelt.guiAccess` and `seatbelt.launchMethod` are wire fields the one-shot

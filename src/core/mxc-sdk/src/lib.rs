@@ -68,6 +68,8 @@
 //! allocates a pty. [`run`] captures both streams; with [`spawn_sandbox`],
 //! stream the handle's `take_stdout`/`take_stderr`, or let
 //! [`wait`](Sandbox::wait) drain and discard any untaken stream.
+//! Policy security warnings are available through [`Sandbox::warnings`] and
+//! [`Output::warnings`].
 //!
 //! ## Relationship to `mxc_engine`
 //!

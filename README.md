@@ -219,13 +219,13 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
 ### Audit Mode (Permissive Learning Mode)
 
-`--audit` runs the policy in **permissive** mode — denied operations are logged but allowed to proceed — and starts a Permissive Learning Mode (PLM) ETW trace alongside the workload. See [src/host/plm/readme.md](src/host/plm/readme.md) for the full PLM tool reference, including standalone `plm.exe` invocation (e.g. re-processing an existing `.etl` with `plm stop --trace-file …`).
+`--audit` runs a Windows **ProcessContainer** policy in permissive mode — denied operations are logged but allowed to proceed — and starts a Permissive Learning Mode (PLM) ETW trace alongside the workload. It is rejected for Windows Sandbox, WSLC, IsolationSession, and every other containment backend because those paths do not honor the AppContainer learning-mode capability. It is the developer inner-loop flow for discovering the capabilities and paths a workload needs. See [src/host/plm/readme.md](src/host/plm/readme.md) for the full PLM tool reference, including standalone `plm.exe` invocation (e.g. re-processing an existing `.etl` with `plm stop --trace-file …`).
 
 ```bash
 wxc-exec.exe --audit policy.json
 ```
 
-> **Warning:** In release builds, `--audit` relaxes the rejection of `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring.
+> **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`; use `processContainer.learningMode: true` for deny-and-record mode or `--audit` for permissive mode. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
 ## Telemetry (Experimental)
 

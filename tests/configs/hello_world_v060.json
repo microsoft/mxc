@@ -5,11 +5,6 @@
   "process": {
     "commandLine": "python -c \"import sys; print('Hello from MXC 0.6.0-alpha!'); print(f'Python version: {sys.version}')\""
   },
-  "processContainer": {
-    "capabilities": [
-      "permissiveLearningMode"
-    ]
-  },
   "ui": {
     "disable": false
   }

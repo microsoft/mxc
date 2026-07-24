@@ -28,6 +28,8 @@ pub enum Mode {
 pub struct Logger {
     mode: Mode,
     buffer: String,
+    /// Security warnings emitted during the run, retained for library callers.
+    warnings: Vec<String>,
     /// Optional CLI-driven log file sink (`--log-file`).
     file: Option<File>,
     /// Named pipe handle for the shared diagnostic console.
@@ -52,6 +54,7 @@ impl Logger {
         Self {
             mode,
             buffer: String::new(),
+            warnings: Vec::new(),
             file: None,
             #[cfg(target_os = "windows")]
             diag_pipe: None,
@@ -244,6 +247,32 @@ impl Logger {
         self.diag_accumulate("\n");
     }
 
+    /// Emit a security warning through an always-visible channel and retain it
+    /// for in-process callers.
+    pub fn warning_line(&mut self, msg: &str) {
+        eprintln!("{msg}");
+        self.warnings.push(msg.to_string());
+        if let Some(ref mut f) = self.file {
+            let secs = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = writeln!(f, "[{}] {}", secs, msg);
+        }
+        self.diag_accumulate(msg);
+        self.diag_accumulate("\n");
+    }
+
+    /// Security warnings emitted during the run.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Take all retained security warnings, leaving the logger empty.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
     pub fn get_buffer(&self) -> &str {
         &self.buffer
     }
@@ -309,5 +338,22 @@ impl fmt::Write for Logger {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.log(s);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn security_warnings_are_retained_outside_the_debug_buffer() {
+        let mut logger = Logger::new(Mode::Buffer);
+
+        logger.warning_line("security warning");
+
+        assert_eq!(logger.warnings(), ["security warning"]);
+        assert!(logger.get_buffer().is_empty());
+        assert_eq!(logger.take_warnings(), ["security warning"]);
+        assert!(logger.warnings().is_empty());
     }
 }

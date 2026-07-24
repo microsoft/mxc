@@ -42,6 +42,10 @@ const exemptions = existsSync(exemptionsPath)
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 const validate = ajv.compile(schema);
+const RESERVED_LEARNING_MODE_CAPABILITIES = [
+  "learningModeLogging",
+  "permissiveLearningMode",
+];
 
 // Recursively collect repo-root-relative paths of *.json files under `dir`, so
 // configs in nested directories are not silently skipped.
@@ -107,6 +111,24 @@ for (const rel of files) {
       .map((e) => `      ${e.instancePath || "/"} ${e.message}`)
       .join("\n");
     unexpectedInvalidDetails.push(`${relNorm}:\n${msgs}`);
+  } else if (ok && !isExempt) {
+    const processContainer = data.processContainer ?? data.appContainer;
+    const capabilities = processContainer?.capabilities;
+    if (Array.isArray(capabilities)) {
+      const reserved = capabilities.find(
+        (capability) =>
+          typeof capability === "string" &&
+          RESERVED_LEARNING_MODE_CAPABILITIES.some(
+            (name) => name.toLowerCase() === capability.toLowerCase()
+          )
+      );
+      if (reserved !== undefined) {
+        unexpectedInvalid++;
+        unexpectedInvalidDetails.push(
+          `${relNorm}: processContainer.capabilities contains reserved learning-mode capability '${reserved}'`
+        );
+      }
+    }
   }
 }
 

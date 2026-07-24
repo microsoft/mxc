@@ -5,6 +5,10 @@
  * MXC SDK - TypeScript SDK for Microsoft eXecution Containers
  *
  * This package provides a Node.js interface for spawning sandboxed containers.
+ * For direct Windows ProcessContainer configs, set
+ * `processContainer.learningMode: true` to enable deny-and-record learning
+ * mode. Learning-mode capability names are reserved and must not be supplied
+ * directly in `processContainer.capabilities`.
  *
  * @example
  * ```typescript

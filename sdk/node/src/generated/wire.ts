@@ -296,11 +296,11 @@ export interface Process {
  */
 export interface ProcessContainer {
   /**
-   * AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+   * AppContainer capabilities (e.g. `internetClient`, `registryRead`). `learningModeLogging` and `permissiveLearningMode` are reserved and rejected here; use `learningMode`, `--audit`, or the dedicated denial capture configuration instead.
    */
   capabilities?: string[] | null;
   /**
-   * AppContainer permissive learning mode.
+   * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.
    */
   learningMode?: boolean | null;
   /**
