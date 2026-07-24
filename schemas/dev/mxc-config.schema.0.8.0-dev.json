@@ -136,6 +136,80 @@
         }
       ]
     },
+    "EgressDefault": {
+      "description": "GA egress default outbound action applied when no egress rule matches.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "EgressDestinationWire": {
+      "additionalProperties": false,
+      "description": "GA outbound destination.",
+      "properties": {
+        "cidr": {
+          "description": "IPv4/IPv6 CIDR range, or a bare IP address.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cidr"
+      ],
+      "type": "object"
+    },
+    "EgressPortWire": {
+      "additionalProperties": false,
+      "description": "GA outbound port selector.",
+      "properties": {
+        "port": {
+          "description": "Destination port. Must be omitted for `icmp` (which has no ports); the parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp` the selector matches all ports for that protocol.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "protocol": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/NetworkProtocol"
+            }
+          ],
+          "description": "Transport protocol."
+        }
+      },
+      "required": [
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "EgressRuleWire": {
+      "additionalProperties": false,
+      "description": "GA outbound policy rule.",
+      "properties": {
+        "ports": {
+          "default": [],
+          "description": "Destination ports and protocols. When omitted or empty, the rule matches all ports and all protocols to the listed destinations.",
+          "items": {
+            "$ref": "#/definitions/EgressPortWire"
+          },
+          "type": "array"
+        },
+        "to": {
+          "description": "Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.",
+          "items": {
+            "$ref": "#/definitions/EgressDestinationWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "to"
+      ],
+      "type": "object"
+    },
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
@@ -258,6 +332,14 @@
         }
       },
       "type": "object"
+    },
+    "HostLoopbackPolicy": {
+      "description": "Host loopback ingress policy.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
     },
     "IsolationConfigurationId": {
       "description": "IsolationSession sizing profile.",
@@ -453,14 +535,14 @@
       "description": "Network access policy.",
       "properties": {
         "allowLocalNetwork": {
-          "description": "Allow binding/listening on local IPs and accepting inbound connections.",
+          "description": "Allow binding/listening on local IPs and accepting inbound connections (legacy schema).",
           "type": [
             "boolean",
             "null"
           ]
         },
         "allowedHosts": {
-          "description": "Hosts explicitly allowed.",
+          "description": "Hosts explicitly allowed (legacy schema).",
           "items": {
             "type": "string"
           },
@@ -470,7 +552,7 @@
           ]
         },
         "blockedHosts": {
-          "description": "Hosts explicitly blocked.",
+          "description": "Hosts explicitly blocked (legacy schema).",
           "items": {
             "type": "string"
           },
@@ -488,7 +570,18 @@
               "type": "null"
             }
           ],
-          "description": "Default outbound policy when no host rule matches."
+          "description": "Default outbound policy when no host rule matches (legacy schema)."
+        },
+        "egress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "GA outbound policy rules."
         },
         "enforcementMode": {
           "anyOf": [
@@ -501,6 +594,17 @@
           ],
           "description": "How the policy is enforced."
         },
+        "ingress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkIngress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "GA inbound policy."
+        },
         "proxy": {
           "anyOf": [
             {
@@ -511,6 +615,40 @@
             }
           ],
           "description": "Proxy configuration (one of localhost / builtinTestServer / url)."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkEgress": {
+      "additionalProperties": false,
+      "description": "GA outbound policy rule set.",
+      "properties": {
+        "allow": {
+          "default": [],
+          "description": "Rules that allow matching outbound connections.",
+          "items": {
+            "$ref": "#/definitions/EgressRuleWire"
+          },
+          "type": "array"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EgressDefault"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default outbound action when no egress rule matches (`allow` or `deny`). When omitted, defaults to `deny` (fail-closed). Setting `default: \"allow\"` expresses the \"allow everything except this deny-list\" model; when GA egress is present it supersedes the legacy `defaultPolicy`."
+        },
+        "deny": {
+          "default": [],
+          "description": "Rules that deny matching outbound connections.",
+          "items": {
+            "$ref": "#/definitions/EgressRuleWire"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -541,11 +679,38 @@
         }
       ]
     },
+    "NetworkIngress": {
+      "additionalProperties": false,
+      "description": "GA inbound policy.",
+      "properties": {
+        "hostLoopback": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HostLoopbackPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether host loopback can connect inbound to the sandbox."
+        }
+      },
+      "type": "object"
+    },
     "NetworkPolicy": {
       "description": "Default network policy.",
       "enum": [
         "allow",
         "block"
+      ],
+      "type": "string"
+    },
+    "NetworkProtocol": {
+      "description": "GA outbound transport protocol.",
+      "enum": [
+        "tcp",
+        "udp",
+        "icmp"
       ],
       "type": "string"
     },

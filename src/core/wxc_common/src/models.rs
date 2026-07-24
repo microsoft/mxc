@@ -378,6 +378,34 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     }
 }
 
+/// Transport protocol for a GA egress rule (internal domain model).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+/// Allow/deny action for a GA egress rule (internal domain model).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleAction {
+    Allow,
+    Deny,
+}
+
+/// Parsed GA egress rule (internal domain model). Populated by the config
+/// parser from the wire `EgressRuleWire`; not yet consumed by enforcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressRule {
+    /// IPv4/IPv6 CIDR ranges or bare IP addresses.
+    pub destinations: Vec<String>,
+    pub ports: Vec<u16>,
+    pub protocols: Vec<Protocol>,
+    pub action: RuleAction,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProxyAddress {
     pub address: String,
