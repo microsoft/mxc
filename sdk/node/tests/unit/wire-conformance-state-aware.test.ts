@@ -92,7 +92,7 @@ type PhaseConfigUnion =
   | IsolationSessionExecConfig
   | IsolationSessionStopConfig
   | IsolationSessionDeprovisionConfig;
-type LiftedPhaseKey = 'version' | 'process';
+type LiftedPhaseKey = 'version' | 'process' | 'network';
 type PublicPhaseKeys = Exclude<
   | keyof IsolationSessionProvisionConfig
   | keyof IsolationSessionStartConfig

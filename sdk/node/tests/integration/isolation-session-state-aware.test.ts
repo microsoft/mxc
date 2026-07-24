@@ -32,7 +32,7 @@ const skipReason = os.platform() !== 'win32'
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', {}, { experimental: true });
+    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
     const sandboxId = provisionResult.sandboxId;
     assert.ok(
       sandboxId.startsWith('iso:'),
@@ -78,7 +78,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
   });
 
   it('shares files with the session through the ephemeral workspace', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', {}, { experimental: true });
+    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
     const sandboxId = provisionResult.sandboxId;
     const workspace = provisionResult.metadata?.ephemeralWorkspacePath;
     assert.ok(
@@ -138,7 +138,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
   });
 
   it('exec surfaces a non-zero script exit as ExecResult.exitCode', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', {}, { experimental: true });
+    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
     const sandboxId = provisionResult.sandboxId;
 
     try {
