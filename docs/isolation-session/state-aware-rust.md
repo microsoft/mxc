@@ -132,7 +132,7 @@ it accepts is the optional Entra `user` bundle, at provision and start.
 | `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected |
 | `policy.network` — canonical `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** | rejected | rejected | rejected | rejected |
 | `policy.network` — any other value (incl. absent → `block`, host rules, proxy) | rejected | rejected | rejected | rejected | rejected |
-| `policy.ui` | rejected | rejected | rejected | rejected | rejected |
+| `policy.ui` — see the known gap below | ignored | ignored | ignored | ignored | ignored |
 | `experimental.isolation_session.{provision,start}.user` | **honored** | **honored** | n/a | n/a | n/a |
 
 Rejection of `policy.*` fields surfaces as `error.code = "policy_validation"`.
@@ -155,13 +155,20 @@ user it assigned at provision.
 ### Policy fields and mode parity
 
 Both modes share the same policy matrix above. Every `policy.filesystem`
-field (`readwritePaths`, `readonlyPaths`, `deniedPaths`) and `policy.ui` are
-rejected at every phase (no host-folder-sharing primitive; `ui` not yet
-honored). The network policy is honesty-gated per the matrix — provision
-requires the canonical unrestricted-network acknowledgment and post-provision
-rejects any supplied network policy (inheriting an absent one). One-shot
-enforces this via `validate_runner`; state-aware enforces it via the
-`validate_<phase>` hooks.
+field (`readwritePaths`, `readonlyPaths`, `deniedPaths`) is rejected at every
+phase (no host-folder-sharing primitive). The network policy is honesty-gated
+per the matrix — provision requires the canonical unrestricted-network
+acknowledgment and post-provision rejects any supplied network policy
+(inheriting an absent one). One-shot enforces this via `validate_runner`;
+state-aware enforces it via the `validate_<phase>` hooks.
+
+**Known gap — `policy.ui` is silently ignored.** The backend has no
+UI-restriction primitive, and it does not validate `policy.ui`, so a supplied
+UI policy is accepted and then dropped rather than refused. That is the same
+false-guarantee shape the network honesty gate closes: a caller asking for a
+UI restriction gets no error and no enforcement. Rejecting `policy.ui` is the
+intended end state, not a deliberate exemption — the matrix records `ignored`
+because that is the current behavior, not the desired one.
 
 ### Fields valid in state-aware only
 

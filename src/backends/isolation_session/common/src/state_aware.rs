@@ -156,9 +156,13 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         Ok(DeprovisionResult { metadata: None })
     }
 
-    // Filesystem rw/ro/denied paths, network, and proxy policy are rejected
-    // at every phase: the backend has no host-folder-sharing, network, or
-    // proxy primitive. Anything rejected produces a `policy_validation`
+    // Filesystem rw/ro/denied paths are rejected at every phase: the backend
+    // has no host-folder-sharing primitive. Network policy is honesty-gated —
+    // the backend cannot filter or deny the container network, so provision
+    // requires the canonical unrestricted-network acknowledgment, and every
+    // post-provision phase rejects a supplied network policy (the posture is
+    // fixed at provision) while inheriting an absent one. Proxy policy is
+    // rejected at every phase. Anything rejected produces a `policy_validation`
     // envelope rather than silent ignore.
 
     fn validate_provision(
