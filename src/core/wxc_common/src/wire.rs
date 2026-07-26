@@ -484,8 +484,10 @@ pub enum TransportProtocol {
 }
 
 /// IsolationSession backend config. Carries the one-shot `user` field and
-/// the per-phase state-aware nesting (`provision` / `start` / `stop` /
-/// `deprovision`).
+/// the per-phase state-aware nesting for the phases that take config
+/// (`provision` / `start`). `stop`/`deprovision`/`exec` take no config
+/// payload — they are invoked via the top-level `phase` field with
+/// `sandboxId`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -496,10 +498,6 @@ pub struct IsolationSession {
     pub provision: Option<IsolationSessionPhase>,
     /// State-aware start-phase configuration.
     pub start: Option<IsolationSessionPhase>,
-    /// State-aware stop-phase configuration.
-    pub stop: Option<IsolationSessionPhase>,
-    /// State-aware deprovision-phase configuration.
-    pub deprovision: Option<IsolationSessionPhase>,
 }
 
 /// Per-phase IsolationSession configuration (state-aware lifecycle).

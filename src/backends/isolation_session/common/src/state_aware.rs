@@ -314,6 +314,66 @@ mod tests {
         );
     }
 
+    // ====== Wire-model / backend config parity ======
+
+    // The generated JSON schema (`schemas/dev/`) and the SDK wire types
+    // (`sdk/node/src/generated/wire.ts`) are both emitted from
+    // `wxc_common::wire::IsolationSession`, while the phases that actually
+    // accept a config are the associated types on the impl above. Nothing
+    // links the two at compile time, so the pair below pins both halves:
+    // the wire model must nest a per-phase key exactly for the phases whose
+    // config type is not `()`. When they disagree, the schema advertises a
+    // payload `deserialize_config` then rejects.
+
+    #[test]
+    fn wire_model_nests_config_only_for_phases_that_take_one() {
+        // Field-by-field construction is deliberate: adding a per-phase field
+        // to the wire struct breaks this test's compilation, forcing a
+        // decision about whether the backend honors it.
+        let wire = wxc_common::wire::IsolationSession {
+            user: None,
+            provision: None,
+            start: None,
+        };
+        let value = serde_json::to_value(&wire).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["provision", "start", "user"],
+            "wire model nests a per-phase config for a phase the backend takes none for"
+        );
+    }
+
+    #[test]
+    fn phases_without_a_config_reject_a_payload() {
+        type StopConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StopConfig;
+        type DeprovisionConfig =
+            <IsolationSessionRunner as StatefulSandboxBackend>::DeprovisionConfig;
+        type ExecConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ExecConfig;
+
+        // These are `()`, which deserializes only from null, so any object in
+        // the slot is a hard error at dispatch.
+        let payload = serde_json::json!({ "user": { "upn": "a@b.com", "wamToken": "t" } });
+        assert!(
+            serde_json::from_value::<StopConfig>(payload.clone()).is_err(),
+            "stop accepted a config payload"
+        );
+        assert!(
+            serde_json::from_value::<DeprovisionConfig>(payload.clone()).is_err(),
+            "deprovision accepted a config payload"
+        );
+        assert!(
+            serde_json::from_value::<ExecConfig>(payload).is_err(),
+            "exec accepted a config payload"
+        );
+    }
+
     fn request_with_filesystem_policy() -> ExecutionRequest {
         ExecutionRequest {
             policy: ContainerPolicy {
