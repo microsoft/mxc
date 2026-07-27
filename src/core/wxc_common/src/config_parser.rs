@@ -595,7 +595,8 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
 /// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
 /// must be an absolute path whose parent directory already exists (the runner
 /// opens the file there when it seals the trace, under the caller's own
-/// identity). A relative path or a missing parent yields an actionable error.
+/// identity). The path itself must not be an existing directory. A relative
+/// path, directory path, or missing parent yields an actionable error.
 fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
     let candidate = std::path::Path::new(path);
     if !candidate.is_absolute() {
@@ -629,6 +630,14 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
                 "processContainer.captureDenials.outputPath parent directory does not \
                  exist: '{}'",
                 parent.display()
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        Some(_) if candidate.is_dir() => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath must name a file, not an \
+                 existing directory: '{path}'"
             );
             logger.log_line(&msg);
             Err(WxcError::ConfigParse(msg))
@@ -1967,6 +1976,28 @@ mod tests {
         assert!(
             format!("{err:?}").contains("directory root"),
             "error should mention the directory-root rejection: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_existing_directory_output_path_rejected() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path_json = serde_json::to_string(&dir.path().to_string_lossy()).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("an existing directory outputPath must be rejected");
+        assert!(
+            format!("{err:?}").contains("existing directory"),
+            "error should identify the directory path: {err:?}"
         );
     }
 
