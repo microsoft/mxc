@@ -31,6 +31,7 @@ use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, SandboxBackend,
     SandboxProcess, StdioMode, StreamCloser,
 };
+use wxc_common::validator::validate_common;
 
 use crate::stream_buffer::{StreamCanceller, StreamReader};
 use crate::wsl_container_runner::{OutputMode, StartedContainer, WSLContainerRunner};
@@ -43,6 +44,14 @@ impl SandboxBackend for WSLContainerRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        // The run-to-completion path gets these through `ScriptRunner::run`;
+        // the streaming path bypasses that, so — like every other
+        // `SandboxBackend` — apply them here. Beyond rejecting an empty
+        // command, this is what enforces the central testing-features gate on
+        // `network.proxy.builtinTestServer`.
+        validate_common(request)?;
+        self.validate(request)?;
+
         // SAFETY: `start_container` drives the WSLC SDK over raw FFI; it owns
         // every buffer it passes in and returns RAII guards for every handle it
         // opens, so the returned value is self-contained.
