@@ -428,14 +428,12 @@ mod ffi_types {
     pub type WslcReleaseProcessFn = unsafe extern "system" fn(WslcProcess) -> HRESULT;
 }
 
-/// Runtime-loaded WSLC SDK. Holds the loaded library and resolved function pointers.
+/// Runtime-loaded WSLC SDK: the resolved `wslcsdk.dll` function pointers.
 ///
-/// Created via `WslcSdk::load()`. The library remains loaded for the lifetime
-/// of this struct. All function pointers are valid as long as `WslcSdk` is alive.
+/// Created via `WslcSdk::load()`. The module is **never unloaded** (see there),
+/// so these pointers stay valid for the life of the process and this type has
+/// no drop-order significance.
 pub struct WslcSdk {
-    // Keep the library alive — function pointers are only valid while it's loaded.
-    _lib: libloading::Library,
-
     pub WslcGetMissingComponents: ffi_types::WslcGetMissingComponentsFn,
     pub WslcInitSessionSettings: ffi_types::WslcInitSessionSettingsFn,
     pub WslcSetSessionSettingsCpuCount: ffi_types::WslcSetSessionSettingsCpuCountFn,
@@ -601,7 +599,7 @@ impl WslcSdk {
                 }};
             }
 
-            Ok(Self {
+            let sdk = Self {
                 WslcGetMissingComponents: load_fn!(lib, b"WslcGetMissingComponents\0"),
                 WslcInitSessionSettings: load_fn!(lib, b"WslcInitSessionSettings\0"),
                 WslcSetSessionSettingsCpuCount: load_fn!(lib, b"WslcSetSessionSettingsCpuCount\0"),
@@ -660,8 +658,17 @@ impl WslcSdk {
                 WslcGetProcessExitEvent: load_fn!(lib, b"WslcGetProcessExitEvent\0"),
                 WslcGetProcessExitCode: load_fn!(lib, b"WslcGetProcessExitCode\0"),
                 WslcReleaseProcess: load_fn!(lib, b"WslcReleaseProcess\0"),
-                _lib: lib,
-            })
+            };
+            // Deliberately never unload `wslcsdk.dll`. The SDK runs its own
+            // threads and delivers stdout/stderr and exit callbacks from them,
+            // and the only signal that it has stopped is the exit callback —
+            // which teardown waits for but cannot force. `FreeLibrary` on a
+            // path where that wait timed out would unmap code an SDK thread is
+            // still executing, so the module is leaked instead: a bounded,
+            // one-module cost in exchange for removing an unload-under-callback
+            // crash. It also means repeat spawns don't re-resolve the exports.
+            std::mem::forget(lib);
+            Ok(sdk)
         }
     }
 }

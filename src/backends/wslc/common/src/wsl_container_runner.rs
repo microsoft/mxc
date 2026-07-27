@@ -187,6 +187,28 @@ impl IoContext {
     }
 }
 
+/// Wait for the SDK's exit callback on `io_ctx`, and if it never fires, make the
+/// callback context immortal.
+///
+/// The exit callback is the SDK's only signal that it has stopped invoking
+/// `io_callback` / `exit_callback`, both of which dereference the
+/// `Arc<IoContext>` handed over as a raw pointer. When the wait times out that
+/// guarantee never held, yet the caller is about to release everything — so a
+/// delayed callback would read freed memory. Leaking one `Arc` reference keeps
+/// the context alive for the life of the process, which is a bounded cost and
+/// strictly preferable to a use-after-free on a pathological shutdown.
+/// (`wslcsdk.dll` itself is never unloaded, for the same reason — see
+/// `WslcSdk::load`.)
+///
+/// Returns whether the callback was observed.
+fn await_callbacks_quiesced(io_ctx: &Arc<IoContext>) -> bool {
+    if io_ctx.wait_for_exit_callback() {
+        return true;
+    }
+    std::mem::forget(Arc::clone(io_ctx));
+    false
+}
+
 /// The caller-side read ends of a [`StdioMode::Pipes`] context.
 pub(crate) struct StreamPipes {
     pub(crate) stdout: StreamReader,
@@ -908,7 +930,7 @@ impl WSLContainerRunner {
         sdk: &WslcSdk,
         process_guard: &WslcProcessGuard,
         container_guard: &WslcContainerGuard,
-        io_ctx: &IoContext,
+        io_ctx: &Arc<IoContext>,
         wait_ms: u32,
         logger: &mut Logger,
     ) -> Result<(i32, bool), ScriptResponse> {
@@ -943,10 +965,11 @@ impl WSLContainerRunner {
         }
 
         // Wait for exit callback to fire — guarantees all I/O is flushed.
-        if !io_ctx.wait_for_exit_callback() {
+        if !await_callbacks_quiesced(io_ctx) {
             let _ = writeln!(
                 logger,
-                "[WSLC] Warning: exit callback did not fire within {}s",
+                "[WSLC] Warning: exit callback did not fire within {}s; leaking the callback \
+                 context so a late callback cannot touch freed memory",
                 EXIT_CALLBACK_TIMEOUT.as_secs()
             );
         }
@@ -1435,7 +1458,7 @@ impl WSLContainerRunner {
     unsafe fn quiesce_started_container(
         sdk: &WslcSdk,
         container: &WslcContainerGuard,
-        io_ctx: &IoContext,
+        io_ctx: &Arc<IoContext>,
         destroy_on_exit: bool,
         logger: &mut Logger,
     ) {
@@ -1449,11 +1472,11 @@ impl WSLContainerRunner {
         drop(err_msg);
 
         io_ctx.close_streams();
-        if !io_ctx.wait_for_exit_callback() {
+        if !await_callbacks_quiesced(io_ctx) {
             let _ = writeln!(
                 logger,
                 "[WSLC] Warning: exit callback did not fire within {}s while cleaning up a \
-                 failed start",
+                 failed start; leaking the callback context",
                 EXIT_CALLBACK_TIMEOUT.as_secs()
             );
         }
@@ -1588,11 +1611,11 @@ impl StartedContainer {
         // `0` means "don't wait for a graceful stop".
         let _ = self.stop(WslcSignal::SigKill, 0);
         self.close_streams();
-        if !self.io_ctx.wait_for_exit_callback() {
+        if !await_callbacks_quiesced(&self.io_ctx) {
             let _ = writeln!(
                 logger,
                 "[WSLC] Warning: exit callback did not fire within {}s while abandoning a \
-                 started container",
+                 started container; leaking the callback context",
                 EXIT_CALLBACK_TIMEOUT.as_secs()
             );
         }
