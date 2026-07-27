@@ -976,17 +976,37 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        if !request.env.is_empty() {
-            let env_cstrings: Vec<Vec<u8>> = request
-                .env
+        // The parser guarantees a WSLC proxy is external and VM-routable — no
+        // loopback, no builtin test server (see `config_parser.rs`).
+        // `ProxyConfig::address` is populated for every enabled proxy shape, so
+        // its presence is exactly "a proxy is configured".
+        let proxy_address = request.policy.network_proxy.address.as_ref();
+        if let Some(addr) = proxy_address {
+            // Log host:port rather than `to_url()`: a `network.proxy.url` may
+            // embed userinfo (credentials before the `@`), which must not reach
+            // the log. `host()` excludes it.
+            let _ = writeln!(
+                logger,
+                "[WSLC] Cooperative network proxy: {}:{} (advisory — egress is not restricted to it)",
+                addr.host(),
+                addr.port()
+            );
+        }
+        let process_env = policy_mapping::build_process_env(&request.env, proxy_address);
+        // Hoisted like `_cwd_cstr` below: `process_settings` holds raw pointers
+        // into these buffers until `WslcCreateContainer` consumes them.
+        let _env_cstrings: Vec<Vec<u8>>;
+        let _env_ptrs: Vec<PCSTR>;
+        if !process_env.is_empty() {
+            _env_cstrings = process_env
                 .iter()
                 .map(|e| format!("{}\0", e).into_bytes())
                 .collect();
-            let env_ptrs: Vec<PCSTR> = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
+            _env_ptrs = _env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr = (sdk.WslcSetProcessSettingsEnvVariables)(
                 &mut process_settings,
-                env_ptrs.as_ptr(),
-                env_ptrs.len(),
+                _env_ptrs.as_ptr(),
+                _env_ptrs.len(),
             );
             if hr != S_OK {
                 return sdk_error("WslcSetProcessSettingsEnvVariables failed", hr, "");

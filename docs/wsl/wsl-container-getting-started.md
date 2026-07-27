@@ -227,6 +227,41 @@ no separate `--setup-wslc` step is required.
 | `"allowOutbound": true` | Bridged networking (full access) |
 | `"allowOutbound": false` | No networking (isolated) |
 
+#### Cooperative proxy
+
+`network.proxy` routes cooperating HTTP traffic through an external proxy by
+injecting `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (plus lowercase aliases)
+into the container's environment — the same cooperative model the Bubblewrap
+(Linux) and Seatbelt (macOS) backends use. Any caller-supplied proxy variable
+(including `NO_PROXY`) is stripped first so sandboxed code cannot override or
+bypass the configured proxy.
+
+```json
+{
+    "containment": "wslc",
+    "network": {
+        "defaultPolicy": "allow",
+        "proxy": { "url": "http://10.0.0.5:8080" }
+    }
+}
+```
+
+MXC does **not** start the proxy — supply one that is already listening.
+
+**Constraints (all enforced at config-parse time):**
+
+| Rejected | Why |
+|---|---|
+| `{ "localhost": <port> }`, or a `url` on `127.0.0.1` / `::1` / `localhost` | The container runs inside the WSL2 VM — a separate kernel with its own loopback, behind NAT. Loopback names the container itself, never the Windows host where the proxy listens. Use an address routable from the VM, and bind the proxy on a VM-reachable interface. |
+| `{ "builtinTestServer": true }` | The bundled test proxy binds host loopback, so it has the same reachability problem. |
+| `defaultPolicy: "block"` | Maps to `NetworkingMode::None` — no network interface at all, so the proxy would be unreachable. Use `"allow"`. |
+| `allowedHosts` / `blockedHosts` alongside `proxy` | MXC does not forward host lists to an external proxy, and WSLC cannot enforce them itself (in-container `iptables` needs `CAP_NET_ADMIN`, which the SDK's `Privileged` flag does not grant). The external proxy enforces its own host policy. |
+
+> **Cooperative, not enforced.** WSLC cannot restrict container egress to the
+> proxy port, so the injected variables are a routing hint: well-behaved HTTP
+> clients (curl, requests, etc.) honor them, but code using raw sockets reaches
+> the network directly. The run logs a warning to this effect.
+
 ### Filesystem mounts
 
 Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
@@ -249,6 +284,7 @@ the container.
 
 - [`tests/examples/wslc_hello_world.json`](../../tests/examples/wslc_hello_world.json) — Hello world with Alpine
 - [`tests/configs/wslc_network_isolated.json`](../../tests/configs/wslc_network_isolated.json) — Network isolation
+- [`tests/configs/wslc_network_proxy_env.json`](../../tests/configs/wslc_network_proxy_env.json) — Cooperative proxy env-var injection and hygiene
 - [`tests/configs/wslc_custom_registry_ghcr.json`](../../tests/configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
 - [`tests/configs/wslc_custom_registry_quay.json`](../../tests/configs/wslc_custom_registry_quay.json) — Pull from Quay.io
 - [`tests/configs/wslc_tar_import_rootfs.json`](../../tests/configs/wslc_tar_import_rootfs.json) — Import rootfs tar

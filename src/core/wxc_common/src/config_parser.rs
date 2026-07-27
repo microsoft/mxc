@@ -788,12 +788,16 @@ fn convert_wire_config(
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
-                && containment != ContainmentBackend::ProcessContainer
-                && containment != ContainmentBackend::Bubblewrap
-                && containment != ContainmentBackend::Seatbelt
+                && !matches!(
+                    containment,
+                    ContainmentBackend::ProcessContainer
+                        | ContainmentBackend::Bubblewrap
+                        | ContainmentBackend::Seatbelt
+                        | ContainmentBackend::Wslc
+                )
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', or 'seatbelt' containment backends";
+                           'bubblewrap', 'seatbelt', or 'wslc' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -903,6 +907,75 @@ fn convert_wire_config(
                        MXC-enforced host filtering, or remove the host policy.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // WSLC: the container runs inside the WSL2 VM — a separate kernel with
+        // its own loopback, behind NAT. A loopback proxy address therefore names
+        // the *container's* empty loopback, never the Windows host where the
+        // proxy listens, so the cooperative HTTP_PROXY/HTTPS_PROXY env vars would
+        // point at nothing and every request would fail. `builtinTestServer`
+        // binds loopback on the host and has the same problem (its bundled
+        // `unix-test-proxy` is a Unix binary besides). Require an explicitly
+        // VM-routable `network.proxy.url` instead of silently shipping a broken
+        // proxy configuration.
+        if containment == ContainmentBackend::Wslc && policy.network_proxy.builtin_test_server {
+            let msg = "WSLC: 'network.proxy.builtinTestServer' is not supported. The builtin \
+                       test proxy binds host loopback, which is unreachable from inside the \
+                       WSL2 VM (the container has its own loopback, behind NAT). Use \
+                       'network.proxy.url' with an address routable from the VM.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        if containment == ContainmentBackend::Wslc
+            && policy.network_proxy.address.as_ref().is_some_and(|addr| {
+                matches!(addr.host(), "127.0.0.1" | "::1" | "[::1]" | "localhost")
+            })
+        {
+            let msg = "WSLC: a loopback network.proxy (127.0.0.1/::1/localhost, including \
+                       'network.proxy.localhost') is unreachable from inside the WSL2 VM. The \
+                       container runs in a separate kernel behind NAT, so loopback names the \
+                       container itself, not the Windows host where the proxy listens. Use \
+                       'network.proxy.url' with an address routable from the VM, and bind the \
+                       proxy on a VM-reachable interface.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // WSLC's only proxy shape is an external one, which enforces its own
+        // policy — MXC does not forward host lists to it. Mirrors the Bubblewrap
+        // guard above: reject rather than silently degrade enforcement.
+        // `defaultPolicy: 'block'` is doubly incompatible here — it maps to
+        // `WslcContainerNetworkingMode::None`, leaving the container with no
+        // network interface at all, so the proxy could never be reached.
+        if containment == ContainmentBackend::Wslc
+            && policy.network_proxy.is_enabled()
+            && (!policy.allowed_hosts.is_empty()
+                || !policy.blocked_hosts.is_empty()
+                || policy.default_network_policy == NetworkPolicy::Block)
+        {
+            let msg = "WSLC: network.proxy requires network.defaultPolicy='allow' and cannot be \
+                       combined with allowedHosts or blockedHosts. 'block' gives the container \
+                       no network interface at all, so the proxy would be unreachable, and MXC \
+                       does not forward host lists to an external proxy (nor can WSLC enforce \
+                       them itself — its in-container iptables path needs CAP_NET_ADMIN). The \
+                       external proxy is expected to enforce its own host policy.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Cooperative-model warning: WSLC cannot restrict egress to the proxy
+        // port — the in-container iptables path needs CAP_NET_ADMIN, which the
+        // WSLC SDK's `Privileged` flag does not grant — so the injected env vars
+        // are a routing hint, never the enforcement mechanism.
+        if containment == ContainmentBackend::Wslc && policy.network_proxy.is_enabled() {
+            logger.log_line(
+                "WARNING: WSLC network.proxy is cooperative. HTTP_PROXY-aware clients \
+                 (curl, requests, etc.) route through the configured proxy, where its own \
+                 policy applies, but WSLC cannot restrict container egress to the proxy \
+                 port, so raw-socket clients that ignore HTTP_PROXY reach the network \
+                 directly.",
+            );
         }
 
         // Cooperative-model warning: builtin test proxy + defaultPolicy 'block'
@@ -2395,6 +2468,144 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_url_accepted_with_wslc() {
+        let json = r#"{
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "experimental": {"wslc": {"image": "python:3.12"}},
+            "network": {"defaultPolicy": "allow", "proxy": {"url": "http://10.0.0.5:8080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.host(), "10.0.0.5");
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejected_with_wslc() {
+        // The builtin proxy binds host loopback, unreachable from the WSL2 VM.
+        let json = r#"{
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "experimental": {"wslc": {"image": "python:3.12"}},
+            "network": {"defaultPolicy": "allow", "proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("WSLC: 'network.proxy.builtinTestServer' is not supported"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_localhost_rejected_with_wslc() {
+        // The container has its own loopback behind NAT, so 127.0.0.1 names the
+        // container itself rather than the Windows host running the proxy.
+        let json = r#"{
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "experimental": {"wslc": {"image": "python:3.12"}},
+            "network": {"defaultPolicy": "allow", "proxy": {"localhost": 8080}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("WSLC: a loopback network.proxy"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn proxy_loopback_url_rejected_with_wslc() {
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://[::1]:8080",
+        ] {
+            let json = format!(
+                r#"{{
+                    "containment": "wslc",
+                    "process": {{"commandLine": "echo hi"}},
+                    "experimental": {{"wslc": {{"image": "python:3.12"}}}},
+                    "network": {{"defaultPolicy": "allow", "proxy": {{"url": "{url}"}}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("WSLC: a loopback network.proxy"),
+                "expected loopback rejection for {}, got: {}",
+                url,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_with_wslc_and_host_lists_is_rejected() {
+        for extra in [
+            r#""defaultPolicy": "allow", "allowedHosts": ["example.com"]"#,
+            r#""defaultPolicy": "allow", "blockedHosts": ["example.com"]"#,
+            r#""defaultPolicy": "block""#,
+            // `defaultPolicy` defaults to "block", so omitting it must reject too.
+            r#""allowLocalNetwork": false"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "containment": "wslc",
+                    "process": {{"commandLine": "echo hi"}},
+                    "experimental": {{"wslc": {{"image": "python:3.12"}}}},
+                    "network": {{"proxy": {{"url": "http://10.0.0.5:8080"}}, {extra}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("WSLC: network.proxy requires network.defaultPolicy='allow'"),
+                "expected rejection for {}, got: {}",
+                extra,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn wslc_host_lists_without_proxy_still_accepted() {
+        let json = r#"{
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "experimental": {"wslc": {"image": "python:3.12"}},
+            "network": {"defaultPolicy": "block", "allowedHosts": ["example.com"]}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.network_proxy.is_enabled());
+        assert_eq!(req.policy.allowed_hosts, vec!["example.com".to_string()]);
     }
 
     #[test]

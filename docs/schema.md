@@ -55,6 +55,9 @@ production configs and the dev schema when working on experimental features:
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
+                                           // (wslc: cooperative env-var proxy too, but only
+                                           //  { "url": ... } with a VM-routable address —
+                                           //  loopback is unreachable from the WSL2 VM)
     },
 
     "processContainer": {                  // Process-based container-specific

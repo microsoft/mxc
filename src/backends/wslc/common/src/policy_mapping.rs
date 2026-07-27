@@ -11,6 +11,7 @@
 
 use crate::wslc_bindings::WslcContainerNetworkingMode;
 use wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+use wxc_common::models::ProxyAddress;
 
 /// A resolved volume mount ready to be passed to `WslcSetContainerSettingsVolumes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,6 +484,76 @@ pub fn build_iptables_rules(
         // If any iptables command fails, the chain stops and the error propagates.
         Some(rules.join(" && "))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cooperative network proxy
+// ---------------------------------------------------------------------------
+
+/// Env var keys the cooperative proxy manages. When a proxy is active these are
+/// stripped from the caller-supplied `request.env` so a config cannot supply
+/// entries that conflict with the values we inject (or re-enable a `NO_PROXY`
+/// bypass). Mirrors the Bubblewrap and Seatbelt backends' `PROXY_ENV_KEYS`;
+/// keep the three lists in sync.
+const PROXY_ENV_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+/// Proxy env var keys injected (pointing at the configured proxy URL) when a
+/// proxy is active. `NO_PROXY` is deliberately absent: exempting a destination
+/// would silently route it around the proxy's own policy.
+const PROXY_INJECT_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
+
+/// Build the `KEY=VALUE` environment passed to `WslcSetProcessSettingsEnvVariables`.
+///
+/// Cooperative env-var proxying, matching the Bubblewrap (Linux) and Seatbelt
+/// (macOS) backends: well-behaved tools (curl, requests, etc.) honor these and
+/// route through the configured proxy, where its own policy applies. Tools that
+/// use raw sockets are NOT enforced — WSLC cannot restrict container egress to
+/// the proxy port (in-container `iptables` needs `CAP_NET_ADMIN`, which the SDK's
+/// `Privileged` flag does not grant), so this is a routing hint, never the
+/// enforcement mechanism.
+///
+/// When `proxy_address` is `Some`, any caller-supplied proxy entry is dropped
+/// first so it cannot override or bypass the injected values.
+///
+/// Entries without a `=` are passed through untouched — the SDK treats the list
+/// as opaque strings and the WSLC backend does not otherwise parse them.
+pub fn build_process_env(env: &[String], proxy_address: Option<&ProxyAddress>) -> Vec<String> {
+    let Some(addr) = proxy_address else {
+        return env.to_vec();
+    };
+
+    let url = addr.to_url();
+    let mut result: Vec<String> = env
+        .iter()
+        .filter(|entry| match entry.split_once('=') {
+            Some((key, _)) => !PROXY_ENV_KEYS.contains(&key),
+            None => true,
+        })
+        .cloned()
+        .collect();
+
+    result.extend(
+        PROXY_INJECT_KEYS
+            .iter()
+            .map(|key| format!("{}={}", key, url)),
+    );
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,5 +1168,66 @@ mod tests {
         assert!(rules.contains("good.com"));
         assert!(rules.contains("10.0.0.1"));
         assert!(!rules.contains("rm"));
+    }
+
+    // -- Cooperative proxy env tests --
+
+    fn proxy_url(url: &str) -> ProxyAddress {
+        ProxyAddress::from_url(url, "10.0.0.5".to_string(), 8080)
+    }
+
+    #[test]
+    fn proxy_env_absent_passes_environment_through() {
+        let env = strings(&["FOO=bar", "HTTP_PROXY=http://evil:9"]);
+        assert_eq!(build_process_env(&env, None), env);
+    }
+
+    #[test]
+    fn proxy_env_injects_all_keys() {
+        let out = build_process_env(&[], Some(&proxy_url("http://10.0.0.5:8080")));
+        for key in PROXY_INJECT_KEYS {
+            assert!(
+                out.contains(&format!("{}=http://10.0.0.5:8080", key)),
+                "missing {}",
+                key
+            );
+        }
+        assert_eq!(out.len(), PROXY_INJECT_KEYS.len());
+    }
+
+    #[test]
+    fn proxy_env_strips_caller_supplied_proxy_vars() {
+        let env = strings(&[
+            "FOO=bar",
+            "HTTP_PROXY=http://evil:9",
+            "https_proxy=http://evil:9",
+            "ALL_PROXY=http://evil:9",
+            "NO_PROXY=*",
+            "no_proxy=*",
+        ]);
+        let out = build_process_env(&env, Some(&proxy_url("http://10.0.0.5:8080")));
+
+        assert!(out.contains(&"FOO=bar".to_string()));
+        assert!(!out.iter().any(|e| e.contains("evil")));
+        // NO_PROXY is stripped and never re-injected, so it cannot carve out a
+        // bypass around the configured proxy.
+        assert!(!out
+            .iter()
+            .any(|e| e.to_uppercase().starts_with("NO_PROXY=")));
+    }
+
+    #[test]
+    fn proxy_env_preserves_entries_without_equals() {
+        let env = strings(&["MALFORMED"]);
+        let out = build_process_env(&env, Some(&proxy_url("http://10.0.0.5:8080")));
+        assert!(out.contains(&"MALFORMED".to_string()));
+    }
+
+    #[test]
+    fn proxy_env_does_not_strip_lookalike_keys() {
+        let env = strings(&["MY_HTTP_PROXY=keep", "HTTP_PROXY_EXTRA=keep"]);
+        let out = build_process_env(&env, Some(&proxy_url("http://10.0.0.5:8080")));
+        assert!(out.contains(&"MY_HTTP_PROXY=keep".to_string()));
+        assert!(out.contains(&"HTTP_PROXY_EXTRA=keep".to_string()));
     }
 }

@@ -1,0 +1,18 @@
+{
+  "version": "0.6.0-alpha",
+  "containerId": "wslc-network-proxy-env",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "env | grep -iE '^(http_proxy|https_proxy|all_proxy|no_proxy)=' | sort",
+    "env": ["HTTP_PROXY=http://attacker.invalid:1", "NO_PROXY=*"]
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "proxy": { "url": "http://10.0.0.5:8080" }
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}
