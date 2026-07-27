@@ -200,7 +200,7 @@ type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, 
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
 
 type _ProcessContainerWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, never>
+  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'captureDenials'>
 >;
 
 // `seatbelt.guiAccess` and `seatbelt.launchMethod` are wire fields the one-shot

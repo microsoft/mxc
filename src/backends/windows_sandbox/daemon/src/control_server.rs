@@ -11,13 +11,15 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 
 use windows_sandbox_lifecycle::bridge::{
-    reconnect_data_streams, stream_exec_on_guest, write_exit_frame, GuestConnection,
+    host_watchdog_deadline, reconnect_data_streams, stream_exec_on_guest, write_exit_frame,
+    GuestConnection, HOST_WATCHDOG_GRACE,
 };
 use windows_sandbox_lifecycle::control_plane::{
-    IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_EXEC, IPC_PING, IPC_STOP,
+    parse_client_protocol, IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_ERR_PROTOCOL, IPC_EXEC,
+    IPC_PING, IPC_PROTOCOL_VERSION, IPC_STOP,
 };
 use windows_sandbox_lifecycle::ipc_exec;
 
@@ -219,9 +221,13 @@ async fn handle_client(
     };
 
     let trimmed = line.trim();
-    let mut parts = trimmed.splitn(2, ' ');
+    // `EXEC` may carry a trailing IPC-protocol-version token: split into up to
+    // three parts (verb, nonce, optional version). The nonce is a space-free
+    // uuid, so it is always exactly the second token.
+    let mut parts = trimmed.splitn(3, ' ');
     let verb = parts.next().unwrap_or("");
     let supplied = parts.next().unwrap_or("");
+    let proto_token = parts.next().unwrap_or("");
 
     if supplied != nonce {
         writer.write_all(b"ERR auth\n").await.ok();
@@ -239,7 +245,7 @@ async fn handle_client(
         shutdown.notify_one();
         Ok(())
     } else if verb == IPC_EXEC {
-        handle_exec(reader, writer, guest, guest_nonce, permit).await
+        handle_exec(reader, writer, guest, guest_nonce, permit, proto_token).await
     } else {
         writer.write_all(b"ERR unknown command\n").await.ok();
         Ok(())
@@ -255,7 +261,36 @@ async fn handle_exec(
     guest: &Arc<Mutex<GuestSlot>>,
     guest_nonce: &GuestNonce,
     permit: tokio::sync::OwnedSemaphorePermit,
+    proto_token: &str,
 ) -> Result<()> {
+    // Reject a wire-protocol mismatch before any frame I/O: a client from a
+    // different mxc install may frame its `ExecStart` differently, so we must
+    // not parse it. An absent token is a pre-versioning client (legacy version).
+    match parse_client_protocol(proto_token) {
+        Some(v) if v == IPC_PROTOCOL_VERSION => {}
+        Some(v) => {
+            writer
+                .write_all(
+                    format!(
+                        "{IPC_ERR} {IPC_ERR_PROTOCOL} client v{v} != daemon v{IPC_PROTOCOL_VERSION}\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .ok();
+            return Ok(());
+        }
+        None => {
+            writer
+                .write_all(
+                    format!("{IPC_ERR} {IPC_ERR_PROTOCOL} malformed version token\n").as_bytes(),
+                )
+                .await
+                .ok();
+            return Ok(());
+        }
+    }
+
     let req = match timeout(
         EXEC_REQUEST_TIMEOUT,
         ipc_exec::read_exec_start_async(&mut reader),
@@ -331,7 +366,46 @@ async fn handle_exec(
     drop(permit);
 
     let exec_id = format!("exec-{}", EXEC_COUNTER.fetch_add(1, Ordering::Relaxed));
-    match stream_exec_on_guest(&mut conn, &exec_id, &req, &mut reader, &mut writer).await {
+
+    // Host-side watchdog: a frozen-but-alive guest (never sends Exit, never
+    // closes its streams) would otherwise wedge the single-flight slot forever.
+    // The deadline is honoured *inside* the relay loop at frame boundaries, so a
+    // timeout can never truncate a data frame and desync the client's decode.
+    // `None` == infinite budget (`timeout_ms == u32::MAX`), as in one-shot.
+    let deadline =
+        host_watchdog_deadline(req.timeout_ms, HOST_WATCHDOG_GRACE).map(|d| Instant::now() + d);
+    let stream_result = stream_exec_on_guest(
+        &mut conn,
+        &exec_id,
+        &req,
+        &mut reader,
+        &mut writer,
+        deadline,
+    )
+    .await;
+    match stream_result {
+        Ok(outcome) if outcome.timed_out => {
+            // Watchdog fired at a frame boundary: the guest connection is no
+            // longer trustworthy, so mark the slot Unusable and hand the client
+            // a clean terminal exit frame (no partial data frame precedes it).
+            let msg = format!(
+                "guest did not report completion within the host watchdog ({}ms guest \
+                 timeout + {}s grace); the sandbox may be frozen",
+                req.timeout_ms,
+                HOST_WATCHDOG_GRACE.as_secs()
+            );
+            eprintln!("[wsb-daemon] exec {exec_id}: {msg}");
+            let released = restore_and_release_guest_slot(slot, GuestSlot::Unusable(msg.clone()));
+            if outcome.ipc_alive {
+                if let Err(e) = write_released_exit_frame(&mut writer, released, -1, &msg).await {
+                    eprintln!(
+                        "[wsb-daemon] exec {exec_id}: failed to send watchdog exit frame: {e:#}"
+                    );
+                }
+            } else {
+                let _ = released;
+            }
+        }
         Ok(outcome) => {
             let reconnect =
                 reconnect_data_streams(&mut conn, addr, outcome.control_residual, guest_nonce)
@@ -648,6 +722,80 @@ mod tests {
         assert!(
             resp.starts_with(&format!("{IPC_ERR} bad request:")),
             "expected ERR bad request prefix, got {resp:?}"
+        );
+
+        shutdown.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn exec_with_matching_protocol_version_reaches_admission() {
+        // An explicit version token equal to the daemon's passes the handshake,
+        // so admission runs and (against Booting) yields `ERR not ready`.
+        let (addr, shutdown, handle) = spawn_test_server(GuestSlot::Booting).await;
+
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("EXEC test-nonce-deadbeef {IPC_PROTOCOL_VERSION}\n").as_bytes())
+            .await
+            .unwrap();
+        let start = ExecStart {
+            script_code: "echo hi".to_string(),
+            working_directory: String::new(),
+            timeout_ms: 5_000,
+        };
+        s.write_all(&ipc_exec::encode_exec_start(&start).unwrap())
+            .await
+            .unwrap();
+        s.shutdown().await.ok();
+        let resp = read_to_string(&mut s).await;
+        assert_eq!(
+            resp,
+            format!("{IPC_ERR} {IPC_ERR_NOT_READY}\n"),
+            "got {resp:?}"
+        );
+
+        shutdown.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn exec_with_mismatched_protocol_version_yields_err_protocol() {
+        // A version the daemon does not speak is refused before any frame I/O.
+        let (addr, shutdown, handle) = spawn_test_server(GuestSlot::Booting).await;
+
+        let mismatch = IPC_PROTOCOL_VERSION + 1;
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("EXEC test-nonce-deadbeef {mismatch}\n").as_bytes())
+            .await
+            .unwrap();
+        s.shutdown().await.ok();
+        let resp = read_to_string(&mut s).await;
+        assert_eq!(
+            resp,
+            format!(
+                "{IPC_ERR} {IPC_ERR_PROTOCOL} client v{mismatch} != daemon v{IPC_PROTOCOL_VERSION}\n"
+            ),
+            "got {resp:?}"
+        );
+
+        shutdown.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn exec_with_malformed_protocol_token_yields_err_protocol() {
+        let (addr, shutdown, handle) = spawn_test_server(GuestSlot::Booting).await;
+
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"EXEC test-nonce-deadbeef notanumber\n")
+            .await
+            .unwrap();
+        s.shutdown().await.ok();
+        let resp = read_to_string(&mut s).await;
+        assert_eq!(
+            resp,
+            format!("{IPC_ERR} {IPC_ERR_PROTOCOL} malformed version token\n"),
+            "got {resp:?}"
         );
 
         shutdown.notify_one();
