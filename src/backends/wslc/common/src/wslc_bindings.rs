@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Ergonomic façade over the bindgen-generated WSLC SDK bindings.
+//! Ergonomic facade over the bindgen-generated WSLC SDK bindings.
 //!
 //! All ABI-defining items — opaque settings structs and their sizes, handle
 //! types, enums, data structs, callback signatures, and the runtime-loaded
@@ -46,7 +46,7 @@ impl WslcComponentFlags {
 
 // bindgen derives `Debug` for the generated newtype, which prints the raw
 // tuple (e.g. `WslcComponentFlags(2)`). That is not actionable in a
-// user-facing error, so the façade adds a `Display` impl (which bindgen does
+// user-facing error, so the facade adds a `Display` impl (which bindgen does
 // not generate) that decodes the set bits into named components. The
 // `WslcGetMissingComponents` error path formats the value with `{}`.
 impl core::fmt::Display for WslcComponentFlags {

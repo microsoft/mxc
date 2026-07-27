@@ -12,14 +12,14 @@ undefined behavior**.
 | File | Role |
 |---|---|
 | `src/backends/wslc/common/src/wslcsdk_sys.rs` | **Generated** by bindgen. The single source of ABI truth: opaque settings structs + size consts, handle types, enums, data structs, callback typedefs, and the runtime-loaded `WslcSdk` function table with compile-time size/offset asserts. **Do not hand-edit.** |
-| `src/backends/wslc/common/src/wslc_bindings.rs` | Thin ergonomic **façade** over the generated module. Re-exports the generated surface (`pub use crate::wslcsdk_sys::*;`) and adds only what bindgen cannot generate: the `S_OK` COM sentinel, `WslcSdk::load()` (anti-hijack DLL loading from the executable's own directory), the RAII guards (`WslcSessionGuard` / `WslcContainerGuard` / `WslcProcessGuard`), `check_hresult`, and `WslcComponentFlags::any_missing`. |
-| `scripts/generate-wslc-bindings.ps1` | Regenerates `wslcsdk_sys.rs` from the header vendored in the SDK `.nupkg`. Run this on every SDK version bump. |
+| `src/backends/wslc/common/src/wslc_bindings.rs` | Thin ergonomic **facade** over the generated module. Re-exports the generated surface (`pub use crate::wslcsdk_sys::*;`) and adds only what bindgen cannot generate: the `S_OK` COM sentinel, `WslcSdk::load()` (anti-hijack DLL loading from the executable's own directory), the RAII guards (`WslcSessionGuard` / `WslcContainerGuard` / `WslcProcessGuard`), `check_hresult`, and `WslcComponentFlags::any_missing`. |
+| `scripts/generate-wslc-bindings.ps1` | Regenerates `wslcsdk_sys.rs` from the header vendored in the SDK `.nupkg`. Run this on every WSLC SDK version bump. |
 
 The generated file is **committed** to the repo. Normal builds (including CI and
 the `--features wslc` feature build) simply `include`/`mod` the committed file —
 they need **no** libclang and **no** bindgen in the Cargo graph. bindgen and
 libclang are required **only** on the machine that regenerates the bindings
-after an SDK bump.
+after a WSLC SDK bump.
 
 ### Why a committed file + standalone script (not `build.rs`)
 
@@ -27,18 +27,21 @@ bindgen is deliberately kept out of `Cargo.toml` and `build.rs`. Generating at
 build time would force **every** builder of the `wslc` feature to install
 libclang and pull `bindgen`/`clang-sys` into the dependency graph (and into the
 `MxcDependencies` feed). Committing the generated file keeps normal builds
-dependency-free and deterministic; only SDK bumps touch the toolchain.
+dependency-free and deterministic; only WSLC SDK bumps touch the toolchain.
 
 ## Regeneration prerequisites
 
-Needed **only** when regenerating bindings (i.e., on an SDK version bump):
+Needed **only** when regenerating bindings (i.e., on a WSLC SDK version bump):
 
 - **LLVM / libclang** — e.g. install LLVM (`C:\Program Files\LLVM\bin`). bindgen
   parses the C header via libclang.
 - **`bindgen-cli`** — `cargo install bindgen-cli` (installs `~/.cargo/bin/bindgen.exe`).
 
 `scripts/generate-wslc-bindings.ps1` auto-discovers both, plus the MSVC/Windows
-SDK include paths and the header inside the vendored `.nupkg`.
+SDK include paths and the header inside the vendored `.nupkg`. It runs on both
+x64 and ARM64 Windows: the clang target triple defaults to the host arch (both
+are LLP64, so the generated file is identical), and it falls back to an
+ARM64-only MSVC toolset install. Override with `-Target <triple>` if needed.
 
 ## Runbook — updating to a new WSLC SDK version
 
@@ -79,12 +82,12 @@ match the pinned SDK.
    the following now **fails to compile** (instead of corrupting memory at
    runtime):
    - the generated compile-time size/offset asserts in `wslcsdk_sys.rs`;
-   - the façade in `wslc_bindings.rs` (e.g. a changed release signature no
+   - the facade in `wslc_bindings.rs` (e.g. a changed release signature no
      longer matches the `*ReleaseFn` aliases);
    - the runner in `wsl_container_runner.rs` (renamed struct fields, enum
      variants, or callback signatures).
 
-   Fix the façade and runner call sites to match the regenerated names/types.
+   Fix the facade and runner call sites to match the regenerated names/types.
 
 6. **Validate.**
 
@@ -108,19 +111,5 @@ match the pinned SDK.
    tests are environment-dependent and may skip).
 
 8. **Commit** the regenerated `wslcsdk_sys.rs` **together with** the
-   `WSLC_SDK_VERSION` + `expected_sha256()` change (and any façade/runner fixes)
+   `WSLC_SDK_VERSION` + `expected_sha256()` change (and any facade/runner fixes)
    in one commit.
-
-## Contrast with the old hand-written bindings
-
-Before bindgen, `wslc_bindings.rs` was a hand-written FFI table pinned to one
-specific SDK ABI. A header change you didn't notice — a struct that grew, a
-renamed export, a reordered field — produced **silent memory corruption or a
-load failure at runtime**. For example, the 2.8.1 → 2.9.3 bump changed struct
-sizes, renamed `WslcCanRun` → `WslcGetMissingComponents`, renamed
-`CurrentDirectory` → `WorkingDirectory`, and added a `registryAuth` field — all
-of which had to be found and fixed by hand.
-
-With bindgen, the same class of change **cannot compile** until a human
-regenerates the file (reading the new header through bindgen) and fixes the
-callers. Drift is converted from a runtime hazard into a build-time error.

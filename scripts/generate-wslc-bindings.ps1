@@ -29,7 +29,13 @@ param(
     # Override the Windows SDK include version (defaults to the newest installed).
     [string] $WindowsSdkVersion,
     # Path to libclang's directory (defaults to the standard LLVM install).
-    [string] $LibClangDir = "C:\Program Files\LLVM\bin"
+    [string] $LibClangDir = "C:\Program Files\LLVM\bin",
+    # Clang target triple bindgen parses the header as. x64 and ARM64 Windows are
+    # both LLP64 with identical layout for the WSLC types, so the generated file is
+    # byte-identical either way (and the retained size/offset asserts catch any
+    # future divergence at compile time). Defaults to the host arch so the script
+    # runs on ARM64 dev machines without an override.
+    [string] $Target = $(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' })
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +66,11 @@ $env:LIBCLANG_PATH = $LibClangDir
 # --- 3. Locate the MSVC toolchain include (via vswhere) -------------------------
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path $vswhere)) { Fail "vswhere.exe not found; a Visual Studio install is required." }
+# Prefer an install carrying the x64 MSVC toolset, but fall back to any VS install
+# (e.g. an ARM64-only box): the MSVC `include` directory is arch-agnostic, and the
+# $msvcInc Test-Path below catches a genuinely missing toolset.
 $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vsPath) { $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath }
 if (-not $vsPath) { Fail "No Visual Studio install with the MSVC toolchain was found." }
 $msvcRoot = Join-Path $vsPath "VC\Tools\MSVC"
 $msvcVer  = Get-ChildItem $msvcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
@@ -117,6 +127,10 @@ try {
     )
 
     # --- 7. Run bindgen ---------------------------------------------------------
+    # bindgen enum styles: OR-able flag masks (Wslc*Flags) become bitflag
+    # newtypes via --bitfield-enum; exclusive-value enums become opaque
+    # newtypes via --newtype-enum. Both keep the C ABI while avoiding UB from
+    # out-of-range discriminants that a plain Rust `enum` would allow.
     $bitfieldEnums = 'Wslc(ContainerFlags|SessionFeatureFlags|ContainerStartFlags|DeleteContainerFlags|ComponentFlags|VhdRequirementsFlags)'
     $newtypeEnums  = 'Wslc(PortProtocol|Signal|ProcessIOHandle|ContainerNetworkingMode|VhdType|SessionTerminationReason|ContainerState|ProcessState|ImageProgressStatus)'
 
@@ -132,7 +146,7 @@ try {
     $bindgenArgs += @(
         "-o", $outFile,
         "--",
-        "--target=x86_64-pc-windows-msvc",
+        "--target=$Target",
         "-fms-compatibility", "-fms-extensions",
         "-I$staging",
         "-I$msvcInc",

@@ -321,7 +321,8 @@ fn verify_sha256(nupkg_path: &Path, version: &str) -> Result<(), String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    if actual != expected {
+    // Compare case-insensitively so an upper- or mixed-case pinned hash still matches.
+    if !actual.eq_ignore_ascii_case(&expected) {
         let _ = std::fs::remove_file(nupkg_path);
         return Err(format!(
             "WSLC SDK integrity check failed for {}: expected SHA-256 {}, got {}. \
