@@ -485,9 +485,10 @@ pub enum TransportProtocol {
 
 /// IsolationSession backend config. Carries the one-shot `user` field and
 /// the per-phase state-aware nesting for the phases that take config
-/// (`provision` / `start`). `stop`/`deprovision`/`exec` take no config
-/// payload — they are invoked via the top-level `phase` field with
-/// `sandboxId`.
+/// (`provision` / `start`). `stop`, `deprovision`, and `exec` take no
+/// per-phase config payload: `stop` and `deprovision` are invoked with only
+/// the top-level `phase` and `sandboxId`, and `exec` additionally carries
+/// the top-level `process` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]

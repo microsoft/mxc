@@ -319,11 +319,13 @@ mod tests {
     // The generated JSON schema (`schemas/dev/`) and the SDK wire types
     // (`sdk/node/src/generated/wire.ts`) are both emitted from
     // `wxc_common::wire::IsolationSession`, while the phases that actually
-    // accept a config are the associated types on the impl above. Nothing
-    // links the two at compile time, so the pair below pins both halves:
-    // the wire model must nest a per-phase key exactly for the phases whose
-    // config type is not `()`. When they disagree, the schema advertises a
-    // payload `deserialize_config` then rejects.
+    // accept a config are the associated types on the impl above. On the
+    // state-aware path the wire model is never constructed — the dispatcher
+    // deserializes raw JSON straight into those associated types — so nothing
+    // couples the two at compile time. The tests below pin that contract from
+    // both directions: the key set the wire model advertises, that the `()`
+    // phases reject a payload, and that the phases which do take one still
+    // accept the payload the wire model describes.
 
     #[test]
     fn wire_model_nests_config_only_for_phases_that_take_one() {
@@ -372,6 +374,38 @@ mod tests {
             serde_json::from_value::<ExecConfig>(payload).is_err(),
             "exec accepted a config payload"
         );
+    }
+
+    #[test]
+    fn phases_with_a_config_accept_the_wire_payload() {
+        type ProvisionConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ProvisionConfig;
+        type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;
+
+        // Derive the payload from the wire type instead of a JSON literal: the
+        // wire model is only the schema source on this path, so a serde rename
+        // on either side would go unnoticed. Both config types are
+        // `#[serde(default)]` with no `deny_unknown_fields`, so a renamed key
+        // does not error — it drops the bundle and provisions a local sandbox
+        // for a caller who asked for an Entra one.
+        let phase = wxc_common::wire::IsolationSessionPhase {
+            user: Some(wxc_common::wire::IsolationUser {
+                upn: "alice@contoso.com".to_string(),
+                wam_token: "tok".to_string(),
+            }),
+        };
+        let payload = serde_json::to_value(&phase).unwrap();
+
+        let provision: ProvisionConfig = serde_json::from_value(payload.clone()).unwrap();
+        let u = provision
+            .user
+            .expect("provision dropped the wire user bundle");
+        assert_eq!(u.upn, "alice@contoso.com");
+        assert_eq!(u.wam_token, "tok");
+
+        let start: StartConfig = serde_json::from_value(payload).unwrap();
+        let u = start.user.expect("start dropped the wire user bundle");
+        assert_eq!(u.upn, "alice@contoso.com");
+        assert_eq!(u.wam_token, "tok");
     }
 
     fn request_with_filesystem_policy() -> ExecutionRequest {
