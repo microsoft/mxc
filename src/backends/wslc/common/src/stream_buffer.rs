@@ -189,11 +189,29 @@ mod tests {
     }
 
     #[test]
-    fn cancel_unblocks_a_parked_read_and_writes_never_block() {
-        // The writer stays open and undrained for the whole test: a callback
-        // thread must never be blocked by an unread stream, and the canceller
-        // must EOF the parked read promptly.
-        let (writer, mut reader) = stream_pair();
+    fn write_never_blocks_on_an_unread_stream() {
+        // The core invariant: an SDK callback thread must never be stalled by a
+        // caller that isn't reading, since that same thread delivers the exit
+        // callback teardown waits on. Nothing drains this stream at all.
+        let (writer, _reader) = stream_pair();
+        let start = Instant::now();
+        for _ in 0..16 {
+            writer.write(&[0u8; 256 * 1024]);
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "writes must not block on an unread stream, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn cancel_unblocks_a_parked_read() {
+        // The writer stays open and never writes, so a plain read would park
+        // forever; the canceller must EOF it promptly. Deliberately no write
+        // here — a write would legitimately wake the reader with data, which
+        // says nothing about cancellation.
+        let (_writer, mut reader) = stream_pair();
         let canceller = reader.canceller();
 
         let handle = std::thread::spawn(move || {
@@ -204,12 +222,6 @@ mod tests {
         });
 
         std::thread::sleep(Duration::from_millis(50));
-        let start = Instant::now();
-        writer.write(&[0u8; 256 * 1024]);
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "write must not block on an unread stream"
-        );
         canceller.close();
         canceller.close(); // idempotent
 

@@ -531,6 +531,16 @@ pub enum Containment {
 ///
 /// [`Default`] matches the native backend's defaults: the `alpine:latest`
 /// image, host-determined CPU/memory, no GPU, and the SDK's default store.
+///
+/// # Network policy
+///
+/// WSLC derives its networking mode from `allowOutbound` alone (bridged when
+/// true, isolated when false). Per-host rules (`allowedHosts`/`blockedHosts`)
+/// are accepted here for parity with the TypeScript SDK, but the backend
+/// currently enforces them with in-container `iptables`, which the container
+/// lacks `CAP_NET_ADMIN` to install — so such a policy **fails the run at
+/// spawn** rather than silently going unenforced. Until enforcement moves to a
+/// VM-level API, prefer expressing WSLC network intent with `allowOutbound`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslcSection {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).

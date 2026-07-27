@@ -295,6 +295,13 @@ no separate `--setup-wslc` step is required.
 | `"allowOutbound": true` | Bridged networking (full access) |
 | `"allowOutbound": false` | No networking (isolated) |
 
+> **`allowedHosts` / `blockedHosts` do not work on WSLC today.** They are
+> accepted by the config builders (for parity across the SDKs), but the backend
+> enforces them with in-container `iptables`, and the container is not granted
+> `CAP_NET_ADMIN` — so the rules cannot be installed and the run **fails at
+> spawn** rather than silently going unenforced. Express WSLC network intent
+> with `allowOutbound` until enforcement moves to a VM-level network policy API.
+
 ### Filesystem mounts
 
 Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted

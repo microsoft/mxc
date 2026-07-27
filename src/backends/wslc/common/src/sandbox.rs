@@ -86,12 +86,21 @@ struct WslcSandboxProcess {
 }
 
 // SAFETY: the WSLC handles inside `StartedContainer` are opaque SDK pointers,
-// not thread-affine COM interface pointers: the SDK is entered under a
-// multithreaded apartment (`CoInitializeEx(COINIT_MULTITHREADED)`) and itself
-// invokes our I/O and exit callbacks on its own internal threads, so its objects
-// are used free-threaded by design. The handle is *moved* between threads, never
-// shared (`Sync` is deliberately not claimed), so at most one thread can call
-// into the SDK with these handles at a time.
+// not COM interface pointers the caller marshals: `init_and_load_sdk` enters the
+// *multithreaded* apartment (`COINIT_MULTITHREADED`), so the SDK's objects live
+// in the MTA and the SDK itself invokes our I/O and exit callbacks on its own
+// internal threads — it is free-threaded by design.
+//
+// `CoInitializeEx` is nonetheless per-thread, so moving this handle to a thread
+// that never initialized COM would otherwise leave the SDK on the stack of an
+// apartment-less thread. Every entry point that calls the SDK
+// (`StartedContainer`'s `wait_for_exit` / `destroy` / `stop` / `exit_code`)
+// therefore joins the MTA for the duration via `ComApartment`, mirroring
+// `appcontainer_common`'s guard. No apartment state or interface pointer is
+// cached across calls, so setup and teardown may run on different threads.
+//
+// The handle is *moved* between threads, never shared (`Sync` is deliberately
+// not claimed), so at most one thread calls into the SDK at a time.
 unsafe impl Send for WslcSandboxProcess {}
 
 impl WslcSandboxProcess {

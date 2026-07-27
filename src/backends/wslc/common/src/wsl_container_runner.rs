@@ -1459,6 +1459,9 @@ impl StartedContainer {
     /// Wait for the init process to exit, enforcing the request's timeout
     /// (stopping the container when it fires). Returns `(exit_code, timed_out)`.
     pub(crate) fn wait_for_exit(&self, logger: &mut Logger) -> Result<(i32, bool), ScriptResponse> {
+        // The handle is `Send`, so this may run on a thread that never entered
+        // the apartment `init_and_load_sdk` established; join it for the call.
+        let _com = ComApartment::enter();
         // SAFETY: `self` owns live process / container handles and a live SDK.
         unsafe {
             WSLContainerRunner::wait_for_process(
@@ -1475,6 +1478,7 @@ impl StartedContainer {
     /// Stop and delete the container when the request asked for it. The session
     /// is terminated by `WslcSessionGuard`'s `Drop`.
     pub(crate) fn destroy(&self, logger: &mut Logger) {
+        let _com = ComApartment::enter();
         if self.destroy_on_exit {
             // SAFETY: the guards hold live handles for `self`'s lifetime and
             // `sdk`'s function pointers are valid while it is alive.
@@ -1506,6 +1510,7 @@ impl StartedContainer {
     /// [`SandboxProcess::kill`](wxc_common::sandbox_process::SandboxProcess::kill).
     /// `timeout_secs` is how long the SDK waits for a graceful stop.
     pub(crate) fn stop(&self, signal: WslcSignal, timeout_secs: u32) -> Result<(), String> {
+        let _com = ComApartment::enter();
         // SAFETY: as `destroy` — live container handle, live SDK.
         unsafe {
             let mut err_msg = CoTaskMemPWSTR::null();
@@ -1544,6 +1549,7 @@ impl StartedContainer {
     /// # Safety
     /// Requires a live process handle and SDK, which `self` owns.
     pub(crate) unsafe fn exit_code(&self) -> Result<i32, String> {
+        let _com = ComApartment::enter();
         let mut exit_code: i32 = -1;
         let hr = (self.sdk.WslcGetProcessExitCode)(self.process_guard.as_raw(), &mut exit_code);
         if hr != S_OK {

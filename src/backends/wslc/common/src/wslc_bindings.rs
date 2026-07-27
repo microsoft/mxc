@@ -479,6 +479,54 @@ pub struct WslcSdk {
 // across threads with an explicit `unsafe impl Send`; see the safety note
 // there for the argument that makes it sound.
 
+/// `RPC_E_CHANGED_MODE`: `CoInitializeEx` returns this when COM is already
+/// initialized on the calling thread with a *different* apartment model. The
+/// existing initialization is reused and must **not** be balanced by our own
+/// `CoUninitialize`.
+const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
+
+/// RAII guard joining the multithreaded apartment on the **current** thread for
+/// the duration of a batch of WSLC SDK calls.
+///
+/// The SDK is entered under `COINIT_MULTITHREADED` (see
+/// `WSLContainerRunner::init_and_load_sdk`), but `CoInitializeEx` is per-thread,
+/// and the streaming handle is `Send` — so `wait`/`kill`/`Drop` can call the SDK
+/// from a thread that never initialized COM. Every such entry point takes one of
+/// these first, mirroring `appcontainer_common`'s `ComApartment`, so the calling
+/// thread always has an apartment while the SDK is on the stack.
+pub(crate) struct ComApartment {
+    /// Whether *this* guard performed the initialization it must balance with
+    /// `CoUninitialize`. `false` when the thread was already in a different
+    /// apartment model (`RPC_E_CHANGED_MODE`), which we reuse but do not own.
+    owns_init: bool,
+}
+
+impl ComApartment {
+    /// Join (or initialize) the multithreaded apartment for the current thread.
+    /// `S_OK`/`S_FALSE` are both initializations this guard balances;
+    /// `RPC_E_CHANGED_MODE` reuses the thread's existing apartment. Any other
+    /// failure still yields a guard — the SDK call is attempted regardless, so
+    /// behaviour is never worse than not taking the apartment at all.
+    pub(crate) fn enter() -> Self {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        // SAFETY: `CoInitializeEx` is always safe to call; the matching
+        // `CoUninitialize` runs in `Drop`, on this same thread, when we own it.
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        Self {
+            owns_init: hr.is_ok(),
+        }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.owns_init {
+            // SAFETY: balances the `CoInitializeEx` in `enter` on the same thread.
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
 /// Whether this host can run the WSLC backend: `wslcsdk.dll` loads next to the
 /// running executable and the runtime reports no missing components (WSL2 and
 /// the WSLC runtime installed).
@@ -486,23 +534,8 @@ pub struct WslcSdk {
 /// Used for host capability reporting. A `false` here is exactly the condition
 /// under which the runner's own preflight would fail.
 pub fn is_available() -> bool {
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-
-    // SAFETY: COM apartment bookkeeping only, balanced below, followed by the
-    // SDK's own capability query through freshly resolved function pointers.
-    unsafe {
-        // Join the MTA for the probe when the calling thread has no apartment
-        // yet, and leave the thread exactly as we found it. An `Err` here is
-        // `RPC_E_CHANGED_MODE` (the caller is already in an STA) — nothing was
-        // initialized, so nothing is uninitialized either, and the probe still
-        // runs.
-        let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let available = probe_components();
-        if initialized {
-            CoUninitialize();
-        }
-        available
-    }
+    let _com = ComApartment::enter();
+    probe_components()
 }
 
 /// Load the SDK and ask it whether any prerequisite component is missing.
