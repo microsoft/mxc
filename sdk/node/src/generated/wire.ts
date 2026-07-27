@@ -42,7 +42,7 @@ export interface BaseProcessUi {
  */
 export interface CaptureDenials {
   /**
-   * How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block-and-log` when omitted.
+   * How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block` when omitted.
    */
   mode?: CaptureDenialsMode | null;
   /**
@@ -54,7 +54,7 @@ export interface CaptureDenials {
 /**
  * How `captureDenials` handles each ungranted access check while recording it.
  */
-export type CaptureDenialsMode = "block-and-log" | "allow-and-log";
+export type CaptureDenialsMode = "block" | "allow";
 
 /**
  * Clipboard access level.

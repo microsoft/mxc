@@ -61,8 +61,8 @@ production configs and the dev schema when working on experimental features:
         "leastPrivilege": false,
         "capabilities": ["internetClient"],
         "captureDenials": {                // Windows-only: record the process's access
-            "mode": "block-and-log",       // "block-and-log" (default): access stays denied and
-                                           // is logged (deny-by-default preserved). "allow-and-log":
+            "mode": "block",               // "block" (default): access stays denied and
+                                           // is logged (deny-by-default preserved). "allow":
                                            // access is allowed and logged (audit; relaxes
                                            // deny-by-default, emits a security warning).
             "outputPath": "C:\\logs\\denials.etl"  // attempts to a learning-mode ETL trace. The

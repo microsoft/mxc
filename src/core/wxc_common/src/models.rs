@@ -571,7 +571,7 @@ pub struct ContainerPolicy {
 #[serde(default)]
 pub struct CaptureDenialsConfig {
     /// How each ungranted access check is handled while it is recorded.
-    /// Defaults to [`CaptureDenialsMode::BlockAndLog`].
+    /// Defaults to [`CaptureDenialsMode::Block`].
     pub mode: CaptureDenialsMode,
     /// Absolute path where the denial ETL trace is written. When `None`, the
     /// runner falls back to a managed per-run temporary file.
@@ -584,10 +584,10 @@ pub enum CaptureDenialsMode {
     /// The access stays denied and the denial is recorded; deny-by-default
     /// containment is preserved. Safe default.
     #[default]
-    BlockAndLog,
+    Block,
     /// The access is allowed and recorded (audit mode); deny-by-default is
     /// relaxed for the run. Security-sensitive — the runner warns.
-    AllowAndLog,
+    Allow,
 }
 
 /// Port mapping for host↔container port forwarding.

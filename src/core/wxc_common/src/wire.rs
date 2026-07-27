@@ -210,7 +210,7 @@ pub struct CaptureDenials {
     /// How each ungranted access check is handled while it is recorded. Both
     /// modes log every access the policy does not grant to the ETL trace; the
     /// mode only decides whether that access is blocked or allowed. Defaults to
-    /// `block-and-log` when omitted.
+    /// `block` when omitted.
     pub mode: Option<CaptureDenialsMode>,
     /// Absolute path where the denial ETL trace is written. The caller names
     /// the path; the OS opens it under the caller's own identity when the trace
@@ -224,13 +224,13 @@ pub struct CaptureDenials {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum CaptureDenialsMode {
-    /// `block-and-log` — the access stays **denied** and the denial is recorded.
+    /// `block` — the access stays **denied** and the denial is recorded.
     /// Deny-by-default containment is preserved; this is the safe default.
-    BlockAndLog,
-    /// `allow-and-log` — the access is **allowed** and recorded (audit mode).
+    Block,
+    /// `allow` — the access is **allowed** and recorded (audit mode).
     /// This relaxes deny-by-default for the run, so it is a security-sensitive
     /// choice and the runner emits a security warning.
-    AllowAndLog,
+    Allow,
 }
 
 /// BaseProcessContainer UI isolation settings.
