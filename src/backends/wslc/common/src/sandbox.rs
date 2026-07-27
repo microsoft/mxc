@@ -140,16 +140,23 @@ impl SandboxProcess for WslcSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        // A cached code means `wait` already ran the full teardown; reuse it.
         if let Some(code) = self.exit {
             return Ok(Some(code));
         }
         if !self.started.has_exited() {
             return Ok(None);
         }
+        // Deliberately *not* cached into `self.exit`: `wait` treats a cached
+        // code as proof that it already drained the streams, destroyed the
+        // container, and set `torn_down`, so caching here would make a later
+        // `wait` skip teardown entirely — and would mask a prior timeout,
+        // turning a `TimedOut` into a normal exit. Re-querying is a cheap
+        // SDK call.
         // SAFETY: `started` owns live process and SDK handles.
-        let code = unsafe { self.started.exit_code() }.map_err(std::io::Error::other)?;
-        self.exit = Some(code);
-        Ok(Some(code))
+        unsafe { self.started.exit_code() }
+            .map_err(std::io::Error::other)
+            .map(Some)
     }
 
     /// Always `0` — the sandboxed process runs inside the WSL VM and has no
@@ -168,11 +175,13 @@ impl SandboxProcess for WslcSandboxProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
-        if let Some(code) = self.exit {
-            return Ok(code);
-        }
+        // A prior timeout is checked first so it stays sticky: `wait` must keep
+        // reporting `TimedOut` rather than a later-observed exit code.
         if self.timed_out {
             return Err(timeout_error(self.started.timeout_ms));
+        }
+        if let Some(code) = self.exit {
+            return Ok(code);
         }
 
         // Drain the streams the caller did not take, concurrently with the
