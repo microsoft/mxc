@@ -136,18 +136,46 @@ impl NormalizedPath {
     /// and fold `.`/`..`. A rooted path clamps `..` at the root (Windows
     /// semantics) so a traversal cannot escape into a different tree.
     fn parse(path: &str) -> Self {
-        let lowered = path.trim().to_lowercase();
+        let mut lowered = path.trim().to_lowercase();
+
+        // Strip Win32 extended/device prefixes so `\\?\C:\x` compares like
+        // `C:\x` (else a `\\?\`-spelled deny slips past Tier 1).
+        for (pfx, repl) in [
+            (r"\\?\unc\", r"\\"),
+            (r"\\.\unc\", r"\\"),
+            (r"\\?\", ""),
+            (r"\\.\", ""),
+        ] {
+            if let Some(rest) = lowered.strip_prefix(pfx) {
+                lowered = format!("{repl}{rest}");
+                break;
+            }
+        }
+
         let bytes = lowered.as_bytes();
+        let is_sep = |c: u8| c == b'\\' || c == b'/';
 
-        // Drive prefix = a leading `x:` (ASCII letter + colon).
-        let (drive, rest) =
-            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-                (Some(lowered[..2].to_string()), &lowered[2..])
+        // A UNC `\\server\share` root is immutable: `..` can't pop the share.
+        let (drive, rooted, rest): (Option<String>, bool, &str) =
+            if bytes.len() >= 2 && is_sep(bytes[0]) && is_sep(bytes[1]) {
+                let mut i = 2;
+                while i < bytes.len() && !is_sep(bytes[i]) {
+                    i += 1; // server
+                }
+                while i < bytes.len() && is_sep(bytes[i]) {
+                    i += 1;
+                }
+                while i < bytes.len() && !is_sep(bytes[i]) {
+                    i += 1; // share
+                }
+                (Some(lowered[..i].replace('/', "\\")), true, &lowered[i..])
+            } else if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                let rooted = lowered[2..].starts_with(['/', '\\']);
+                (Some(lowered[..2].to_string()), rooted, &lowered[2..])
             } else {
-                (None, lowered.as_str())
+                let rooted = lowered.starts_with(['/', '\\']);
+                (None, rooted, lowered.as_str())
             };
-
-        let rooted = rest.starts_with(['/', '\\']);
 
         let mut components: Vec<String> = Vec::new();
         for segment in rest.split(['/', '\\']).filter(|s| !s.is_empty()) {
@@ -243,25 +271,17 @@ impl NormalizedPath {
 /// back to the weaker textual compare, matching the D6 pass
 /// ([`wxc_common::filesystem_object::normalize_object_conflicts`]).
 ///
-/// **Scope / known limitations.** Tier 2 canonicalizes only the paths *listed in
-/// the policy*; it does not scan *inside* a mounted directory for reparse
-/// points. A junction planted within a mounted tree that points at a denied (or
-/// otherwise out-of-tree) location — e.g. mount `C:\project`, deny `C:\secrets`,
-/// with `C:\project\link -> C:\secrets` — is **not** caught: canonicalizing the
-/// two policy entries yields non-overlapping paths, yet the guest could reach
-/// `C:\secrets` through `C:\project\link` if the runtime follows the reparse
-/// point. Detecting this would require walking the mounted subtree for reparse
-/// points (expensive and still racy) or controlling traversal beneath the mount,
-/// which the WSLC SDK does not expose. Likewise, Tier 2 does not fold Unicode
-/// normalization forms and compares path endpoints, not object identity: a hard
-/// link inside a mounted tree pointing at a denied file resolves to its own
-/// in-tree name (not the denied one), so it is not caught here or by D6 (the two
-/// are distinct objects). Creating either alias requires write access to a
-/// location the guest does not have, so both are out of scope under the
-/// trusted-author threat model. A residual TOCTOU window also remains between
-/// canonicalization and the SDK mount (an alias could be swapped in between);
-/// fully closing it needs handle-based mounting the WSLC SDK does not expose, so
-/// it is likewise accepted.
+/// **Scope / known limitations.** Tier 2 canonicalizes only the *listed* policy
+/// paths; it does not scan *inside* a mounted tree for reparse points. A junction
+/// planted within a mount that points out of tree — mount `C:\project`, deny
+/// `C:\secrets`, `C:\project\link -> C:\secrets` — is **not** caught. A hard link
+/// inside a mount naming a denied file is the *same object* as the deny, so the
+/// D6 pass ([`wxc_common::filesystem_object::normalize_object_conflicts`]) would
+/// tighten it, but only when the alias is itself a listed path. A `readwritePaths`
+/// mount lets the guest plant such aliases at runtime (a `readonlyPaths` mount
+/// does not); these — and a residual canonicalize→mount TOCTOU window — are
+/// accepted under MXC's trusted-author threat model, so a deny under a read-write
+/// mount should not be relied on against untrusted in-guest code.
 pub fn validate_denied_path_overlap(
     readwrite_paths: &[String],
     readonly_paths: &[String],
@@ -325,27 +345,29 @@ fn validate_denied_path_overlap_with(
         }
     }
 
-    // Tier 2: canonicalize on disk to collapse alias spellings, then re-compare.
-    // Fail closed on an unresolvable path (Unknown) since deniedPaths are present.
-    let denied_canon: Vec<(&String, PathCanonical)> =
-        denied_paths.iter().map(|d| (d, resolve(d))).collect();
-    let mount_canon: Vec<(&String, &str, PathCanonical)> = mounts
-        .iter()
-        .map(|(m, list)| (*m, *list, resolve(m)))
-        .collect();
+    // Tier 2: canonicalize on disk, then re-compare. Resolve lazily and fail
+    // closed on the first Unknown (deniedPaths present), short-circuiting I/O.
+    let unknown_err = |path: &str| -> String {
+        format!(
+            "WSLC: cannot verify deniedPaths against mounts because '{path}' could not be \
+             resolved to a canonical location (it exists but is not examinable). With \
+             deniedPaths present, MXC fails closed rather than risk an unenforced deny. \
+             Ensure the path is accessible, or remove the deniedPaths entry."
+        )
+    };
 
-    for (path, canon) in denied_canon
-        .iter()
-        .map(|(p, c)| (*p, c))
-        .chain(mount_canon.iter().map(|(p, _, c)| (*p, c)))
-    {
-        if matches!(canon, PathCanonical::Unknown) {
-            return Err(format!(
-                "WSLC: cannot verify deniedPaths against mounts because '{path}' could not be \
-                 resolved to a canonical location (it exists but is not examinable). With \
-                 deniedPaths present, MXC fails closed rather than risk an unenforced deny. \
-                 Ensure the path is accessible, or remove the deniedPaths entry."
-            ));
+    let mut denied_canon: Vec<(&String, PathCanonical)> = Vec::with_capacity(denied_paths.len());
+    for d in denied_paths {
+        match resolve(d) {
+            PathCanonical::Unknown => return Err(unknown_err(d)),
+            other => denied_canon.push((d, other)),
+        }
+    }
+    let mut mount_canon: Vec<(&String, &str, PathCanonical)> = Vec::with_capacity(mounts.len());
+    for (m, list) in &mounts {
+        match resolve(m) {
+            PathCanonical::Unknown => return Err(unknown_err(m)),
+            other => mount_canon.push((*m, *list, other)),
         }
     }
 
@@ -762,6 +784,78 @@ mod tests {
         let resolve = resolver(vec![(r"C:\denied", PathCanonical::Unknown)]);
         validate_denied_path_overlap_with(&[], &[], &strings(&[r"C:\denied"]), resolve)
             .expect("no mounts means no possible overlap");
+    }
+
+    #[test]
+    fn canonical_allows_exact_equal_resolved_paths() {
+        let resolve = resolver(vec![
+            (r"C:\real", canonical(r"C:\real")),
+            (r"C:\alias", canonical(r"C:\real")),
+        ]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\real"]),
+            &[],
+            &strings(&[r"C:\alias"]),
+            resolve,
+        )
+        .expect("a deny equal to the mount root must be accepted");
+    }
+
+    #[test]
+    fn canonical_skips_absent_on_both_sides() {
+        let resolve = resolver(vec![]); // everything Absent
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\gone"]),
+            &[],
+            &strings(&[r"C:\ghost"]),
+            resolve,
+        )
+        .expect("absent mount and absent deny must pass");
+    }
+
+    #[test]
+    fn tier1_catches_extended_namespace_deny() {
+        // Caught at Tier 1 even when Tier 2 can't help (mount absent on disk).
+        let resolve = resolver(vec![]);
+        let err = validate_denied_path_overlap_with(
+            &strings(&[r"C:\mnt"]),
+            &[],
+            &strings(&[r"\\?\C:\mnt\secret"]),
+            resolve,
+        )
+        .unwrap_err();
+        assert!(err.contains("nested under"), "{err}");
+    }
+
+    #[test]
+    fn normalized_path_unc_anchor_clamps_dotdot() {
+        let p = NormalizedPath::parse(r"\\srv\share\a\..\..\b");
+        assert_eq!(p.drive.as_deref(), Some(r"\\srv\share"));
+        assert!(p.rooted);
+        assert_eq!(p.components, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn normalized_path_strips_extended_prefix() {
+        assert_eq!(
+            NormalizedPath::parse(r"\\?\C:\a\b"),
+            NormalizedPath::parse(r"C:\a\b")
+        );
+        assert_eq!(
+            NormalizedPath::parse(r"\\?\UNC\srv\share\x"),
+            NormalizedPath::parse(r"\\srv\share\x")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_validator_fails_closed_via_public_api() {
+        // The public validator (not the `_with` variant) must fail closed on
+        // non-Windows, where the canonicalizer reports every path Unknown.
+        let err =
+            validate_denied_path_overlap(&strings(&[r"C:\mount"]), &[], &strings(&[r"C:\denied"]))
+                .unwrap_err();
+        assert!(err.contains("fails closed"), "{err}");
     }
 
     #[test]

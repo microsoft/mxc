@@ -122,64 +122,29 @@ fn resolve_object(path: &str) -> PathResolution {
 
 #[cfg(windows)]
 fn resolve_object(path: &str) -> PathResolution {
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-    };
+    use crate::filesystem_canonical::{open_path_for_metadata, OpenClass};
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        FileIdInfo, GetFileInformationByHandleEx, FILE_FLAGS_AND_ATTRIBUTES, FILE_ID_INFO,
     };
 
+    // Shared open + classify (see `filesystem_canonical::open_path_for_metadata`).
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-
-    // FILE_READ_ATTRIBUTES is the minimum access GetFileInformationByHandleEx
-    // (FileIdInfo) needs to read the object identity; a zero-access handle can
-    // be rejected (ERROR_ACCESS_DENIED) on some filesystems. We deliberately do
-    // NOT request data-read access. FILE_FLAG_BACKUP_SEMANTICS lets the same
-    // call open directories as well as files. SAFETY: `wide` is a local
-    // NUL-terminated buffer; all other pointers are NULL.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            FILE_READ_ATTRIBUTES.0,
-            share,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
-            None,
-        )
-    };
-    let handle = match handle {
-        Ok(h) if !h.is_invalid() => h,
-        _ => {
-            // Distinguish a cleanly-missing path from an unexaminable one.
-            // SAFETY: reads the thread-local last error set by the failed call.
-            let err = unsafe { GetLastError() };
-            return if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
-                PathResolution::Absent
-            } else {
-                PathResolution::Unknown
-            };
-        }
+    let handle = match open_path_for_metadata(&wide, FILE_FLAGS_AND_ATTRIBUTES(0)) {
+        Ok(h) => h,
+        Err(OpenClass::NotFound) => return PathResolution::Absent,
+        Err(OpenClass::Unexaminable) => return PathResolution::Unknown,
     };
 
     let mut info = FILE_ID_INFO::default();
-    // SAFETY: `handle` is valid; `info` is a correctly sized out-param.
+    // SAFETY: `handle.0` is valid; `info` is a correctly sized out-param.
     let rc = unsafe {
         GetFileInformationByHandleEx(
-            handle,
+            handle.0,
             FileIdInfo,
             &mut info as *mut FILE_ID_INFO as *mut core::ffi::c_void,
             std::mem::size_of::<FILE_ID_INFO>() as u32,
         )
     };
-    // SAFETY: `handle` came from a successful CreateFileW above.
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
     if rc.is_err() {
         // We opened the object but couldn't read its identity — treat as
         // unexaminable rather than absent.

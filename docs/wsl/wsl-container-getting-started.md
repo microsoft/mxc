@@ -233,6 +233,26 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+### Denied paths
+
+`filesystem.deniedPaths` entries that do **not** overlap a mounted path need no
+special handling — an unmounted path is simply invisible inside the container.
+
+A deny that resolves *underneath* a mounted `readwritePaths`/`readonlyPaths`
+entry is **rejected at preflight** (before the container starts), because the
+WSLC SDK exposes only flat volume mounts and has no primitive to mask a subtree
+of a mount. The check is alias-aware: it canonicalizes host paths on disk to
+catch symlink/junction/8.3/`\\?\` spellings and `.`/`..` folding, so a deny that
+only lands inside a mount after following an alias is still caught. If a path is
+present on disk but cannot be resolved (e.g. access denied) while `deniedPaths`
+are set, MXC **fails closed** and rejects the config rather than risk an
+unenforced deny.
+
+Two cases are out of scope (accepted under the trusted-author threat model): an
+alias planted *inside* a mounted tree (only listed policy paths are checked), and
+a residual time-of-check/time-of-use window. See `validate_denied_path_overlap`
+in `src/backends/wslc/common/src/policy_mapping.rs` for the full contract.
+
 ## Troubleshooting
 
 | Error | Cause | Fix |

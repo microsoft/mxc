@@ -297,7 +297,7 @@ Filesystem mapping:
 |---|---|
 | `readwritePaths: ["C:\\workspace"]` | `WslcSetContainerSettingsVolumes()` with `windowsPath: "C:\\workspace"`, `containerPath: "/mnt/c/workspace"`, `readOnly: false` |
 | `readonlyPaths: ["C:\\data"]` | `WslcSetContainerSettingsVolumes()` with `windowsPath: "C:\\data"`, `containerPath: "/mnt/c/data"`, `readOnly: true` |
-| `deniedPaths: ["C:\\secrets"]` | Simply not added as a volume — Linux container isolation means it's inaccessible by default |
+| `deniedPaths: ["C:\\secrets"]` | A non-overlapping deny is simply not added as a volume (invisible in the container). A deny that resolves *under* a mounted path is **rejected** at the runner preflight (the WSLC SDK has no overlay primitive to mask a subtree of a mount), with on-disk canonicalization catching symlink/junction/8.3/`\\?\` and `..` alias spellings; an existing-but-unresolvable path with `deniedPaths` present **fails closed** (config rejected). Aliases planted *inside* a mounted tree are out of scope — see `validate_denied_path_overlap` in `src/backends/wslc/common/src/policy_mapping.rs`. |
 
 **Path mapping rule:** Windows paths are converted to Linux mount points using the WSL2 convention: strip the drive letter, lowercase it, and prefix with `/mnt/`. For example, `C:\Projects\my-app` → `/mnt/c/Projects/my-app`, `D:\data` → `/mnt/d/data`. This means scripts running inside the container must use `/mnt/c/...` style paths. A future iteration could support explicit `{ windowsPath, containerPath }` pairs for custom mount points.
 
