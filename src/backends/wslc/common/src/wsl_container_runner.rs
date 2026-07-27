@@ -2211,6 +2211,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn run_rejects_denied_alias_via_junction() {
         // Tier-2 wiring guard: a deniedPaths entry that only lands inside a
@@ -2262,6 +2263,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn run_rejects_absent_denied_leaf_via_junction() {
         // Finding B: a not-yet-created deny under a junctioned mount. The leaf

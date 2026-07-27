@@ -31,41 +31,54 @@ pub enum PathCanonical {
     Unknown,
 }
 
-/// Resolve `path` to its canonical on-disk form, collapsing alias spellings.
-///
-/// Returns [`PathCanonical::Absent`] for a cleanly-missing path and
-/// [`PathCanonical::Unknown`] when the object exists but cannot be examined.
+/// RAII wrapper closing a `CreateFileW` handle, shared with
+/// [`crate::filesystem_object`].
 #[cfg(windows)]
-pub fn canonicalize_path(path: &str) -> PathCanonical {
-    use windows::core::{HRESULT, PCWSTR};
-    use windows::Win32::Foundation::{
-        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE,
-    };
-    use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
-        OPEN_EXISTING, VOLUME_NAME_DOS,
-    };
+pub(crate) struct OwnedHandle(pub(crate) windows::Win32::Foundation::HANDLE);
 
-    // RAII guard so the handle is closed on every exit path, including an
-    // allocation unwind between the two GetFinalPathNameByHandleW calls.
-    struct OwnedHandle(HANDLE);
-    impl Drop for OwnedHandle {
-        fn drop(&mut self) {
-            // SAFETY: only constructed from a valid CreateFileW handle.
-            unsafe {
-                let _ = CloseHandle(self.0);
-            }
+#[cfg(windows)]
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: only constructed from a valid CreateFileW handle.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
         }
     }
+}
 
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+/// Classification of a failed [`open_path_for_metadata`].
+#[cfg(windows)]
+pub(crate) enum OpenClass {
+    /// The object does not exist.
+    NotFound,
+    /// The object exists (or may) but could not be opened; callers fail closed.
+    Unexaminable,
+}
+
+/// Open the NUL-terminated wide path `wide` for metadata access (no data read).
+///
+/// Pass `FILE_FLAG_OPEN_REPARSE_POINT` in `extra_flags` to open a reparse point
+/// without following it. Shared by [`canonicalize_wide`] and
+/// [`crate::filesystem_object`].
+#[cfg(windows)]
+pub(crate) fn open_path_for_metadata(
+    wide: &[u16],
+    extra_flags: windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
+) -> Result<OwnedHandle, OpenClass> {
+    use windows::core::{HRESULT, PCWSTR};
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    // `PCWSTR` scans to the first NUL; reject an empty/unterminated slice so the
+    // FFI never reads past `wide`.
+    if wide.last() != Some(&0) {
+        return Err(OpenClass::Unexaminable);
+    }
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-
-    // Open without data access; FILE_FLAG_BACKUP_SEMANTICS lets the same call
-    // open directories as well as files. SAFETY: `wide` is a local
-    // NUL-terminated buffer; all other pointers are NULL.
+    // SAFETY: `wide` is NUL-terminated (checked above); other pointers are NULL.
     let handle = unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
@@ -73,90 +86,81 @@ pub fn canonicalize_path(path: &str) -> PathCanonical {
             share,
             None,
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_BACKUP_SEMANTICS | extra_flags,
             None,
         )
     };
-    let handle = match handle {
-        Ok(h) if !h.is_invalid() => OwnedHandle(h),
+    match handle {
+        Ok(h) if !h.is_invalid() => Ok(OwnedHandle(h)),
+        Ok(_) => Err(OpenClass::Unexaminable),
         Err(e) => {
-            // Distinguish a cleanly-missing path from an unexaminable one using
-            // the error captured by the failed call itself (no second, racy
-            // GetLastError round-trip).
             let code = e.code();
-            if code != HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
-                && code != HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
+            if code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
+                || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
             {
-                // Exists but unexaminable (access denied, I/O error, …).
-                return PathCanonical::Unknown;
+                Err(OpenClass::NotFound)
+            } else {
+                Err(OpenClass::Unexaminable)
             }
-            // "Not found" from the open above is ambiguous: that open *follows*
-            // reparse points, so a dangling symlink/junction (the link object
-            // exists but its target is missing) also reports FILE/PATH_NOT_FOUND.
-            // Re-probe without following the reparse point; if the link itself
-            // opens, the path exists but cannot be resolved — classify it Unknown
-            // so denied-path callers fail closed rather than replay a stale alias.
-            // SAFETY: `wide` is a local NUL-terminated buffer; all other pointers
-            // are NULL.
-            let reparse = unsafe {
-                CreateFileW(
-                    PCWSTR(wide.as_ptr()),
-                    FILE_READ_ATTRIBUTES.0,
-                    share,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                    None,
-                )
-            };
-            return match reparse {
-                // The link object itself exists: present but unresolvable →
-                // fail closed. Drop the probe handle immediately via the guard.
-                Ok(h) if !h.is_invalid() => {
-                    let _guard = OwnedHandle(h);
-                    PathCanonical::Unknown
-                }
-                // Success with an invalid handle: no error to read → unexaminable.
+        }
+    }
+}
+
+/// Resolve `path` to its canonical on-disk form, collapsing alias spellings.
+/// A dangling reparse point (target missing) returns [`PathCanonical::Unknown`]
+/// so callers fail closed.
+#[cfg(windows)]
+pub fn canonicalize_path(path: &str) -> PathCanonical {
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    canonicalize_wide(&wide)
+}
+
+/// Resolve a pre-encoded NUL-terminated wide path (see [`canonicalize_path`]);
+/// separate so the absent-tail walk can probe ancestors without re-encoding.
+#[cfg(windows)]
+fn canonicalize_wide(wide: &[u16]) -> PathCanonical {
+    use windows::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_NAME_NORMALIZED, GETFINALPATHNAMEBYHANDLE_FLAGS, VOLUME_NAME_DOS,
+    };
+
+    let handle = match open_path_for_metadata(wide, FILE_FLAGS_AND_ATTRIBUTES(0)) {
+        Ok(h) => h,
+        Err(OpenClass::Unexaminable) => return PathCanonical::Unknown,
+        Err(OpenClass::NotFound) => {
+            // A dangling reparse point also reports NOT_FOUND when followed;
+            // re-open it without following — success means it exists (Unknown).
+            return match open_path_for_metadata(wide, FILE_FLAG_OPEN_REPARSE_POINT) {
                 Ok(_) => PathCanonical::Unknown,
-                Err(e) => {
-                    let code = e.code();
-                    if code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
-                        || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
-                    {
-                        // Genuinely missing (or a missing parent): absent.
-                        PathCanonical::Absent
-                    } else {
-                        // Present but unexaminable (access denied, sharing
-                        // violation, I/O) → fail closed.
-                        PathCanonical::Unknown
-                    }
-                }
+                Err(OpenClass::NotFound) => PathCanonical::Absent,
+                Err(OpenClass::Unexaminable) => PathCanonical::Unknown,
             };
         }
-        // CreateFileW reported success but returned an invalid handle: there is
-        // no error to read, so treat the path as unexaminable.
-        Ok(_) => return PathCanonical::Unknown,
     };
 
     let flags = GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0);
-    // Probe the required length (incl. NUL) with an empty buffer, then fetch.
-    // SAFETY: `handle.0` is valid; an empty slice is a valid zero-length buffer.
-    let needed = unsafe { GetFinalPathNameByHandleW(handle.0, &mut [], flags) };
-    if needed == 0 {
+    // Stack buffer covers most paths in one syscall; heap-fallback if longer.
+    let mut stack = [0u16; 512];
+    // SAFETY: `handle.0` is valid; `stack` is a valid buffer.
+    let written = unsafe { GetFinalPathNameByHandleW(handle.0, &mut stack, flags) };
+    if written == 0 {
         return PathCanonical::Unknown;
     }
+    let resolved = if (written as usize) < stack.len() {
+        // Fit: `written` excludes the NUL.
+        String::from_utf16_lossy(&stack[..written as usize])
+    } else {
+        // Too small: `written` includes the NUL; refetch (0 or a grown value = race).
+        let mut buf = vec![0u16; written as usize];
+        // SAFETY: `handle.0` is valid; `buf` holds `written` elements.
+        let n = unsafe { GetFinalPathNameByHandleW(handle.0, &mut buf, flags) };
+        if n == 0 || n as usize >= buf.len() {
+            return PathCanonical::Unknown;
+        }
+        String::from_utf16_lossy(&buf[..n as usize])
+    };
 
-    let mut buf = vec![0u16; needed as usize];
-    // SAFETY: `handle.0` is valid; `buf` holds `needed` elements.
-    let written = unsafe { GetFinalPathNameByHandleW(handle.0, &mut buf, flags) };
-    // 0 = failure; `>= len` means the path grew between calls (race) — treat
-    // either as unresolvable rather than returning a truncated path.
-    if written == 0 || written as usize >= buf.len() {
-        return PathCanonical::Unknown;
-    }
-
-    let resolved = String::from_utf16_lossy(&buf[..written as usize]);
-    PathCanonical::Canonical(strip_extended_prefix(&resolved))
+    PathCanonical::Canonical(strip_extended_prefix(&resolved).into_owned())
 }
 
 /// Non-Windows builds have no final-path resolution; report every existing path
@@ -166,75 +170,181 @@ pub fn canonicalize_path(_path: &str) -> PathCanonical {
     PathCanonical::Unknown
 }
 
-/// Like [`canonicalize_path`] but tolerates a not-yet-created leaf: when the
-/// full path is missing it resolves the deepest existing ancestor (collapsing
-/// its aliases) and replays the missing tail onto it. This lets callers compare
-/// a denied path that does not exist yet but whose parent is an alias
-/// (symlink/junction) into a mounted tree. Mirrors the bubblewrap runner's
-/// `resolve_through_symlinks`. Returns [`PathCanonical::Absent`] only when no
-/// ancestor resolves.
+/// Like [`canonicalize_path`] but tolerates a not-yet-created leaf: it resolves
+/// the deepest existing ancestor and replays the missing tail (folding `.`/`..`)
+/// onto it, so a denied path whose parent is an alias into a mounted tree is
+/// still comparable. Returns [`PathCanonical::Absent`] only when no ancestor
+/// resolves.
+///
+/// The path is UTF-16-encoded once and each ancestor probed by NUL-terminating
+/// that buffer in place, so copying is O(depth), not O(depth²).
 #[cfg(windows)]
 pub fn canonicalize_allowing_absent_tail(path: &str) -> PathCanonical {
-    use std::path::{Component, Path, PathBuf};
+    let mut wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    // Map each queryable byte-offset (a char boundary) to its index in `wide`.
+    let mut byte_to_u16: Vec<(usize, usize)> = Vec::with_capacity(path.len() + 1);
+    let mut u = 0usize;
+    for (bi, ch) in path.char_indices() {
+        byte_to_u16.push((bi, u));
+        u += ch.len_utf16();
+    }
+    byte_to_u16.push((path.len(), u));
+    let total_u16 = u;
 
-    match canonicalize_path(path) {
+    let resolve = |prefix: &str| -> PathCanonical {
+        let idx = byte_to_u16
+            .binary_search_by_key(&prefix.len(), |&(b, _)| b)
+            .map(|i| byte_to_u16[i].1)
+            .unwrap_or(total_u16);
+        let saved = wide[idx];
+        wide[idx] = 0;
+        let r = canonicalize_wide(&wide[..=idx]);
+        wide[idx] = saved;
+        r
+    };
+    canonicalize_allowing_absent_tail_with(path, resolve)
+}
+
+/// Non-Windows: every path resolves `Unknown`, so the walk short-circuits.
+#[cfg(not(windows))]
+pub fn canonicalize_allowing_absent_tail(path: &str) -> PathCanonical {
+    canonicalize_allowing_absent_tail_with(path, canonicalize_path)
+}
+
+/// Platform-independent core of [`canonicalize_allowing_absent_tail`] with an
+/// injected `resolve` (deepest ancestor first, then tail replay). Splitting the
+/// resolver out lets the fold logic be unit-tested cross-platform without disk.
+pub fn canonicalize_allowing_absent_tail_with(
+    path: &str,
+    mut resolve: impl FnMut(&str) -> PathCanonical,
+) -> PathCanonical {
+    match resolve(path) {
         PathCanonical::Canonical(resolved) => return PathCanonical::Canonical(resolved),
         PathCanonical::Unknown => return PathCanonical::Unknown,
         PathCanonical::Absent => {}
     }
 
-    // Capture tail components verbatim (as `Component`, not `file_name`, which
-    // returns `None` for `.`/`..`) so they survive to the replay below; the OS
-    // already folds any `.`/`..` in the existing-ancestor portion.
-    let mut tail: Vec<Component> = Vec::new();
-    let mut cur = Path::new(path);
-    while let Some(parent) = cur.parent() {
-        if let Some(comp) = cur.components().next_back() {
-            tail.push(comp);
+    let (anchor, rest) = split_anchor(path);
+    let base_off = path.len() - rest.len();
+    // Segment slices of `rest` + the byte offset in `path` where each ends.
+    let mut segs: Vec<&str> = Vec::new();
+    let mut ends: Vec<usize> = Vec::new();
+    let rb = rest.as_bytes();
+    let is_sep = |c: u8| c == b'\\' || c == b'/';
+    let mut i = 0usize;
+    while i < rb.len() {
+        while i < rb.len() && is_sep(rb[i]) {
+            i += 1;
         }
-        match canonicalize_path(&parent.to_string_lossy()) {
+        let start = i;
+        while i < rb.len() && !is_sep(rb[i]) {
+            i += 1;
+        }
+        if i > start {
+            segs.push(&rest[start..i]);
+            ends.push(base_off + i);
+        }
+    }
+
+    // Deepest existing ancestor first; k = 0 is the bare anchor.
+    let n = segs.len();
+    for k in (0..n).rev() {
+        let ancestor: &str = if k == 0 { anchor } else { &path[..ends[k - 1]] };
+        if ancestor.is_empty() {
+            continue;
+        }
+        match resolve(ancestor) {
             PathCanonical::Canonical(base) => {
-                // Replay the absent tail onto the resolved ancestor, folding
-                // `.`/`..` by push/pop so e.g. `X\..\Z` collapses to `Z` rather
-                // than being mis-reconstructed as `X\Z`.
-                let mut result = PathBuf::from(base);
-                for comp in tail.iter().rev() {
-                    match comp {
-                        Component::Normal(name) => result.push(name),
-                        Component::ParentDir => {
-                            result.pop();
-                        }
-                        Component::CurDir => {}
-                        // A prefix/root below an existing ancestor is impossible.
-                        _ => {}
-                    }
-                }
-                return PathCanonical::Canonical(result.to_string_lossy().into_owned());
+                return PathCanonical::Canonical(fold_tail(&base, &segs[k..]));
             }
             PathCanonical::Unknown => return PathCanonical::Unknown,
             PathCanonical::Absent => {}
         }
-        cur = parent;
     }
     PathCanonical::Absent
 }
 
-/// Non-Windows stub — see the [`canonicalize_path`] non-Windows variant.
-#[cfg(not(windows))]
-pub fn canonicalize_allowing_absent_tail(_path: &str) -> PathCanonical {
-    PathCanonical::Unknown
+/// Split a Windows path into its anchor (drive root `C:\`, UNC share
+/// `\\server\share\`, or leading separators) and the remainder.
+fn split_anchor(path: &str) -> (&str, &str) {
+    let b = path.as_bytes();
+    let is_sep = |c: u8| c == b'\\' || c == b'/';
+    // UNC: \\server\share
+    if b.len() >= 2 && is_sep(b[0]) && is_sep(b[1]) {
+        let mut i = 2;
+        while i < b.len() && !is_sep(b[i]) {
+            i += 1; // server
+        }
+        while i < b.len() && is_sep(b[i]) {
+            i += 1;
+        }
+        while i < b.len() && !is_sep(b[i]) {
+            i += 1; // share
+        }
+        while i < b.len() && is_sep(b[i]) {
+            i += 1; // trailing separators
+        }
+        return (&path[..i], &path[i..]);
+    }
+    // Drive: X:
+    if b.len() >= 2 && (b[0] as char).is_ascii_alphabetic() && b[1] == b':' {
+        let mut i = 2;
+        while i < b.len() && is_sep(b[i]) {
+            i += 1;
+        }
+        return (&path[..i], &path[i..]);
+    }
+    // Rooted (leading separator run).
+    if !b.is_empty() && is_sep(b[0]) {
+        let mut i = 0;
+        while i < b.len() && is_sep(b[i]) {
+            i += 1;
+        }
+        return (&path[..i], &path[i..]);
+    }
+    ("", path)
 }
 
-/// Strip a Win32 extended-length prefix from a canonical path:
-/// `\\?\C:\dir` → `C:\dir`, `\\?\UNC\server\share` → `\\server\share`.
+/// Replay `tail` onto canonical `base`, folding `.`/`..` (clamped at the anchor).
+fn fold_tail(base: &str, tail: &[&str]) -> String {
+    let (anchor, rest) = split_anchor(base);
+    let mut comps: Vec<&str> = rest.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    for &seg in tail {
+        match seg {
+            "." => {}
+            ".." => {
+                comps.pop();
+            }
+            other => comps.push(other),
+        }
+    }
+    let mut out = String::with_capacity(base.len() + 16);
+    out.push_str(anchor);
+    let anchor_has_sep = anchor.ends_with(['\\', '/']);
+    for (idx, c) in comps.iter().enumerate() {
+        if idx == 0 {
+            if !anchor.is_empty() && !anchor_has_sep {
+                out.push('\\');
+            }
+        } else {
+            out.push('\\');
+        }
+        out.push_str(c);
+    }
+    out
+}
+
+/// Strip a Win32 extended-length prefix: `\\?\C:\dir` → `C:\dir`,
+/// `\\?\UNC\server\share` → `\\server\share`, `\\?\Volume{…}` → `Volume{…}`.
 #[cfg(windows)]
-fn strip_extended_prefix(path: &str) -> String {
+fn strip_extended_prefix(path: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
+        Cow::Owned(format!(r"\\{rest}"))
     } else if let Some(rest) = path.strip_prefix(r"\\?\") {
-        rest.to_string()
+        Cow::Borrowed(rest)
     } else {
-        path.to_string()
+        Cow::Borrowed(path)
     }
 }
 
@@ -242,25 +352,139 @@ fn strip_extended_prefix(path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn canon(s: &str) -> PathCanonical {
+        PathCanonical::Canonical(s.to_string())
+    }
+
+    /// Fixed-table resolver (case- and trailing-separator-insensitive like the
+    /// real FS); unlisted paths are `Absent`. Exercises the fold without disk.
+    fn mock_resolver(
+        entries: Vec<(&'static str, PathCanonical)>,
+    ) -> impl Fn(&str) -> PathCanonical {
+        move |p: &str| {
+            let q = p.trim_end_matches(['\\', '/']);
+            for (k, v) in &entries {
+                if k.trim_end_matches(['\\', '/']).eq_ignore_ascii_case(q) {
+                    return v.clone();
+                }
+            }
+            PathCanonical::Absent
+        }
+    }
+
+    #[test]
+    fn seam_folds_dotdot_onto_resolved_ancestor() {
+        let resolve = mock_resolver(vec![(r"C:\link", canon(r"C:\real"))]);
+        assert_eq!(
+            canonicalize_allowing_absent_tail_with(r"C:\link\sub\..\Z", &resolve),
+            canon(r"C:\real\Z")
+        );
+    }
+
+    #[test]
+    fn seam_dotdot_clamps_at_anchor() {
+        let resolve = mock_resolver(vec![(r"C:\real", canon(r"C:\real"))]);
+        assert_eq!(
+            canonicalize_allowing_absent_tail_with(r"C:\real\..\..\X", &resolve),
+            canon(r"C:\X")
+        );
+    }
+
+    #[test]
+    fn seam_handles_dot_and_interior_dotdot() {
+        let resolve = mock_resolver(vec![(r"C:\a", canon(r"C:\a"))]);
+        assert_eq!(
+            canonicalize_allowing_absent_tail_with(r"C:\a\.\b\..\c", &resolve),
+            canon(r"C:\a\c")
+        );
+    }
+
+    #[test]
+    fn seam_unknown_ancestor_fails_closed() {
+        let resolve = mock_resolver(vec![(r"C:\a\b", PathCanonical::Unknown)]);
+        assert_eq!(
+            canonicalize_allowing_absent_tail_with(r"C:\a\b\c\d", &resolve),
+            PathCanonical::Unknown
+        );
+    }
+
+    #[test]
+    fn seam_all_absent_is_absent() {
+        let resolve = mock_resolver(vec![]);
+        assert_eq!(
+            canonicalize_allowing_absent_tail_with(r"C:\none\here", &resolve),
+            PathCanonical::Absent
+        );
+    }
+
+    #[test]
+    fn seam_full_path_canonical_passthrough() {
+        let resolve = mock_resolver(vec![(r"C:\x\y", canon(r"D:\real\y"))]);
+        assert_eq!(
+            canonicalize_allowing_absent_tail_with(r"C:\x\y", &resolve),
+            canon(r"D:\real\y")
+        );
+    }
+
+    #[test]
+    fn seam_unc_anchor_folds() {
+        let resolve = mock_resolver(vec![(r"\\srv\share", canon(r"\\srv\share"))]);
+        assert_eq!(
+            canonicalize_allowing_absent_tail_with(r"\\srv\share\a\..\..\b", &resolve),
+            canon(r"\\srv\share\b")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn open_path_rejects_unterminated_wide() {
+        use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+        assert!(matches!(
+            open_path_for_metadata(&[], FILE_FLAGS_AND_ATTRIBUTES(0)),
+            Err(OpenClass::Unexaminable)
+        ));
+        let unterminated: [u16; 3] = [b'C' as u16, b':' as u16, b'\\' as u16];
+        assert!(matches!(
+            open_path_for_metadata(&unterminated, FILE_FLAGS_AND_ATTRIBUTES(0)),
+            Err(OpenClass::Unexaminable)
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn strip_prefix_drive() {
-        assert_eq!(strip_extended_prefix(r"\\?\C:\dir\file"), r"C:\dir\file");
+        assert_eq!(
+            strip_extended_prefix(r"\\?\C:\dir\file").as_ref(),
+            r"C:\dir\file"
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn strip_prefix_unc() {
         assert_eq!(
-            strip_extended_prefix(r"\\?\UNC\server\share\file"),
+            strip_extended_prefix(r"\\?\UNC\server\share\file").as_ref(),
             r"\\server\share\file"
         );
     }
 
     #[cfg(windows)]
     #[test]
+    fn strip_prefix_device_forms() {
+        assert_eq!(
+            strip_extended_prefix(r"\\?\Volume{12345678-0000-0000-0000-000000000000}\x").as_ref(),
+            r"Volume{12345678-0000-0000-0000-000000000000}\x"
+        );
+        assert_eq!(
+            strip_extended_prefix(r"\\?\GLOBALROOT\Device\HarddiskVolume3\x").as_ref(),
+            r"GLOBALROOT\Device\HarddiskVolume3\x"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn strip_prefix_absent_is_passthrough() {
-        assert_eq!(strip_extended_prefix(r"C:\dir"), r"C:\dir");
+        assert_eq!(strip_extended_prefix(r"C:\dir").as_ref(), r"C:\dir");
     }
 
     #[cfg(windows)]
@@ -346,100 +570,67 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn absent_tail_folds_dotdot_across_aliased_ancestor() {
-        // Regression: an aliased (junction) ancestor + multiple non-existent
-        // components + `..`. The deepest existing ancestor is the junction,
-        // resolved by the OS; the absent tail `sub\..\Z` must fold to `Z` on the
-        // real target, not be mis-reconstructed as `sub\Z`.
+        // Regression: `sub\..\Z` under a junction must fold to `real\Z`, not
+        // `sub\Z`. mklink /J needs no admin, so assert rather than skip.
         use std::process::Command;
 
-        let tmp = std::env::temp_dir();
-        let base = format!(
-            r"{}\mxc-dotdot-{}",
-            tmp.to_string_lossy().trim_end_matches('\\'),
-            std::process::id()
-        );
-        let real = format!(r"{base}\real");
-        let link = format!(r"{base}\link");
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let real = tmp.path().join("real");
+        let link = tmp.path().join("link");
         std::fs::create_dir_all(&real).unwrap();
 
         let status = Command::new("cmd")
-            .args(["/c", "mklink", "/J", &link, &real])
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
             .status()
-            .unwrap();
-        if !status.success() {
-            eprintln!(
-                "skipping absent_tail_folds_dotdot_across_aliased_ancestor: mklink /J failed"
-            );
-            let _ = std::fs::remove_dir_all(&base);
-            return;
-        }
+            .expect("spawn cmd for mklink");
+        assert!(
+            status.success(),
+            "mklink /J failed (directory junctions require no admin); status={status:?}"
+        );
 
-        // `link` exists (→ real); `sub` and `Z` do not. `sub\..\Z` must fold to
-        // `real\Z`, so the resolved form ends with `real\Z` and omits `sub`.
-        let denied = format!(r"{link}\sub\..\Z");
-        let resolved = match canonicalize_allowing_absent_tail(&denied) {
-            PathCanonical::Canonical(r) => r,
-            other => {
-                let _ = std::fs::remove_dir_all(&base);
-                panic!("expected Canonical, got {other:?}");
+        let denied = format!(r"{}\sub\..\Z", link.display());
+        match canonicalize_allowing_absent_tail(&denied) {
+            PathCanonical::Canonical(resolved) => {
+                let lc = resolved.to_lowercase();
+                assert!(
+                    lc.ends_with(r"\real\z"),
+                    "tail `sub\\..\\Z` must fold to `real\\Z`, got {resolved}"
+                );
+                assert!(
+                    !lc.contains(r"\sub\"),
+                    "`..` must cancel `sub`, got {resolved}"
+                );
             }
-        };
-        let _ = std::fs::remove_dir_all(&base);
-
-        assert!(
-            resolved.to_lowercase().ends_with(r"\real\z"),
-            "tail `sub\\..\\Z` must fold to `real\\Z`, got {resolved}"
-        );
-        assert!(
-            !resolved.to_lowercase().contains(r"\sub\"),
-            "`..` must cancel `sub`, got {resolved}"
-        );
+            other => panic!("expected Canonical, got {other:?}"),
+        }
     }
 
     #[cfg(windows)]
     #[test]
-    fn dangling_reparse_point_is_unknown_not_absent() {
-        // A junction whose target is missing exists as an object but makes the
-        // *followed* open report FILE/PATH_NOT_FOUND. It must classify Unknown
-        // (present-but-unresolvable → fail closed), never Absent, so denied-path
-        // callers do not treat it as cleanly-missing and replay a stale alias.
+    fn dangling_junction_fails_closed() {
+        // A dangling junction (target deleted) still names an object, so it must
+        // fail closed (Unknown), not read as Absent.
         use std::process::Command;
 
-        // Thread id keeps concurrent tests from colliding on the fixture dir.
-        let tmp = std::env::temp_dir();
-        let base = format!(
-            r"{}\mxc-dangling-{}-{:?}",
-            tmp.to_string_lossy().trim_end_matches('\\'),
-            std::process::id(),
-            std::thread::current().id()
-        );
-        let link = format!(r"{base}\link");
-        let missing_target = format!(r"{base}\no-such-target");
-        let _ = std::fs::remove_dir_all(&base); // clear any leftover from an aborted run
-        std::fs::create_dir_all(&base).unwrap();
-
-        // `mklink /J` creates a junction even when the target does not exist.
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let target = tmp.path().join("target");
+        let link = tmp.path().join("dangling");
+        std::fs::create_dir_all(&target).unwrap();
         let status = Command::new("cmd")
-            .args(["/c", "mklink", "/J", &link, &missing_target])
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
             .status()
-            .unwrap();
-        // mklink /J needs no elevation, so a failure is a broken environment,
-        // not an expected skip — surface it rather than silently no-op.
-        assert!(
-            status.success(),
-            "mklink /J failed ({status}); junction creation needs no elevation, so this \
-             indicates a broken test environment rather than an expected skip"
-        );
-
-        let result = canonicalize_path(&link);
-        // Remove the junction itself (do not follow it) before clearing base.
-        let _ = std::fs::remove_dir(&link);
-        let _ = std::fs::remove_dir_all(&base);
+            .expect("spawn cmd for mklink");
+        assert!(status.success(), "mklink /J failed; status={status:?}");
+        std::fs::remove_dir_all(&target).unwrap();
 
         assert_eq!(
-            result,
+            canonicalize_path(&link.to_string_lossy()),
             PathCanonical::Unknown,
-            "a dangling junction must be Unknown (fail closed), not Absent"
+            "a dangling junction must fail closed, not read as Absent"
         );
     }
 
@@ -452,34 +643,22 @@ mod tests {
         // junction>) — which the overlap check would then miss.
         use std::process::Command;
 
-        let tmp = std::env::temp_dir();
-        let base = format!(
-            r"{}\mxc-dangling-anc-{}-{:?}",
-            tmp.to_string_lossy().trim_end_matches('\\'),
-            std::process::id(),
-            std::thread::current().id()
-        );
-        let link = format!(r"{base}\link");
-        let missing_target = format!(r"{base}\no-such-target");
-        let leaf = format!(r"{link}\file");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let target = tmp.path().join("target");
+        let link = tmp.path().join("dangling");
+        std::fs::create_dir_all(&target).unwrap();
         let status = Command::new("cmd")
-            .args(["/c", "mklink", "/J", &link, &missing_target])
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
             .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "mklink /J failed ({status}); junction creation needs no elevation"
-        );
+            .expect("spawn cmd for mklink");
+        assert!(status.success(), "mklink /J failed; status={status:?}");
+        std::fs::remove_dir_all(&target).unwrap();
 
-        let result = canonicalize_allowing_absent_tail(&leaf);
-        let _ = std::fs::remove_dir(&link);
-        let _ = std::fs::remove_dir_all(&base);
-
+        let leaf = link.join("file");
         assert_eq!(
-            result,
+            canonicalize_allowing_absent_tail(&leaf.to_string_lossy()),
             PathCanonical::Unknown,
             "a deny under a dangling-junction ancestor must fail closed, not \
              resolve to a Canonical path still containing the junction"

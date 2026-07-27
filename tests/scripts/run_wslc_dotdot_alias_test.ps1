@@ -11,12 +11,14 @@
 # reconstruction dropped it), so this exercises the fixed push/pop folding
 # end-to-end through wxc-exec.
 #
-# Fixture (owned here so the config is never run without its on-disk aliasing):
-#   C:\ddttest\real            real directory, mounted readwrite
-#   C:\ddttest\link -> real    junction; deny is spelled through it
-# Denied `C:\ddttest\link\ghost\sub\..\secret` resolves to `C:\ddttest\real\ghost\secret`,
-# which is nested under the mounted `C:\ddttest\real`, so validation must FAIL
-# (exit -1) with the "cannot be enforced" overlap error BEFORE any container run.
+# Fixture (owned here so the config is never run without its on-disk aliasing),
+# created under a unique %TEMP%\mxc-ddt-<guid> base and substituted into a
+# generated copy of the checked-in template config:
+#   <base>\real            real directory, mounted readwrite
+#   <base>\link -> real    junction; deny is spelled through it
+# Denied `<base>\link\ghost\sub\..\secret` resolves to `<base>\real\ghost\secret`,
+# which is nested under the mounted `<base>\real`, so validation must FAIL
+# (non-zero exit) with the "cannot be enforced" overlap error BEFORE any run.
 #
 # Usage:
 #   .\run_wslc_dotdot_alias_test.ps1                       # auto-discovers wxc-exec.exe
@@ -49,8 +51,9 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
     exit 1
 }
 
-# Fixed paths must match tests\configs\wslc_denied_dotdot_alias.json.
-$Base = "C:\ddttest"
+# Unique temp fixture (not a fixed `C:\ddttest`) with a generated config, so the
+# test never deletes an unrelated directory and parallel runs don't collide.
+$Base = Join-Path $env:TEMP ("mxc-ddt-" + [guid]::NewGuid().ToString("N"))
 $RealDir = Join-Path $Base "real"
 $LinkDir = Join-Path $Base "link"
 
@@ -70,10 +73,17 @@ try {
         exit 1
     }
 
+    # Generate the run config from the template, substituting the fixture base.
+    $template = Get-Content -Raw $ConfigPath
+    $baseJson = $Base.Replace('\', '\\')
+    $configText = $template.Replace('C:\\ddttest', $baseJson)
+    $RunConfig = Join-Path $Base "config.json"
+    Set-Content -Path $RunConfig -Value $configText -Encoding utf8
+
     Write-Host "Running WSLC denied `..`-through-junction test (expect pre-flight rejection)..."
     $wxcArgs = @("--experimental")
     if ($Debug) { $wxcArgs += "--debug" }
-    $wxcArgs += $ConfigPath
+    $wxcArgs += $RunConfig
 
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -82,9 +92,12 @@ try {
     $ErrorActionPreference = $prev
     Write-Host $output
 
-    # The container must never start; validation must reject the config with a
-    # non-zero exit AND the overlap error, and must not print the process output.
-    if (($exitCode -ne 0) -and ($output -match "cannot be enforced") -and ($output -notmatch "SHOULD_NOT_RUN")) {
+    # Must reject with a non-zero exit AND the alias-specific message (not just
+    # "cannot be enforced"), and never print the process output.
+    if (($exitCode -ne 0) -and
+        ($output -match "cannot be enforced") -and
+        ($output -match "symlink, junction") -and
+        ($output -notmatch "SHOULD_NOT_RUN")) {
         Write-Host "PASS: `..`-through-junction deny rejected at pre-flight (tail replay folded `..` into the mount)." -ForegroundColor Green
         $exit = 0
     } else {
