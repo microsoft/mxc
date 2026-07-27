@@ -503,17 +503,27 @@ pub(crate) struct ComApartment {
 
 impl ComApartment {
     /// Join (or initialize) the multithreaded apartment for the current thread.
+    ///
     /// `S_OK`/`S_FALSE` are both initializations this guard balances;
-    /// `RPC_E_CHANGED_MODE` reuses the thread's existing apartment. Any other
-    /// failure still yields a guard — the SDK call is attempted regardless, so
-    /// behaviour is never worse than not taking the apartment at all.
-    pub(crate) fn enter() -> Self {
+    /// `RPC_E_CHANGED_MODE` reuses the thread's existing apartment without
+    /// taking ownership of its teardown. Every other `HRESULT` is a genuine
+    /// failure to establish *any* apartment — reported as an error rather than
+    /// swallowed, since the caller's soundness argument for using the SDK from
+    /// this thread depends on the apartment actually existing.
+    pub(crate) fn enter() -> Result<Self, String> {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
         // SAFETY: `CoInitializeEx` is always safe to call; the matching
         // `CoUninitialize` runs in `Drop`, on this same thread, when we own it.
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        Self {
-            owns_init: hr.is_ok(),
+        if hr.is_ok() {
+            Ok(Self { owns_init: true })
+        } else if hr.0 as u32 == RPC_E_CHANGED_MODE {
+            Ok(Self { owns_init: false })
+        } else {
+            Err(format!(
+                "CoInitializeEx(COINIT_MULTITHREADED) failed: 0x{:08X}",
+                hr.0 as u32
+            ))
         }
     }
 }
@@ -534,7 +544,11 @@ impl Drop for ComApartment {
 /// Used for host capability reporting. A `false` here is exactly the condition
 /// under which the runner's own preflight would fail.
 pub fn is_available() -> bool {
-    let _com = ComApartment::enter();
+    // Without an apartment the probe can't be trusted, so fail closed rather
+    // than advertise a backend we may not be able to drive.
+    let Ok(_com) = ComApartment::enter() else {
+        return false;
+    };
     probe_components()
 }
 

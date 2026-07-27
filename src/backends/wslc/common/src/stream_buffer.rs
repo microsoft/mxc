@@ -121,12 +121,30 @@ pub(crate) struct StreamCanceller(Arc<Shared>);
 
 impl StreamCloser for StreamCanceller {
     fn close(&self) {
-        let mut state = self.0.lock();
-        state.cancelled = true;
-        // The caller has abandoned this stream, so anything still queued is
-        // unreachable — release it rather than hold it for the container's life.
-        state.buffer = VecDeque::new();
-        self.0.ready.notify_all();
+        abandon(&self.0);
+    }
+}
+
+/// Mark a stream abandoned: no read can observe it again, so stop queueing and
+/// release whatever is buffered. Shared by [`StreamCanceller::close`] and
+/// [`StreamReader`]'s `Drop`, which mean the same thing to the writer side.
+fn abandon(shared: &Arc<Shared>) {
+    let mut state = shared.lock();
+    state.cancelled = true;
+    // The caller has abandoned this stream, so anything still queued is
+    // unreachable — release it rather than hold it for the container's life.
+    state.buffer = VecDeque::new();
+    shared.ready.notify_all();
+}
+
+impl Drop for StreamReader {
+    /// Dropping the reader abandons the stream. Without this, a caller that
+    /// takes stdout/stderr and then drops it leaves the queue with no consumer
+    /// — and `WslcSandboxProcess::wait` no longer drains a *taken* stream — so
+    /// the callback side would append to this unbounded buffer for the life of
+    /// the container.
+    fn drop(&mut self) {
+        abandon(&self.0);
     }
 }
 
@@ -202,6 +220,25 @@ mod tests {
             start.elapsed() < Duration::from_secs(5),
             "writes must not block on an unread stream, took {:?}",
             start.elapsed()
+        );
+    }
+
+    #[test]
+    fn dropping_the_reader_stops_the_writer_queueing() {
+        // A caller that takes stdout/stderr and drops it leaves no consumer,
+        // and `wait` does not drain a taken stream — so the writer must stop
+        // queueing rather than grow the unbounded buffer for the container's
+        // remaining life.
+        let (writer, reader) = stream_pair();
+        let probe = reader.canceller(); // shares the state so we can inspect it
+        writer.write(b"queued");
+        drop(reader);
+
+        assert!(probe.0.lock().buffer.is_empty(), "queued bytes released");
+        writer.write(&[0u8; 64 * 1024]);
+        assert!(
+            probe.0.lock().buffer.is_empty(),
+            "writes after the reader is dropped must not queue"
         );
     }
 
