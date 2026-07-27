@@ -1,0 +1,20 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "wslc-most-specific-denied-parent",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "D=/mnt/c/wslcmsp/data; if cat \"$D/secret_child/keep.txt\" 2>/dev/null | grep -q CHILD_KEPT; then echo CHILD_OK; else echo CHILD_MISSING; fi; if echo w > \"$D/secret_child/written.txt\" 2>/dev/null && grep -q w \"$D/secret_child/written.txt\" 2>/dev/null; then echo CHILD_WRITE_OK; else echo CHILD_WRITE_FAIL; fi; if cat \"$D/sibling.txt\" 2>/dev/null | grep -q PARENT_SECRET; then echo PARENT_LEAK; else echo PARENT_MASKED_OK; fi"
+  },
+  "filesystem": {
+    "readwritePaths": ["C:\\wslcmsp\\data\\secret_child"],
+    "deniedPaths": ["C:\\wslcmsp\\data"]
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  },
+  "experimental": {
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

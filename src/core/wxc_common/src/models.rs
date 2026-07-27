@@ -236,10 +236,11 @@ impl From<crate::wire::LaunchMethod> for LaunchMethod {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowsSandboxConfig {
-    /// Idle timeout in milliseconds before the daemon tears down the sandbox VM.
-    /// Default: 300 000 (5 minutes). 0 = no timeout.
+    /// Legacy daemon idle timeout. Parsed for compatibility and ignored by the
+    /// one-shot backend.
     pub idle_timeout_ms: u32,
-    /// Named pipe name the daemon listens on (without `\\.\pipe\` prefix).
+    /// Legacy daemon endpoint name. Parsed for compatibility and ignored by the
+    /// one-shot backend.
     pub daemon_pipe_name: String,
 }
 

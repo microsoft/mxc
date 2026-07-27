@@ -3,7 +3,7 @@
   "containerId": "CLI-WindowsSandbox-Network-Isolated",
   "containment": "windows_sandbox",
   "process": {
-    "commandLine": "python -c \"import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)\"",
+    "commandLine": "powershell -NoProfile -Command \"Invoke-WebRequest -Uri 'http://example.com' -TimeoutSec 5\"",
     "timeout": 30000
   }
 }

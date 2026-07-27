@@ -81,6 +81,11 @@ pub struct ParsedStateAwareRequest {
     /// Present iff the request carried a `sandboxId` field. Required for all
     /// non-provision phases; absent for `provision`.
     pub sandbox_id: Option<String>,
+    /// Present iff the request carried a `correlationVector` field — the MS-CV
+    /// seeded at `provision` and relayed by the client into every later phase so
+    /// all phases of one lifecycle share a telemetry base prefix. Absent for
+    /// `provision` (which seeds its own) and when telemetry is not in use.
+    pub correlation_vector: Option<String>,
     /// Raw `experimental` JSON object (un-narrowed). Shape:
     /// `{ <backend_key>: { <phase_name>: <typed-config>, ... }, ... }`.
     /// `deserialize_config<C>` navigates the two layers.
@@ -156,6 +161,7 @@ mod tests {
             phase,
             containment: None,
             sandbox_id: None,
+            correlation_vector: None,
             experimental_raw: exp,
         }
     }

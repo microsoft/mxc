@@ -8,3 +8,5 @@ license.workspace = true
 wxc_common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+getrandom = { workspace = true }
+tokio.workspace = true

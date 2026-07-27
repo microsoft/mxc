@@ -109,9 +109,10 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
 /// When `Some`, the builder:
 /// - drops `--unshare-net` (the sandbox needs to reach the loopback proxy on
 ///   the host's network namespace),
-/// - strips any caller-supplied `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`
-///   entries from `request.env`,
-/// - emits `--setenv` for those keys pointing at the proxy URL.
+/// - strips any caller-supplied `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+///   `NO_PROXY` entries from `request.env`,
+/// - emits `--setenv` for the proxy keys (all but `NO_PROXY`) pointing at the
+///   proxy URL.
 ///
 /// `denied_files` is the set of `deniedPaths` entries the runner classified as
 /// files (built by `symlink_metadata`-probing each denied path, so this function
@@ -582,8 +583,15 @@ mod tests {
         let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
         let args = build_args(&r, Some(&addr));
 
-        // Each HTTP/HTTPS proxy key must be set via --setenv.
-        for key in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        // Each proxy key must be set via --setenv.
+        for key in &[
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
             let pos = args
                 .iter()
                 .position(|a| a == *key)
@@ -620,6 +628,7 @@ mod tests {
             "FOO=bar".into(),
             "HTTP_PROXY=http://attacker.example:9999".into(),
             "https_proxy=http://attacker.example:9999".into(),
+            "ALL_PROXY=http://attacker.example:9999".into(),
             "PATH=/usr/bin".into(),
         ];
         let addr = ProxyAddress::new("127.0.0.1".into(), 9000);

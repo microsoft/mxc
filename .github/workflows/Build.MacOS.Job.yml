@@ -40,9 +40,12 @@ jobs:
 
       # Mac uses package selection rather than feature selection — the
       # workspace has Windows-only crates that won't compile here.
+      # unix_test_proxy backs network.proxy.builtinTestServer on Seatbelt and
+      # ships alongside mxc-exec-mac.
       - name: Build
         run: cargo build --locked --release --target aarch64-apple-darwin
              -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
+             -p unix_test_proxy
 
       # wxc_e2e_tests includes the Seatbelt executor characterization tests.
       # mxc-exec-mac (built above via -p mxc_darwin) is what they drive; the
@@ -56,6 +59,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mxc-binaries-aarch64-apple-darwin
-          path: src/target/aarch64-apple-darwin/release/mxc-exec-mac
+          path: |
+            src/target/aarch64-apple-darwin/release/mxc-exec-mac
+            src/target/aarch64-apple-darwin/release/unix-test-proxy
           if-no-files-found: error
           retention-days: 1

@@ -63,8 +63,8 @@ jobs:
 
     - script: |
         set -euo pipefail
-        find $(sdkDirectory)/bin -name linux-test-proxy -exec chmod +x {} +
-      displayName: Restore execute permission on linux-test-proxy
+        find $(sdkDirectory)/bin -name unix-test-proxy -exec chmod +x {} +
+      displayName: Restore execute permission on unix-test-proxy
 
     # Drop symbol files from the npm package — symbols ship separately.
     - script: rm -rf $(sdkDirectory)/bin/*/symbols

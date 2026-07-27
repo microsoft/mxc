@@ -19,3 +19,4 @@ tempfile.workspace = true
 
 [build-dependencies]
 zip = "2"
+sha2 = "0.10"

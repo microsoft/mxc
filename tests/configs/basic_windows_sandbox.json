@@ -3,7 +3,7 @@
   "containerId": "CLI-WindowsSandbox-Hello-World",
   "containment": "windows_sandbox",
   "process": {
-    "commandLine": "python -S -B -c \"import sys; print('Hello from Windows Sandbox!'); print(f'Python version: {sys.version}'); print('Script executed successfully in sandbox isolation')\"",
+    "commandLine": "echo Hello from Windows Sandbox! && echo Script executed successfully in sandbox isolation",
     "timeout": 60000
   }
 }

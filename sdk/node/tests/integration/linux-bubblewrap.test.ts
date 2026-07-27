@@ -13,7 +13,7 @@ import {
   isLinuxBubblewrap,
   debugSpawnOptions,
   spawnFromConfigAsync,
-  startLinuxTestProxy,
+  startUnixTestProxy,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
 
@@ -102,8 +102,8 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it('should route HTTPS traffic through an externally launched linux-test-proxy', async () => {
-    const { port, proxyProcess } = startLinuxTestProxy(tmpDir);
+  it('should route HTTPS traffic through an externally launched unix-test-proxy', async () => {
+    const { port, proxyProcess } = startUnixTestProxy(tmpDir);
     proxies.push(proxyProcess);
 
     const config = sdk.createConfigFromPolicy(

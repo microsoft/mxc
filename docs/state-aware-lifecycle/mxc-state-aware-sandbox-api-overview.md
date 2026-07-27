@@ -16,7 +16,7 @@ each phase individually.
 
 The proposal reuses several existing MXC types unchanged. They appear in interfaces and
 function signatures throughout. One-line summaries; full definitions live in
-`sdk/node/src/types.ts`, `sdk/node/src/policy.ts`, and `docs/config-schema.md`.
+`sdk/node/src/types.ts`, `sdk/node/src/policy.ts`, and `docs/schema.md`.
 
 | Type | Where | Role |
 |---|---|---|
@@ -154,8 +154,8 @@ interface OneShotRequest {
   filesystem?: FilesystemConfig;
   network?: NetworkConfig;
   ui?: UiConfig;
-  experimental?: ExperimentalOneShotConfigs;  // existing one-shot shape per docs/config-schema.md
-  // ...other one-shot fields per docs/config-schema.md
+  experimental?: ExperimentalOneShotConfigs;  // existing one-shot shape per docs/schema.md
+  // ...other one-shot fields per docs/schema.md
 }
 
 interface ProvisionStateAwareRequest {

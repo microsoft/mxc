@@ -12,7 +12,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 - **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
-    - **Network Policy**: Proxy support (not supported on macOS); allow/block outbound and host filtering (not yet supported on Windows)
+    - **Network Policy**: Proxy support (cooperative on Linux/macOS), allow/block outbound, and backend-dependent host filtering
     - **UI Policy**: Clipboard, display, and GUI access controls
 - **State-aware Lifecycle**: Multi-step sandbox lifecycle (provision → start → exec → stop → deprovision) for session sandboxes
 - **TypeScript SDK**: [`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk) npm package with one-shot and state-aware APIs
@@ -109,7 +109,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Linux Rust (from src/; matches build.sh's platform-compatible crate set)
 
-cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p linux_test_proxy --all-targets -- -D warnings
+cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy --all-targets -- -D warnings
 
 # macOS Rust (from src/)
 

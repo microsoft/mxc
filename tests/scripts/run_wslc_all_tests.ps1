@@ -234,6 +234,51 @@ $null = $results.Add(@{
     Reason  = $(if ($objPass) { "" } else { "object-validation test failed" })
 })
 
+# Denied-path `..`-through-junction pre-flight validation (comment 1): a deny
+# that only lands inside a mounted tree after following a junction AND folding
+# `..` across not-yet-created components must be rejected at pre-flight. Owns its
+# own directory+junction fixture, like the object test above.
+$ddtScript = Join-Path $PSScriptRoot "run_wslc_dotdot_alias_test.ps1"
+$ddtArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $ddtArgs.Debug = $true }
+& $ddtScript @ddtArgs
+$ddtPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_denied_dotdot_alias.json"
+    Pass    = $ddtPass
+    Skipped = $false
+    Reason  = $(if ($ddtPass) { "" } else { "dotdot-alias validation test failed" })
+})
+
+Write-Host "`n--- Denied Masking / Most-Specific Tests ---" -ForegroundColor Cyan
+# Denied-path masking and most-specific-path-wins on WSLC. Each is delegated to
+# a standalone script that owns its on-disk fixture (a read-write mount plus
+# unmounted denied siblings / parent), since the config is meaningless without
+# the fixture. WSLC masks by NOT mounting the denied path (see policy_mapping.rs).
+$maskScript = Join-Path $PSScriptRoot "run_wslc_denied_masking_test.ps1"
+$maskArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $maskArgs.Debug = $true }
+& $maskScript @maskArgs
+$maskPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_denied_masking.json"
+    Pass    = $maskPass
+    Skipped = $false
+    Reason  = $(if ($maskPass) { "" } else { "denied-masking test failed" })
+})
+
+$mspScript = Join-Path $PSScriptRoot "run_wslc_most_specific_test.ps1"
+$mspArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $mspArgs.Debug = $true }
+& $mspScript @mspArgs
+$mspPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_most_specific_denied_parent.json"
+    Pass    = $mspPass
+    Skipped = $false
+    Reason  = $(if ($mspPass) { "" } else { "most-specific test failed" })
+})
+
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
 $null = $results.Add((Run-WslcTest "wslc_network_proxy.json" -OutputContains "WSLC_PROXY_FUNCTIONAL_OK"))

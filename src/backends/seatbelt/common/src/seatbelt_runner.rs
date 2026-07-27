@@ -29,15 +29,46 @@ use std::time::Duration;
 
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, LaunchMethod, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
     take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
     WaitError,
 };
+use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::validate_common;
 
-use crate::profile_builder::build_profile;
+use crate::profile_builder::build_profile_with_proxy;
+
+/// Env var keys the cooperative proxy manages. When a proxy is active these
+/// are stripped from the caller-supplied environment so sandboxed code cannot
+/// override the `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` values we inject (or
+/// re-enable a `NO_PROXY` bypass). `ALL_PROXY` is the catch-all curl/libcurl
+/// and many HTTP clients honor for every scheme, so leaving it caller-settable
+/// would let sandboxed code redirect or bypass the proxy. Mirrors the
+/// Bubblewrap backend's `PROXY_ENV_KEYS`.
+const PROXY_ENV_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+/// Proxy env var keys injected (pointing at the resolved proxy URL) when a
+/// proxy is active. `NO_PROXY` is intentionally absent — see the module docs
+/// and [`resolve_environment`].
+const PROXY_INJECT_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
 
 // ---------------------------------------------------------------------------
 // FFI declarations for Apple's sandbox API (libsandbox.dylib).
@@ -97,8 +128,32 @@ impl SandboxBackend for SeatbeltScriptRunner {
         validate_common(request)?;
         self.validate(request)?;
 
-        // Build the Seatbelt profile from the policy.
-        let profile = build_profile(request).map_err(error_response)?;
+        // Start the cooperative network proxy (if configured) before building
+        // the profile and launching the child: the profile's proxy-reachability
+        // rule is scoped to the proxy's *resolved* address (builtinTestServer
+        // binds a runtime port), and the child needs that address injected as
+        // HTTP_PROXY / HTTPS_PROXY. macOS has no WinHTTP-style OS proxy policy,
+        // so — like the Bubblewrap backend — enforcement is cooperative:
+        // well-behaved HTTP clients honor the env vars; raw-socket clients
+        // bypass them.
+        let mut proxy = UnixProxyCoordinator::new();
+        if request.policy.network_proxy.is_enabled() {
+            proxy
+                .start(
+                    &request.policy.network_proxy,
+                    "127.0.0.1",
+                    &request.policy.allowed_hosts,
+                    &request.policy.blocked_hosts,
+                    request.policy.default_network_policy.clone(),
+                    logger,
+                )
+                .map_err(|err| {
+                    error_response(format!("Seatbelt: failed to start network proxy: {err}"))
+                })?;
+        }
+        // Build the Seatbelt profile now that the proxy address is resolved, so
+        // the reachability rule can be scoped to the proxy's exact host + port.
+        let profile = build_profile_with_proxy(request, proxy.address()).map_err(error_response)?;
 
         // Determine launch method + GUI access from the seatbelt config.
         let launch_method = request
@@ -113,8 +168,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .unwrap_or(false);
 
         match launch_method {
-            LaunchMethod::Exec => spawn_exec(&profile, request, gui_access, stdio, logger),
-            LaunchMethod::Open => spawn_open(&profile, request, stdio, logger),
+            LaunchMethod::Exec => spawn_exec(&profile, request, gui_access, stdio, logger, proxy),
+            LaunchMethod::Open => spawn_open(&profile, request, stdio, logger, proxy),
         }
     }
 }
@@ -131,6 +186,7 @@ fn spawn_exec(
     gui_access: bool,
     stdio: StdioMode,
     logger: &mut Logger,
+    proxy: UnixProxyCoordinator,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
     if gui_access && stdio == StdioMode::Pipes {
         return Err(error_response(
@@ -158,8 +214,9 @@ fn spawn_exec(
     )?;
 
     // Always start from a cleared environment so untrusted sandboxed code never
-    // inherits the host's env.
-    apply_clean_environment(&mut command, request);
+    // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
+    // vars are injected here (and caller-supplied proxy vars stripped).
+    apply_clean_environment(&mut command, request, proxy.address());
 
     // Working directory. Also export `PWD` so the child's `getcwd()` uses its
     // fast `$PWD` path (a single stat) instead of walking parent directories
@@ -225,6 +282,7 @@ fn spawn_exec(
         timeout: timeout_from(request),
         group: new_session || new_group,
         cleanup: Vec::new(),
+        proxy,
     }))
 }
 
@@ -238,6 +296,7 @@ fn spawn_open(
     request: &ExecutionRequest,
     stdio: StdioMode,
     logger: &mut Logger,
+    proxy: UnixProxyCoordinator,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
     if stdio == StdioMode::Pipes {
         return Err(error_response(
@@ -257,21 +316,21 @@ fn spawn_open(
         Err(e) => return Err(error_response(format!("failed to write profile: {e}"))),
     };
 
-    // 2. Build environment exports for the helper script.
+    // 2. Build environment exports for the helper script. When a proxy is
+    //    active its HTTP_PROXY/HTTPS_PROXY vars are injected and caller-supplied
+    //    proxy vars stripped (see `resolve_environment`).
     let mut env_exports = String::new();
-    for kv in &request.env {
-        if let Some((key, value)) = kv.split_once('=') {
-            // Validate key is a safe shell identifier to prevent injection.
-            if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                || key.is_empty()
-                || key.starts_with(|c: char| c.is_ascii_digit())
-            {
-                continue; // Skip invalid env var names
-            }
-            // Shell-escape the value.
-            let escaped = value.replace('\'', "'\\''");
-            let _ = writeln!(env_exports, "export {key}='{escaped}'");
+    for (key, value) in resolve_environment(request, proxy.address()) {
+        // Validate key is a safe shell identifier to prevent injection.
+        if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || key.is_empty()
+            || key.starts_with(|c: char| c.is_ascii_digit())
+        {
+            continue; // Skip invalid env var names
         }
+        // Shell-escape the value.
+        let escaped = value.replace('\'', "'\\''");
+        let _ = writeln!(env_exports, "export {key}='{escaped}'");
     }
 
     // 3. Create the sandbox helper script.
@@ -351,6 +410,7 @@ fn spawn_open(
         timeout: timeout_from(request),
         group: false,
         cleanup: vec![profile_path, helper_path, command_path],
+        proxy,
     }))
 }
 
@@ -377,13 +437,23 @@ struct SeatbeltSandboxProcess {
     group: bool,
     /// Temp files to remove once the child exits (Open mode); empty otherwise.
     cleanup: Vec<String>,
+    /// The per-run cooperative network proxy. Inactive (a no-op on teardown)
+    /// unless `network.proxy` was configured; stopped once the child exits.
+    proxy: UnixProxyCoordinator,
 }
 
 impl SeatbeltSandboxProcess {
-    /// Remove the Open-mode temp files (profile / helper / `.command`) once the
-    /// child has exited. Idempotent — drains `cleanup` — so it is safe to call
-    /// from both `wait()` and `drop`.
+    /// Tear down per-run state once the child has exited: stop the cooperative
+    /// network proxy (idempotent; a no-op when it was never started) and remove
+    /// the Open-mode temp files (profile / helper / `.command`). Safe to call
+    /// from both `wait()` and `drop` — the proxy stop is idempotent and the
+    /// temp-file list is drained.
     fn run_cleanup(&mut self) {
+        // Silent buffer logger: teardown may run during `drop` (possibly on an
+        // unwinding path), and the coordinator's own `Drop` is likewise silent.
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        self.proxy.stop(&mut logger);
+
         if self.cleanup.is_empty() {
             return;
         }
@@ -646,16 +716,52 @@ const DEFAULT_SANDBOX_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// Populate `command`'s environment from a cleared baseline: never inherit the
 /// host environment (matching the bubblewrap `--clearenv` and AppContainer
-/// clean-block behaviour). Sets a default `PATH`, then the request's vars
-/// (which may override `PATH`). `PWD` is set separately alongside the cwd.
-fn apply_clean_environment(command: &mut Command, request: &ExecutionRequest) {
+/// clean-block behaviour). Sets a default `PATH`, then the resolved request
+/// vars (which may override `PATH`). When a proxy is active its
+/// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` vars are injected and
+/// caller-supplied proxy vars stripped (see [`resolve_environment`]). `PWD` is set separately
+/// alongside the cwd.
+fn apply_clean_environment(
+    command: &mut Command,
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+) {
     command.env_clear();
     command.env("PATH", DEFAULT_SANDBOX_PATH);
+    for (key, value) in resolve_environment(request, proxy_address) {
+        command.env(key, value);
+    }
+}
+
+/// Compute the final `(key, value)` environment for the sandboxed child: the
+/// request's env, followed by the injected proxy vars.
+///
+/// When `proxy_address` is `Some`, any caller-supplied proxy vars
+/// ([`PROXY_ENV_KEYS`]) are dropped so sandboxed code cannot override or
+/// bypass the proxy, then the injected keys ([`PROXY_INJECT_KEYS`]:
+/// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and their lowercase forms) are
+/// set to the proxy URL. Shared by the exec and open launch paths
+/// so both enforce the proxy identically.
+fn resolve_environment(
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
     for kv in &request.env {
         if let Some((key, value)) = kv.split_once('=') {
-            command.env(key, value);
+            if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {
+                continue;
+            }
+            pairs.push((key.to_string(), value.to_string()));
         }
     }
+    if let Some(addr) = proxy_address {
+        let url = addr.to_url();
+        for key in PROXY_INJECT_KEYS {
+            pairs.push((key.to_string(), url.clone()));
+        }
+    }
+    pairs
 }
 
 /// Write `content` to a temp file with a cryptographically random name and the
@@ -733,6 +839,92 @@ mod tests {
         assert_eq!(response.exit_code, -1);
         assert!(response.error_message.contains("blockedHosts"));
         assert!(response.error_message.contains("cannot be enforced"));
+    }
+
+    /// Look up the last value set for `key` in a resolved env list.
+    fn env_value<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn resolve_environment_without_proxy_passes_through() {
+        let mut request = base_request();
+        request.env = vec!["FOO=bar".into(), "BAZ=qux".into()];
+        let pairs = resolve_environment(&request, None);
+        assert_eq!(env_value(&pairs, "FOO"), Some("bar"));
+        assert_eq!(env_value(&pairs, "BAZ"), Some("qux"));
+        // No proxy vars injected.
+        assert!(env_value(&pairs, "HTTP_PROXY").is_none());
+    }
+
+    #[test]
+    fn resolve_environment_injects_proxy_url() {
+        let request = base_request();
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
+        let pairs = resolve_environment(&request, Some(&addr));
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert_eq!(
+                env_value(&pairs, key),
+                Some("http://127.0.0.1:8888"),
+                "{key} must point at the proxy"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_environment_strips_caller_proxy_when_active() {
+        let mut request = base_request();
+        request.env = vec![
+            "HTTP_PROXY=http://attacker.example:9999".into(),
+            "https_proxy=http://attacker.example:9999".into(),
+            "ALL_PROXY=http://attacker.example:9999".into(),
+            "NO_PROXY=localhost".into(),
+            "KEEP=me".into(),
+        ];
+        let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
+        let pairs = resolve_environment(&request, Some(&addr));
+        // Legitimate non-proxy var is preserved.
+        assert_eq!(env_value(&pairs, "KEEP"), Some("me"));
+        // Caller-supplied proxy values are overridden with ours; NO_PROXY dropped.
+        assert_eq!(
+            env_value(&pairs, "HTTP_PROXY"),
+            Some("http://127.0.0.1:7777")
+        );
+        assert_eq!(
+            env_value(&pairs, "https_proxy"),
+            Some("http://127.0.0.1:7777")
+        );
+        assert_eq!(
+            env_value(&pairs, "ALL_PROXY"),
+            Some("http://127.0.0.1:7777")
+        );
+        assert!(env_value(&pairs, "NO_PROXY").is_none());
+        // The attacker's URL must not survive anywhere.
+        assert!(!pairs.iter().any(|(_, v)| v.contains("attacker.example")));
+    }
+
+    #[test]
+    fn resolve_environment_keeps_caller_proxy_when_inactive() {
+        // With no proxy active the builder must not touch caller-supplied
+        // vars whose keys happen to match PROXY_ENV_KEYS.
+        let mut request = base_request();
+        request.env = vec!["HTTP_PROXY=http://caller.example:8080".into()];
+        let pairs = resolve_environment(&request, None);
+        assert_eq!(
+            env_value(&pairs, "HTTP_PROXY"),
+            Some("http://caller.example:8080")
+        );
     }
 
     #[test]

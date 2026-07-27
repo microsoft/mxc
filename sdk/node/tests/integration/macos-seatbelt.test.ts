@@ -7,6 +7,7 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { MxcError } from '@microsoft/mxc-sdk';
 import {
   sdk,
   debugSpawnOptions,
@@ -172,19 +173,28 @@ describe('macOS Seatbelt Container', {
         blockedHosts: ['evil.example.com'],
       },
     };
-    const result = await sdk.spawnSandboxAsync(
-      'echo should-not-run',
-      policy,
-      seatbeltSpawnOptions,
-      undefined,
-      'seatbelt-blocked-hosts',
-    );
-    // blockedHosts is unsupported on seatbelt; the runner rejects it with exit -1/255
-    assert.notStrictEqual(result.exitCode, 0, 'Expected non-zero exit for blockedHosts rejection');
-    const combined = result.stdout + result.stderr;
-    assert.ok(
-      combined.includes('blockedHosts') || combined.includes('cannot be enforced') || result.exitCode === 255,
-      `Expected blockedHosts rejection, got exit ${result.exitCode}: ${combined}`,
+    // blockedHosts is unsupported on seatbelt; the runner rejects it and emits
+    // a structured `backend_error` envelope, so spawnSandboxAsync rejects with
+    // an MxcError (parity with wxc-exec / lxc-exec — issue #564).
+    await assert.rejects(
+      () =>
+        sdk.spawnSandboxAsync(
+          'echo should-not-run',
+          policy,
+          seatbeltSpawnOptions,
+          undefined,
+          'seatbelt-blocked-hosts',
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof MxcError, `Expected MxcError, got: ${err}`);
+        assert.strictEqual(err.code, 'backend_error');
+        assert.ok(
+          err.message.includes('blockedHosts') ||
+            err.message.includes('cannot be enforced'),
+          `Expected blockedHosts rejection message, got: ${err.message}`,
+        );
+        return true;
+      },
     );
   });
 
@@ -206,15 +216,28 @@ describe('macOS Seatbelt Container', {
       version: schemaVersion,
       timeoutMs: 2000,
     };
-    const result = await sdk.spawnSandboxAsync(
-      'sleep 30',
-      policy,
-      seatbeltSpawnOptions,
-      undefined,
-      'seatbelt-timeout',
+    // On timeout the runner kills the process and emits a structured
+    // `backend_error` envelope, so spawnSandboxAsync rejects with an MxcError
+    // (parity with wxc-exec / lxc-exec — issue #564).
+    await assert.rejects(
+      () =>
+        sdk.spawnSandboxAsync(
+          'sleep 30',
+          policy,
+          seatbeltSpawnOptions,
+          undefined,
+          'seatbelt-timeout',
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof MxcError, `Expected MxcError, got: ${err}`);
+        assert.strictEqual(err.code, 'backend_error');
+        assert.ok(
+          err.message.includes('timed out'),
+          `Expected timeout message, got: ${err.message}`,
+        );
+        return true;
+      },
     );
-    // The runner should kill the process before 30s and return non-zero
-    assert.notStrictEqual(result.exitCode, 0, 'Expected non-zero exit for timed-out script');
   });
 
   it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {

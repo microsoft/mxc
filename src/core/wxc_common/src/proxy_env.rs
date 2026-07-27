@@ -14,7 +14,7 @@
 //! 1. **Scrub** every caller-supplied proxy env var ([`PROXY_ENV_KEYS`]) so a
 //!    workload cannot defeat the cooperative proxy by injecting its own
 //!    `HTTP_PROXY` (or clearing it via `NO_PROXY`).
-//! 2. **Set** only the HTTP/HTTPS proxy keys ([`PROXY_SET_KEYS`]) to the
+//! 2. **Set** the HTTP/HTTPS/ALL proxy keys ([`PROXY_SET_KEYS`]) to the
 //!    configured proxy URL.
 //!
 //! `NO_PROXY` is intentionally *not* set: exempting loopback/other hosts
@@ -28,17 +28,26 @@
 pub const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
+    "ALL_PROXY",
     "http_proxy",
     "https_proxy",
+    "all_proxy",
     "NO_PROXY",
     "no_proxy",
 ];
 
 /// Proxy env var keys that are actively *set* to the configured proxy URL.
 ///
-/// Only the HTTP/HTTPS keys (upper- and lower-case) are set. `NO_PROXY` is
+/// The HTTP/HTTPS/ALL keys (upper- and lower-case) are set. `NO_PROXY` is
 /// deliberately omitted (see module docs).
-pub const PROXY_SET_KEYS: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
+pub const PROXY_SET_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
 
 /// Returns the key portion of a `"KEY=VALUE"` env entry (the whole string if
 /// there is no `=`).

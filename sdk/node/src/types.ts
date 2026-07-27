@@ -201,11 +201,13 @@ export interface NetworkConfig {
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
   /** Proxy configuration (supported on Windows ProcessContainer, Linux Bubblewrap,
-   *  and WSLC). `builtinTestServer` activates a bundled, testing-only proxy; the SDK
-   *  rejects it unless `allowTestingFeatures: true` is set in SandboxSpawnOptions
-   *  (which maps to the native `--allow-testing-features` flag).
-   *  WSLC accepts only the `{ url }` form (its containers run in their own network
-   *  namespace, so the `localhost` / `builtinTestServer` loopback forms are
+   *  macOS Seatbelt, and WSLC). On Bubblewrap/Seatbelt/WSLC it is a cooperative
+   *  env-var proxy (HTTP_PROXY/HTTPS_PROXY): well-behaved HTTP clients honor it,
+   *  raw-socket clients can bypass it. `builtinTestServer` activates a bundled,
+   *  testing-only proxy; the SDK rejects it unless `allowTestingFeatures: true` is
+   *  set in SandboxSpawnOptions (which maps to the native `--allow-testing-features`
+   *  flag). WSLC accepts only the `{ url }` form (its containers run in their own
+   *  network namespace, so the `localhost` / `builtinTestServer` loopback forms are
    *  unreachable and rejected); enforcement is cooperative (no in-kernel iptables). */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
@@ -233,11 +235,11 @@ export interface WslcConfig {
   /**
    * Host↔container port mappings.
    *
-   * Only TCP is currently supported by the vendored WSLC SDK runtime
-   * (Microsoft.WSL.Containers 2.8.1). UDP is declared in the SDK header
-   * but the shipped runtime returns `E_NOTIMPL` when UDP is actually
-   * requested, so the parser hard-rejects `"udp"` with a clear message at
-   * spawn time. The `protocol` field defaults to `"tcp"` when omitted.
+   * Only TCP is currently supported by the WSLC SDK runtime. UDP is declared
+   * in the SDK header but the shipped runtime returns `E_NOTIMPL` when UDP is
+   * actually requested, so the parser hard-rejects `"udp"` with a clear
+   * message at spawn time. The `protocol` field defaults to `"tcp"` when
+   * omitted.
    */
   portMappings?: PortMapping[];
 }
@@ -252,9 +254,9 @@ export interface PortMapping {
   containerPort: number;
   /**
    * Transport protocol. Only `"tcp"` is currently supported; `"udp"` is
-   * rejected by the parser because the vendored WSLC SDK runtime
-   * (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL` for UDP even
-   * though the header declares it. Defaults to `"tcp"` when omitted.
+   * rejected by the parser because the WSLC SDK runtime returns `E_NOTIMPL`
+   * for UDP even though the header declares it. Defaults to `"tcp"` when
+   * omitted.
    */
   protocol?: 'tcp';
 }
@@ -347,11 +349,15 @@ export type SandboxPolicy = {
       /** Hosts to block even when outbound is allowed. Requires allowOutbound. */
       blockedHosts?: string[];
       /**
-       * Proxy configuration. Routes all traffic through this proxy.
-       * Cannot be combined with other network flags. `builtinTestServer`
-       * selects a bundled, testing-only proxy; the SDK rejects it unless
-       * `allowTestingFeatures: true` is set in SandboxSpawnOptions (which maps
-       * to the native `--allow-testing-features` flag).
+       * Proxy configuration. Routes cooperating HTTP traffic through this proxy.
+       * Supported on Windows ProcessContainer, Linux Bubblewrap, and macOS
+       * Seatbelt. On Bubblewrap/Seatbelt it is a cooperative env-var proxy
+       * (HTTP_PROXY/HTTPS_PROXY) — raw-socket clients can bypass it. Native
+       * validation enforces backend-specific combination rules.
+       * `builtinTestServer` selects a bundled, testing-only proxy; the SDK
+       * rejects it unless `allowTestingFeatures: true` is set in
+       * SandboxSpawnOptions (which maps to the native
+       * `--allow-testing-features` flag).
        */
       proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   };

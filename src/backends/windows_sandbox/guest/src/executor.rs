@@ -9,25 +9,31 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 use windows_sandbox_common::sandbox_protocol::{
-    decode_message, encode_message, ControlMessage, DecodeResult, ExecRequest, ExitNotification,
+    decode_message, encode_message, encode_preamble, ControlMessage, DecodeResult, ExecRequest,
+    ExitNotification,
 };
 
-/// Main command loop.  Reads control messages from the host and executes
-/// scripts until the control connection is closed.  After each execution,
-/// re-accepts fresh data connections so the next EXEC has usable streams.
-///
-/// TODO: Multi-exec reuses the same VM, so a previous script's side
-/// effects (files, processes, registry, env changes) persist. Consider
-/// killing orphan processes and cleaning temp directories between
-/// executions to limit cross-execution state leakage.
+use crate::job::Job;
+
+/// Backstop budget for stdio bridge drain after child exit.
+const BRIDGE_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Main command loop.
 pub async fn run_command_loop(
     mut control: TcpStream,
     stdin_stream: TcpStream,
     stdout_stream: TcpStream,
     stderr_stream: TcpStream,
     listener: &TcpListener,
+    expected_nonce: &windows_sandbox_common::auth::Nonce,
 ) -> Result<()> {
-    // Signal readiness to the host.
+    // Announce the protocol magic + version so the host can fail fast on a
+    // version/identity mismatch before any framed messages are exchanged.
+    control
+        .write_all(&encode_preamble())
+        .await
+        .context("send preamble")?;
+
     let ready_frame = encode_message(&ControlMessage::Ready).context("encode Ready")?;
     control
         .write_all(&ready_frame)
@@ -42,7 +48,6 @@ pub async fn run_command_loop(
     let mut tmp = [0u8; 4096];
 
     loop {
-        // Read from control channel.
         let bytes_read = control.read(&mut tmp).await.context("read control")?;
         if bytes_read == 0 {
             eprintln!("[guest] control connection closed");
@@ -50,7 +55,6 @@ pub async fn run_command_loop(
         }
         buf.extend_from_slice(&tmp[..bytes_read]);
 
-        // Try to decode a complete message.
         loop {
             match decode_message(&buf).context("decode control message")? {
                 DecodeResult::Incomplete => break,
@@ -58,7 +62,12 @@ pub async fn run_command_loop(
                     buf.drain(..consumed);
                     match message {
                         ControlMessage::Exec(req) => {
-                            eprintln!("[guest] exec {}: {}", req.exec_id, req.script_code);
+                            // Do not log raw script_code; it may contain secrets.
+                            eprintln!(
+                                "[guest] exec {} ({} bytes)",
+                                req.exec_id,
+                                req.script_code.len()
+                            );
 
                             handle_exec(
                                 &req,
@@ -69,11 +78,8 @@ pub async fn run_command_loop(
                             )
                             .await?;
 
-                            // Re-accept fresh data connections for the next
-                            // execution. The listener is already bound so the
-                            // daemon's connects queue in the TCP backlog.
                             let (new_stdin, new_stdout, new_stderr) =
-                                reconnect_streams(&mut control, listener).await?;
+                                reconnect_streams(&mut control, listener, expected_nonce).await?;
                             current_stdin = new_stdin;
                             current_stdout = new_stdout;
                             current_stderr = new_stderr;
@@ -135,6 +141,7 @@ async fn handle_exec(
 async fn reconnect_streams(
     control: &mut TcpStream,
     listener: &TcpListener,
+    expected_nonce: &windows_sandbox_common::auth::Nonce,
 ) -> Result<(TcpStream, TcpStream, TcpStream)> {
     let ready_frame =
         encode_message(&ControlMessage::StreamsReady).context("encode StreamsReady")?;
@@ -144,11 +151,38 @@ async fn reconnect_streams(
         .context("send StreamsReady")?;
     eprintln!("[guest] StreamsReady sent, accepting new data connections");
 
-    let streams = crate::listener::accept_data_connections(listener)
+    let streams = crate::listener::accept_data_connections(listener, expected_nonce)
         .await
         .context("re-accept data connections")?;
     eprintln!("[guest] new data connections accepted, ready for next exec");
     Ok(streams)
+}
+
+/// Forcibly terminate a process and descendants.
+async fn kill_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        eprintln!("[guest] cannot tree-kill: child pid unavailable");
+        return;
+    };
+    let killed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match killed {
+        Ok(Ok(out)) if out.status.success() => {}
+        Ok(Ok(out)) => eprintln!(
+            "[guest] taskkill tree-kill of pid {} returned {}: {}",
+            pid,
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Ok(Err(err)) => eprintln!("[guest] failed to run taskkill for pid {}: {}", pid, err),
+        Err(_) => eprintln!("[guest] taskkill for pid {} timed out after 5s", pid),
+    }
 }
 
 /// Spawn a child process and bridge its stdio over the TCP streams.
@@ -160,9 +194,7 @@ async fn execute_script(
     stdout_stream: TcpStream,
     stderr_stream: TcpStream,
 ) -> Result<i32> {
-    // Use raw_arg to pass the script literally to cmd.exe.
-    // Rust's standard arg() escaping conflicts with cmd.exe's quoting rules,
-    // so we pass /C normally and the script code unescaped.
+    // raw_arg preserves cmd.exe quoting.
     let mut cmd = Command::new("cmd.exe");
     cmd.arg("/C");
     cmd.raw_arg(script_code);
@@ -176,6 +208,23 @@ async fn execute_script(
     cmd.stderr(std::process::Stdio::piped());
 
     let mut child = cmd.spawn().context("spawn child process")?;
+    let child_pid = child.id();
+
+    // Best-effort job object cleanup for child descendants.
+    let job = match Job::new() {
+        Ok(j) => {
+            if let Some(pid) = child_pid {
+                if let Err(err) = j.assign(pid) {
+                    eprintln!("[guest] could not assign child to job (continuing): {err:#}");
+                }
+            }
+            Some(j)
+        }
+        Err(err) => {
+            eprintln!("[guest] could not create job object (continuing): {err:#}");
+            None
+        }
+    };
 
     // Take child stdio handles.
     let child_stdin = child.stdin.take();
@@ -183,8 +232,9 @@ async fn execute_script(
     let child_stderr = child.stderr.take();
 
     // Bridge stdin: TCP → child
-    let stdin_task = tokio::spawn(async move {
+    let mut stdin_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_in)) = (stdin_stream, child_stdin) {
+            let _ = tcp.set_nodelay(true);
             if let Err(err) = tokio::io::copy(&mut tcp, &mut child_in).await {
                 eprintln!("[guest] stdin bridge error: {}", err);
             }
@@ -192,19 +242,27 @@ async fn execute_script(
     });
 
     // Bridge stdout: child → TCP
-    let stdout_task = tokio::spawn(async move {
+    let mut stdout_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_out)) = (stdout_stream, child_stdout) {
+            let _ = tcp.set_nodelay(true);
             if let Err(err) = tokio::io::copy(&mut child_out, &mut tcp).await {
                 eprintln!("[guest] stdout bridge error: {}", err);
+            }
+            if let Err(err) = tcp.shutdown().await {
+                eprintln!("[guest] stdout shutdown error: {}", err);
             }
         }
     });
 
     // Bridge stderr: child → TCP
-    let stderr_task = tokio::spawn(async move {
+    let mut stderr_task = tokio::spawn(async move {
         if let (mut tcp, Some(mut child_err)) = (stderr_stream, child_stderr) {
+            let _ = tcp.set_nodelay(true);
             if let Err(err) = tokio::io::copy(&mut child_err, &mut tcp).await {
                 eprintln!("[guest] stderr bridge error: {}", err);
+            }
+            if let Err(err) = tcp.shutdown().await {
+                eprintln!("[guest] stderr shutdown error: {}", err);
             }
         }
     });
@@ -218,6 +276,10 @@ async fn execute_script(
             Ok(Ok(status)) => status,
             Ok(Err(err)) => anyhow::bail!("wait failed: {}", err),
             Err(_) => {
+                match &job {
+                    Some(j) => j.terminate(),
+                    None => kill_process_tree(child_pid).await,
+                }
                 if let Err(err) = child.kill().await {
                     eprintln!("[guest] failed to kill timed-out process: {}", err);
                 }
@@ -226,19 +288,36 @@ async fn execute_script(
         }
     };
 
-    // Wait for bridge tasks to complete (they'll finish when the child exits
-    // and its stdio handles are closed). Task join errors indicate panics
-    // in the bridge tasks, which should not happen but we log them.
-    let (stdin_result, stdout_result, stderr_result) =
-        tokio::join!(stdin_task, stdout_task, stderr_task);
-    if let Err(err) = stdin_result {
-        eprintln!("[guest] stdin bridge task failed: {}", err);
+    if let Some(j) = &job {
+        j.terminate();
     }
-    if let Err(err) = stdout_result {
-        eprintln!("[guest] stdout bridge task failed: {}", err);
-    }
-    if let Err(err) = stderr_result {
-        eprintln!("[guest] stderr bridge task failed: {}", err);
+
+    // Bound the drain so a pipe-holding descendant cannot wedge the guest.
+    let drain = tokio::time::timeout(BRIDGE_DRAIN_GRACE, async {
+        tokio::join!(&mut stdin_task, &mut stdout_task, &mut stderr_task)
+    })
+    .await;
+    match drain {
+        Ok((stdin_result, stdout_result, stderr_result)) => {
+            if let Err(err) = stdin_result {
+                eprintln!("[guest] stdin bridge task failed: {}", err);
+            }
+            if let Err(err) = stdout_result {
+                eprintln!("[guest] stdout bridge task failed: {}", err);
+            }
+            if let Err(err) = stderr_result {
+                eprintln!("[guest] stderr bridge task failed: {}", err);
+            }
+        }
+        Err(_) => {
+            eprintln!(
+                "[guest] bridge drain timed out after {:?}; aborting stdio relay (possible leaked descendant holding the pipes)",
+                BRIDGE_DRAIN_GRACE
+            );
+            stdin_task.abort();
+            stdout_task.abort();
+            stderr_task.abort();
+        }
     }
 
     Ok(exit_status.code().unwrap_or(-1))

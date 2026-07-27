@@ -122,6 +122,81 @@ pub fn decode_message(buf: &[u8]) -> Result<DecodeResult, serde_json::Error> {
 }
 
 // ---------------------------------------------------------------------------
+// Connection preamble (control-channel handshake)
+// ---------------------------------------------------------------------------
+
+/// Magic bytes the guest agent writes first on the control channel.
+///
+/// Lets the host fail fast (rather than hanging or misframing) if it connects
+/// to something that is not a matching guest agent.
+pub const PROTOCOL_MAGIC: [u8; 4] = *b"WSBP";
+
+/// Compatibility version for the host/guest control-channel wire protocol.
+///
+/// The host injects the guest binary, so in normal operation both sides are
+/// always the same build; the version guards against a stale guest left over
+/// from an incompatible image and makes mismatches diagnosable. Bump this only
+/// for incompatible changes to framing, preamble semantics, or required control
+/// messages. A mismatch rejects the connection before any framed messages run.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Length in bytes of the fixed control-channel preamble (4 magic + 4 version).
+pub const PREAMBLE_LEN: usize = 8;
+
+/// Reason an 8-byte control preamble was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreambleError {
+    /// The first four bytes did not match [`PROTOCOL_MAGIC`].
+    BadMagic([u8; 4]),
+    /// The magic matched but the peer's version differed from [`PROTOCOL_VERSION`].
+    VersionMismatch { expected: u32, actual: u32 },
+}
+
+impl std::fmt::Display for PreambleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PreambleError::BadMagic(got) => write!(
+                f,
+                "bad protocol magic: expected {:?}, got {:?}",
+                PROTOCOL_MAGIC, got
+            ),
+            PreambleError::VersionMismatch { expected, actual } => write!(
+                f,
+                "protocol version mismatch: expected {}, got {}",
+                expected, actual
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PreambleError {}
+
+/// Encode the fixed control-channel preamble the guest sends before `Ready`.
+pub fn encode_preamble() -> [u8; PREAMBLE_LEN] {
+    let mut bytes = [0u8; PREAMBLE_LEN];
+    bytes[..4].copy_from_slice(&PROTOCOL_MAGIC);
+    bytes[4..].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    bytes
+}
+
+/// Validate an 8-byte preamble, returning the peer's protocol version.
+pub fn validate_preamble(bytes: &[u8; PREAMBLE_LEN]) -> Result<u32, PreambleError> {
+    let mut magic = [0u8; 4];
+    magic.copy_from_slice(&bytes[..4]);
+    if magic != PROTOCOL_MAGIC {
+        return Err(PreambleError::BadMagic(magic));
+    }
+    let actual = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    if actual != PROTOCOL_VERSION {
+        return Err(PreambleError::VersionMismatch {
+            expected: PROTOCOL_VERSION,
+            actual,
+        });
+    }
+    Ok(actual)
+}
+
+// ---------------------------------------------------------------------------
 // Daemon IPC result (line-based protocol between wxc-exec and daemon)
 // ---------------------------------------------------------------------------
 
@@ -223,6 +298,38 @@ mod tests {
                 consumed: frame.len(),
             }
         );
+    }
+
+    #[test]
+    fn preamble_roundtrip() {
+        let bytes = encode_preamble();
+        assert_eq!(bytes.len(), PREAMBLE_LEN);
+        assert_eq!(&bytes[..4], &PROTOCOL_MAGIC);
+        assert_eq!(validate_preamble(&bytes).unwrap(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn preamble_rejects_bad_magic() {
+        let mut bytes = encode_preamble();
+        bytes[0] ^= 0xFF;
+        match validate_preamble(&bytes) {
+            Err(PreambleError::BadMagic(_)) => {}
+            other => panic!("expected BadMagic, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn preamble_rejects_version_mismatch() {
+        let mut bytes = encode_preamble();
+        let bad = PROTOCOL_VERSION.wrapping_add(1);
+        bytes[4..].copy_from_slice(&bad.to_le_bytes());
+        match validate_preamble(&bytes) {
+            Err(PreambleError::VersionMismatch { expected, actual }) => {
+                assert_eq!(expected, PROTOCOL_VERSION);
+                assert_eq!(actual, bad);
+            }
+            other => panic!("expected VersionMismatch, got {:?}", other),
+        }
     }
 
     #[test]

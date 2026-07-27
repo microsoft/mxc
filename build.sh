@@ -70,7 +70,7 @@ echo "=== Building Rust binaries ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
 # Packages to build and lint — kept in one place so build and clippy stay in sync.
-LXC_PACKAGES=(-p lxc -p lxc_common -p wxc_common -p bwrap_common -p linux_test_proxy)
+LXC_PACKAGES=(-p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy)
 
 CARGO_FEATURES=()
 FEATURES_LIST=()
@@ -126,16 +126,16 @@ if [ -n "$TARGET_TRIPLE" ]; then
         cp "$SRC_DIR/target/release/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
         cp "$SRC_DIR/target/$TARGET_TRIPLE/release/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
         echo "Warning: Could not find lxc-exec binary to copy"
-        cp "$SRC_DIR/target/release/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/release/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find linux-test-proxy binary to copy"
+        cp "$SRC_DIR/target/release/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
+        cp "$SRC_DIR/target/$TARGET_TRIPLE/release/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
+        echo "Warning: Could not find unix-test-proxy binary to copy"
     else
         cp "$SRC_DIR/target/debug/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
         cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/lxc-exec" "$BIN_DIR/" 2>/dev/null || \
         echo "Warning: Could not find lxc-exec binary to copy"
-        cp "$SRC_DIR/target/debug/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/linux-test-proxy" "$BIN_DIR/" 2>/dev/null || \
-        echo "Warning: Could not find linux-test-proxy binary to copy"
+        cp "$SRC_DIR/target/debug/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
+        cp "$SRC_DIR/target/$TARGET_TRIPLE/debug/unix-test-proxy" "$BIN_DIR/" 2>/dev/null || \
+        echo "Warning: Could not find unix-test-proxy binary to copy"
     fi
 fi
 

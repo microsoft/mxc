@@ -33,6 +33,19 @@ pub type PipeHandle = windows::Win32::Foundation::HANDLE;
 #[cfg(not(target_os = "windows"))]
 pub type PipeHandle = i32;
 
+/// A null / invalid [`PipeHandle`] — the sentinel a backend returns for a
+/// stream it does not expose (e.g. IsolationSession, which relays internally).
+#[cfg(target_os = "windows")]
+pub fn null_pipe_handle() -> PipeHandle {
+    windows::Win32::Foundation::HANDLE(std::ptr::null_mut())
+}
+
+/// A null / invalid [`PipeHandle`] — see the Windows variant.
+#[cfg(not(target_os = "windows"))]
+pub fn null_pipe_handle() -> PipeHandle {
+    -1
+}
+
 /// Provision-phase result. Carries the freshly-minted `sandbox_id` and
 /// optional backend-typed metadata.
 #[derive(Debug)]

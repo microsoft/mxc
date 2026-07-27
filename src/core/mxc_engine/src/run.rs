@@ -216,16 +216,21 @@ fn resolve_runner_inner(
                     "Windows Sandbox is an experimental feature. Use --experimental flag.",
                 ));
             }
-            let sandbox_config = request
-                .experimental
-                .windows_sandbox
-                .as_ref()
-                .cloned()
-                .unwrap_or_default();
+            if let Some(ws) = &request.experimental.windows_sandbox {
+                let default = wxc_common::models::WindowsSandboxConfig::default();
+                if ws.idle_timeout_ms != default.idle_timeout_ms
+                    || ws.daemon_pipe_name != default.daemon_pipe_name
+                {
+                    let _ = writeln!(
+                        logger,
+                        "warning: experimental.windows_sandbox.idleTimeoutMs and daemonPipeName \
+                         are ignored by the one-shot backend; each invocation launches and tears \
+                         down a fresh VM"
+                    );
+                }
+            }
             Ok(ResolvedRunner::without_guard(Box::new(
-                windows_sandbox_common::windows_sandbox_runner::WindowsSandboxScriptRunner::new(
-                    &sandbox_config,
-                ),
+                windows_sandbox_lifecycle::WindowsSandboxRunner::new(),
             )))
         }
         ContainmentBackend::IsolationSession => {
@@ -365,5 +370,51 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
         Err(MxcError::unsupported_containment(
             "Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)",
         ))
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+    use wxc_common::logger::Mode;
+    use wxc_common::models::{ExperimentalConfig, WindowsSandboxConfig};
+
+    fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
+        ExecutionRequest {
+            containment: ContainmentBackend::WindowsSandbox,
+            experimental_enabled: true,
+            experimental: ExperimentalConfig {
+                windows_sandbox: config,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn windows_sandbox_default_settings_do_not_warn() {
+        for config in [None, Some(WindowsSandboxConfig::default())] {
+            let request = windows_sandbox_request(config);
+            let mut logger = Logger::new(Mode::Buffer);
+            resolve_runner_inner(&request, &mut logger).unwrap();
+            assert!(logger.get_buffer().is_empty());
+        }
+    }
+
+    #[test]
+    fn windows_sandbox_non_default_legacy_settings_warn() {
+        let config = WindowsSandboxConfig {
+            idle_timeout_ms: 1,
+            ..Default::default()
+        };
+        let request = windows_sandbox_request(Some(config));
+        let mut logger = Logger::new(Mode::Buffer);
+
+        resolve_runner_inner(&request, &mut logger).unwrap();
+
+        let warning = logger.get_buffer();
+        assert!(warning.contains("idleTimeoutMs"));
+        assert!(warning.contains("daemonPipeName"));
+        assert!(warning.contains("fresh VM"));
     }
 }

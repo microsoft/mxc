@@ -1,0 +1,19 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Denied-Masking",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "B=/mnt/masktest; if cat \"$B/visible.txt\" 2>/dev/null | grep -q VISIBLE_SECRET; then echo VISIBLE_OK; else echo VISIBLE_MISSING; fi; if cat \"$B/secret_file.txt\" 2>/dev/null | grep -q FILE_SECRET; then echo FILE_LEAK; else echo FILE_MASKED_OK; fi; if ls \"$B/secret_dir\" 2>/dev/null | grep -q .; then echo DIR_LEAK; else echo DIR_MASKED_OK; fi"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "filesystem": {
+    "readwritePaths": ["/mnt/masktest"],
+    "deniedPaths": ["/mnt/masktest/secret_file.txt", "/mnt/masktest/secret_dir"]
+  }
+}

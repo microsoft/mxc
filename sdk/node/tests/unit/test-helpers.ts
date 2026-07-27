@@ -40,9 +40,11 @@ export function fakeSpawn(opts: FakeChildOpts): {
   spawn: (cmd: string, args: string[], spawnOpts: unknown) => unknown;
   captured: { cmd?: string; args?: string[]; envelope?: Record<string, unknown> };
   killCount: () => number;
+  stdinEnded: () => boolean;
 } {
   const captured: { cmd?: string; args?: string[]; envelope?: Record<string, unknown> } = {};
   let kills = 0;
+  let stdinEnded = false;
   const spawn = (cmd: string, args: string[], _spawnOpts: unknown) => {
     captured.cmd = cmd;
     captured.args = args;
@@ -54,6 +56,11 @@ export function fakeSpawn(opts: FakeChildOpts): {
     const ee = new EventEmitter();
     const stdout = new Readable({ read() { /* no-op */ } });
     const stderr = new Readable({ read() { /* no-op */ } });
+    // Minimal stdin spy: buffered exec must close it so a stdin-reading guest
+    // process sees EOF instead of hanging (see spawnAndCollect). It also
+    // registers an 'error' handler on the pipe to swallow EPIPE, so the spy
+    // mirrors the real WritableStream's `on`.
+    const stdin = { end: () => { stdinEnded = true; }, on: () => stdin };
     setImmediate(() => {
       if (opts.error) {
         ee.emit('error', opts.error);
@@ -66,6 +73,7 @@ export function fakeSpawn(opts: FakeChildOpts): {
       ee.emit('close', opts.exitCode ?? 0);
     });
     return Object.assign(ee, {
+      stdin,
       stdout,
       stderr,
       kill: (_sig?: NodeJS.Signals | number) => {
@@ -75,5 +83,5 @@ export function fakeSpawn(opts: FakeChildOpts): {
       },
     });
   };
-  return { spawn, captured, killCount: () => kills };
+  return { spawn, captured, killCount: () => kills, stdinEnded: () => stdinEnded };
 }

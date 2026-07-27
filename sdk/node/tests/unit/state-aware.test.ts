@@ -128,6 +128,24 @@ describe('buildStateAwareEnvelope', () => {
     });
   });
 
+  it('relays correlationVector onto non-provision envelopes and omits it from provision', () => {
+    const nonProvision = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:abc',
+      correlationVector: 'BASEbaseBASEbaseBASEba.1',
+    });
+    assert.strictEqual(nonProvision.correlationVector, 'BASEbaseBASEbaseBASEba.1');
+
+    // Provision seeds its own cV in the executor; the builder never emits one.
+    const provision = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+    });
+    assert.strictEqual(provision.correlationVector, undefined);
+  });
+
 });
 
 describe('parseNonExecResponse', () => {
@@ -207,6 +225,19 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.ok(fake.captured.args?.includes('--experimental'));
   });
 
+  it('surfaces the correlationVector from the provision result envelope', async () => {
+    const fake = fakeSpawn({
+      stdout: '{"result":{"sandboxId":"iso:reg-abc:prov-1","correlationVector":"BASEbaseBASEbaseBASEba.42"}}',
+      exitCode: 0,
+    });
+    activeFake = fake;
+    _setSpawnImpl(fake.spawn);
+    const result = await provisionSandbox('isolation_session', undefined, testOptions());
+    assert.strictEqual(result.correlationVector, 'BASEbaseBASEbaseBASEba.42');
+    // Provision itself never sends a correlationVector on the wire.
+    assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
+  });
+
   it('throws an MxcError carrying backend_unavailable when the executor reports it', async () => {
     const fake = fakeSpawn({
       stdout: '{"error":{"code":"backend_unavailable","message":"IsoSessionApp.dll not registered"}}',
@@ -250,6 +281,14 @@ describe('startSandbox', { skip: platformSkip }, () => {
       isolation_session: { start: { configurationId: 'small' } },
     });
   });
+
+  it('relays the correlationVector from options onto the start envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
+    await startSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.7' }));
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.7');
+  });
 });
 
 describe('stopSandbox', { skip: platformSkip }, () => {
@@ -275,6 +314,14 @@ describe('stopSandbox', { skip: platformSkip }, () => {
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
     );
   });
+
+  it('relays the correlationVector from options onto the stop envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await stopSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.9' }));
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.9');
+  });
 });
 
 describe('deprovisionSandbox', { skip: platformSkip }, () => {
@@ -287,6 +334,14 @@ describe('deprovisionSandbox', { skip: platformSkip }, () => {
     await deprovisionSandbox(id, undefined, testOptions());
     assert.strictEqual(fake.captured.envelope?.phase, 'deprovision');
     assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:abc');
+  });
+
+  it('relays the correlationVector from options onto the deprovision envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await deprovisionSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.11' }));
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.11');
   });
 });
 
@@ -324,10 +379,118 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
       exitCode: 1,
     });
     _setSpawnImpl(fake.spawn);
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
     await assert.rejects(
       () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, testOptions()),
       (err: unknown) => err instanceof MxcError && err.code === 'stale_id',
     );
+  });
+
+  it('closes the child stdin so a stdin-reading command sees EOF instead of hanging', async () => {
+    // Regression for the buffered-exec hang: the Rust state-aware path waits
+    // for stdin EOF before closing guest stdin, so spawnAndCollect must end()
+    // the child's write end when it supplies no input.
+    const fake = fakeSpawn({ stdout: '', stderr: '', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await execInSandboxAsync(id, { process: { commandLine: 'cat' } }, testOptions());
+    assert.strictEqual(
+      fake.stdinEnded(),
+      true,
+      'buffered exec must close the child stdin (end()) so stdin reads see EOF',
+    );
+  });
+
+  it('relays the correlationVector from options onto the exec envelope', async () => {
+    const fake = fakeSpawn({ stdout: 'hi\n', stderr: '', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    await execInSandboxAsync(
+      id,
+      { process: { commandLine: 'echo hi' } },
+      testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.13' }),
+    );
+    assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.13');
+  });
+});
+
+describe('windows_sandbox state-aware lifecycle', () => {
+  it('buildStateAwareEnvelope lifts filesystem (incl. deniedPaths) and emits no experimental block', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'windows_sandbox',
+      containment: 'windows_sandbox',
+      config: {
+        version: '0.6.0-alpha',
+        filesystem: {
+          readwritePaths: ['C:\\workspace'],
+          readonlyPaths: ['C:\\inputs'],
+          deniedPaths: ['C:\\secrets'],
+        },
+      },
+    });
+    assert.strictEqual(env.phase, 'provision');
+    assert.strictEqual(env.containment, 'windows_sandbox');
+    assert.deepStrictEqual(env.filesystem, {
+      readwritePaths: ['C:\\workspace'],
+      readonlyPaths: ['C:\\inputs'],
+      deniedPaths: ['C:\\secrets'],
+    });
+    assert.strictEqual(env.experimental, undefined);
+  });
+
+  describe('round-trip via the typed API', { skip: platformSkip }, () => {
+    afterEach(() => { _resetSpawnImpl(); });
+
+    it('provisionSandbox builds a windows_sandbox envelope and routes back via the wsb: prefix', async () => {
+      const fake = fakeSpawn({ stdout: '{"result":{"sandboxId":"wsb:prov-1"}}', exitCode: 0 });
+      _setSpawnImpl(fake.spawn);
+      const result = await provisionSandbox(
+        'windows_sandbox',
+        { filesystem: { readonlyPaths: ['C:\\inputs'] } },
+        testOptions(),
+      );
+      assert.strictEqual(result.sandboxId, 'wsb:prov-1');
+      assert.strictEqual(fake.captured.envelope?.phase, 'provision');
+      assert.strictEqual(fake.captured.envelope?.containment, 'windows_sandbox');
+      assert.deepStrictEqual(fake.captured.envelope?.filesystem, { readonlyPaths: ['C:\\inputs'] });
+      assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+    });
+
+    it('startSandbox infers windows_sandbox from the wsb: prefix', async () => {
+      const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+      _setSpawnImpl(fake.spawn);
+      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
+      await startSandbox(id, undefined, testOptions());
+      assert.strictEqual(fake.captured.envelope?.phase, 'start');
+      assert.strictEqual(fake.captured.envelope?.sandboxId, 'wsb:prov-1');
+      assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+    });
+
+    it('execInSandboxAsync places process at top-level for a wsb: id', async () => {
+      const fake = fakeSpawn({ stdout: 'hello-from-wsb\n', stderr: '', exitCode: 0 });
+      _setSpawnImpl(fake.spawn);
+      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
+      const result = await execInSandboxAsync(
+        id,
+        { process: { commandLine: 'echo hello-from-wsb' } },
+        testOptions(),
+      );
+      assert.deepStrictEqual(result, { stdout: 'hello-from-wsb\n', stderr: '', exitCode: 0 });
+      assert.deepStrictEqual(fake.captured.envelope?.process, { commandLine: 'echo hello-from-wsb' });
+    });
+
+    it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {
+      for (const phase of ['stop', 'deprovision'] as const) {
+        const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+        _setSpawnImpl(fake.spawn);
+        const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
+        const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
+        await call(id, undefined, testOptions());
+        assert.strictEqual(fake.captured.envelope?.phase, phase);
+        assert.strictEqual(fake.captured.envelope?.sandboxId, 'wsb:prov-1');
+        _resetSpawnImpl();
+      }
+    });
   });
 });

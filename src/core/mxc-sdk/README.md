@@ -125,6 +125,38 @@ backend the library supports.
 > restore outlives the child. A host with none of the tiers available surfaces a
 > clear error rather than silently running unsandboxed.
 
+## State-aware lifecycle
+
+Beyond the one-shot `run` / `spawn_sandbox` paths, the SDK exposes the
+state-aware sandbox lifecycle from a wire-format request JSON string:
+
+- `run_state_aware_json(request_json, dry_run)` drives the **envelope phases** —
+  `provision`, `start`, `stop`, `deprovision` (and a dry run of any phase) — and
+  returns the response-envelope JSON string.
+- `exec_sandbox(request_json)` runs the `exec` phase as a **live streaming**
+  `Sandbox` (the same handle `spawn_sandbox` returns).
+
+```rust,no_run
+use mxc_sdk::{run_state_aware_json, exec_sandbox};
+
+// Envelope phase: provision returns { "result": { "sandboxId": ... } }.
+let provisioned = run_state_aware_json(
+    r#"{"phase":"provision","containment":"isolation_session"}"#,
+    false,
+)?;
+
+// Exec phase: a live streaming handle.
+let mut proc = exec_sandbox(
+    r#"{"phase":"exec","sandboxId":"iso:...","process":{"commandLine":"echo hi"}}"#,
+)?;
+let _ = proc.wait();
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The only in-tree state-aware backend, IsolationSession, is Windows-only and
+experimental (it needs its OS-side service); on a host/build without it these
+return an `Error` with `ErrorCode::UnsupportedPhase`.
+
 ## Supported backends
 
 The backend is chosen by the `containment` field in the request (or the host

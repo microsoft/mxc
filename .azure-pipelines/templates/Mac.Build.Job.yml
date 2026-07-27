@@ -64,30 +64,32 @@ jobs:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
           # macOS-only crate set; the rest of the workspace has Windows-only
-          # crates that do not compile on macOS.
-          cargoPackages: mxc_darwin,seatbelt_common,wxc_common
+          # crates that do not compile on macOS. unix_test_proxy backs
+          # network.proxy.builtinTestServer and ships next to mxc-exec-mac.
+          cargoPackages: mxc_darwin,seatbelt_common,wxc_common,unix_test_proxy
 
     - ${{ else }}:
       - template: Rust.Build.Steps.Unofficial.yml@self
         parameters:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
-          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common
+          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common -p unix_test_proxy
 
     # --- macOS Code Signing + Notarization (official builds only) ---
     # ESRP handles the full signing flow using Microsoft's Developer ID
     # certificate (CP-401337-Apple). No local cert or codesign needed.
     #
     # ESRP's Mac signing requires a .zip (or .dmg) input — raw Mach-O
-    # binaries are rejected. We zip before signing and unzip afterward.
+    # binaries are rejected. We zip before signing and unzip afterward. Both
+    # the executor and the testing-only unix-test-proxy are signed together.
     #
     # Flow: (1) zip → (2) ESRP sign (hardened runtime) → (3) ESRP notarize → (4) unzip
     # Stapling is impossible for standalone Mach-O binaries (Apple limitation);
     # Gatekeeper checks the notarization ticket online instead.
     - script: |
         cd "$(targetTripleDir)"
-        zip mxc-exec-mac.zip mxc-exec-mac
-      displayName: 'Zip binary for ESRP signing'
+        zip mxc-exec-mac.zip mxc-exec-mac unix-test-proxy
+      displayName: 'Zip binaries for ESRP signing'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
 
     - task: EsrpCodeSigning@5
@@ -148,14 +150,16 @@ jobs:
         cd "$(targetTripleDir)"
         unzip -o mxc-exec-mac.zip
         rm mxc-exec-mac.zip
-      displayName: 'Unzip signed binary'
+      displayName: 'Unzip signed binaries'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
 
     - task: CopyFiles@2
-      displayName: Copy binary
+      displayName: Copy binaries
       inputs:
         sourceFolder: $(targetTripleDir)
-        contents: mxc-exec-mac
+        contents: |
+          mxc-exec-mac
+          unix-test-proxy
         targetFolder: $(outputDirectory)/$(targetTriple)
 
     # Copy the .dSYM bundle into a sibling `symbols/` subdir, mirroring the

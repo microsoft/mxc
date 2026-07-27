@@ -5,12 +5,19 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+/// Maximum time to wait for the guest agent's rendezvous file.
+pub const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(360);
+
+pub const RENDEZVOUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Maximum time to wait for TCP connect after rendezvous.
+pub const GUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Poll `rendezvous_dir/rendezvous.txt` until it contains a valid `ip:port`.
-///
-/// Retries every `poll_interval` for up to `timeout`.
 pub async fn wait_for_rendezvous(
     rendezvous_dir: &Path,
     timeout: std::time::Duration,

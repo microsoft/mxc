@@ -8,23 +8,43 @@ use std::net::IpAddr;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-/// Lock down the Windows Firewall inside the sandbox so that only the
-/// already-established host connections survive.
-///
-/// 1. Delete all existing rules.
-/// 2. Allow inbound on our listen port from the host IP.
-/// 3. Allow outbound to the host IP.
-/// 4. Set default policy to block-all for both directions.
+/// Pre-authorise the agent by program path before bind so an inbound firewall
+/// prompt cannot block unattended runs. [`lockdown`] replaces this temporary
+/// rule after the host connects.
+pub async fn pre_authorize() -> Result<()> {
+    let exe = std::env::current_exe().context("resolve guest executable path")?;
+    let program = exe.to_string_lossy();
+
+    run_netsh(&[
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        "name=WxcAgentPreAuth",
+        "dir=in",
+        "action=allow",
+        "protocol=TCP",
+        "profile=any",
+        "enable=yes",
+        &format!("program={}", program),
+    ])
+    .await
+    .context("add pre-authorization inbound allow rule")?;
+
+    Ok(())
+}
+
+/// Restrict traffic to the established host connection and block everything
+/// else. The outbound rule uses the listener's source port so scripts cannot
+/// open new connections to arbitrary host services.
 pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
     let host = host_ip.to_string();
     let port = listen_port.to_string();
 
-    // Delete all existing firewall rules.
     run_netsh(&["advfirewall", "firewall", "delete", "rule", "name=all"])
         .await
         .context("delete existing rules")?;
 
-    // Allow inbound from host to our listen port.
     run_netsh(&[
         "advfirewall",
         "firewall",
@@ -40,7 +60,6 @@ pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
     .await
     .context("add inbound allow rule")?;
 
-    // Allow outbound to host.
     run_netsh(&[
         "advfirewall",
         "firewall",
@@ -50,12 +69,12 @@ pub async fn lockdown(host_ip: IpAddr, listen_port: u16) -> Result<()> {
         "dir=out",
         "action=allow",
         "protocol=TCP",
+        &format!("localport={}", port),
         &format!("remoteip={}", host),
     ])
     .await
     .context("add outbound allow rule")?;
 
-    // Block everything else.
     run_netsh(&[
         "advfirewall",
         "set",
