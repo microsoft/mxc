@@ -401,6 +401,16 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         let parsed = url::Url::parse(&url_str)
             .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
 
+        // Only http/https are meaningful for the HTTP(S)_PROXY env vars we
+        // inject. A non-HTTP scheme (ftp://, socks5://, …) is silently ignored
+        // by many clients, which fails open under WSLc's defaultPolicy=allow.
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(WxcError::ConfigParse(format!(
+                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {url_str}"
+            )));
+        }
+
         let host = parsed
             .host_str()
             .ok_or_else(|| {
@@ -2487,6 +2497,28 @@ mod tests {
             format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn proxy_rejects_non_http_scheme() {
+        // Non-HTTP schemes are silently ignored by many clients when injected
+        // as HTTP(S)_PROXY, which fails open. Reject at parse time.
+        for url in ["socks5://proxy.example:1080", "ftp://proxy.example:21"] {
+            let json = format!(
+                r#"{{
+                    "process": {{"commandLine": "echo hi"}},
+                    "containment": "processcontainer",
+                    "network": {{"proxy": {{"url": "{url}"}}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(
+                format!("{err}").contains("must use the 'http' or 'https' scheme"),
+                "expected scheme rejection for {url}, got: {err}"
+            );
+        }
     }
 
     #[test]
