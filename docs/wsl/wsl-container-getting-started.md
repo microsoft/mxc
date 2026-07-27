@@ -232,9 +232,11 @@ no separate `--setup-wslc` step is required.
 `network.proxy` routes cooperating HTTP traffic through an external proxy by
 injecting `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (plus lowercase aliases)
 into the container's environment — the same cooperative model the Bubblewrap
-(Linux) and Seatbelt (macOS) backends use. Any caller-supplied proxy variable
-(including `NO_PROXY`) is stripped first so sandboxed code cannot override or
-bypass the configured proxy.
+(Linux) and Seatbelt (macOS) backends use. Any caller-supplied value for those
+six variables, plus `NO_PROXY` / `no_proxy`, is stripped from `process.env`
+first, so a config cannot supply a conflicting value or re-enable a `NO_PROXY`
+bypass. Other proxy variables — notably `FTP_PROXY` / `ftp_proxy` — are **not**
+stripped, matching the Bubblewrap and Seatbelt backends.
 
 ```json
 {
@@ -252,7 +254,7 @@ MXC does **not** start the proxy — supply one that is already listening.
 
 | Rejected | Why |
 |---|---|
-| `{ "localhost": <port> }`, or a `url` on `127.0.0.1` / `::1` / `localhost` | The container runs inside the WSL2 VM — a separate kernel with its own loopback, behind NAT. Loopback names the container itself, never the Windows host where the proxy listens. Use an address routable from the VM, and bind the proxy on a VM-reachable interface. |
+| `{ "localhost": <port> }`, or a `url` whose host is local-only (`127.0.0.0/8`, `::1`, `::ffff:127.0.0.1`, `0.0.0.0`, `::`, `localhost`) | The container runs inside the WSL2 VM — a separate kernel with its own loopback, behind NAT. A local-only address names the container itself, never the Windows host where the proxy listens. Use an address routable from the VM, and bind the proxy on a VM-reachable interface. |
 | `{ "builtinTestServer": true }` | The bundled test proxy binds host loopback, so it has the same reachability problem. |
 | `defaultPolicy: "block"` | Maps to `NetworkingMode::None` — no network interface at all, so the proxy would be unreachable. Use `"allow"`. |
 | `allowedHosts` / `blockedHosts` alongside `proxy` | MXC does not forward host lists to an external proxy, and WSLC cannot enforce them itself (in-container `iptables` needs `CAP_NET_ADMIN`, which the SDK's `Privileged` flag does not grant). The external proxy enforces its own host policy. |

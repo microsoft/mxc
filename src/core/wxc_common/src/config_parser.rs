@@ -375,6 +375,38 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
 
 // ---------- Conversion from wire model to domain model ----------
 
+/// Returns `true` when `host` names an endpoint that is local to whoever
+/// resolves it, and therefore cannot reach a proxy running on another machine.
+///
+/// Accepts the bracketed IPv6 form (`[::1]`) that URL parsing preserves, and
+/// covers the whole `127.0.0.0/8` block plus IPv4-mapped IPv6 loopback
+/// (`::ffff:127.0.0.1`) — matching on a handful of literal spellings would miss
+/// `127.0.0.2` and friends. `0.0.0.0` / `::` are included because they resolve
+/// to the local host too, so they are unreachable in exactly the same way.
+fn is_local_only_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    // `Ipv6Addr::is_loopback` is false for `::ffff:127.0.0.1`, but the mapped
+    // IPv4 address is still loopback.
+    match ip {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .is_some_and(|v4| v4.is_loopback() || v4.is_unspecified()),
+        std::net::IpAddr::V4(_) => false,
+    }
+}
+
 /// Convert a typed `wire::Proxy` block into the validated domain `ProxyConfig`.
 /// Exactly one of `builtinTestServer` / `localhost` / `url` may be set.
 fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
@@ -928,16 +960,18 @@ fn convert_wire_config(
         }
 
         if containment == ContainmentBackend::Wslc
-            && policy.network_proxy.address.as_ref().is_some_and(|addr| {
-                matches!(addr.host(), "127.0.0.1" | "::1" | "[::1]" | "localhost")
-            })
+            && policy
+                .network_proxy
+                .address
+                .as_ref()
+                .is_some_and(|addr| is_local_only_host(addr.host()))
         {
-            let msg = "WSLC: a loopback network.proxy (127.0.0.1/::1/localhost, including \
-                       'network.proxy.localhost') is unreachable from inside the WSL2 VM. The \
-                       container runs in a separate kernel behind NAT, so loopback names the \
-                       container itself, not the Windows host where the proxy listens. Use \
-                       'network.proxy.url' with an address routable from the VM, and bind the \
-                       proxy on a VM-reachable interface.";
+            let msg = "WSLC: a loopback network.proxy (127.0.0.0/8, ::1, 0.0.0.0, localhost, \
+                       including 'network.proxy.localhost') is unreachable from inside the WSL2 \
+                       VM. The container runs in a separate kernel behind NAT, so a local-only \
+                       address names the container itself, not the Windows host where the proxy \
+                       listens. Use 'network.proxy.url' with an address routable from the VM, \
+                       and bind the proxy on a VM-reachable interface.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
@@ -2536,8 +2570,17 @@ mod tests {
     fn proxy_loopback_url_rejected_with_wslc() {
         for url in [
             "http://127.0.0.1:8080",
+            // Anywhere in 127.0.0.0/8 is loopback, not just 127.0.0.1.
+            "http://127.0.0.2:8080",
+            "http://127.255.255.254:8080",
             "http://localhost:8080",
+            "http://LocalHost:8080",
             "http://[::1]:8080",
+            // IPv4-mapped IPv6 loopback: `Ipv6Addr::is_loopback()` is false here.
+            "http://[::ffff:127.0.0.1]:8080",
+            // Unspecified addresses resolve to the local host too.
+            "http://0.0.0.0:8080",
+            "http://[::]:8080",
         ] {
             let json = format!(
                 r#"{{
@@ -2558,6 +2601,34 @@ mod tests {
                 url,
                 msg
             );
+        }
+    }
+
+    #[test]
+    fn proxy_routable_url_accepted_with_wslc() {
+        // Guard against over-rejection: addresses that merely *look* loopback-ish
+        // (10.x, 172.x, a `127`-prefixed hostname) are routable and must pass.
+        for url in [
+            "http://10.0.0.5:8080",
+            "http://172.16.0.1:8080",
+            "http://proxy.corp.example:3128",
+            "http://127-0-0-1.example.com:8080",
+            "http://[2001:db8::1]:8080",
+        ] {
+            let json = format!(
+                r#"{{
+                    "containment": "wslc",
+                    "process": {{"commandLine": "echo hi"}},
+                    "experimental": {{"wslc": {{"image": "python:3.12"}}}},
+                    "network": {{"defaultPolicy": "allow", "proxy": {{"url": "{url}"}}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let req = load_request(&encoded, &mut logger, true)
+                .unwrap_or_else(|e| panic!("expected {} to be accepted, got: {}", url, e));
+            assert!(req.policy.network_proxy.is_enabled());
         }
     }
 
