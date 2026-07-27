@@ -1488,7 +1488,15 @@ impl WSLContainerRunner {
         // -- Wait for exit --
         let (exit_code, timed_out) = match started.wait_for_exit(logger) {
             Ok(r) => r,
-            Err(e) => return e,
+            Err(e) => {
+                // `wait_for_exit` can fail while the container is still running
+                // (a failed apartment, or `WslcGetProcessExitEvent`). Returning
+                // straight away would drop `started`, freeing the callback
+                // context and unloading the DLL under live callbacks, so settle
+                // the container first.
+                started.quiesce(logger);
+                return e;
+            }
         };
 
         started.destroy(logger);
@@ -1563,6 +1571,34 @@ impl StartedContainer {
         }
     }
 
+    /// Stop the container and block until the SDK's exit callback has fired,
+    /// then tear it down — the teardown for any path that abandons a *started*
+    /// container without a completed wait (an error return, or a handle dropped
+    /// mid-run).
+    ///
+    /// The exit callback is the SDK's guarantee that no further callback will
+    /// arrive, which must hold before this container's fields drop: they free
+    /// the `IoContext` those callbacks write through and then unload the DLL.
+    /// The happy path reaches the same guarantee via
+    /// [`wait_for_exit`](Self::wait_for_exit) followed by
+    /// [`destroy`](Self::destroy).
+    pub(crate) fn quiesce(&self, logger: &mut Logger) {
+        // Force-stop: this only runs when the run is already being abandoned,
+        // so there is no `destroyOnExit: false` container left to keep alive.
+        // `0` means "don't wait for a graceful stop".
+        let _ = self.stop(WslcSignal::SigKill, 0);
+        self.close_streams();
+        if !self.io_ctx.wait_for_exit_callback() {
+            let _ = writeln!(
+                logger,
+                "[WSLC] Warning: exit callback did not fire within {}s while abandoning a \
+                 started container",
+                EXIT_CALLBACK_TIMEOUT.as_secs()
+            );
+        }
+        self.destroy(logger);
+    }
+
     /// Stop and delete the container when the request asked for it. The session
     /// is terminated by `WslcSessionGuard`'s `Drop`.
     pub(crate) fn destroy(&self, logger: &mut Logger) {
@@ -1628,12 +1664,6 @@ impl StartedContainer {
     /// its output has been flushed).
     pub(crate) fn has_exited(&self) -> bool {
         *lock(&self.io_ctx.exited.0)
-    }
-
-    /// Block (bounded) until the SDK's exit callback has fired, so releasing the
-    /// SDK handles can't race a callback still in flight.
-    pub(crate) fn wait_for_exit_callback(&self) {
-        self.io_ctx.wait_for_exit_callback();
     }
 
     /// The init process's exit code. Only meaningful once

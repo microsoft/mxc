@@ -257,17 +257,10 @@ impl Drop for WslcSandboxProcess {
         if self.torn_down {
             return;
         }
-        // Harmless once the process has already exited: the container is simply
-        // signalled again before being deleted.
-        let _ = self.started.stop(WslcSignal::SigKill, 0);
-        self.started.close_streams();
-        // Releasing the SDK handles and unloading `wslcsdk.dll` is only safe
-        // once the SDK has stopped calling back into us, which it guarantees
-        // from the exit callback onwards. `wait_for_exit` establishes that on
-        // the normal path; do the same here rather than tearing down under a
-        // possibly-live callback.
-        self.started.wait_for_exit_callback();
+        // Settles the container and blocks on the exit callback before the
+        // fields it owns are released — the SDK must have stopped calling back
+        // before the `IoContext` is freed and the DLL unloaded.
         let mut logger = Logger::new(Mode::Buffer);
-        self.started.destroy(&mut logger);
+        self.started.quiesce(&mut logger);
     }
 }
