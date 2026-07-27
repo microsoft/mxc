@@ -16,34 +16,41 @@
 //! ```
 
 fn main() {
+    std::process::exit(run_probe());
+}
+
+#[cfg(target_os = "windows")]
+fn run_probe() -> i32 {
     let learning_mode_available = learning_mode_windows::is_learning_mode_api_available();
     println!("is_learning_mode_api_available = {learning_mode_available}");
 
-    #[cfg(target_os = "windows")]
-    let available = {
-        match learning_mode_windows::LearningModeApi::load() {
-            Ok(api) => println!("LearningModeApi::load = OK  ({api:?})"),
-            Err(e) => println!("LearningModeApi::load = ERR ({e})"),
-        }
+    match learning_mode_windows::LearningModeApi::load() {
+        Ok(api) => println!("LearningModeApi::load = OK  ({api:?})"),
+        Err(e) => println!("LearningModeApi::load = ERR ({e})"),
+    }
 
-        let secenv_available = learning_mode_windows::is_security_environment_api_available();
-        println!("is_security_environment_api_available = {secenv_available}");
+    let secenv_available = learning_mode_windows::is_security_environment_api_available();
+    println!("is_security_environment_api_available = {secenv_available}");
 
-        let report = learning_mode_windows::probe_security_environment_exports();
-        println!("  create export = {:?}", report.create);
-        println!("  launch export = {:?}", report.launch);
-        println!("  close  export = {:?}", report.close);
+    let report = learning_mode_windows::probe_security_environment_exports();
+    println!("  create export = {:?}", report.create);
+    println!("  launch export = {:?}", report.launch);
+    println!("  close  export = {:?}", report.close);
 
-        match learning_mode_windows::SecurityEnvironmentApi::load() {
-            Ok(api) => println!("SecurityEnvironmentApi::load = OK  ({api:?})"),
-            Err(e) => println!("SecurityEnvironmentApi::load = ERR ({e})"),
-        }
+    match learning_mode_windows::SecurityEnvironmentApi::load() {
+        Ok(api) => println!("SecurityEnvironmentApi::load = OK  ({api:?})"),
+        Err(e) => println!("SecurityEnvironmentApi::load = ERR ({e})"),
+    }
 
-        learning_mode_available && secenv_available
-    };
+    if learning_mode_available && secenv_available {
+        0
+    } else {
+        2
+    }
+}
 
-    #[cfg(not(target_os = "windows"))]
-    let available = false;
-
-    std::process::exit(if available { 0 } else { 2 });
+#[cfg(not(target_os = "windows"))]
+fn run_probe() -> i32 {
+    println!("is_learning_mode_api_available = false");
+    2
 }

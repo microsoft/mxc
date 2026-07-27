@@ -9,7 +9,6 @@
 //! stays resident for the process lifetime, so the module handle is used only to
 //! resolve exports and then dropped without `FreeLibrary`.
 
-use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 
@@ -145,18 +144,23 @@ impl LearningModeApi {
     ) -> Result<(), LearningModeError> {
         let wide_path = match encode_output_path(output_path) {
             Ok(path) => path,
-            Err(primary) => {
-                let cleanup = self.stop_trace_encoded(trace, None);
-                return match cleanup {
-                    Ok(()) => Err(primary),
-                    Err(cleanup) => Err(LearningModeError::CleanupFailed {
-                        primary: Box::new(primary),
-                        cleanup: Box::new(cleanup),
-                    }),
-                };
-            }
+            Err(primary) => return Err(self.discard_trace_after_error(trace, primary)),
         };
         self.stop_trace_encoded(trace, wide_path.as_deref())
+    }
+
+    fn discard_trace_after_error(
+        &self,
+        trace: LearningModeTraceHandle,
+        primary: LearningModeError,
+    ) -> LearningModeError {
+        match self.stop_trace_encoded(trace, None) {
+            Ok(()) => primary,
+            Err(cleanup) => LearningModeError::CleanupFailed {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup),
+            },
+        }
     }
 
     fn stop_trace_encoded(
@@ -185,17 +189,12 @@ impl LearningModeApi {
 fn encode_output_path(output_path: Option<&Path>) -> Result<Option<Vec<u16>>, LearningModeError> {
     output_path
         .map(|path| {
-            // `encode_wide` preserves non-Unicode path data that `to_string_lossy`
-            // would replace, so the ETL lands at exactly the requested path.
-            let mut wide = path.as_os_str().encode_wide().collect::<Vec<u16>>();
-            if wide.contains(&0) {
-                return Err(LearningModeError::InvalidInput {
+            string_util::os_str_to_wide(path.as_os_str()).map_err(|_| {
+                LearningModeError::InvalidInput {
                     parameter: "output_path",
                     detail: "path contains an embedded NUL".to_string(),
-                });
-            }
-            wide.push(0);
-            Ok(wide)
+                }
+            })
         })
         .transpose()
 }
