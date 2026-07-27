@@ -81,8 +81,8 @@ stays enforced:
 | Flow | Audience | Entry point | Enforcement |
 | ---- | -------- | ----------- | ----------- |
 | **Developer inner-loop** | The author bringing a workload up | `--audit` CLI flag | Relaxed (allow-all) |
-| **App / user-configurable** | Apps that let end users tune their own config | `captureDenials` (`mode: "block-and-log"`) / `learningModeLogging` | Enforced (deny-and-record) |
-| **Fleet auditing** | IT admins | `captureDenials` (`mode: "allow-and-log"`) / `permissiveLearningMode` | Relaxed (allow-all) |
+| **App / user-configurable** | Apps that let end users tune their own config | `captureDenials` (`mode: "block"`) / `learningModeLogging` | Enforced (deny-and-record) |
+| **Fleet auditing** | IT admins | `captureDenials` (`mode: "allow"`) / `permissiveLearningMode` | Relaxed (allow-all) |
 
 1. **Developer inner-loop (`--audit`).** A developer runs `wxc-exec --audit`
    with ProcessContainer containment to discover the capabilities and paths
@@ -95,14 +95,14 @@ stays enforced:
    wxc-exec --audit --config <config>
    ```
 
-2. **App / user-configurable (`captureDenials` block-and-log / `learningModeLogging`).**
+2. **App / user-configurable (`captureDenials` block / `learningModeLogging`).**
    An app wants to let its users "configure" their own sandbox. Each user
    workflow differs, so the app records what was blocked, presents it through its
    own UX, and re-generates the config with the new paths/capabilities.
    Deny-by-default stays enforced — the workload behaves exactly as it would in
    production while the denials are recorded.
 
-3. **Fleet auditing (`captureDenials` allow-and-log / `permissiveLearningMode`).**
+3. **Fleet auditing (`captureDenials` allow / `permissiveLearningMode`).**
    IT admins audit access checks across a fleet by running MXC instances in
    permissive learning mode. This flow does **not** trigger UAC: the capability
    is supplied through config and takes effect directly, allowing and recording
@@ -115,9 +115,9 @@ Windows-only `captureDenials` config switch drives collecting those events and
 surfacing the resulting denials to the caller. Its `mode` selects how each
 ungranted access is handled while it is recorded:
 
-- `mode: "block-and-log"` (default) maps onto `learningModeLogging`
+- `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.
-- `mode: "allow-and-log"` maps onto `permissiveLearningMode` (allow-and-record)
+- `mode: "allow"` maps onto `permissiveLearningMode` (allow-and-record)
   — the fleet-auditing flow.
 
 The capture pipeline is delivered incrementally and is documented separately as
