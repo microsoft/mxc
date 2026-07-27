@@ -54,7 +54,7 @@ pub(super) fn validate_post_provision_policy(
     request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
     reject_filesystem_policy(request)?;
-    if request.network_specified {
+    if request.policy.network_specified {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_IMMUTABLE.to_string(),
         ));
@@ -435,8 +435,10 @@ mod tests {
         // Any supplied network policy is refused post-provision (fixed at
         // provision), regardless of value — here a canonical allow.
         let request = ExecutionRequest {
-            policy: canonical_allow_policy(),
-            network_specified: true,
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..canonical_allow_policy()
+            },
             ..Default::default()
         };
         assert_policy_err_contains(
@@ -451,7 +453,10 @@ mod tests {
         // (Block) network is indistinguishable from absent in the domain model,
         // so the `network_specified` flag — not the value — drives the refusal.
         let request = ExecutionRequest {
-            network_specified: true,
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_policy_err_contains(
@@ -473,9 +478,9 @@ mod tests {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["C:\\src".to_string()],
+                network_specified: true,
                 ..Default::default()
             },
-            network_specified: true,
             ..Default::default()
         };
         assert_policy_err_contains(

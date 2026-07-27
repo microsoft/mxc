@@ -787,7 +787,7 @@ fn convert_wire_config(
     // `cfg.network` so backends can distinguish an absent policy from an
     // explicit default-valued one (the domain `default_network_policy` defaults
     // to `Block` either way).
-    let network_specified = cfg.network.is_some();
+    policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
@@ -1071,7 +1071,6 @@ fn convert_wire_config(
         containment,
         lifecycle,
         policy,
-        network_specified,
         lxc_config,
         seatbelt,
         experimental_enabled: false,
@@ -1889,7 +1888,7 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.network_specified);
+        assert!(req.policy.network_specified);
     }
 
     #[test]
@@ -1899,7 +1898,7 @@ mod tests {
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(!req.network_specified);
+        assert!(!req.policy.network_specified);
     }
 
     #[test]

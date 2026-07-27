@@ -531,7 +531,10 @@ mod tests {
         // provision and refused (mapped to policy_validation at the boundary).
         let runner = IsolationSessionRunner::new();
         let req = ExecutionRequest {
-            network_specified: true,
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
