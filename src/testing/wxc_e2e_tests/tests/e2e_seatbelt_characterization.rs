@@ -267,3 +267,57 @@ fn seatbelt_timeout_kills_before_completion() {
         result.wall_time_ms
     );
 }
+
+/// Regression guard: when the requested `process.cwd` is not readable under the
+/// sandbox policy, the executor launches from a policy-allowed directory so the
+/// child shell's startup `getcwd()` does not emit noisy "cannot access parent
+/// directories" warnings. The command (reading an allowed absolute path) must
+/// still succeed and stderr must be free of the getcwd noise.
+#[test]
+fn seatbelt_out_of_policy_cwd_has_no_getcwd_noise() {
+    if !has_platform_exec() {
+        return;
+    }
+    // Allowed read-only location holding the file the command reads.
+    let ro_dir = fs::canonicalize(unique_tempdir("noise-ro")).expect("canonicalize");
+    let protected = ro_dir.join("protected.txt");
+    fs::write(&protected, "original read-only content").expect("write protected file");
+    // Requested cwd that is deliberately outside every policy path.
+    let out_of_policy = fs::canonicalize(unique_tempdir("noise-cwd")).expect("canonicalize");
+
+    let mut cfg = config("cwd-noise", &format!("cat {}", protected.to_string_lossy()));
+    cfg["process"]["cwd"] = json!(out_of_policy.to_string_lossy());
+    cfg["filesystem"] = json!({ "readonlyPaths": [ro_dir.to_string_lossy()] });
+
+    let result = run_platform_config_value("seatbelt cwd noise", &cfg, &[], None);
+
+    let _ = fs::remove_dir_all(&ro_dir);
+    let _ = fs::remove_dir_all(&out_of_policy);
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "reading an allowed absolute path should still succeed:\n{}",
+        result.combined_output()
+    );
+    assert!(
+        result.stdout.contains("original read-only content"),
+        "expected the file contents on stdout:\n{}",
+        result.combined_output()
+    );
+    // The core of the fix: no getcwd startup noise leaks onto stderr.
+    for needle in [
+        "getcwd",
+        "error retrieving current directory",
+        "shell-init",
+        "job-working-directory",
+    ] {
+        assert!(
+            !result.stderr.contains(needle),
+            "stderr should not contain getcwd noise ({needle:?}); \
+             out-of-policy cwd should fall back to a policy-allowed directory.\n\
+             --- stderr ---\n{}",
+            result.stderr
+        );
+    }
+}

@@ -230,9 +230,16 @@ unconditional; it applies whether or not `process.env` is provided.)
 
 ### Working directory
 
-If `process.cwd` is omitted it resolves to `readwritePaths[0]`, else
+If `process.cwd` is provided it is honored **only when it is readable under the
+filesystem policy** — i.e. within a `readwritePaths`/`readonlyPaths` entry and
+not within a `deniedPaths` entry. If `process.cwd` is omitted, or points at a
+directory the policy does not allow, it resolves to `readwritePaths[0]`, else
 `readonlyPaths[0]`, else `/`; a `~`/`~/…` default is tilde-expanded the same way
-the sandbox profile expands policy paths. `PWD` is exported to the resolved
+the sandbox profile expands policy paths. Launching from a policy-allowed
+directory (rather than an inaccessible one) keeps the child shell's startup
+`getcwd()` from emitting noisy "cannot access parent directories" warnings under
+the deny-by-default profile; the fallback changes only the launch directory and
+never grants additional filesystem access. `PWD` is exported to the resolved
 directory so the child's `getcwd()` takes its fast `$PWD` path.
 
 ## Usage
