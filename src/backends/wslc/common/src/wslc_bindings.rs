@@ -475,7 +475,47 @@ pub struct WslcSdk {
 // `WslcSdk` intentionally does not implement `Send` or `Sync`.
 // Cross-thread use of the runtime-loaded SDK may require additional
 // guarantees (such as per-thread COM initialization) that are not enforced
-// by this type.
+// by this type. The streaming handle in `crate::sandbox` opts into moving one
+// across threads with an explicit `unsafe impl Send`; see the safety note
+// there for the argument that makes it sound.
+
+/// Whether this host can run the WSLC backend: `wslcsdk.dll` loads next to the
+/// running executable and the runtime reports no missing components (WSL2 and
+/// the WSLC runtime installed).
+///
+/// Used for host capability reporting. A `false` here is exactly the condition
+/// under which the runner's own preflight would fail.
+pub fn is_available() -> bool {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+
+    // SAFETY: COM apartment bookkeeping only, balanced below, followed by the
+    // SDK's own capability query through freshly resolved function pointers.
+    unsafe {
+        // Join the MTA for the probe when the calling thread has no apartment
+        // yet, and leave the thread exactly as we found it. An `Err` here is
+        // `RPC_E_CHANGED_MODE` (the caller is already in an STA) — nothing was
+        // initialized, so nothing is uninitialized either, and the probe still
+        // runs.
+        let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let available = probe_components();
+        if initialized {
+            CoUninitialize();
+        }
+        available
+    }
+}
+
+/// Load the SDK and ask it whether any prerequisite component is missing.
+fn probe_components() -> bool {
+    let Ok(sdk) = WslcSdk::load() else {
+        return false;
+    };
+    let mut missing = WslcComponentFlags::NONE;
+    // SAFETY: `sdk` holds valid function pointers while it is alive, and
+    // `missing` is a valid out-param for the call.
+    let hr = unsafe { (sdk.WslcGetMissingComponents)(&mut missing) };
+    hr == S_OK && !missing.any_missing()
+}
 
 impl WslcSdk {
     /// Load `wslcsdk.dll` at runtime and resolve all required function pointers.
@@ -617,10 +657,9 @@ impl WslcSessionGuard {
 impl Drop for WslcSessionGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
+            // SAFETY: the handle is non-null and owned by this guard, so it is
+            // terminated and released exactly once.
             unsafe {
-                eprintln!(
-                    "[WSLC][debug] WslcSessionGuard dropped -- terminating and releasing session"
-                );
                 let _ = (self.terminate_fn)(self.handle);
                 (self.release_fn)(self.handle);
             }
@@ -656,8 +695,9 @@ impl WslcContainerGuard {
 impl Drop for WslcContainerGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
+            // SAFETY: the handle is non-null and owned by this guard, so it is
+            // released exactly once.
             unsafe {
-                eprintln!("[WSLC][debug] WslcContainerGuard dropped -- releasing container");
                 (self.release_fn)(self.handle);
             }
         }
@@ -692,8 +732,9 @@ impl WslcProcessGuard {
 impl Drop for WslcProcessGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
+            // SAFETY: the handle is non-null and owned by this guard, so it is
+            // released exactly once.
             unsafe {
-                eprintln!("[WSLC][debug] WslcProcessGuard dropped -- releasing process");
                 (self.release_fn)(self.handle);
             }
         }

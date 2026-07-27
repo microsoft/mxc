@@ -15,9 +15,10 @@
 //!
 //! ## Surface
 //!
-//! - [`build_request`] / [`SandboxPolicy`] / [`SandboxRequest`] — build a
-//!   spawnable request from a policy (the Rust port of the SDK's
-//!   `createConfigFromPolicy`).
+//! - [`build_request`] / [`build_request_with_containment`] / [`SandboxPolicy`]
+//!   / [`SandboxRequest`] — build a spawnable request from a policy (the Rust
+//!   port of the SDK's `createConfigFromPolicy`), for the host's native
+//!   containment or an explicitly selected [`Containment`] backend.
 //! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
 //! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
@@ -37,8 +38,9 @@ mod state_aware;
 pub use error::{Error, ErrorCode};
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
-    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
+    available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
+    user_profile_policy, Containment, FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
+    WslcSection,
 };
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};

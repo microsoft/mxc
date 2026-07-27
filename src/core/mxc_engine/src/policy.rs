@@ -504,6 +504,102 @@ pub struct UiSection {
     pub allow_input_injection: bool,
 }
 
+/// The containment backend [`build_request_with_containment`] targets — the
+/// Rust analogue of the SDK's `ContainmentType | ContainmentBackend` argument
+/// to `createConfigFromPolicy`.
+///
+/// Only the backends this library can actually run are listed; select a
+/// concrete backend when you specifically need it, and prefer
+/// [`Containment::Process`] otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Containment {
+    /// Abstract "OS-native process isolation" intent, resolved per host:
+    /// ProcessContainer (Windows), Bubblewrap (Linux), Seatbelt (macOS).
+    #[default]
+    Process,
+    /// WSL Container backend: a Linux container on a Windows host, via the WSLC
+    /// SDK, configured by the carried [`WslcSection`]
+    /// (`WslcSection::default()` matches the SDK's defaults).
+    ///
+    /// **Experimental** — the request must have experimental features enabled
+    /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
+    Wslc(WslcSection),
+}
+
+/// WSL Container settings, mirroring the SDK's `experimental.wslc` config
+/// block; carried by [`Containment::Wslc`].
+///
+/// [`Default`] matches the native backend's defaults: the `alpine:latest`
+/// image, host-determined CPU/memory, no GPU, and the SDK's default store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WslcSection {
+    /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
+    /// The image must already be in the WSLC image store unless
+    /// `image_tar_path` is set — MXC never pulls images itself.
+    pub image: String,
+    /// Path to a local tar (a `docker save` archive or a rootfs) imported as
+    /// the image instead of resolving it from the store.
+    pub image_tar_path: Option<String>,
+    /// vCPUs for the session. `None` lets the host decide.
+    pub cpu_count: Option<u32>,
+    /// Memory for the session, in MB. `None` lets the host decide.
+    pub memory_mb: Option<u64>,
+    /// Enable GPU passthrough.
+    pub gpu: bool,
+    /// Override the WSLC session image-store path. `None` uses the SDK default.
+    pub storage_path: Option<String>,
+    /// Host → container TCP port forwards, as `(windows_port, container_port)`.
+    /// Only TCP is supported (the WSLC runtime returns `E_NOTIMPL` for UDP).
+    pub port_mappings: Vec<(u16, u16)>,
+}
+
+impl Default for WslcSection {
+    fn default() -> Self {
+        Self {
+            image: "alpine:latest".to_string(),
+            image_tar_path: None,
+            cpu_count: None,
+            memory_mb: None,
+            gpu: false,
+            storage_path: None,
+            port_mappings: Vec::new(),
+        }
+    }
+}
+
+impl WslcSection {
+    /// The wire-format `experimental.wslc` object. Optional fields are omitted
+    /// rather than sent as `null` so the parser applies its own defaults.
+    fn wire(&self) -> serde_json::Value {
+        use serde_json::json;
+        let mut wslc = json!({ "image": self.image, "gpu": self.gpu });
+        if let Some(tar) = &self.image_tar_path {
+            wslc["imageTarPath"] = json!(tar);
+        }
+        if let Some(cpu) = self.cpu_count {
+            wslc["cpuCount"] = json!(cpu);
+        }
+        if let Some(memory) = self.memory_mb {
+            wslc["memoryMb"] = json!(memory);
+        }
+        if let Some(storage) = &self.storage_path {
+            wslc["storagePath"] = json!(storage);
+        }
+        if !self.port_mappings.is_empty() {
+            wslc["portMappings"] = json!(self
+                .port_mappings
+                .iter()
+                .map(|(windows_port, container_port)| json!({
+                    "windowsPort": windows_port,
+                    "containerPort": container_port,
+                    "protocol": "tcp",
+                }))
+                .collect::<Vec<_>>());
+        }
+        wslc
+    }
+}
+
 /// Cross-platform sandbox policy — the Rust analogue of the SDK
 /// `SandboxPolicy`. Describes *what* to restrict; omitted fields are
 /// most-restrictive (default-deny).
@@ -607,6 +703,17 @@ impl SandboxRequest {
         self.inner.seatbelt.get_or_insert_default().keychain_access = allow;
         self
     }
+
+    /// Enable (or disable) experimental features for this request — the
+    /// analogue of the SDK's `SandboxSpawnOptions.experimental` and the
+    /// executor's `--experimental` flag.
+    ///
+    /// Experimental backends (today: [`Containment::Wslc`]) refuse to spawn
+    /// unless this is set, so the gate stays fail-closed.
+    pub fn set_experimental(&mut self, enabled: bool) -> &mut Self {
+        self.inner.experimental_enabled = enabled;
+        self
+    }
 }
 
 /// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
@@ -620,8 +727,43 @@ impl SandboxRequest {
 /// constraints) for the supported backends. Internally it builds the same
 /// wire-format `ContainerConfig` the SDK emits and runs it through the shared
 /// config parser, so validation and the wire→model mapping match production.
+///
+/// Targets the host's native process containment; use
+/// [`build_request_with_containment`] to select a specific backend.
 pub fn build_request(
     policy: &SandboxPolicy,
+    container_name: Option<&str>,
+) -> Result<SandboxRequest, crate::Error> {
+    build_request_with_containment(policy, &Containment::Process, container_name)
+}
+
+/// Build a [`SandboxRequest`] for an explicitly chosen [`Containment`] backend
+/// — the Rust port of `createConfigFromPolicy(policy, containment, name)`.
+///
+/// Same mapping and validation as [`build_request`]; the containment argument
+/// picks the backend rather than always resolving the host's native one.
+/// Experimental backends additionally need
+/// [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
+/// before they will spawn.
+///
+/// ```no_run
+/// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
+///
+/// let policy = SandboxPolicy {
+///     version: "0.7.0-alpha".to_string(),
+///     filesystem: None,
+///     network: None,
+///     ui: None,
+///     timeout_ms: None,
+/// };
+/// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
+/// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
+/// request.set_script("python3 -c 'print(1)'").set_experimental(true);
+/// # Ok::<(), mxc_engine::Error>(())
+/// ```
+pub fn build_request_with_containment(
+    policy: &SandboxPolicy,
+    containment: &Containment,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
     // The shared parser tolerates an empty schema version (treats it as
@@ -629,7 +771,7 @@ pub fn build_request(
     if policy.version.is_empty() {
         return Err(MxcError::malformed_request("Policy version is required").into());
     }
-    let config = build_wire_config(policy, container_name)?;
+    let config = build_wire_config(policy, containment, container_name)?;
 
     let mut logger = Logger::new(Mode::Buffer);
     // Map the wire config straight to a request — no base64/file round-trip.
@@ -644,6 +786,7 @@ pub fn build_request(
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
 fn build_wire_config(
     policy: &SandboxPolicy,
+    containment: &Containment,
     container_name: Option<&str>,
 ) -> Result<serde_json::Value, MxcError> {
     use serde_json::json;
@@ -673,12 +816,15 @@ fn build_wire_config(
     });
 
     // Mirror the SDK's host-rule validation: Unix backends accept host lists
-    // without `allowOutbound`; only Windows ProcessContainer requires it.
+    // without `allowOutbound`; only Windows ProcessContainer requires it. WSLC
+    // is a Linux container (its rules are host-side), so it accepts them too —
+    // matching the SDK's `acceptsHostRulesWithoutOutbound`.
     // NB: Seatbelt can't actually enforce hostnames (`profile_builder` degrades a
     // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
-    let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"));
+    let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"))
+        || matches!(containment, Containment::Wslc(_));
 
     if let Some(net) = &policy.network {
         if !accepts_host_rules_without_outbound
@@ -704,7 +850,10 @@ fn build_wire_config(
         config["network"] = json!({ "defaultPolicy": "block" });
     }
 
-    apply_backend(&mut config, policy, &container_id);
+    match containment {
+        Containment::Process => apply_host_process_backend(&mut config, policy, &container_id),
+        Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
+    }
     Ok(config)
 }
 
@@ -721,7 +870,11 @@ fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 /// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
 /// ProcessContainer on Windows — which itself resolves to BaseContainer or
 /// AppContainer at runtime by host capability).
-fn apply_backend(config: &mut serde_json::Value, policy: &SandboxPolicy, container_id: &str) {
+fn apply_host_process_backend(
+    config: &mut serde_json::Value,
+    policy: &SandboxPolicy,
+    container_id: &str,
+) {
     use serde_json::json;
 
     // Resolve the abstract Process intent per host.
@@ -793,6 +946,17 @@ fn has_host_rules(network: &serde_json::Value) -> bool {
             .is_some_and(|a| !a.is_empty())
     };
     non_empty("allowedHosts") || non_empty("blockedHosts")
+}
+
+/// Apply the WSL Container backend fields — the Rust port of the SDK's
+/// `buildWslcContainerConfig`. WSLC derives its networking mode (`None` /
+/// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
+/// its settings live under `experimental.wslc` because the backend is
+/// experimental.
+fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
+    use serde_json::json;
+    config["containment"] = json!("wslc");
+    config["experimental"] = json!({ "wslc": wslc.wire() });
 }
 
 /// Promote network enforcement to `firewall` when host rules are present and
@@ -1099,5 +1263,137 @@ mod tests {
         assert!(cfg
             .extra_mach_lookups
             .contains(&"com.example.service".to_string()));
+    }
+
+    use super::{build_request_with_containment, Containment, WslcSection};
+    use wxc_common::models::ContainmentBackend;
+
+    fn minimal_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn default_containment_resolves_the_host_backend() {
+        // `build_request` must keep resolving the host's native backend — the
+        // WSLC selection is strictly opt-in and must not change the default.
+        let request = build_request(&minimal_policy(), None).expect("build_request");
+        assert_ne!(request.inner.containment, ContainmentBackend::Wslc);
+    }
+
+    #[test]
+    fn wslc_containment_maps_config_to_the_request() {
+        // Mirrors `createConfigFromPolicy(policy, 'wslc')` plus a tweaked
+        // `experimental.wslc` block: the wire config goes through the shared
+        // parser, so the mapped request carries the WSLC settings verbatim.
+        let wslc = WslcSection {
+            image: "python:3.12".to_string(),
+            cpu_count: Some(2),
+            memory_mb: Some(2048),
+            gpu: true,
+            storage_path: Some("C:\\wslc-store".to_string()),
+            port_mappings: vec![(8080, 80)],
+            ..Default::default()
+        };
+        let request =
+            build_request_with_containment(&minimal_policy(), &Containment::Wslc(wslc), None)
+                .expect("build_request_with_containment");
+
+        assert_eq!(request.inner.containment, ContainmentBackend::Wslc);
+        let config = request
+            .inner
+            .experimental
+            .wslc
+            .as_ref()
+            .expect("wslc config");
+        assert_eq!(config.image, "python:3.12");
+        assert_eq!(config.cpu_count, Some(2));
+        assert_eq!(config.memory_mb, Some(2048));
+        assert!(config.gpu);
+        assert_eq!(config.storage_path.as_deref(), Some("C:\\wslc-store"));
+        assert_eq!(config.port_mappings.len(), 1);
+        assert_eq!(config.port_mappings[0].windows_port, 8080);
+        assert_eq!(config.port_mappings[0].container_port, 80);
+        assert_eq!(config.port_mappings[0].protocol, "tcp");
+    }
+
+    #[test]
+    fn wslc_defaults_match_the_sdk() {
+        // `WslcSection::default()` must produce the same block the TypeScript
+        // SDK's `buildWslcContainerConfig` emits (image only, alpine:latest).
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Wslc(WslcSection::default()),
+            None,
+        )
+        .expect("build_request_with_containment");
+        let config = request
+            .inner
+            .experimental
+            .wslc
+            .as_ref()
+            .expect("wslc config");
+        assert_eq!(config.image, "alpine:latest");
+        assert_eq!(config.target_os, "linux");
+        assert!(config.port_mappings.is_empty());
+        assert!(!config.gpu);
+    }
+
+    #[test]
+    fn wslc_is_not_experimental_enabled_by_default() {
+        // Selecting the backend must not silently flip the experimental gate:
+        // the caller opts in explicitly, exactly like the SDK's
+        // `SandboxSpawnOptions.experimental`.
+        let mut request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Wslc(WslcSection::default()),
+            None,
+        )
+        .expect("build_request_with_containment");
+        assert!(!request.inner.experimental_enabled);
+        request.set_experimental(true);
+        assert!(request.inner.experimental_enabled);
+    }
+
+    #[test]
+    fn wslc_rejects_an_invalid_port_mapping() {
+        // Validation is the shared parser's, so a bad mapping is rejected at
+        // build time rather than at spawn.
+        let wslc = WslcSection {
+            port_mappings: vec![(8080, 80), (8080, 81)],
+            ..Default::default()
+        };
+        let err = build_request_with_containment(&minimal_policy(), &Containment::Wslc(wslc), None)
+            .expect_err("duplicate windowsPort must be rejected");
+        assert!(
+            err.message.contains("duplicate windowsPort"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_host_rules_without_allow_outbound() {
+        // WSLC enforces host rules container-side, so — like the SDK — it does
+        // not require `allowOutbound` alongside `allowedHosts`.
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: false,
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        });
+        assert!(
+            build_request_with_containment(
+                &policy,
+                &Containment::Wslc(WslcSection::default()),
+                None
+            )
+            .is_ok(),
+            "allowedHosts without allowOutbound must be accepted for WSLC"
+        );
     }
 }

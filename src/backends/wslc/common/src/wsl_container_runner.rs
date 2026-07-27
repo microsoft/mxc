@@ -8,25 +8,189 @@
 //!  I/O capture → Exit code → ScriptResponse`
 //!
 //! RAII guards ensure cleanup even on error paths.
+//!
+//! [`start_container`](WSLContainerRunner::start_container) owns everything up
+//! to and including "container started, init process in hand" and is shared by
+//! both execution models: the run-to-completion [`ScriptRunner`] here, and the
+//! streaming [`SandboxBackend`](wxc_common::sandbox_process::SandboxBackend) in
+//! [`crate::sandbox`]. They differ only in where the SDK's I/O callbacks send
+//! their bytes — see [`IoSink`].
 
 use std::ffi::c_void;
 use std::fmt::Write;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
+use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::policy_mapping;
+use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
 
-/// Shared buffer for capturing process I/O via callbacks.
+/// Where the bytes the WSLC SDK hands us in its stdout/stderr callbacks go.
+///
+/// The WSLC SDK never exposes the container's pipe ends — it pushes output to
+/// registered callbacks — so this is the one place the two execution models
+/// diverge: run-to-completion accumulates the bytes for the `ScriptResponse`,
+/// streaming hands them to the caller's live reader (or to the host's stdio).
+enum IoSink {
+    /// Accumulate in memory for [`WSLContainerRunner::collect_output`].
+    Buffer(Mutex<Vec<u8>>),
+    /// Hand to the caller's live reader.
+    Stream(StreamWriter),
+    /// Write straight through to the host's own stdout/stderr.
+    Inherit(HostStream),
+}
+
+/// The host stream an [`IoSink::Inherit`] sink writes through to.
+enum HostStream {
+    Stdout,
+    Stderr,
+}
+
+impl IoSink {
+    /// Forward one callback chunk.
+    ///
+    /// This runs on an SDK callback thread, and that same thread delivers the
+    /// process-exit callback teardown waits for, so a sink must not stall it:
+    /// the `Buffer` and `Stream` sinks only take a short-lived lock, never OS
+    /// I/O. (`Inherit` writes to the host's own stdio, which the host owns and
+    /// is expected to keep drained.) Write errors are dropped for the same
+    /// reason: there is nowhere to report them from here, and a closed host
+    /// stdout must not take the run down.
+    fn write(&self, bytes: &[u8]) {
+        match self {
+            IoSink::Buffer(buffer) => lock(buffer).extend_from_slice(bytes),
+            IoSink::Stream(writer) => writer.write(bytes),
+            IoSink::Inherit(HostStream::Stdout) => write_through(std::io::stdout().lock(), bytes),
+            IoSink::Inherit(HostStream::Stderr) => write_through(std::io::stderr().lock(), bytes),
+        }
+    }
+
+    /// End the stream so a streaming reader sees EOF once it has drained what
+    /// is buffered. Idempotent, and a no-op for the buffer / inherit sinks.
+    fn close(&self) {
+        if let IoSink::Stream(writer) = self {
+            writer.close();
+        }
+    }
+
+    /// The bytes captured so far, lossily decoded. Always empty for the
+    /// streaming sinks — the caller consumed those bytes live.
+    fn captured(&self) -> String {
+        match self {
+            IoSink::Buffer(buffer) => String::from_utf8_lossy(&lock(buffer)).to_string(),
+            IoSink::Stream(_) | IoSink::Inherit(_) => String::new(),
+        }
+    }
+}
+
+/// Write one chunk straight through to a host stream, flushing it so output
+/// appears as the container produces it.
+fn write_through(mut sink: impl std::io::Write, bytes: &[u8]) {
+    let _ = sink.write_all(bytes);
+    let _ = sink.flush();
+}
+
+/// How long to wait for the SDK's exit callback, which is what guarantees all
+/// output has been flushed and no further callback can arrive. Bounded so a
+/// misbehaving runtime can't park teardown forever.
+const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Lock a mutex, tolerating poisoning: every mutex here guards plain output
+/// state with no invariant a panicking writer could break.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Callback context: where each stream's bytes go, plus the process-exit
+/// signal the SDK fires once all I/O has been flushed.
 struct IoContext {
-    stdout: Arc<Mutex<Vec<u8>>>,
-    stderr: Arc<Mutex<Vec<u8>>>,
-    exited: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    stdout: IoSink,
+    stderr: IoSink,
+    exited: (Mutex<bool>, Condvar),
+}
+
+/// How a started container's output is delivered.
+#[derive(Clone, Copy)]
+pub(crate) enum OutputMode {
+    /// Capture in memory, returned in the `ScriptResponse` (run-to-completion).
+    Capture,
+    /// Stream: hand the caller live pipes ([`StdioMode::Pipes`]) or write
+    /// through to the host's own stdio ([`StdioMode::Inherit`]).
+    Stream(StdioMode),
+}
+
+impl IoContext {
+    /// Build the context for `mode`, along with the read ends the caller
+    /// streams ([`StdioMode::Pipes`] only).
+    fn new(mode: OutputMode) -> (Self, Option<StreamPipes>) {
+        let (stdout, stderr, pipes) = match mode {
+            OutputMode::Capture => (
+                IoSink::Buffer(Mutex::new(Vec::new())),
+                IoSink::Buffer(Mutex::new(Vec::new())),
+                None,
+            ),
+            OutputMode::Stream(StdioMode::Inherit) => (
+                IoSink::Inherit(HostStream::Stdout),
+                IoSink::Inherit(HostStream::Stderr),
+                None,
+            ),
+            OutputMode::Stream(StdioMode::Pipes) => {
+                let (stdout_writer, stdout_reader) = stream_pair();
+                let (stderr_writer, stderr_reader) = stream_pair();
+                (
+                    IoSink::Stream(stdout_writer),
+                    IoSink::Stream(stderr_writer),
+                    Some(StreamPipes {
+                        stdout: stdout_reader,
+                        stderr: stderr_reader,
+                    }),
+                )
+            }
+        };
+        (
+            Self {
+                stdout,
+                stderr,
+                exited: (Mutex::new(false), Condvar::new()),
+            },
+            pipes,
+        )
+    }
+
+    /// Close both streaming sinks, EOF-ing any reader the caller holds.
+    /// Idempotent — the exit callback normally gets there first.
+    fn close_streams(&self) {
+        self.stdout.close();
+        self.stderr.close();
+    }
+
+    /// Block until the SDK's exit callback has fired, up to
+    /// [`EXIT_CALLBACK_TIMEOUT`]. Returns whether it fired.
+    ///
+    /// The predicate loop is load-bearing, not ceremony: a condvar wakeup may be
+    /// spurious, and callers treat `false` as "the SDK is done calling back" —
+    /// closing the streams (truncating output still being flushed) and releasing
+    /// the SDK handles.
+    fn wait_for_exit_callback(&self) -> bool {
+        let (mutex, cvar) = &self.exited;
+        let exited = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let (exited, _) = cvar
+            .wait_timeout_while(exited, EXIT_CALLBACK_TIMEOUT, |exited| !*exited)
+            .unwrap_or_else(|e| e.into_inner());
+        *exited
+    }
+}
+
+/// The caller-side read ends of a [`StdioMode::Pipes`] context.
+pub(crate) struct StreamPipes {
+    pub(crate) stdout: StreamReader,
+    pub(crate) stderr: StreamReader,
 }
 
 /// RAII guard that reclaims an Arc<IoContext> from a raw pointer on drop.
@@ -44,8 +208,9 @@ impl IoCtxRawGuard {
 impl Drop for IoCtxRawGuard {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
+            // SAFETY: `ptr` came from `Arc::into_raw` on an `Arc<IoContext>` and
+            // is reclaimed exactly once, here.
             unsafe {
-                eprintln!("[WSLC][debug] IoCtxRawGuard dropped -- reclaiming Arc<IoContext>");
                 let _ = Arc::from_raw(self.ptr as *const IoContext);
             }
         }
@@ -71,21 +236,16 @@ unsafe extern "system" fn io_callback(
     let ctx = &*(context as *const IoContext);
     let bytes = std::slice::from_raw_parts(data, data_size as usize);
     match io_handle {
-        WslcProcessIOHandle::Stdout => {
-            let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
-            buf.extend_from_slice(bytes);
-        }
-        WslcProcessIOHandle::Stderr => {
-            let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
-            buf.extend_from_slice(bytes);
-        }
+        WslcProcessIOHandle::Stdout => ctx.stdout.write(bytes),
+        WslcProcessIOHandle::Stderr => ctx.stderr.write(bytes),
         _ => {}
     }
 }
 
 /// Callback invoked when the process exits and all I/O has been flushed.
 /// Per SDK docs: "Once this callback is invoked, any registered IO callbacks
-/// will no longer be called." This guarantees buffers are complete.
+/// will no longer be called." This guarantees buffers are complete — and makes
+/// this the point at which a streaming caller's readers can safely be EOF'd.
 ///
 /// # Safety
 /// Same lifetime requirements as `io_callback` — `context` must be a valid
@@ -95,9 +255,13 @@ unsafe extern "system" fn exit_callback(_exit_code: i32, context: *mut c_void) {
         return;
     }
     let ctx = &*(context as *const IoContext);
-    let mut exited = ctx.exited.0.lock().unwrap_or_else(|e| e.into_inner());
+    // No further I/O callbacks can arrive, so closing the streaming pipes' write
+    // ends here is what ends a caller's `read` with EOF.
+    ctx.close_streams();
+    let (lock, cvar) = &ctx.exited;
+    let mut exited = lock.lock().unwrap_or_else(|e| e.into_inner());
     *exited = true;
-    ctx.exited.1.notify_all();
+    cvar.notify_all();
 }
 
 /// WSL Container script runner using the WSLC SDK.
@@ -725,6 +889,9 @@ impl WSLContainerRunner {
     /// Wait for process exit with timeout enforcement.
     /// Returns (exit_code, timed_out).
     ///
+    /// `wait_ms` is the deadline in milliseconds; `u32::MAX` waits forever.
+    /// Shared by the run-to-completion and streaming paths.
+    ///
     /// # Safety
     /// `sdk` must contain valid function pointers. `process_guard` and
     /// `container_guard` must hold live handles from this session.
@@ -733,7 +900,7 @@ impl WSLContainerRunner {
         process_guard: &WslcProcessGuard,
         container_guard: &WslcContainerGuard,
         io_ctx: &IoContext,
-        request: &ExecutionRequest,
+        wait_ms: u32,
         logger: &mut Logger,
     ) -> Result<(i32, bool), ScriptResponse> {
         let mut exit_event: HANDLE = ptr::null_mut();
@@ -741,12 +908,6 @@ impl WSLContainerRunner {
         if hr != S_OK {
             return Err(sdk_error("WslcGetProcessExitEvent failed", hr, ""));
         }
-
-        let wait_ms = if request.script_timeout > 0 {
-            request.script_timeout
-        } else {
-            u32::MAX
-        };
 
         let mut timed_out = false;
         if !exit_event.is_null() {
@@ -773,23 +934,19 @@ impl WSLContainerRunner {
         }
 
         // Wait for exit callback to fire — guarantees all I/O is flushed.
-        {
-            let (lock, cvar) = &*io_ctx.exited;
-            let mut exited = lock.lock().unwrap_or_else(|e| e.into_inner());
-            if !*exited {
-                let result = cvar
-                    .wait_timeout(exited, std::time::Duration::from_secs(30))
-                    .unwrap_or_else(|e| e.into_inner());
-                exited = result.0;
-                if !*exited {
-                    let _ = writeln!(
-                        logger,
-                        "[WSLC] Warning: exit callback did not fire within 30s"
-                    );
-                }
-            }
-            drop(exited);
+        if !io_ctx.wait_for_exit_callback() {
+            let _ = writeln!(
+                logger,
+                "[WSLC] Warning: exit callback did not fire within {}s",
+                EXIT_CALLBACK_TIMEOUT.as_secs()
+            );
         }
+
+        // Backstop for the streaming path: the exit callback normally closes the
+        // pipes, but if it never fired (the warning above) a caller blocked on a
+        // `read` would otherwise hang forever. No-op once already closed, and no
+        // I/O can be lost — the SDK stops delivering output at process exit.
+        io_ctx.close_streams();
 
         let mut exit_code: i32 = -1;
         let hr = (sdk.WslcGetProcessExitCode)(process_guard.as_raw(), &mut exit_code);
@@ -813,12 +970,8 @@ impl WSLContainerRunner {
         wait_ms: u32,
         logger: &mut Logger,
     ) -> ScriptResponse {
-        let stdout =
-            String::from_utf8_lossy(&io_ctx.stdout.lock().unwrap_or_else(|e| e.into_inner()))
-                .to_string();
-        let stderr =
-            String::from_utf8_lossy(&io_ctx.stderr.lock().unwrap_or_else(|e| e.into_inner()))
-                .to_string();
+        let stdout = io_ctx.stdout.captured();
+        let stderr = io_ctx.stderr.captured();
 
         if !stdout.is_empty() {
             let _ = writeln!(logger, "[WSLC] Captured {} bytes stdout", stdout.len());
@@ -841,6 +994,16 @@ impl WSLContainerRunner {
     }
 
     /// Orchestrates the full WSLC lifecycle.
+    /// Orchestrates the WSLC lifecycle up to a *started* container: preflight
+    /// validation, session, image, process/container settings, start, iptables,
+    /// and the init-process handle. The caller decides what happens next — wait
+    /// to completion ([`Self::run_internal`]) or stream
+    /// (the [`SandboxBackend`](wxc_common::sandbox_process::SandboxBackend) impl
+    /// in [`crate::sandbox`]).
+    ///
+    /// `output` selects where the SDK's output callbacks send their bytes; the
+    /// caller-side read ends (if any) come back on [`StartedContainer::pipes`].
+    ///
     /// Helpers handle phases that don't involve dangling-pointer risks;
     /// pointer-heavy SDK configuration stays inline to keep owned string
     /// data alive for the duration needed.
@@ -848,15 +1011,17 @@ impl WSLContainerRunner {
     /// # Safety
     /// Calls into the WSLC SDK via raw FFI. Owned buffers backing pointers
     /// passed to the SDK (cmdline, env, mounts, etc.) must remain alive
-    /// until the SDK call that consumes them returns. RAII guards
-    /// (`WslcSessionGuard`, `WslcContainerGuard`, `WslcProcessGuard`,
-    /// `IoCtxRawGuard`) ensure handles and reference counts are released
-    /// on every exit path.
-    unsafe fn run_internal(
+    /// until the SDK call that consumes them returns — every such buffer is a
+    /// local of this function, and the SDK consumes them by the time
+    /// `WslcCreateContainer` returns here. RAII guards (`WslcSessionGuard`,
+    /// `WslcContainerGuard`, `WslcProcessGuard`, `IoCtxRawGuard`) ensure handles
+    /// and reference counts are released on every exit path.
+    pub(crate) unsafe fn start_container(
         &self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-    ) -> ScriptResponse {
+        output: OutputMode,
+    ) -> Result<StartedContainer, ScriptResponse> {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
         // Object-based FS-policy normalization (D6): tighten aliases of the same
@@ -878,7 +1043,7 @@ impl WSLContainerRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return ScriptResponse::error(&msg),
+            Err(msg) => return Err(ScriptResponse::error(&msg)),
         };
         // Delegation check (D3): reject any policy path the invoking user cannot
         // access, so the sandbox never gains access the caller lacks. Runs AFTER
@@ -886,7 +1051,7 @@ impl WSLContainerRunner {
         // intents. On Windows this covers directory readwrite paths (the common
         // WSLC case).
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return ScriptResponse::error(&msg);
+            return Err(ScriptResponse::error(&msg));
         }
 
         // Denied-path overlap validation: WSLC's flat volume-mount surface has no
@@ -904,25 +1069,17 @@ impl WSLContainerRunner {
             &request.policy.denied_paths,
         ) {
             let _ = writeln!(logger, "[WSLC] {}", msg);
-            return ScriptResponse::error(&msg);
+            return Err(ScriptResponse::error(&msg));
         }
 
         // -- Init: COM + SDK + preflight --
-        let sdk = match Self::init_and_load_sdk(logger) {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
+        let sdk = Self::init_and_load_sdk(logger)?;
 
         // -- Session (configure + create in one step to keep string data alive) --
-        let session_guard = match self.create_session(&sdk, request, logger) {
-            Ok(g) => g,
-            Err(e) => return e,
-        };
+        let session_guard = self.create_session(&sdk, request, logger)?;
 
         // -- Image resolution --
-        if let Err(e) = self.resolve_image(&sdk, session_guard.as_raw(), logger) {
-            return e;
-        }
+        self.resolve_image(&sdk, session_guard.as_raw(), logger)?;
 
         // -- Process settings --
         // String data (script_cstr, env_cstrings, _cwd_cstr) must stay alive
@@ -930,7 +1087,7 @@ impl WSLContainerRunner {
         let mut process_settings = std::mem::zeroed::<WslcProcessSettings>();
         let hr = (sdk.WslcInitProcessSettings)(&mut process_settings);
         if hr != S_OK {
-            return sdk_error("WslcInitProcessSettings failed", hr, "");
+            return Err(sdk_error("WslcInitProcessSettings failed", hr, ""));
         }
 
         // Register I/O callbacks to capture stdout/stderr.
@@ -939,16 +1096,13 @@ impl WSLContainerRunner {
         // registered). The SDK may still invoke callbacks on its internal
         // threads; Arc ensures the memory isn't freed until all references
         // (including the one held by the SDK via raw pointer) are dropped.
-        let io_ctx = Arc::new(IoContext {
-            stdout: Arc::new(Mutex::new(Vec::new())),
-            stderr: Arc::new(Mutex::new(Vec::new())),
-            exited: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
-        });
+        let (io_ctx, pipes) = IoContext::new(output);
+        let io_ctx = Arc::new(io_ctx);
         // Give the SDK an Arc reference via raw pointer. We must reconstruct
         // the Arc later to avoid leaking the reference count.
         let io_ctx_for_sdk = Arc::clone(&io_ctx);
         let io_ctx_raw = Arc::into_raw(io_ctx_for_sdk) as *mut c_void;
-        let _io_ctx_guard = IoCtxRawGuard::new(io_ctx_raw);
+        let io_ctx_guard = IoCtxRawGuard::new(io_ctx_raw);
 
         let callbacks = WslcProcessCallbacks {
             on_stdout: Some(io_callback),
@@ -958,7 +1112,7 @@ impl WSLContainerRunner {
         let hr =
             (sdk.WslcSetProcessSettingsCallbacks)(&mut process_settings, &callbacks, io_ctx_raw);
         if hr != S_OK {
-            return sdk_error("WslcSetProcessSettingsCallbacks failed", hr, "");
+            return Err(sdk_error("WslcSetProcessSettingsCallbacks failed", hr, ""));
         }
 
         let sh = b"/bin/sh\0";
@@ -973,7 +1127,7 @@ impl WSLContainerRunner {
         let hr =
             (sdk.WslcSetProcessSettingsCmdLine)(&mut process_settings, argv.as_ptr(), argv.len());
         if hr != S_OK {
-            return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
+            return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
         }
 
         if !request.env.is_empty() {
@@ -989,7 +1143,11 @@ impl WSLContainerRunner {
                 env_ptrs.len(),
             );
             if hr != S_OK {
-                return sdk_error("WslcSetProcessSettingsEnvVariables failed", hr, "");
+                return Err(sdk_error(
+                    "WslcSetProcessSettingsEnvVariables failed",
+                    hr,
+                    "",
+                ));
             }
         }
 
@@ -1004,7 +1162,11 @@ impl WSLContainerRunner {
                     _cwd_cstr.as_bytes().as_ptr() as PCSTR,
                 );
                 if hr != S_OK {
-                    return sdk_error("WslcSetProcessSettingsWorkingDirectory failed", hr, "");
+                    return Err(sdk_error(
+                        "WslcSetProcessSettingsWorkingDirectory failed",
+                        hr,
+                        "",
+                    ));
                 }
             }
         }
@@ -1019,7 +1181,7 @@ impl WSLContainerRunner {
             &mut container_settings,
         );
         if hr != S_OK {
-            return sdk_error("WslcInitContainerSettings failed", hr, "");
+            return Err(sdk_error("WslcInitContainerSettings failed", hr, ""));
         }
 
         // -- Port mappings (host<->container) --
@@ -1056,7 +1218,11 @@ impl WSLContainerRunner {
                 mappings.len() as u32,
             );
             if hr != S_OK {
-                return sdk_error("WslcSetContainerSettingsPortMappings failed", hr, "");
+                return Err(sdk_error(
+                    "WslcSetContainerSettingsPortMappings failed",
+                    hr,
+                    "",
+                ));
             }
             let _ = writeln!(
                 logger,
@@ -1071,7 +1237,7 @@ impl WSLContainerRunner {
             Ok(m) => m,
             Err(e) => {
                 let _ = writeln!(logger, "[WSLC] {}", e);
-                return ScriptResponse::error(&e);
+                return Err(ScriptResponse::error(&e));
             }
         };
 
@@ -1102,7 +1268,7 @@ impl WSLContainerRunner {
                 volumes.len() as u32,
             );
             if hr != S_OK {
-                return sdk_error("WslcSetContainerSettingsVolumes failed", hr, "");
+                return Err(sdk_error("WslcSetContainerSettingsVolumes failed", hr, ""));
             }
             let _ = writeln!(
                 logger,
@@ -1120,7 +1286,11 @@ impl WSLContainerRunner {
         let net_mode = policy_mapping::map_network_policy(is_default_block, has_host_rules);
         let hr = (sdk.WslcSetContainerSettingsNetworkingMode)(&mut container_settings, net_mode);
         if hr != S_OK {
-            return sdk_error("WslcSetContainerSettingsNetworkingMode failed", hr, "");
+            return Err(sdk_error(
+                "WslcSetContainerSettingsNetworkingMode failed",
+                hr,
+                "",
+            ));
         }
         let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
 
@@ -1142,7 +1312,7 @@ impl WSLContainerRunner {
         }
         let hr = (sdk.WslcSetContainerSettingsFlags)(&mut container_settings, flags);
         if hr != S_OK {
-            return sdk_error("WslcSetContainerSettingsFlags failed", hr, "");
+            return Err(sdk_error("WslcSetContainerSettingsFlags failed", hr, ""));
         }
 
         let hr = (sdk.WslcSetContainerSettingsInitProcess)(
@@ -1150,7 +1320,11 @@ impl WSLContainerRunner {
             &mut process_settings,
         );
         if hr != S_OK {
-            return sdk_error("WslcSetContainerSettingsInitProcess failed", hr, "");
+            return Err(sdk_error(
+                "WslcSetContainerSettingsInitProcess failed",
+                hr,
+                "",
+            ));
         }
 
         // -- Create & start container --
@@ -1164,7 +1338,7 @@ impl WSLContainerRunner {
         );
         if hr != S_OK {
             let msg = err_msg.to_string_lossy();
-            return sdk_error("WslcCreateContainer failed", hr, &msg);
+            return Err(sdk_error("WslcCreateContainer failed", hr, &msg));
         }
         let container_guard = WslcContainerGuard::from_raw(container, sdk.WslcReleaseContainer);
         let _ = writeln!(logger, "[WSLC] Container created");
@@ -1177,69 +1351,213 @@ impl WSLContainerRunner {
         );
         if hr != S_OK {
             let msg = err_msg.to_string_lossy();
-            return sdk_error("WslcStartContainer failed", hr, &msg);
+            return Err(sdk_error("WslcStartContainer failed", hr, &msg));
         }
         let _ = writeln!(logger, "[WSLC] Container started");
 
         // -- Iptables (if needed) --
         if let Some(ref ipt_cmd) = iptables_cmd {
-            if let Err(e) =
-                Self::apply_iptables_rules(&sdk, container_guard.as_raw(), ipt_cmd, logger)
-            {
-                return e;
-            }
+            Self::apply_iptables_rules(&sdk, container_guard.as_raw(), ipt_cmd, logger)?;
         }
 
         // -- Get init process handle --
         let mut process: WslcProcess = ptr::null_mut();
         let hr = (sdk.WslcGetContainerInitProcess)(container_guard.as_raw(), &mut process);
         if hr != S_OK {
-            return sdk_error("WslcGetContainerInitProcess failed", hr, "");
+            return Err(sdk_error("WslcGetContainerInitProcess failed", hr, ""));
         }
         let process_guard = WslcProcessGuard::from_raw(process, sdk.WslcReleaseProcess);
 
+        Ok(StartedContainer {
+            process_guard,
+            container_guard,
+            session_guard,
+            io_ctx_guard,
+            io_ctx,
+            sdk,
+            pipes,
+            destroy_on_exit: request.lifecycle.destroy_on_exit,
+            timeout_ms: wait_timeout_ms(request),
+        })
+    }
+
+    /// Run to completion: start the container, wait for the init process, tear
+    /// it down, and return the captured output.
+    ///
+    /// # Safety
+    /// Calls into the WSLC SDK via raw FFI — see
+    /// [`start_container`](Self::start_container).
+    unsafe fn run_internal(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
+        let started = match self.start_container(request, logger, OutputMode::Capture) {
+            Ok(started) => started,
+            Err(response) => return response,
+        };
+
         // -- Wait for exit --
-        let (exit_code, timed_out) = match Self::wait_for_process(
-            &sdk,
-            &process_guard,
-            &container_guard,
-            &io_ctx,
-            request,
-            logger,
-        ) {
+        let (exit_code, timed_out) = match started.wait_for_exit(logger) {
             Ok(r) => r,
             Err(e) => return e,
         };
 
-        // -- Cleanup --
-        if request.lifecycle.destroy_on_exit {
-            err_msg = CoTaskMemPWSTR::null();
-            let _ = (sdk.WslcStopContainer)(
-                container_guard.as_raw(),
-                WslcSignal::SigTerm,
-                10,
-                err_msg.as_mut_ptr(),
-            );
-            drop(err_msg);
+        started.destroy(logger);
 
-            err_msg = CoTaskMemPWSTR::null();
-            let _ = (sdk.WslcDeleteContainer)(
-                container_guard.as_raw(),
-                WslcDeleteContainerFlags::Force,
-                err_msg.as_mut_ptr(),
-            );
-            drop(err_msg);
+        Self::collect_output(
+            &started.io_ctx,
+            exit_code,
+            timed_out,
+            started.timeout_ms,
+            logger,
+        )
+    }
+}
+
+/// The wait deadline in milliseconds for `request`; `u32::MAX` means "wait
+/// forever" (the request carries `0` for no timeout).
+fn wait_timeout_ms(request: &ExecutionRequest) -> u32 {
+    if request.script_timeout > 0 {
+        request.script_timeout
+    } else {
+        u32::MAX
+    }
+}
+
+/// A started WSLC container plus everything needed to wait on, stream, and tear
+/// down its init process.
+///
+/// Field order is the drop order and matters: the process, container, and
+/// session handles are released first, then the SDK callback context, and only
+/// then `sdk` — whose `Drop` unloads `wslcsdk.dll`, invalidating the very
+/// function pointers those guards call.
+pub(crate) struct StartedContainer {
+    process_guard: WslcProcessGuard,
+    container_guard: WslcContainerGuard,
+    /// Held for its `Drop`, which terminates and releases the WSLC session.
+    #[allow(dead_code, reason = "RAII guard: terminates the session on drop")]
+    session_guard: WslcSessionGuard,
+    /// Held for its `Drop`, which reclaims the `Arc<IoContext>` reference handed
+    /// to the SDK by raw pointer.
+    #[allow(
+        dead_code,
+        reason = "RAII guard: reclaims the callback context on drop"
+    )]
+    io_ctx_guard: IoCtxRawGuard,
+    io_ctx: Arc<IoContext>,
+    sdk: WslcSdk,
+    /// Caller-side read ends, present only for [`StdioMode::Pipes`].
+    pub(crate) pipes: Option<StreamPipes>,
+    /// Whether the container is stopped and deleted after the process exits.
+    pub(crate) destroy_on_exit: bool,
+    /// Wait deadline in milliseconds; `u32::MAX` waits forever.
+    pub(crate) timeout_ms: u32,
+}
+
+impl StartedContainer {
+    /// Wait for the init process to exit, enforcing the request's timeout
+    /// (stopping the container when it fires). Returns `(exit_code, timed_out)`.
+    pub(crate) fn wait_for_exit(&self, logger: &mut Logger) -> Result<(i32, bool), ScriptResponse> {
+        // SAFETY: `self` owns live process / container handles and a live SDK.
+        unsafe {
+            WSLContainerRunner::wait_for_process(
+                &self.sdk,
+                &self.process_guard,
+                &self.container_guard,
+                &self.io_ctx,
+                self.timeout_ms,
+                logger,
+            )
+        }
+    }
+
+    /// Stop and delete the container when the request asked for it. The session
+    /// is terminated by `WslcSessionGuard`'s `Drop`.
+    pub(crate) fn destroy(&self, logger: &mut Logger) {
+        if self.destroy_on_exit {
+            // SAFETY: the guards hold live handles for `self`'s lifetime and
+            // `sdk`'s function pointers are valid while it is alive.
+            unsafe {
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let _ = (self.sdk.WslcStopContainer)(
+                    self.container_guard.as_raw(),
+                    WslcSignal::SigTerm,
+                    10,
+                    err_msg.as_mut_ptr(),
+                );
+                drop(err_msg);
+
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let _ = (self.sdk.WslcDeleteContainer)(
+                    self.container_guard.as_raw(),
+                    WslcDeleteContainerFlags::Force,
+                    err_msg.as_mut_ptr(),
+                );
+                drop(err_msg);
+            }
         }
 
         // Session termination is handled by WslcSessionGuard's Drop impl.
         let _ = writeln!(logger, "[WSLC] Cleanup complete");
+    }
 
-        let wait_ms = if request.script_timeout > 0 {
-            request.script_timeout
-        } else {
-            u32::MAX
-        };
-        Self::collect_output(&io_ctx, exit_code, timed_out, wait_ms, logger)
+    /// Signal the container's processes, for
+    /// [`SandboxProcess::kill`](wxc_common::sandbox_process::SandboxProcess::kill).
+    /// `timeout_secs` is how long the SDK waits for a graceful stop.
+    pub(crate) fn stop(&self, signal: WslcSignal, timeout_secs: u32) -> Result<(), String> {
+        // SAFETY: as `destroy` — live container handle, live SDK.
+        unsafe {
+            let mut err_msg = CoTaskMemPWSTR::null();
+            let hr = (self.sdk.WslcStopContainer)(
+                self.container_guard.as_raw(),
+                signal,
+                timeout_secs,
+                err_msg.as_mut_ptr(),
+            );
+            if hr != S_OK {
+                let msg = err_msg.to_string_lossy();
+                return Err(format!(
+                    "WslcStopContainer failed: {msg} (HRESULT 0x{:08X})",
+                    hr as u32
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the SDK's exit callback has fired (the process is gone and all
+    /// its output has been flushed).
+    pub(crate) fn has_exited(&self) -> bool {
+        *lock(&self.io_ctx.exited.0)
+    }
+
+    /// Block (bounded) until the SDK's exit callback has fired, so releasing the
+    /// SDK handles can't race a callback still in flight.
+    pub(crate) fn wait_for_exit_callback(&self) {
+        self.io_ctx.wait_for_exit_callback();
+    }
+
+    /// The init process's exit code. Only meaningful once
+    /// [`has_exited`](Self::has_exited) is true.
+    ///
+    /// # Safety
+    /// Requires a live process handle and SDK, which `self` owns.
+    pub(crate) unsafe fn exit_code(&self) -> Result<i32, String> {
+        let mut exit_code: i32 = -1;
+        let hr = (self.sdk.WslcGetProcessExitCode)(self.process_guard.as_raw(), &mut exit_code);
+        if hr != S_OK {
+            return Err(format!(
+                "WslcGetProcessExitCode failed (HRESULT 0x{:08X})",
+                hr as u32
+            ));
+        }
+        Ok(exit_code)
+    }
+
+    /// EOF any streaming reader the caller still holds.
+    pub(crate) fn close_streams(&self) {
+        self.io_ctx.close_streams();
     }
 }
 
