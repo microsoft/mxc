@@ -179,7 +179,7 @@ impl SandboxProcess for WslcSandboxProcess {
         // the init process and everything it spawned — the tree kill the trait
         // asks for. `0` means "don't wait for a graceful stop".
         self.started
-            .stop(WslcSignal::SigKill, 0)
+            .stop(WslcSignal::WSLC_SIGNAL_SIGKILL, 0)
             .map_err(std::io::Error::other)
     }
 
