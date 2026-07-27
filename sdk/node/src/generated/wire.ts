@@ -107,13 +107,9 @@ export interface Filesystem {
 }
 
 /**
- * IsolationSession backend config. Carries the one-shot `user` field and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).
+ * IsolationSession backend config. Carries the one-shot `user` field and the per-phase state-aware nesting for the phases that take config (`provision` / `start`). `stop`, `deprovision`, and `exec` take no per-phase config payload: `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.
  */
 export interface IsolationSession {
-  /**
-   * State-aware deprovision-phase configuration.
-   */
-  deprovision?: IsolationSessionPhase | null;
   /**
    * State-aware provision-phase configuration.
    */
@@ -122,10 +118,6 @@ export interface IsolationSession {
    * State-aware start-phase configuration.
    */
   start?: IsolationSessionPhase | null;
-  /**
-   * State-aware stop-phase configuration.
-   */
-  stop?: IsolationSessionPhase | null;
   /**
    * Optional Entra cloud-agent user bundle (one-shot).
    */
