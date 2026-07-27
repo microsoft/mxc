@@ -548,7 +548,12 @@ pub struct WslcSection {
     /// `image_tar_path` is set — MXC never pulls images itself.
     pub image: String,
     /// Path to a local tar (a `docker save` archive or a rootfs) imported as
-    /// the image instead of resolving it from the store.
+    /// the image.
+    ///
+    /// The image store is consulted **first**: if `image` is already cached the
+    /// tar is skipped entirely, so supplying an updated tar under a name that
+    /// is already present runs the stale cached content. Use a new `image` name
+    /// (or clear the store) to pick up changed tar contents.
     pub image_tar_path: Option<String>,
     /// vCPUs for the session. `None` lets the host decide.
     pub cpu_count: Option<u32>,

@@ -495,15 +495,24 @@ impl WSLContainerRunner {
     /// The returned `WslcSdk` holds raw function pointers loaded from `wslcsdk.dll`;
     /// callers must keep it alive for the duration of all SDK use.
     unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
-        let com_hr = windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        );
-        if com_hr.is_err() {
-            return Err(ScriptResponse::error(&format!(
-                "COM initialization failed: {:?}",
-                com_hr
-            )));
+        // Accept exactly what `ComApartment` accepts, so a probe and a spawn on
+        // the same thread can never disagree: an STA caller
+        // (`RPC_E_CHANGED_MODE`) reuses its existing apartment rather than
+        // being refused here after `platform_support()` advertised WSLC.
+        //
+        // The initialization is deliberately *not* balanced. The SDK, its
+        // objects, and its callback threads stay live for as long as the
+        // returned handle, so releasing the apartment when this function
+        // returns could tear the MTA down under a running container. Balancing
+        // it means tying the apartment to `StartedContainer`'s lifetime, which
+        // is cross-thread — see the ownership follow-up noted on the PR.
+        match ComApartment::enter() {
+            Ok(com) => std::mem::forget(com),
+            Err(e) => {
+                return Err(ScriptResponse::error(&format!(
+                    "COM initialization failed: {e}"
+                )))
+            }
         }
         let _ = writeln!(logger, "[WSLC] COM initialized");
 
