@@ -35,10 +35,15 @@ Needed **only** when regenerating bindings (i.e., on a WSLC SDK version bump):
 
 - **LLVM / libclang** — e.g. install LLVM (`C:\Program Files\LLVM\bin`). bindgen
   parses the C header via libclang.
-- **`bindgen-cli`** — `cargo install bindgen-cli` (installs `~/.cargo/bin/bindgen.exe`).
+- **`bindgen-cli`** — `cargo install bindgen-cli --version 0.72.1` (installs
+  `~/.cargo/bin/bindgen.exe`). The version is **pinned**: the script verifies
+  `bindgen --version` matches and fails otherwise, since different bindgen
+  releases can emit different output. Bump it deliberately (script constant
+  `$RequiredBindgenVersion` + the generated header) when upgrading.
 
 `scripts/generate-wslc-bindings.ps1` auto-discovers both, plus the MSVC/Windows
-SDK include paths and the header inside the vendored `.nupkg`. It runs on both
+SDK include paths, and extracts the header from the vendored `.nupkg` **matching
+the pinned `WSLC_SDK_VERSION`** in `build.rs`. It runs on both
 x64 and ARM64 Windows: the clang target triple defaults to the host arch (both
 are LLP64, so the generated file is identical), and it falls back to an
 ARM64-only MSVC toolset install. Override with `-Target <triple>` if needed.

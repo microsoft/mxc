@@ -16,7 +16,7 @@
 
 .PREREQUISITES
     - LLVM / libclang   (winget install LLVM.LLVM)  — provides libclang for bindgen
-    - bindgen CLI       (cargo install bindgen-cli)
+    - bindgen CLI       (cargo install bindgen-cli --version 0.72.1)
     - Visual Studio 2022 with the MSVC toolchain + a Windows 10/11 SDK
 
 .NOTES
@@ -54,7 +54,18 @@ $cmd = Get-Command bindgen -ErrorAction SilentlyContinue
 if ($cmd) { $bindgen = $cmd.Source }
 if (-not $bindgen) { $bindgen = Join-Path $env:USERPROFILE ".cargo\bin\bindgen.exe" }
 if (-not (Test-Path $bindgen)) {
-    Fail "bindgen CLI not found. Install it with: cargo install bindgen-cli"
+    Fail "bindgen CLI not found. Install it with: cargo install bindgen-cli --version 0.72.1"
+}
+
+# Pin the generator version. The committed file records the bindgen version in its
+# header, and different bindgen releases can emit different ABI types/options, so an
+# unpinned CLI makes regen non-reproducible. Fail fast on a mismatch. Bump this
+# constant (and the header it produces) intentionally when upgrading bindgen.
+$RequiredBindgenVersion = "0.72.1"
+$bindgenVerRaw = (& $bindgen --version 2>&1) | Select-Object -First 1
+$bindgenVer = ($bindgenVerRaw -replace '[^\d.]', '')
+if ($bindgenVer -ne $RequiredBindgenVersion) {
+    Fail "bindgen $RequiredBindgenVersion required (found '$bindgenVerRaw'). Install it with: cargo install bindgen-cli --version $RequiredBindgenVersion"
 }
 
 # --- 2. Locate libclang ---------------------------------------------------------
@@ -95,8 +106,19 @@ Write-Host "  MSVC    : $msvcInc"
 Write-Host "  WinSDK  : $sdkInc"
 
 # --- 5. Extract wslcsdk.h from the vendored NuGet package -----------------------
-$nupkg = Get-ChildItem $vendorDir -Filter "*.nupkg" | Sort-Object Name -Descending | Select-Object -First 1
-if (-not $nupkg) { Fail "No vendored .nupkg found in '$vendorDir'." }
+# Select the package matching the pinned WSLC_SDK_VERSION rather than lexically
+# sorting all *.nupkg (which mis-ranks e.g. "2.9.3" ahead of "2.10.0" and could
+# pick a stale package left behind mid-update), so the generated bindings always
+# match the SDK version build.rs stages.
+$verLine = Select-String -Path (Join-Path $wslcCommon "build.rs") -Pattern 'WSLC_SDK_VERSION\s*:\s*&str\s*=\s*"([^"]+)"' | Select-Object -First 1
+if (-not $verLine) { Fail "Could not read WSLC_SDK_VERSION from build.rs." }
+$wslcVersion = $verLine.Matches[0].Groups[1].Value
+$nupkgPath = Join-Path $vendorDir "Microsoft.WSL.Containers.$wslcVersion.nupkg"
+if (-not (Test-Path $nupkgPath)) {
+    Fail "Vendored package for WSLC_SDK_VERSION=$wslcVersion not found at '$nupkgPath'."
+}
+$nupkg = Get-Item $nupkgPath
+Write-Host "  Package : $($nupkg.Name)"
 
 $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("wslc-bindgen-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
