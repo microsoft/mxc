@@ -203,15 +203,19 @@ impl SandboxProcess for WslcSandboxProcess {
 
         let waited = self.started.wait_for_exit(&mut self.logger);
 
-        // The process is gone (or was killed): close the SDK-side write ends so
-        // every reader — ours and the caller's — sees EOF once it has consumed
-        // what was already buffered.
-        self.started.close_streams();
-        // Only cancel a read *we* own; a caller-taken stream may still be being
-        // read, and cancelling it would truncate their output.
+        // Release the drain readers we own first, whichever way the wait went:
+        // firing their canceller can't truncate anything the caller is reading
+        // (`cancel_and_join_discard` only fires for a stream we drained), and
+        // joining them here keeps a later error return from leaving threads
+        // parked on a read.
         cancel_and_join_discard(stdout_drain, &self.stdout_canceller);
         cancel_and_join_discard(stderr_drain, &self.stderr_canceller);
 
+        // Deliberately before `close_streams`: `wait_for_exit` can fail while
+        // the process is still running (a failed apartment, or
+        // `WslcGetProcessExitEvent`), and closing the SDK-side writers then
+        // would EOF a caller-taken reader and discard every later callback for
+        // a process that is still producing output.
         let (exit_code, timed_out) = waited.map_err(|response| {
             std::io::Error::other(if response.error_message.is_empty() {
                 "waiting for the WSL container process failed".to_string()
@@ -219,6 +223,11 @@ impl SandboxProcess for WslcSandboxProcess {
                 response.error_message
             })
         })?;
+
+        // The process is gone (or was killed): close the SDK-side write ends so
+        // every reader — ours and the caller's — sees EOF once it has consumed
+        // what was already buffered.
+        self.started.close_streams();
 
         self.started.destroy(&mut self.logger);
         self.torn_down = true;

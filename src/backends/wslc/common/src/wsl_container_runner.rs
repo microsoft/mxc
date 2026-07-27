@@ -1364,18 +1364,29 @@ impl WSLContainerRunner {
         }
         let _ = writeln!(logger, "[WSLC] Container started");
 
-        // -- Iptables (if needed) --
-        if let Some(ref ipt_cmd) = iptables_cmd {
-            Self::apply_iptables_rules(&sdk, container_guard.as_raw(), ipt_cmd, logger)?;
-        }
-
-        // -- Get init process handle --
-        let mut process: WslcProcess = ptr::null_mut();
-        let hr = (sdk.WslcGetContainerInitProcess)(container_guard.as_raw(), &mut process);
-        if hr != S_OK {
-            return Err(sdk_error("WslcGetContainerInitProcess failed", hr, ""));
-        }
-        let process_guard = WslcProcessGuard::from_raw(process, sdk.WslcReleaseProcess);
+        // From here the container is live and the SDK is delivering callbacks
+        // into `io_ctx`. A bare `return Err(..)` would drop the locals in
+        // reverse declaration order — freeing the callback context (`io_ctx` /
+        // `io_ctx_guard`) *before* the session is terminated and the DLL
+        // unloaded — so a late callback could dereference freed memory. Every
+        // failure past this point therefore quiesces the container first. This
+        // is not a corner case: `apply_iptables_rules` fails for any host-rule
+        // policy today, since the container is not granted `CAP_NET_ADMIN`.
+        let post_start =
+            Self::attach_init_process(&sdk, &container_guard, iptables_cmd.as_deref(), logger);
+        let process_guard = match post_start {
+            Ok(guard) => guard,
+            Err(e) => {
+                Self::quiesce_started_container(
+                    &sdk,
+                    &container_guard,
+                    &io_ctx,
+                    request.lifecycle.destroy_on_exit,
+                    logger,
+                );
+                return Err(e);
+            }
+        };
 
         Ok(StartedContainer {
             process_guard,
@@ -1388,6 +1399,74 @@ impl WSLContainerRunner {
             destroy_on_exit: request.lifecycle.destroy_on_exit,
             timeout_ms: wait_timeout_ms(request),
         })
+    }
+
+    /// Apply any host-rule `iptables` chain and take the container's init
+    /// process handle. Split out so every failure between "container started"
+    /// and "handle in hand" funnels through one caller-side cleanup path.
+    ///
+    /// # Safety
+    /// `sdk` must hold valid function pointers and `container` a live handle.
+    unsafe fn attach_init_process(
+        sdk: &WslcSdk,
+        container: &WslcContainerGuard,
+        iptables_cmd: Option<&str>,
+        logger: &mut Logger,
+    ) -> Result<WslcProcessGuard, ScriptResponse> {
+        if let Some(ipt_cmd) = iptables_cmd {
+            Self::apply_iptables_rules(sdk, container.as_raw(), ipt_cmd, logger)?;
+        }
+
+        let mut process: WslcProcess = ptr::null_mut();
+        let hr = (sdk.WslcGetContainerInitProcess)(container.as_raw(), &mut process);
+        if hr != S_OK {
+            return Err(sdk_error("WslcGetContainerInitProcess failed", hr, ""));
+        }
+        Ok(WslcProcessGuard::from_raw(process, sdk.WslcReleaseProcess))
+    }
+
+    /// Stop a started container and block until the SDK's exit callback has
+    /// fired, so no further callback can reference the context the caller is
+    /// about to drop. Best-effort: every step's failure is ignored, because the
+    /// caller is already unwinding a more meaningful error.
+    ///
+    /// # Safety
+    /// `sdk` must hold valid function pointers and `container` a live handle.
+    unsafe fn quiesce_started_container(
+        sdk: &WslcSdk,
+        container: &WslcContainerGuard,
+        io_ctx: &IoContext,
+        destroy_on_exit: bool,
+        logger: &mut Logger,
+    ) {
+        let mut err_msg = CoTaskMemPWSTR::null();
+        let _ = (sdk.WslcStopContainer)(
+            container.as_raw(),
+            WslcSignal::SigKill,
+            5,
+            err_msg.as_mut_ptr(),
+        );
+        drop(err_msg);
+
+        io_ctx.close_streams();
+        if !io_ctx.wait_for_exit_callback() {
+            let _ = writeln!(
+                logger,
+                "[WSLC] Warning: exit callback did not fire within {}s while cleaning up a \
+                 failed start",
+                EXIT_CALLBACK_TIMEOUT.as_secs()
+            );
+        }
+
+        if destroy_on_exit {
+            let mut err_msg = CoTaskMemPWSTR::null();
+            let _ = (sdk.WslcDeleteContainer)(
+                container.as_raw(),
+                WslcDeleteContainerFlags::Force,
+                err_msg.as_mut_ptr(),
+            );
+            drop(err_msg);
+        }
     }
 
     /// Run to completion: start the container, wait for the init process, tear
