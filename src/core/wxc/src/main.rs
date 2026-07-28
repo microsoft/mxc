@@ -255,7 +255,7 @@ fn apply_command_override(
     }
 }
 
-/// The correlation-vector action a state-aware phase should take, decided purely
+/// The plan for producing this phase's correlation vector, derived
 /// from the phase and the relayed value. Returned by [`plan_correlation_vector`]
 /// so the seed-vs-spin decision is unit-testable without touching the RNG/clock;
 /// the caller executes the plan against the (nondeterministic) operators.
@@ -321,6 +321,16 @@ fn inject_correlation_vector(outcome: &mut Result<DispatchOutcome, MxcError>, cv
             );
         }
     }
+}
+
+/// On a state-aware dispatch failure, record the error only on the auxiliary
+/// diagnostic sinks (`--log-file` and the diagnostic pipe) via
+/// [`Logger::log_diagnostic_line`]. It is deliberately kept out of the primary
+/// console/buffer output so it never interleaves with the stdout response
+/// envelope; the failure reason still reaches the client through the JSON error
+/// envelope on stdout.
+fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
+    logger.log_diagnostic_line(&error.to_string());
 }
 
 /// Drives the state-aware dispatch flow. On envelope success, writes the
@@ -423,6 +433,13 @@ fn run_state_aware_main(
         elapsed,
     );
 
+    // On dispatch failure, route the error to the auxiliary diagnostic sinks
+    // only (log file / diagnostic pipe) — never the primary buffer/stderr — so
+    // the stdout error envelope written below stays the single client-facing
+    // channel and is not shadowed by a duplicate on stderr.
+    if let Err(error) = &outcome {
+        log_state_aware_dispatch_error(logger, error);
+    }
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();
@@ -1228,17 +1245,16 @@ fn main() {
         }
         mark_audit_active();
         _audit_guard = Some(AuditTraceGuard);
-        // previously this was
-        // `let _ = run_plm_command(...)`, which discarded the failure
-        // status. If plm start failed (missing plm.exe, wpr session
-        // conflict not resolved, etc.), the workload ran with
-        // `permissiveLearningMode` injected into the sandbox policy
-        // but with zero WPR recording — an empty Adjusted_*.json
-        // looked like "no denials." Bail explicitly on start failure
-        // so the operator sees the error and the policy isn't
-        // silently relaxed.
+        // Bail explicitly on `plm start` failure rather than
+        // discarding the failure status. If plm start failed
+        // (missing plm.exe, wpr session conflict not resolved,
+        // etc.), the workload would run with `permissiveLearningMode`
+        // injected into the sandbox policy but with zero WPR
+        // recording — an empty Adjusted_*.json looks like "no
+        // denials." Bailing lets the operator see the error and the
+        // policy isn't silently relaxed.
         //
-        // bracket the spawn with
+        // Bracket the spawn with
         // AUDIT_START_IN_FLIGHT so the console-control handler waits
         // for it to drain before deciding whether to issue `wpr
         // -cancel` (closes the Ctrl+C race where cancel arrives
@@ -1283,13 +1299,13 @@ fn main() {
     // its exit code. Done before the runner is dropped so the trace
     // tooling sees a fully-quiesced workload.
     //
-    // only clear `AUDIT_ACTIVE` when `plm stop` actually
-    // succeeded. Previously the flag was cleared unconditionally,
-    // which silently leaked the kernel ETW session whenever stop
-    // failed (missing plm.exe, spawn fail, wpr -stop non-zero) and
-    // simultaneously turned `AuditTraceGuard::drop` and the Ctrl-C
-    // handler into no-ops. On failure we now leave the flag set so
-    // the stack guard's `Drop` runs `wpr -cancel` for us.
+    // Only clear `AUDIT_ACTIVE` when `plm stop` actually
+    // succeeded. Clearing it unconditionally would silently leak
+    // the kernel ETW session whenever stop failed (missing
+    // plm.exe, spawn fail, wpr -stop non-zero) and simultaneously
+    // turn `AuditTraceGuard::drop` and the Ctrl-C handler into
+    // no-ops. On failure, leave the flag set so the stack guard's
+    // `Drop` runs `wpr -cancel` for us.
     #[cfg(target_os = "windows")]
     if cli.audit {
         let mut stop_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from("stop")];
@@ -1430,6 +1446,31 @@ mod tests {
                 .expect_err("non-ProcessContainer backend must reject --audit");
             assert!(error.contains(containment.wire_name()));
         }
+    }
+
+    #[test]
+    fn state_aware_dispatch_errors_use_only_auxiliary_diagnostic_sinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let error = MxcError::malformed_request(
+            "Invalid configuration at `experimental.wslc.start.portMappings[0].windowsPort`",
+        );
+
+        log_state_aware_dispatch_error(&mut logger, &error);
+
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the JSON envelope must retain primary output ownership"
+        );
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("experimental.wslc.start.portMappings[0].windowsPort")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1722,6 +1763,7 @@ mod tests {
             sandbox_id: Some("iso:wxc-1234".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
 
         let err = command_override_context_for_state_aware(&parsed, true).unwrap_err();

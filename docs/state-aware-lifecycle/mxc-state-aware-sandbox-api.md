@@ -722,6 +722,24 @@ state-aware mode so `stdout` remains parseable without sentinels. (One-shot disp
 keeps its existing `stdout` logger behaviour — the stricter routing applies to
 state-aware only.)
 
+Configuration parse-phase failures that occur **after** the request is
+discriminated as state-aware (i.e. the `phase` field was recognized) follow the
+state-aware contract: the typed `{error}` envelope is the only primary output,
+while the human-readable actionable parse diagnostic is written only to
+configured auxiliary sinks (`--log-file` and the Windows diagnostic console). It
+is not duplicated to the logger's primary console/buffer output, so such a parse
+failure does not add stderr noise even with `--debug`. Dispatch-time failures,
+including typed per-backend configuration errors, use the same auxiliary-only
+diagnostic routing before the executor emits their typed `{error}` envelope.
+
+Failures that occur **before** discrimination is possible — malformed base64,
+non-UTF-8 bytes, or JSON so malformed that the `phase` field cannot be read —
+cannot be attributed to the state-aware path, so they retain the legacy
+behavior: the diagnostic is written to the primary output (stderr) and **no**
+`{error}` envelope is emitted. Callers that require an envelope even for
+unparseable input should validate that the payload is well-formed JSON before
+invoking `wxc-exec`.
+
 For exec specifically, MXC diagnostic output mixes with the script's own stderr when
 `--debug` is passed. This is a small amount of pre- and post-dispatch noise; consumers
 wanting clean separation should use `--log-file <path>` instead, which routes diagnostic
@@ -1029,26 +1047,30 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Wire envelope (Rust mirror)
 
-MXC's parser at `src/core/wxc_common/src/config_parser.rs` deserializes the
-wire-format JSON directly into the typed wire model in
-`src/core/wxc_common/src/wire.rs` (`wire::MxcConfig`), then maps it into the
-typed domain models (`convert_wire_config` → `ExecutionRequest`, with `From`
-impls beside the domain types for the trivial enum/struct conversions) before
-dispatch. The state-aware path reuses this same wire model.
+`src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
+deserialization into the typed wire model in
+`src/core/wxc_common/src/wire.rs` (`wire::MxcConfig`).
+`src/core/wxc_common/src/config_parser.rs` discriminates request shape,
+validates the wire model, and maps it into the typed domain models
+(`convert_wire_config` → `ExecutionRequest`, with `From` impls beside the
+domain types for trivial enum/struct conversions). The state-aware path reuses
+this wire model while retaining its per-backend `experimental` subtree for
+dispatch-time typing.
 
 ```rust
 // In config_parser.rs — discrimination is by presence of the `phase` key in
-// the decoded JSON; both shapes deserialize into the one wire::MxcConfig type,
-// which declares `phase` / `sandboxId` and the per-backend `experimental` block.
-let value: serde_json::Value = serde_json::from_str(&json_str)?;
-if value.get("phase").is_some() {
-    // state-aware: peel off the raw `experimental` block (typed per-backend at
-    // dispatch), deserialize the rest into wire::MxcConfig, then map.
-    convert_wire_state_aware(value, logger, allow_missing_command)
+// the source JSON without building a full untyped request tree.
+let discriminator: RequestDiscriminator<'_> =
+    config_deserialize::from_str(&json_str)?;
+if discriminator.phase.is_some() {
+    convert_wire_state_aware(
+        &json_str,
+        discriminator.experimental,
+        logger,
+        allow_missing_command,
+    )
 } else {
-    // one-shot: deserialize wire::MxcConfig from the source text (preserving
-    // serde line/column diagnostics) and map.
-    let cfg: wire::MxcConfig = serde_json::from_str(&json_str)?;
+    let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)?;
     convert_wire_config(cfg, logger, true, allow_missing_command)
 }
 ```
@@ -1073,8 +1095,10 @@ state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`)
 are extracted alongside the `ExecutionRequest` and bundled into a
 `ParsedStateAwareRequest` domain model — `{ request: ExecutionRequest, phase:
 Phase, containment: Option<ContainmentBackend>, sandbox_id: Option<String>,
-experimental_raw: Option<serde_json::Value> }` — that the dispatcher consumes
-(§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
+experimental_raw: Option<serde_json::Value>, source_text: Option<Box<str>> }` —
+that the dispatcher consumes (§9.3). `source_text` retains the decoded request
+text so per-backend per-phase config errors can be reported with whole-file
+source location (§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
 are exposed to the dispatch layer; the wire types are an implementation detail of
 the parser and schema generation.
 
@@ -1426,7 +1450,13 @@ prefix) or `malformed_id` (no prefix structure) per §8.
 `Result<Option<C>, MxcError>`: it navigates the wire `experimental.<backend_key>.<phase_name>`
 JSON value and deserialises it into `C` when present, returns `Ok(None)` when absent,
 and surfaces malformed JSON as `malformed_request`. The dispatcher passes
-`B::BACKEND_KEY` so each backend reads from its own slot.
+`B::BACKEND_KEY` so each backend reads from its own slot. Typed errors carry the
+complete `experimental.<backend>.<phase>.<field>` JSON path **and** whole-file
+source location (line/column), at parity with base-config errors: the phase-config
+sub-slice is deserialised positionally out of the retained request text and its
+fragment-local serde location is translated back to whole-file coordinates. If the
+sub-slice cannot be located, deserialisation falls back to the value-based path,
+which still reports the JSON path (without a source location).
 `sandbox_id_required()` enforces that non-provision phases carry a `sandboxId`,
 returning `&str` on success or `malformed_request` on absence. `validate_exec_common`
 is a free function in `validator.rs` that checks cross-backend per-phase invariants
