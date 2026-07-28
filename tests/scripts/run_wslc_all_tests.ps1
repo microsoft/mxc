@@ -92,6 +92,58 @@ if (-not $SkipSetup) {
     }
 }
 
+# Reset the WSLC runtime to a clean state between tests.
+#
+# Sequential container creations that use volume mounts can leave the WSL
+# runtime in a state where the next WslcCreateContainer returns E_INVALIDARG
+# (0x80070057). Verified empirically: every mount-based test passes in isolation
+# after a `wsl --shutdown` but flakes when chained. `wsl --shutdown` is
+# asynchronous, so we wait for the VM to actually stop before letting the WSLC
+# service settle -- a fixed sleep alone is racy.
+function Reset-WslRuntime {
+    param([int]$SettleSeconds = 8, [int]$TimeoutSeconds = 60)
+    $null = wsl --shutdown 2>&1
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $running = ""
+        try { $running = (& wsl.exe --list --running 2>$null | Out-String) -replace "`0", "" } catch { break }
+        if ([string]::IsNullOrWhiteSpace($running) -or $running -match 'no running') { break }
+        Start-Sleep -Milliseconds 500
+    }
+    Start-Sleep $SettleSeconds
+}
+
+# True when output shows the transient WSLC session-bleed failure (E_INVALIDARG /
+# 0x80070057 from WslcCreateContainer) that a runtime reset + retry clears.
+function Test-WslcBleed {
+    param([string]$Output)
+    return [bool]($Output -match '0x80070057')
+}
+
+# Invoke a delegated fixture script (which owns its own on-disk fixture) with a
+# reset before each attempt and one retry if it hits the session-bleed transient.
+# Returns $true on success. Output streams live and is also captured for the
+# bleed check.
+function Invoke-WslcDelegatedScript {
+    param([string]$ScriptPath, [hashtable]$ScriptArgs)
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        Reset-WslRuntime
+        # Merge ALL streams (*>&1) so the delegated script's Write-Host output --
+        # which carries the 0x80070057 signature -- is captured, not just stderr.
+        # Out-Host displays it live without polluting this function's return value.
+        & $ScriptPath @ScriptArgs *>&1 | Tee-Object -Variable teed | Out-Host
+        $exit = $LASTEXITCODE
+        if ($exit -eq 0) { return $true }
+        $captured = ($teed | Out-String)
+        if ($attempt -lt 2 -and (Test-WslcBleed $captured)) {
+            Write-Host "    [retry] transient WSLC session bleed (0x80070057) -- resetting and retrying $([System.IO.Path]::GetFileName($ScriptPath))..." -ForegroundColor Yellow
+            continue
+        }
+        return $false
+    }
+    return $false
+}
+
 # Helper: run a single WSLC test config
 function Run-WslcTest {
     param(
@@ -120,61 +172,78 @@ function Run-WslcTest {
 
     Write-Host "  $ConfigFile ... " -NoNewline
 
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $wxcArgs = @("--experimental")
-    if ($Debug) {
-        $wxcArgs += "--debug"
-    }
-    $wxcArgs += $configPath
-    $output = & $WxcExec @wxcArgs 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $prevPref
-
-    # Access violation (0xC0000005) or other hard crashes corrupt WSL runtime
-    # state, causing subsequent WslcCreateSession calls to fail with
-    # ERROR_SHARING_VIOLATION. Recover by restarting WSL.
-    $isCrash = ($exitCode -lt -1000000000) -or ($exitCode -eq -2147483645)
-    if ($isCrash) {
-        Write-Host "" # newline before recovery message
-        Write-Host "    [recovery] Process crashed (exit $exitCode) -- restarting WSL..." -ForegroundColor Yellow
-        $null = wsl --shutdown 2>&1
-        Start-Sleep 15
-    }
-
+    # Start from a clean runtime so state from a prior mount test cannot cause
+    # a spurious E_INVALIDARG on this container's creation. Retry once if the
+    # container-create still hits the session-bleed transient (0x80070057).
     $pass = $true
     $reason = ""
+    $output = ""
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        Reset-WslRuntime
 
-    if ($exitCode -ne $ExpectedExit) {
-        $pass = $false
-        $reason = "Expected exit $ExpectedExit, got $exitCode"
-    }
-
-    if ($pass -and $OutputContains -and $output -notmatch [regex]::Escape($OutputContains)) {
-        $pass = $false
-        $reason = "Output missing '$OutputContains'"
-    }
-
-    # OutputMatches is a regex pattern (no escaping).
-    if ($pass -and $OutputMatches -and $output -notmatch $OutputMatches) {
-        $pass = $false
-        $reason = "Output did not match regex '$OutputMatches'"
-    }
-
-    # PostExitCheck runs after exit/output gates pass. Receives ($id, $output)
-    # and must return truthy. Use for externally-observable state assertions.
-    if ($pass -and $PostExitCheck) {
-        $containerId = $configJson.containerId
-        try {
-            $checkResult = & $PostExitCheck $containerId $output
-            if (-not $checkResult) {
-                $pass = $false
-                $reason = "PostExitCheck returned false"
-            }
-        } catch {
-            $pass = $false
-            $reason = "PostExitCheck threw: $_"
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $wxcArgs = @("--experimental")
+        if ($Debug) {
+            $wxcArgs += "--debug"
         }
+        $wxcArgs += $configPath
+        $output = & $WxcExec @wxcArgs 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevPref
+
+        # Access violation (0xC0000005) or other hard crashes corrupt WSL runtime
+        # state, causing subsequent WslcCreateSession calls to fail with
+        # ERROR_SHARING_VIOLATION. Recover by restarting WSL.
+        $isCrash = ($exitCode -lt -1000000000) -or ($exitCode -eq -2147483645)
+        if ($isCrash) {
+            Write-Host "" # newline before recovery message
+            Write-Host "    [recovery] Process crashed (exit $exitCode) -- restarting WSL..." -ForegroundColor Yellow
+            Reset-WslRuntime -SettleSeconds 15
+        }
+
+        $pass = $true
+        $reason = ""
+
+        if ($exitCode -ne $ExpectedExit) {
+            $pass = $false
+            $reason = "Expected exit $ExpectedExit, got $exitCode"
+        }
+
+        if ($pass -and $OutputContains -and $output -notmatch [regex]::Escape($OutputContains)) {
+            $pass = $false
+            $reason = "Output missing '$OutputContains'"
+        }
+
+        # OutputMatches is a regex pattern (no escaping).
+        if ($pass -and $OutputMatches -and $output -notmatch $OutputMatches) {
+            $pass = $false
+            $reason = "Output did not match regex '$OutputMatches'"
+        }
+
+        # PostExitCheck runs after exit/output gates pass. Receives ($id, $output)
+        # and must return truthy. Use for externally-observable state assertions.
+        if ($pass -and $PostExitCheck) {
+            $containerId = $configJson.containerId
+            try {
+                $checkResult = & $PostExitCheck $containerId $output
+                if (-not $checkResult) {
+                    $pass = $false
+                    $reason = "PostExitCheck returned false"
+                }
+            } catch {
+                $pass = $false
+                $reason = "PostExitCheck threw: $_"
+            }
+        }
+
+        if ($pass) { break }
+        if ($attempt -lt 2 -and (Test-WslcBleed $output)) {
+            Write-Host "" # newline before retry message
+            Write-Host "    [retry] transient WSLC session bleed (0x80070057) -- resetting and retrying..." -ForegroundColor Yellow
+            continue
+        }
+        break
     }
 
     if ($pass) {
@@ -187,10 +256,6 @@ function Run-WslcTest {
             Write-Host "    > $($line.TrimEnd())" -ForegroundColor Gray
         }
     }
-
-    # Brief delay between tests to let the WSLC runtime fully release
-    # session resources (mounts, networking) before the next test starts.
-    Start-Sleep 2
 
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
@@ -225,8 +290,7 @@ Write-Host "`n--- Object Validation Tests ---" -ForegroundColor Cyan
 $objScript = Join-Path $PSScriptRoot "run_wslc_object_test.ps1"
 $objArgs = @{ WxcExecPath = $WxcExec }
 if ($Debug) { $objArgs.Debug = $true }
-& $objScript @objArgs
-$objPass = ($LASTEXITCODE -eq 0)
+$objPass = Invoke-WslcDelegatedScript $objScript $objArgs
 $null = $results.Add(@{
     Name    = "wslc_filesystem_object.json"
     Pass    = $objPass
@@ -241,8 +305,7 @@ $null = $results.Add(@{
 $ddtScript = Join-Path $PSScriptRoot "run_wslc_dotdot_alias_test.ps1"
 $ddtArgs = @{ WxcExecPath = $WxcExec }
 if ($Debug) { $ddtArgs.Debug = $true }
-& $ddtScript @ddtArgs
-$ddtPass = ($LASTEXITCODE -eq 0)
+$ddtPass = Invoke-WslcDelegatedScript $ddtScript $ddtArgs
 $null = $results.Add(@{
     Name    = "wslc_denied_dotdot_alias.json"
     Pass    = $ddtPass
@@ -258,8 +321,7 @@ Write-Host "`n--- Denied Masking / Most-Specific Tests ---" -ForegroundColor Cya
 $maskScript = Join-Path $PSScriptRoot "run_wslc_denied_masking_test.ps1"
 $maskArgs = @{ WxcExecPath = $WxcExec }
 if ($Debug) { $maskArgs.Debug = $true }
-& $maskScript @maskArgs
-$maskPass = ($LASTEXITCODE -eq 0)
+$maskPass = Invoke-WslcDelegatedScript $maskScript $maskArgs
 $null = $results.Add(@{
     Name    = "wslc_denied_masking.json"
     Pass    = $maskPass
@@ -270,8 +332,7 @@ $null = $results.Add(@{
 $mspScript = Join-Path $PSScriptRoot "run_wslc_most_specific_test.ps1"
 $mspArgs = @{ WxcExecPath = $WxcExec }
 if ($Debug) { $mspArgs.Debug = $true }
-& $mspScript @mspArgs
-$mspPass = ($LASTEXITCODE -eq 0)
+$mspPass = Invoke-WslcDelegatedScript $mspScript $mspArgs
 $null = $results.Add(@{
     Name    = "wslc_most_specific_denied_parent.json"
     Pass    = $mspPass
