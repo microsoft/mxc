@@ -318,6 +318,19 @@ try {
         Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
     } | Out-Null
 
+    # Test 1c: provision rejects a non-canonical network policy. The container's
+    # network is unrestricted and cannot be filtered or denied, so only the
+    # canonical acknowledgment (defaultPolicy=allow + allowLocalNetwork=true) is
+    # accepted; here defaultPolicy=block is refused up-front (no cleanup needed).
+    Run-StateAwareTest "provision (non-canonical network rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_network.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    } | Out-Null
+
     # Test 2: start succeeds against the provisioned sandbox. Exercises the
     # multi-invocation pattern -- provision was a separate wxc-exec process;
     # this is a fresh wxc-exec process consuming the same sandbox_id.
@@ -358,6 +371,25 @@ try {
         } | Out-Null
     }
 
+    # Test 2c: start rejects a request that carries a network policy. The
+    # network posture is fixed at provision; ANY network policy on a
+    # post-provision phase is rejected -- even the canonical acknowledgment,
+    # because it is being supplied where the posture is immutable.
+    if ($startedOk) {
+        Run-StateAwareTest "start (network policy rejected post-provision)" {
+            $req = @{
+                phase     = 'start'
+                sandboxId = $script:sandboxId
+                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        } | Out-Null
+    }
+
     # Test 3: exec runs a command in the started session. Output streams live
     # (the backend reuses the one-shot relay path) so stdout from this
     # wxc-exec invocation is the script's output rather than a JSON envelope.
@@ -386,6 +418,25 @@ try {
                 sandboxId = $script:sandboxId
                 process    = @{ commandLine = 'echo unused' }
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        } | Out-Null
+    }
+
+    # Test 3c: exec rejects a request that carries a network policy. The network
+    # posture is fixed at provision; any network policy on a post-provision phase
+    # is rejected -- even the canonical acknowledgment.
+    if ($execedOk) {
+        Run-StateAwareTest "exec (network policy rejected post-provision)" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:sandboxId
+                process   = @{ commandLine = 'echo unused' }
+                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
             }
             $r = Invoke-StateAware -Request $req -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"

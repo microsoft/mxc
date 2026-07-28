@@ -239,16 +239,16 @@ versions and stating that the bindings must be regenerated.
 
 **Automated (`cargo test`, runs on any machine including CI):**
 
-| Category | Count | Location | What it verifies |
-|---|---:|---|---|
-| Config parsing | ~8 | `config_parser.rs` | `"isolation_session"` containment value and `experimental.isolation_session` section parsing |
-| Policy validation | ~15 | `policy.rs` | Every filesystem field (`readwritePaths` / `readonlyPaths` / `deniedPaths`), network, and proxy policy is rejected at every phase |
-| Option building | ~6 | `isolation_session_runner.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
-| Feature unavailable | 1 | `isolation_session_runner.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
+| Category | Location | What it verifies |
+|---|---|---|
+| Config parsing | `config_parser.rs` | `"isolation_session"` containment value and `experimental.isolation_session` section parsing |
+| Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
+| Option building | `isolation_session_runner.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
+| Feature unavailable | `isolation_session_runner.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
-These ~22 backend-specific tests run alongside the existing workspace tests
-(287 total currently passing). The feature-unavailable test is what runs in
-CI, since CI machines do not have a Windows build with the IsolationSession feature enabled.
+These backend-specific tests run alongside the existing workspace tests. The
+feature-unavailable test is what runs in CI, since CI machines do not have a
+Windows build with the IsolationSession feature enabled.
 
 **Integration tests (require a Windows host with the IsolationSession feature enabled):**
 
