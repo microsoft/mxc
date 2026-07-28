@@ -44,33 +44,60 @@ describe('SandboxId<C> brand', () => {
 });
 
 describe('IsolationSessionProvisionConfig', () => {
-  it('accepts version and rejects filesystem', () => {
+  // The one accepted network value: the unrestricted-network acknowledgment.
+  const network: { defaultPolicy: 'allow'; allowLocalNetwork: true } = {
+    defaultPolicy: 'allow',
+    allowLocalNetwork: true,
+  };
+
+  it('requires the canonical network acknowledgment', () => {
+    const ok: IsolationSessionProvisionConfig = { version: '0.6.0-alpha', network };
+    assert.strictEqual(ok.network.defaultPolicy, 'allow');
+    assert.strictEqual(ok.network.allowLocalNetwork, true);
+
+    // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
+    const missing: IsolationSessionProvisionConfig = { version: '0.6.0-alpha' };
+    assert.ok(missing);
+  });
+
+  it('rejects any network value other than the canonical acknowledgment', () => {
+    const block: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — defaultPolicy must be 'allow'; the backend cannot enforce a deny.
+      network: { defaultPolicy: 'block', allowLocalNetwork: true },
+    };
+    const noLocal: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — allowLocalNetwork must be true; inbound is open and cannot be denied.
+      network: { defaultPolicy: 'allow', allowLocalNetwork: false },
+    };
+    assert.ok(block);
+    assert.ok(noLocal);
+  });
+
+  it('rejects filesystem', () => {
     const cfg: IsolationSessionProvisionConfig = {
-      version: '0.6.0-alpha',
+      network,
       // @ts-expect-error — filesystem is rejected at provision; the backend has no host-folder-sharing primitive.
       filesystem: { readwritePaths: ['C:\\workspace'] },
     };
     assert.ok(cfg);
   });
 
-  it('rejects network and ui until those features land Rust-side', () => {
-    const withNetwork: IsolationSessionProvisionConfig = {
-      // @ts-expect-error — network is not exposed at provision until the Rust runtime honors it.
-      network: { defaultPolicy: 'block' },
-    };
-    const withUi: IsolationSessionProvisionConfig = {
+  it('rejects ui until that feature lands Rust-side', () => {
+    const cfg: IsolationSessionProvisionConfig = {
+      network,
       // @ts-expect-error — ui is not exposed at provision until the Rust runtime honors it.
       ui: { disable: true, clipboard: 'none', injection: false },
     };
-    assert.ok(withNetwork);
-    assert.ok(withUi);
+    assert.ok(cfg);
   });
 
   it('accepts user only as an IsolationSessionUserConfig instance', () => {
     const ok: IsolationSessionProvisionConfig = {
+      network,
       user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
     };
     const bare: IsolationSessionProvisionConfig = {
+      network,
       // @ts-expect-error — user must be constructed via IsolationSessionUserConfig for wamToken redaction.
       user: { upn: 'alice@contoso.com', wamToken: 'tok' },
     };
@@ -84,6 +111,14 @@ describe('IsolationSessionStartConfig', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — start phase does not honor filesystem.
       filesystem: { readwritePaths: ['C:\\workspace'] },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects network (fixed at provision; provision-only)', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — network is fixed at provision; post-provision phases do not accept it.
+      network: { defaultPolicy: 'allow', allowLocalNetwork: true },
     };
     assert.ok(cfg);
   });
@@ -157,7 +192,7 @@ describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () 
 describe('ConfigsForBackend', () => {
   it('selects the IsolationSession bundle for the isolation_session backend', () => {
     const bundle: ConfigsForBackend<'isolation_session'> = {
-      provision: { version: '0.6.0-alpha' },
+      provision: { version: '0.6.0-alpha', network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
       start: {},
       exec: { process: { commandLine: 'echo' } },
       stop: {},

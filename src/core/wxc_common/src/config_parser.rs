@@ -907,7 +907,11 @@ enforced; access denials are recorded for diagnostics.\n",
         }
     }
 
-    // Network section
+    // Network section. Capture presence before the typed mapping consumes
+    // `cfg.network` so backends can distinguish an absent policy from an
+    // explicit default-valued one (the domain `default_network_policy` defaults
+    // to `Block` either way).
+    policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
@@ -2692,6 +2696,30 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn network_specified_true_when_network_present() {
+        // An empty `network: {}` object still counts as "supplied".
+        let json = r#"{
+            "process": {"commandLine": "echo x"},
+            "network": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_specified);
+    }
+
+    #[test]
+    fn network_specified_false_when_network_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.network_specified);
     }
 
     #[test]

@@ -14,6 +14,7 @@ import {
   MxcError,
   deprovisionSandbox,
   provisionSandbox,
+  type ProvisionConfigFor,
   type SandboxId,
   type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk';
@@ -220,9 +221,19 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
   containment: C,
 ): Promise<string | undefined> {
   try {
+    // Provision needs a backend-valid minimal config. IsolationSession requires
+    // the unrestricted-network acknowledgment at provision (the container's
+    // network cannot be filtered or denied); other backends take no required
+    // provision config. Without this the probe would hit `policy_validation` on
+    // an iso-capable host and rethrow it, breaking the suite at module load.
+    const probeConfig = (
+      containment === 'isolation_session'
+        ? { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }
+        : undefined
+    ) as ProvisionConfigFor<C> | undefined;
     const provisionResult = await provisionSandbox(
       containment,
-      undefined,
+      probeConfig,
       { experimental: true },
     );
     await safeDeprovision(provisionResult.sandboxId);

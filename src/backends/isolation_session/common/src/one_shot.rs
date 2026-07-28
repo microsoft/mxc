@@ -112,7 +112,10 @@ impl ScriptRunner for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ExperimentalConfig, IsolationSessionConfig, IsolationSessionUser};
+    use wxc_common::models::{
+        ContainerPolicy, ExperimentalConfig, IsolationSessionConfig, IsolationSessionUser,
+        NetworkPolicy,
+    };
 
     fn well_formed_user() -> IsolationSessionUser {
         IsolationSessionUser {
@@ -146,6 +149,11 @@ mod tests {
     fn validate_runner_one_shot_accepts_no_user() {
         let runner = IsolationSessionRunner::new();
         let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                allow_local_network: true,
+                ..Default::default()
+            },
             experimental: ExperimentalConfig {
                 isolation_session: Some(IsolationSessionConfig::default()),
                 ..Default::default()
@@ -153,5 +161,21 @@ mod tests {
             ..Default::default()
         };
         runner.validate_runner(&req).unwrap();
+    }
+
+    #[test]
+    fn validate_runner_one_shot_rejects_default_network() {
+        // No user, but the default (absent → `Block`) network is not the
+        // canonical unrestricted-network acknowledgment, so one-shot provision
+        // refuses it (one-shot runs the full lifecycle, so provision rules
+        // apply).
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest::default();
+        let resp = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            resp.error_message.contains("network"),
+            "got {}",
+            resp.error_message
+        );
     }
 }

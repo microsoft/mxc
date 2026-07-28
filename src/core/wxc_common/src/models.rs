@@ -519,6 +519,15 @@ pub struct ContainerPolicy {
     pub blocked_hosts: Vec<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
+    /// Whether the caller supplied a `network` block on the wire (any field
+    /// present), captured at parse time. Distinguishes an absent network policy
+    /// from an explicit one whose values equal the defaults — the other fields
+    /// here cannot, since `default_network_policy` defaults to `Block` either
+    /// way. Used by backends (e.g. IsolationSession) that must reject a network
+    /// policy supplied on a phase where the posture is immutable. Parse-derived,
+    /// never on the wire.
+    #[serde(skip)]
+    pub network_specified: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
