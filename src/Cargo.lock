@@ -1279,6 +1279,7 @@ name = "learning_mode_windows"
 version = "0.7.0"
 dependencies = [
  "flatbuffers",
+ "learning_mode_core",
  "sandbox_spec",
  "thiserror",
  "windows",
