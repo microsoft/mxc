@@ -153,7 +153,9 @@ jobs:
       New-Item -ItemType Directory -Force -Path $sdkInteg | Out-Null
 
       # Built test files, runner, and package.json
-      Copy-Item -Recurse "$integSrc/dist" "$sdkInteg/dist"
+      New-Item -ItemType Directory -Force -Path "$sdkInteg/dist" | Out-Null
+      Copy-Item "$integSrc/dist/isolation-session-*.test.js" "$sdkInteg/dist/"
+      Copy-Item "$integSrc/dist/test-helpers.js" "$sdkInteg/dist/"
       Copy-Item "$integSrc/package.json" "$sdkInteg/package.json"
       Copy-Item "$integSrc/run-tests.js" "$sdkInteg/run-tests.js"
 
