@@ -336,9 +336,8 @@ fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
         );
     }
     if needs_wsl_package {
-        guidance.push(
-            "install WSL 2.9.3 or newer and run `wsl --update --pre-release`".to_string(),
-        );
+        guidance
+            .push("install WSL 2.9.3 or newer and run `wsl --update --pre-release`".to_string());
     }
     if guidance.is_empty() {
         guidance.push("ensure WSL2 and the WSLC SDK are installed".to_string());
