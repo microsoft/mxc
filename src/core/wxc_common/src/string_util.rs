@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use widestring::{U16CString, U16Str};
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
@@ -10,6 +12,33 @@ use windows::Win32::Security::PSID;
 /// Convert a UTF-8 string to a null-terminated UTF-16 wide string.
 pub fn to_wide(s: &str) -> Vec<u16> {
     U16CString::from_str_truncate(s).into_vec_with_nul()
+}
+
+/// Error returned when an OS string contains an embedded NUL and therefore
+/// cannot be passed as a single null-terminated Win32 string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedNulError;
+
+impl std::fmt::Display for EmbeddedNulError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OS string contains an embedded NUL")
+    }
+}
+
+impl std::error::Error for EmbeddedNulError {}
+
+/// Convert an OS string losslessly to null-terminated UTF-16.
+///
+/// Unlike [`to_wide`], this preserves Windows `OsStr` data that is not valid
+/// Unicode. Embedded NULs are rejected rather than silently truncating the
+/// value seen by Win32.
+pub fn os_str_to_wide(value: &OsStr) -> Result<Vec<u16>, EmbeddedNulError> {
+    let mut wide = value.encode_wide().collect::<Vec<u16>>();
+    if wide.contains(&0) {
+        return Err(EmbeddedNulError);
+    }
+    wide.push(0);
+    Ok(wide)
 }
 
 /// Convert a UTF-16 slice to a UTF-8 String, stopping at the first null terminator if present.
@@ -115,6 +144,8 @@ impl Drop for CoTaskMemPWSTR {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
 
     // ========== Base64 Encode ==========
 
@@ -277,6 +308,23 @@ mod tests {
         let wide = to_wide("Line1\nLine2\tTabbed");
         let s = from_wide(&wide);
         assert_eq!(s, "Line1\nLine2\tTabbed");
+    }
+
+    #[test]
+    fn os_str_to_wide_preserves_non_unicode_units() {
+        let units = [b'a' as u16, 0xD800, b'b' as u16];
+        let value = OsString::from_wide(&units);
+
+        let wide = os_str_to_wide(&value).expect("non-Unicode units are preserved");
+
+        assert_eq!(wide, [units[0], units[1], units[2], 0]);
+    }
+
+    #[test]
+    fn os_str_to_wide_rejects_embedded_nul() {
+        let value = OsString::from_wide(&[b'a' as u16, 0, b'b' as u16]);
+
+        assert_eq!(os_str_to_wide(&value), Err(EmbeddedNulError));
     }
 
     #[test]

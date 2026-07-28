@@ -382,9 +382,9 @@ fn validate_denied_path_overlap_with(
 /// - `Allow` → `Bridged`
 pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainerNetworkingMode {
     if is_block && !has_host_rules {
-        WslcContainerNetworkingMode::None
+        WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
     } else {
-        WslcContainerNetworkingMode::Bridged
+        WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
     }
 }
 
@@ -960,7 +960,7 @@ mod tests {
     fn network_block_no_hosts_maps_to_none() {
         assert_eq!(
             map_network_policy(true, false),
-            WslcContainerNetworkingMode::None
+            WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
         );
     }
 
@@ -968,7 +968,7 @@ mod tests {
     fn network_block_with_hosts_maps_to_bridged() {
         assert_eq!(
             map_network_policy(true, true),
-            WslcContainerNetworkingMode::Bridged
+            WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
         );
     }
 
@@ -976,7 +976,7 @@ mod tests {
     fn network_allow_maps_to_bridged() {
         assert_eq!(
             map_network_policy(false, false),
-            WslcContainerNetworkingMode::Bridged
+            WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
         );
     }
 
