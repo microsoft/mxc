@@ -156,9 +156,13 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         Ok(DeprovisionResult { metadata: None })
     }
 
-    // Filesystem rw/ro/denied paths, network, and proxy policy are rejected
-    // at every phase: the backend has no host-folder-sharing, network, or
-    // proxy primitive. Anything rejected produces a `policy_validation`
+    // Filesystem rw/ro/denied paths are rejected at every phase: the backend
+    // has no host-folder-sharing primitive. Network policy is honesty-gated —
+    // the backend cannot filter or deny the container network, so provision
+    // requires the canonical unrestricted-network acknowledgment, and every
+    // post-provision phase rejects a supplied network policy (the posture is
+    // fixed at provision) while inheriting an absent one. Proxy policy is
+    // rejected at every phase. Anything rejected produces a `policy_validation`
     // envelope rather than silent ignore.
 
     fn validate_provision(
@@ -256,7 +260,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, IsolationSessionUser};
+    use wxc_common::models::{ContainerPolicy, IsolationSessionUser, NetworkPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
 
     fn well_formed_user() -> IsolationSessionUser {
@@ -418,6 +422,19 @@ mod tests {
         }
     }
 
+    fn request_with_canonical_network() -> ExecutionRequest {
+        // The one network form the provision phase accepts (see policy.rs):
+        // unrestricted outbound + inbound, no host rules, no proxy.
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     // ====== sandbox_id parsing ======
 
     #[test]
@@ -491,15 +508,49 @@ mod tests {
     }
 
     #[test]
-    fn validate_phase_hooks_accept_clean_request() {
+    fn validate_provision_hook_accepts_canonical_network() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_canonical_network();
+        runner.validate_provision(&req, None).unwrap();
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_accept_absent_network() {
         let runner = IsolationSessionRunner::new();
         let req = ExecutionRequest::default();
 
-        runner.validate_provision(&req, None).unwrap();
         runner.validate_start("iso:abc", &req, None).unwrap();
         runner.validate_exec("iso:abc", &req, None).unwrap();
         runner.validate_stop("iso:abc", &req, None).unwrap();
         runner.validate_deprovision("iso:abc", &req, None).unwrap();
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_reject_specified_network() {
+        // A network policy supplied on a post-provision phase is fixed at
+        // provision and refused (mapped to policy_validation at the boundary).
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let s = runner.validate_start("iso:abc", &req, None).unwrap_err();
+        assert_eq!(s.code, MxcErrorCode::PolicyValidation);
+
+        let e = runner.validate_exec("iso:abc", &req, None).unwrap_err();
+        assert_eq!(e.code, MxcErrorCode::PolicyValidation);
+
+        let st = runner.validate_stop("iso:abc", &req, None).unwrap_err();
+        assert_eq!(st.code, MxcErrorCode::PolicyValidation);
+
+        let d = runner
+            .validate_deprovision("iso:abc", &req, None)
+            .unwrap_err();
+        assert_eq!(d.code, MxcErrorCode::PolicyValidation);
     }
 
     // ====== Entra user bundle validation ======
@@ -511,7 +562,7 @@ mod tests {
             user: Some(well_formed_user()),
         };
         runner
-            .validate_provision(&ExecutionRequest::default(), Some(&cfg))
+            .validate_provision(&request_with_canonical_network(), Some(&cfg))
             .unwrap();
     }
 

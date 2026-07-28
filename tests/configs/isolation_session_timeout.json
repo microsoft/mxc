@@ -2,6 +2,10 @@
   "version": "0.6.0-alpha",
   "containerId": "isolation-session-timeout",
   "containment": "isolation_session",
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
   "process": {
     "commandLine": "ping -n 30 127.0.0.1 >nul",
     "timeout": 1500

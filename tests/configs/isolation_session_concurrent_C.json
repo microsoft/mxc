@@ -2,6 +2,10 @@
   "version": "0.6.0-alpha",
   "containerId": "isolation-session-concurrent-C",
   "containment": "isolation_session",
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
   "process": {
     "commandLine": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\mxc_concurrent_log\\C.ps1",
     "timeout": 75000
