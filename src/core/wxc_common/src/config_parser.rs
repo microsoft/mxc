@@ -420,16 +420,6 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         let parsed = url::Url::parse(&url_str)
             .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
 
-        // Only http/https are meaningful for the HTTP(S)_PROXY env vars we
-        // inject. A non-HTTP scheme (ftp://, socks5://, …) is silently ignored
-        // by many clients, which fails open under WSLc's defaultPolicy=allow.
-        let scheme = parsed.scheme();
-        if scheme != "http" && scheme != "https" {
-            return Err(WxcError::ConfigParse(format!(
-                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {url_str}"
-            )));
-        }
-
         let host = parsed
             .host_str()
             .ok_or_else(|| {
@@ -874,34 +864,12 @@ enforced; access denials are recorded for diagnostics.\n",
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
                 && containment != ContainmentBackend::Seatbelt
-                && containment != ContainmentBackend::Wslc
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', 'seatbelt', or 'wslc' containment backends";
+                           'bubblewrap', or 'seatbelt' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
-
-            // WSLc containers run in their own network namespace, so an
-            // MXC-run host-loopback proxy is unreachable. Accept only the
-            // caller-supplied `url` form (which carries `original_url`); reject
-            // the `localhost` / `builtinTestServer` forms.
-            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
-                let is_url_form = proxy_config
-                    .address
-                    .as_ref()
-                    .is_some_and(|addr| addr.original_url.is_some());
-                if !is_url_form {
-                    let msg = "WSLc: network.proxy must use the 'url' form pointing at a \
-                               routable proxy (e.g. \"url\": \"http://proxy.example:8080\"). \
-                               The 'localhost' and 'builtinTestServer' forms are not supported \
-                               because a WSLc container runs in its own network namespace and \
-                               cannot reach a host-loopback proxy.";
-                    logger.log_line(msg);
-                    return Err(WxcError::ConfigParse(msg.to_string()));
-                }
-            }
-
             policy.network_proxy = proxy_config;
         }
 
@@ -922,24 +890,6 @@ enforced; access denials are recorded for diagnostics.\n",
         }
         if let Some(v) = net.blocked_hosts {
             policy.blocked_hosts = v;
-        }
-
-        // WSLc routes egress through the cooperative proxy but does not forward
-        // host lists to it, and a 'block' default (the WSLc default) yields no
-        // outbound networking / a drop-floor that can't even reach the proxy.
-        // Require an 'allow' default with no host lists so the proxy is reachable.
-        if containment == ContainmentBackend::Wslc
-            && policy.network_proxy.is_enabled()
-            && (policy.default_network_policy == NetworkPolicy::Block
-                || !policy.allowed_hosts.is_empty()
-                || !policy.blocked_hosts.is_empty())
-        {
-            let msg = "WSLc: network.proxy requires network.defaultPolicy='allow' and no \
-                       allowedHosts/blockedHosts. A WSLc container reaches the proxy only \
-                       with outbound networking enabled, and host lists are enforced by the \
-                       proxy, not forwarded to it.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
         // Bubblewrap is unprivileged by design; iptables-based enforcement
@@ -3063,134 +3013,6 @@ mod tests {
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
         // Warning is best-effort surfaced via the logger; the request still
         // succeeds.
-    }
-
-    #[test]
-    fn proxy_accepted_with_wslc_url_form() {
-        // WSLc supports the cooperative env-var proxy via a routable `url`.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"url": "http://proxy.example:8080"},
-                "defaultPolicy": "allow"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(!req.policy.network_proxy.builtin_test_server);
-        let addr = req.policy.network_proxy.address.as_ref().unwrap();
-        assert_eq!(addr.to_url(), "http://proxy.example:8080");
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_localhost_form() {
-        // The localhost form implies a host-loopback proxy, which a WSLc
-        // container (own network namespace) cannot reach. Must be rejected.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"localhost": 8080}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_builtin_test_server() {
-        // builtinTestServer spins up an MXC-run in-host proxy, unreachable
-        // from a WSLc container. Must be rejected with the url-form message.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"builtinTestServer": true}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_rejects_non_http_scheme() {
-        // Non-HTTP schemes are silently ignored by many clients when injected
-        // as HTTP(S)_PROXY, which fails open. Reject at parse time.
-        for url in ["socks5://proxy.example:1080", "ftp://proxy.example:21"] {
-            let json = format!(
-                r#"{{
-                    "process": {{"commandLine": "echo hi"}},
-                    "containment": "processcontainer",
-                    "network": {{"proxy": {{"url": "{url}"}}}}
-                }}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-            let err = load_request(&encoded, &mut logger, true).unwrap_err();
-            assert!(
-                format!("{err}").contains("must use the 'http' or 'https' scheme"),
-                "expected scheme rejection for {url}, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_url_with_block_default() {
-        // A WSLc url proxy needs outbound networking; the default 'block'
-        // policy (defaultPolicy omitted) leaves the proxy unreachable.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"url": "http://proxy.example:8080"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("requires network.defaultPolicy='allow'"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_url_with_host_lists() {
-        // Host lists are not forwarded to the proxy; reject to avoid silently
-        // weaker enforcement.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"url": "http://proxy.example:8080"},
-                "defaultPolicy": "allow",
-                "allowedHosts": ["example.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("allowedHosts/blockedHosts"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]

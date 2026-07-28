@@ -975,57 +975,17 @@ impl WSLContainerRunner {
             return sdk_error("WslcSetProcessSettingsCmdLine failed", hr, "");
         }
 
-        // Route egress through the cooperative proxy: WSLc has no in-kernel
-        // iptables, so per-host policy is enforced at the proxy layer by
-        // injecting HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
-        // See wxc_common::proxy_env.
-        let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
-            // url-only (also enforced at parse time). Fail fast rather than
-            // inject an empty HTTP_PROXY= for the localhost/builtinTestServer
-            // forms, which carry no routable URL.
-            let proxy_url = match request
-                .policy
-                .network_proxy
-                .address
-                .as_ref()
-                .and_then(|addr| addr.original_url.clone())
-            {
-                Some(url) => url,
-                None => {
-                    return ScriptResponse::error(
-                        "WSLC: network.proxy requires the 'url' form (a routable proxy URL); \
-                         the localhost and builtinTestServer forms are not supported because a \
-                         WSLc container runs in its own network namespace.",
-                    );
-                }
-            };
-            let _ = writeln!(
-                logger,
-                "[WSLC] Cooperative network proxy configured: {}",
-                wxc_common::proxy_env::redact_proxy_url(&proxy_url)
-            );
-            wxc_common::proxy_env::apply_cooperative_proxy_env(&request.env, &proxy_url)
-        } else {
-            request.env.clone()
-        };
-
-        // Env buffers must outlive WslcCreateContainer: the SDK stores the
-        // pointers into process_settings (it does not copy), and reads them at
-        // container-create time. Hoisting to function scope keeps them alive —
-        // mirrors the cmdline/_cwd_cstr handling. Scoping them inside the `if`
-        // below frees them early and causes a use-after-free (0xC0000005).
-        let _env_cstrings: Vec<Vec<u8>>;
-        let _env_ptrs: Vec<PCSTR>;
-        if !effective_env.is_empty() {
-            _env_cstrings = effective_env
+        if !request.env.is_empty() {
+            let env_cstrings: Vec<Vec<u8>> = request
+                .env
                 .iter()
                 .map(|e| format!("{}\0", e).into_bytes())
                 .collect();
-            _env_ptrs = _env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
+            let env_ptrs: Vec<PCSTR> = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr = sdk.WslcSetProcessSettingsEnvVariables(
                 &mut process_settings,
-                _env_ptrs.as_ptr(),
-                _env_ptrs.len(),
+                env_ptrs.as_ptr(),
+                env_ptrs.len(),
             );
             if hr != S_OK {
                 return sdk_error("WslcSetProcessSettingsEnvVariables failed", hr, "");
