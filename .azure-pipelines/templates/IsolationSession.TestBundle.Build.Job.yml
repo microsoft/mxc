@@ -185,7 +185,7 @@ jobs:
           format_version = 1
           produced_at    = (Get-Date).ToUniversalTime().ToString('o')
           branch_name    = "${{ parameters.checkoutRepo }}"
-          commit_sha     = "$(Build.SourceVersion)"
+          commit_sha     = (git -C "$(Build.SourcesDirectory)" rev-parse HEAD).Trim()
           build_id       = "$(Build.BuildId)"
           pipeline       = "$(Build.DefinitionName)"
           triplet        = "x86_64-pc-windows-msvc"
