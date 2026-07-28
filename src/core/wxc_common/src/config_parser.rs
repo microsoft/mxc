@@ -815,10 +815,6 @@ fn convert_wire_config(
         // available in every build.
         if ac.learning_mode.unwrap_or(false) {
             policy.capabilities.push("learningModeLogging".to_string());
-            logger.log(
-                "NOTE: 'learningModeLogging' enabled - AppContainer restrictions remain \
-enforced; access denials are recorded for diagnostics.\n",
-            );
         }
 
         // Learning-mode capability names are reserved for the dedicated entry
@@ -2557,6 +2553,10 @@ mod tests {
                 .capabilities
                 .contains(&"learningModeLogging".to_string()),
             "allow capture must remove deny-and-record mode"
+        );
+        assert!(
+            !logger.get_buffer().contains("restrictions remain enforced"),
+            "parser must not log the superseded deny-and-record mode"
         );
     }
 

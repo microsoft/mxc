@@ -713,15 +713,16 @@ impl BaseContainerRunner {
         // Resolve the ETL output path: caller-specified when provided, else a
         // managed per-run temp file the runner names (parsed / cleaned up by the
         // consume + analyze stages).
-        let capture_output_path: Option<PathBuf> = capture_denials.as_ref().map(|cd| {
-            cd.output_path
-                .clone()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::temp_dir()
-                        .join(format!("mxc_capture_denials_{}.etl", std::process::id()))
-                })
-        });
+        let capture_output_path: Option<PathBuf> = capture_denials
+            .as_ref()
+            .map(|cd| {
+                cd.output_path
+                    .clone()
+                    .map(PathBuf::from)
+                    .map(Ok)
+                    .unwrap_or_else(managed_capture_output_path)
+            })
+            .transpose()?;
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
@@ -1500,9 +1501,9 @@ impl BaseContainerSandboxProcess {
         }
     }
 
-    fn run_teardown(&mut self) {
+    fn run_teardown(&mut self) -> std::io::Result<()> {
         if self.teardown_done {
-            return;
+            return Ok(());
         }
         self.teardown_done = true;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
@@ -1513,19 +1514,22 @@ impl BaseContainerSandboxProcess {
         // security environment. The output-file path is surfaced on stderr so a
         // caller can locate the denials (the full NDJSON contract is finalized
         // in the output/consume stage).
-        if let Some(session) = self.capture_session.take() {
-            let output_path = self.capture_output_path.clone();
+        let capture_result = if let Some(session) = self.capture_session.take() {
+            let output_path = self.capture_output_path.take();
             match session.finish(output_path.as_deref()) {
                 Ok(()) => {
                     if let Some(path) = &output_path {
                         eprintln!("captureDenials: denials ETL written to {}", path.display());
                     }
+                    Ok(())
                 }
-                Err(e) => {
-                    eprintln!("captureDenials: failed to seal denials ETL: {e}");
-                }
+                Err(error) => Err(std::io::Error::other(format!(
+                    "captureDenials failed to seal the denial trace: {error}"
+                ))),
             }
-        }
+        } else {
+            Ok(())
+        };
 
         if self.destroy_on_exit {
             run_sandbox_cleanup(
@@ -1537,6 +1541,7 @@ impl BaseContainerSandboxProcess {
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
         self.proxy_coordinator.stop(&mut logger);
+        capture_result
     }
 }
 
@@ -1632,8 +1637,8 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
-        self.run_teardown();
-        result
+        let teardown_result = self.run_teardown();
+        combine_process_and_teardown_results(result, teardown_result)
     }
 }
 
@@ -1646,7 +1651,43 @@ impl Drop for BaseContainerSandboxProcess {
         unsafe {
             let _ = WaitForSingleObject(self.process.get(), u32::MAX);
         }
-        self.run_teardown();
+        if let Err(error) = self.run_teardown() {
+            eprintln!("captureDenials teardown failed during drop: {error}");
+        }
+    }
+}
+
+fn managed_capture_output_path() -> Result<PathBuf, ScriptResponse> {
+    let mut nonce = [0u8; 16];
+    getrandom::getrandom(&mut nonce).map_err(|error| {
+        ScriptResponse::error(&format!(
+            "captureDenials could not generate a unique temporary output path: {error}"
+        ))
+    })?;
+    let suffix = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(std::env::temp_dir().join(format!(
+        "mxc_capture_denials_{}_{suffix}.etl",
+        std::process::id()
+    )))
+}
+
+fn combine_process_and_teardown_results(
+    process_result: std::io::Result<i32>,
+    teardown_result: std::io::Result<()>,
+) -> std::io::Result<i32> {
+    match (process_result, teardown_result) {
+        (Ok(exit_code), Ok(())) => Ok(exit_code),
+        (Ok(_), Err(teardown_error)) => Err(teardown_error),
+        (Err(wait_error), Ok(())) => Err(wait_error),
+        (Err(wait_error), Err(teardown_error)) => {
+            eprintln!(
+                "captureDenials teardown also failed after process wait failure: {teardown_error}"
+            );
+            Err(wait_error)
+        }
     }
 }
 
@@ -1684,6 +1725,26 @@ mod tests {
 
     fn expected_mask(r: EffectiveUiRestrictions) -> u64 {
         to_job_object_uilimit_mask(&r) as u64
+    }
+
+    #[test]
+    fn managed_capture_paths_are_unique_per_run() {
+        let first = managed_capture_output_path().expect("first path");
+        let second = managed_capture_output_path().expect("second path");
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(second.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(first.extension().and_then(|ext| ext.to_str()), Some("etl"));
+    }
+
+    #[test]
+    fn successful_process_reports_capture_teardown_failure() {
+        let error =
+            combine_process_and_teardown_results(Ok(0), Err(std::io::Error::other("seal failed")))
+                .expect_err("capture failure must override successful process exit");
+
+        assert!(error.to_string().contains("seal failed"));
     }
 
     #[test]
