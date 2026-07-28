@@ -2,7 +2,6 @@
     "phase": "provision",
     "containment": "isolation_session",
     "network": {
-        "defaultPolicy": "allow",
-        "allowLocalNetwork": true
+        "defaultPolicy": "block"
     }
 }
