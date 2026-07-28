@@ -290,6 +290,27 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_user_
     -ExpectedExit -1 `
     -OutputContains @("user is not supported in one-shot mode")))
 
+# One-shot network rejection: the isolation session container's network is
+# unrestricted and cannot be filtered or denied, so a non-canonical network
+# policy (here defaultPolicy=block) is refused at provision. Only the canonical
+# acknowledgment (defaultPolicy=allow + allowLocalNetwork=true) is accepted.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("network is unrestricted")))
+
+# Inbound axis: `allow` outbound without `allowLocalNetwork` is still refused --
+# a process inside CAN listen on a localhost-reachable port, so the caller must
+# acknowledge inbound too. Both axes must be the unrestricted form.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_no_local.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("network is unrestricted")))
+
+# Host rules: even with the canonical allow + allowLocalNetwork base, any
+# allowedHosts/blockedHosts entry is refused -- the backend cannot filter hosts.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_hosts.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("network is unrestricted")))
+
 # ---------------- Concurrent one-shot test ----------------
 #
 # Three wxc-exec processes (A, B, C) run a per-agent PowerShell script

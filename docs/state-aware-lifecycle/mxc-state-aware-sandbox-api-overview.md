@@ -290,8 +290,7 @@ Provision and exec — the two most distinctive shapes. Reference §7.4 has all 
 
 ```typescript
 const config: IsolationSessionProvisionConfig = {
-  filesystem: { readwritePaths: ['C:\\workspace'] },
-  network: { defaultPolicy: 'allow', allowedHosts: ['api.anthropic.com'] },
+  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
 };
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
@@ -306,8 +305,7 @@ const { sandboxId } = await provisionSandbox(
   "version": "0.6.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
-  "filesystem": { "readwritePaths": ["C:\\workspace"] },
-  "network": { "defaultPolicy": "allow", "allowedHosts": ["api.anthropic.com"] }
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
 }
 ```
 
@@ -370,8 +368,9 @@ Cross-backend exec fields flow through top-level `process`. Cross-cutting fields
 (`filesystem` / `network` / `ui`) on the per-(backend, phase) Config map directly to
 top-level wire fields (backend declares per-phase honor per reference §10.3). The
 SDK Config exposes only the cross-cutting fields the runtime currently honors —
-for IsolationSession at provision today that's `filesystem`; `network` and `ui` are
-added when the runtime honors them.
+for IsolationSession at provision that's `network` — the required unrestricted-network
+acknowledgment (`{ defaultPolicy: 'allow', allowLocalNetwork: true }`); `filesystem` is
+rejected.
 
 ## Error codes
 
