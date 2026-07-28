@@ -163,6 +163,7 @@ export interface ProcessContainerConfig {
   learningMode?: boolean;
   /**
    * Additional AppContainer capabilities (e.g., "registryRead", "internetClient").
+   * Each entry must contain one capability name and must not contain a comma.
    * The reserved learning-mode capability names must not be supplied directly.
    */
   capabilities?: string[];

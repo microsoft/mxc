@@ -196,6 +196,8 @@ pub struct ProcessContainer {
     /// dedicated denial-capture configuration.
     pub learning_mode: Option<bool>,
     /// AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+    /// Each array entry must contain exactly one capability name; commas are
+    /// rejected because BaseContainer uses commas as its wire delimiter.
     /// `learningModeLogging` and `permissiveLearningMode` are reserved and
     /// rejected here; use `learningMode`, `--audit`, or the dedicated denial
     /// capture configuration instead.

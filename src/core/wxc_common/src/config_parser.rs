@@ -775,6 +775,14 @@ enforced; access denials are recorded for diagnostics.\n",
         // Reject direct capability-array use case-insensitively because Windows
         // derives capability SIDs case-insensitively.
         if let Some(caps) = ac.capabilities {
+            if let Some(invalid) = caps.iter().find(|capability| capability.contains(',')) {
+                let msg = format!(
+                    "processContainer.capabilities entry '{invalid}' must not contain a comma; \
+                     provide multiple capabilities as separate JSON array entries"
+                );
+                logger.log_line(&msg);
+                return Err(WxcError::ConfigParse(msg));
+            }
             if let Some(reserved) = caps.iter().find(|capability| {
                 capability.eq_ignore_ascii_case("learningModeLogging")
                     || capability.eq_ignore_ascii_case("permissiveLearningMode")
@@ -1777,6 +1785,28 @@ mod tests {
                 .expect_err("reserved learning-mode capability must be rejected");
             let message = error.to_string();
             assert!(message.contains("reserved learning-mode capability"));
+            assert!(message.contains(capability));
+        }
+    }
+
+    #[test]
+    fn comma_delimited_capability_entries_are_rejected() {
+        for capability in [
+            "internetClient,permissiveLearningMode",
+            "learningModeLogging,internetClient",
+            "internetClient,privateNetworkClientServer",
+        ] {
+            let json = format!(
+                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let error = load_request(&encoded, &mut logger, true)
+                .expect_err("comma-delimited capability entry must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("must not contain a comma"));
+            assert!(message.contains("separate JSON array entries"));
             assert!(message.contains(capability));
         }
     }
