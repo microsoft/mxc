@@ -34,7 +34,9 @@ use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
+use wxc_common::models::{
+    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
+};
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
@@ -1303,6 +1305,14 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if request.policy.capture_denials.is_some() {
+            let msg = "captureDenials requires the BaseContainer learning-mode APIs and is not \
+                       supported by the AppContainer fallback tier";
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(msg)
+            });
+        }
         if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
             return Err(ScriptResponse::error(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
@@ -1824,7 +1834,7 @@ mod tests {
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use super::{AppContainerScriptRunner, FilesystemMode};
-    use wxc_common::models::ExecutionRequest;
+    use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
@@ -1884,5 +1894,18 @@ mod tests {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
         assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_capture_denials_on_appcontainer_fallback() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer fallback must not silently ignore captureDenials");
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert!(error.error_message.contains("requires the BaseContainer"));
     }
 }

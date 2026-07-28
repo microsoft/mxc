@@ -671,8 +671,9 @@ impl BaseContainerRunner {
         // injected into policy.capabilities (and hence the spec) by the config
         // parser; here we obtain the OS handles that drive the ETL trace. Both
         // exports live in the same processmodel.dll the BaseContainer launch API
-        // is loaded from, and only exist on feature-enabled (GE_CURRENT) builds,
-        // so a failed load is a clean, actionable "backend unavailable" degrade.
+        // is loaded from, and only exist on supported feature-enabled Windows
+        // builds, so a failed load is a clean, actionable "backend unavailable"
+        // degrade.
         let capture_denials = request.policy.capture_denials.clone();
         let mut capture_apis: Option<(SecurityEnvironmentApi, LearningModeApi)> = None;
         if capture_denials.is_some() {
