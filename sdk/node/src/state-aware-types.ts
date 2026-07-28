@@ -67,6 +67,17 @@ export interface IsolationSessionProvisionConfig {
    * `startSandbox`. Hosts that don't support this surface `backend_unavailable`.
    */
   user?: IsolationSessionUserConfig;
+  /**
+   * Unrestricted-network acknowledgment (**required**). The isolation session
+   * container runs on a network MXC cannot filter or deny — outbound is open,
+   * and a process inside can listen on a port reachable from outside via
+   * localhost. The caller must explicitly acknowledge this; the ONLY accepted
+   * value is `{ defaultPolicy: 'allow', allowLocalNetwork: true }`. Any other
+   * network policy (including omission, which the backend treats as the
+   * unenforceable default-deny) is rejected at provision. The posture is fixed
+   * at provision, so `network` is not accepted on the post-provision phases.
+   */
+  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 
 export interface IsolationSessionStartConfig {
