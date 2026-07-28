@@ -273,7 +273,7 @@ mod tests {
         }
     }
 
-    /// Mirrors the real `Mode="Normal"` (block-and-log) capture: file/registry
+    /// Mirrors the real `Mode="Normal"` (`block`) capture: file/registry
     /// access checks as event 14 plus a compact capability denial as event 28.
     #[test]
     fn block_and_log_shape_decodes_and_classifies() {
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(out[2].pid, 0x1acc, "pid from payload ProcessId");
     }
 
-    /// Mirrors the real `Mode="Permissive"` (allow-and-log) capture: the same
+    /// Mirrors the real `Mode="Permissive"` (`allow`) capture: the same
     /// file/registry checks plus a capability check folded into an
     /// empty-`ObjectType` event 14 (there is no event 28 in this mode).
     #[test]

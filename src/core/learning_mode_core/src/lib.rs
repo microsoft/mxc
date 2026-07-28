@@ -26,7 +26,7 @@
 //!
 //! What a capture contains depends on the active OS learning mode.
 //! File/path and UI denials are recorded under both `learningMode`
-//! (block-and-log) and `permissiveLearningMode` (allow-and-log), but
+//! (`block`) and `permissiveLearningMode` (`allow`), but
 //! **capability** ([`ResourceType::Capability`]) denials are currently
 //! only recorded under permissive learning mode. Consumers must not
 //! assume capability records are present under plain `learningMode`.

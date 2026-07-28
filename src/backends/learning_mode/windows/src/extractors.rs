@@ -24,14 +24,14 @@
 //!   object type (Section, Process, Thread, ...) is dropped (not actionable
 //!   via sandbox policy). The [`AccessType`] is derived from the
 //!   `AccessMask` field (see [`access_type_from_mask`]). Emitted under both
-//!   learning modes (`block-and-log` → `Mode="Normal"`, `allow-and-log` →
+//!   learning modes (`block` → `Mode="Normal"`, `allow` →
 //!   `Mode="Permissive"`).
 //! - **27 — `LearningModeViolation`** — UI-surface denials →
 //!   [`ResourceType::Ui`]. Carries no usable access mask, so the access type
 //!   stays [`AccessType::Unknown`].
 //! - **28 — capability denial** — a compact capability-access-manager
 //!   record (`Denied` / `PackageSid` / `ProcessId`), emitted under
-//!   `block-and-log`; `allow-and-log` folds the same information into the
+//!   `block`; `allow` folds the same information into the
 //!   empty-`ObjectType` event 14 above. Mapped to [`ResourceType::Capability`].
 //!   The capability *name* is carried in the `PackageSid` blob and is not
 //!   yet decoded, so the resource path is left empty for now (see the crate
@@ -175,7 +175,7 @@ pub fn build_denial_from_learning_mode(
 
 /// Builds a [`RawDenial`] from a capability-denial (event 28) payload.
 ///
-/// Emitted under `block-and-log`. The record reports a `Denied` boolean; we
+/// Emitted under `block`. The record reports a `Denied` boolean; we
 /// only surface actual denials. The originating process is taken from the
 /// payload `ProcessId` (which is more precise than the ETW header pid for
 /// brokered checks) when present, else the header pid. The capability name
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn capability_denial_event_28_extracted() {
-        // Real block-and-log shape: image name + hex ProcessId + Denied.
+        // Real block shape: image name + hex ProcessId + Denied.
         let p = parts(
             28,
             &[
