@@ -57,17 +57,77 @@ impl std::fmt::Display for MxcErrorCode {
     }
 }
 
+/// Structured detail for a failure that originated in an underlying platform
+/// API.
+///
+/// Grouping these makes the envelope invariant unrepresentable to violate:
+/// `native_code` and `remediation` cannot exist without `operation`, because
+/// they live inside the same value. `MxcError` holds this boxed, so adding
+/// detail costs one pointer rather than widening every `Result<_, MxcError>`
+/// in the codebase.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ApiFailure {
+    /// The API call that failed, namespaced by its interface — e.g.
+    /// `IsoSessionOps.RunProcessWithOptionsAsync`. Kept low-cardinality and
+    /// free of call parameters so it can be grouped in telemetry.
+    pub operation: String,
+    /// The underlying platform status as a string, e.g. `0x80070490`.
+    pub native_code: Option<String>,
+    /// The API's actionable "how to fix it" hint, when it supplies one.
+    pub remediation: Option<String>,
+}
+
+impl ApiFailure {
+    /// A failure that names its operation but carries no status or hint.
+    pub fn new(operation: impl Into<String>) -> Self {
+        Self {
+            operation: operation.into(),
+            native_code: None,
+            remediation: None,
+        }
+    }
+
+    pub fn with_native_code(mut self, native_code: impl Into<String>) -> Self {
+        self.native_code = Some(native_code.into());
+        self
+    }
+
+    pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
+        self.remediation = Some(remediation.into());
+        self
+    }
+}
+
 /// Typed Rust equivalent of the SDK `MxcError`.
 ///
 /// Constructed via `MxcError::new(code, message)` or one of the per-code
 /// convenience constructors (e.g. `MxcError::stale_id("...")`); attach
-/// structured failure information with `.with_details(json!({...}))`.
+/// structured failure information with `with_details` or `with_api_failure`.
+///
+/// # Structured failure fields
+///
+/// An [`ApiFailure`] describes a failure that originated in an underlying
+/// platform API. It is deliberately backend-neutral: `operation` names the
+/// API call that failed, `native_code` carries the platform status as a
+/// string (an HRESULT on Windows, an errno or equivalent elsewhere), and
+/// `remediation` carries an actionable hint when the API supplies one. On the
+/// wire these are flat siblings of `code` and `message`.
+///
+/// A failure MXC raises itself — a malformed request, a policy rejection, or
+/// an internal failure with no API call in flight — leaves it unset and so
+/// carries only `code` and `message`.
+///
+/// A new *backend-neutral* concept earns a field on `ApiFailure`;
+/// *backend-specific* structured data belongs in `details`, which stays open
+/// for that purpose.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message}")]
 pub struct MxcError {
     pub code: MxcErrorCode,
     pub message: String,
     pub details: Option<Value>,
+    /// Present only when an underlying API operation was in flight.
+    pub api_failure: Option<Box<ApiFailure>>,
 }
 
 impl MxcError {
@@ -76,6 +136,7 @@ impl MxcError {
             code,
             message: message.into(),
             details: None,
+            api_failure: None,
         }
     }
 
@@ -84,11 +145,41 @@ impl MxcError {
         self
     }
 
+    /// Attaches the structured detail of an underlying API failure.
+    pub fn with_api_failure(mut self, failure: ApiFailure) -> Self {
+        self.api_failure = Some(Box::new(failure));
+        self
+    }
+
+    /// The API call that failed, when one was in flight.
+    pub fn operation(&self) -> Option<&str> {
+        self.api_failure.as_ref().map(|f| f.operation.as_str())
+    }
+
+    /// The underlying platform status, when known. Never present without
+    /// [`MxcError::operation`].
+    pub fn native_code(&self) -> Option<&str> {
+        self.api_failure
+            .as_ref()
+            .and_then(|f| f.native_code.as_deref())
+    }
+
+    /// The API's remediation hint, when it supplied one. Never present
+    /// without [`MxcError::operation`].
+    pub fn remediation(&self) -> Option<&str> {
+        self.api_failure
+            .as_ref()
+            .and_then(|f| f.remediation.as_deref())
+    }
+
     pub fn to_envelope(&self) -> ErrorEnvelope {
         ErrorEnvelope {
             code: self.code,
             message: self.message.clone(),
             details: self.details.clone(),
+            operation: self.operation().map(str::to_string),
+            native_code: self.native_code().map(str::to_string),
+            remediation: self.remediation().map(str::to_string),
         }
     }
 }
@@ -134,14 +225,27 @@ impl MxcError {
 }
 
 /// Wire shape of the `error` arm. `code` is a closed `MxcErrorCode` that
-/// serialises to its snake_case wire string; `details` is omitted from JSON
-/// when absent.
+/// serialises to its snake_case wire string; every optional field is omitted
+/// from JSON when absent.
+///
+/// See [`MxcError`] for the meaning of the structured failure fields and the
+/// invariant relating them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorEnvelope {
     pub code: MxcErrorCode,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub details: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub operation: Option<String>,
+    #[serde(
+        rename = "nativeCode",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub native_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub remediation: Option<String>,
 }
 
 /// Top-level non-exec response envelope: `{"result": <T>}` on success, or
@@ -269,6 +373,9 @@ mod tests {
             code: MxcErrorCode::StaleId,
             message: "session expired".into(),
             details: Some(json!({"k": "v"})),
+            operation: Some("IsoSessionOps.StopSessionAsync".into()),
+            native_code: Some("0x80070490".into()),
+            remediation: Some("Re-provision the sandbox.".into()),
         };
         let s = serde_json::to_string(&env).unwrap();
         let back: ErrorEnvelope = serde_json::from_str(&s).unwrap();
@@ -281,6 +388,9 @@ mod tests {
             code: MxcErrorCode::StaleId,
             message: "x".into(),
             details: None,
+            operation: None,
+            native_code: None,
+            remediation: None,
         };
         let s = serde_json::to_string(&env).unwrap();
         assert!(!s.contains("details"));
@@ -299,6 +409,9 @@ mod tests {
             code: MxcErrorCode::StaleId,
             message: "x".into(),
             details: None,
+            operation: None,
+            native_code: None,
+            remediation: None,
         };
         let env: ResponseEnvelope<()> = ResponseEnvelope::Error(inner.clone());
         let json = serde_json::to_value(&env).unwrap();
@@ -311,6 +424,9 @@ mod tests {
             code: MxcErrorCode::BackendError,
             message: "boom".into(),
             details: Some(json!({"x": 1})),
+            operation: Some("IsoSessionOps.AddUserAsync".into()),
+            native_code: Some("0x80004005".into()),
+            remediation: None,
         };
         let env: ResponseEnvelope<()> = ResponseEnvelope::Error(inner);
         let s = serde_json::to_string(&env).unwrap();
@@ -333,5 +449,120 @@ mod tests {
                 }
             })
         );
+    }
+
+    // ── Structured failure fields ────────────────────────────────────────
+
+    fn full_api_failure() -> ApiFailure {
+        ApiFailure::new("IsoSessionOps.AddUserAsync")
+            .with_native_code("0x80070490")
+            .with_remediation("Re-provision the sandbox.")
+    }
+
+    #[test]
+    fn new_leaves_structured_fields_unset() {
+        let err = MxcError::backend_error("boom");
+        assert_eq!(err.operation(), None);
+        assert_eq!(err.native_code(), None);
+        assert_eq!(err.remediation(), None);
+    }
+
+    #[test]
+    fn structured_builders_set_their_fields() {
+        let err = MxcError::backend_error("boom").with_api_failure(full_api_failure());
+        assert_eq!(err.operation(), Some("IsoSessionOps.AddUserAsync"));
+        assert_eq!(err.native_code(), Some("0x80070490"));
+        assert_eq!(err.remediation(), Some("Re-provision the sandbox."));
+    }
+
+    /// `native_code` and `remediation` live inside `ApiFailure`, so they
+    /// cannot be set without an `operation` — the envelope invariant holds
+    /// by construction rather than by convention.
+    #[test]
+    fn structured_detail_always_carries_an_operation() {
+        let err = MxcError::backend_error("boom")
+            .with_api_failure(ApiFailure::new("IsoSessionOps.AddUserAsync"));
+        assert_eq!(err.operation(), Some("IsoSessionOps.AddUserAsync"));
+        assert_eq!(err.native_code(), None);
+        assert_eq!(err.remediation(), None);
+    }
+
+    #[test]
+    fn to_envelope_copies_structured_fields_through() {
+        let env = MxcError::backend_error("boom")
+            .with_api_failure(full_api_failure())
+            .to_envelope();
+        assert_eq!(env.operation.as_deref(), Some("IsoSessionOps.AddUserAsync"));
+        assert_eq!(env.native_code.as_deref(), Some("0x80070490"));
+        assert_eq!(
+            env.remediation.as_deref(),
+            Some("Re-provision the sandbox.")
+        );
+    }
+
+    /// The wire key is camelCase `nativeCode`, not the Rust field name
+    /// `native_code`. The SDK reads `nativeCode`; a lost serde rename would
+    /// silently strip the field from every consumer.
+    #[test]
+    fn native_code_serialises_as_camel_case_key() {
+        let env = MxcError::backend_error("boom")
+            .with_api_failure(
+                ApiFailure::new("IsoSessionOps.AddUserAsync").with_native_code("0x80070490"),
+            )
+            .to_envelope();
+        let s = serde_json::to_string(&env).unwrap();
+        assert!(
+            s.contains("\"nativeCode\""),
+            "expected camelCase key in {s}"
+        );
+        assert!(!s.contains("native_code"), "found snake_case key in {s}");
+    }
+
+    #[test]
+    fn structured_envelope_serialises_all_fields() {
+        let env = MxcError::stale_id("agent user not found")
+            .with_api_failure(
+                ApiFailure::new("IsoSessionOps.StopSessionAsync")
+                    .with_native_code("0x80070490")
+                    .with_remediation("Re-provision the sandbox."),
+            )
+            .to_envelope();
+        let json = serde_json::to_value(&env).unwrap();
+        assert_eq!(
+            json,
+            json!({
+                "code": "stale_id",
+                "message": "agent user not found",
+                "operation": "IsoSessionOps.StopSessionAsync",
+                "nativeCode": "0x80070490",
+                "remediation": "Re-provision the sandbox.",
+            })
+        );
+    }
+
+    #[test]
+    fn envelope_omits_each_structured_field_when_unset() {
+        // Only `operation` set: the other two must not appear at all.
+        let env = MxcError::backend_error("boom")
+            .with_api_failure(ApiFailure::new("IsoSessionOps.AddUserAsync"))
+            .to_envelope();
+        let s = serde_json::to_string(&env).unwrap();
+        assert!(s.contains("\"operation\""));
+        assert!(
+            !s.contains("nativeCode"),
+            "unset nativeCode leaked into {s}"
+        );
+        assert!(
+            !s.contains("remediation"),
+            "unset remediation leaked into {s}"
+        );
+    }
+
+    /// An MXC-side rejection has no API call in flight, so it carries neither
+    /// `operation` nor its refinements — see the invariant on `MxcError`.
+    #[test]
+    fn mxc_side_rejection_carries_no_structured_fields() {
+        let json = serde_json::to_value(MxcError::policy_validation("bad").to_envelope()).unwrap();
+        assert_eq!(json, json!({"code": "policy_validation", "message": "bad"}));
     }
 }

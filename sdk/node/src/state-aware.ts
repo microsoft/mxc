@@ -4,7 +4,7 @@
 import pty from 'node-pty';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
-import { mxcErrorFromCode } from './errors.js';
+import { mxcErrorFromEnvelope } from './errors.js';
 import { diagLog } from './diagnostic.js';
 import {
   DeprovisionConfigFor,
@@ -142,8 +142,7 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   if (exitCode !== 0) {
     const errorEnvelope = tryParseErrorEnvelope(stdout);
     if (errorEnvelope) {
-      const e = errorEnvelope.error;
-      throw mxcErrorFromCode(e.code, e.message, e.details);
+      throw mxcErrorFromEnvelope(errorEnvelope.error);
     }
   }
 

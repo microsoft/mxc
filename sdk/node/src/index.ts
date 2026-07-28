@@ -71,7 +71,10 @@ export {
 export {
   ErrorCode,
   MxcError,
+  MxcErrorFields,
+  WireError,
   mxcErrorFromCode,
+  mxcErrorFromEnvelope,
 } from './errors.js';
 
 // Export state-aware lifecycle types
