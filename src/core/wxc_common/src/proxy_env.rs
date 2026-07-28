@@ -12,15 +12,21 @@
 //!
 //! Two hygiene rules make this robust:
 //! 1. **Scrub** every caller-supplied proxy env var ([`PROXY_ENV_KEYS`]) so a
-//!    workload cannot defeat the cooperative proxy by injecting its own
-//!    `HTTP_PROXY` (or clearing it via `NO_PROXY`).
+//!    workload cannot pre-disable the proxy via its own `HTTP_PROXY` (or a
+//!    `NO_PROXY` exemption). This only sanitizes the *initial* env; the model
+//!    is cooperative, so a workload can still mutate its own env at runtime.
 //! 2. **Set** the HTTP/HTTPS/ALL proxy keys ([`PROXY_SET_KEYS`]) to the
-//!    configured proxy URL.
+//!    configured URL — never `NO_PROXY` (a host exemption list, not a target).
 //!
-//! `NO_PROXY` is intentionally *not* set: exempting loopback/other hosts
-//! would silently bypass the proxy's host filtering.
+//! `NO_PROXY` is kept out of [`PROXY_SET_KEYS`] and handled per-backend:
+//! - Bubblewrap uses `--clearenv` + `PROXY_SET_KEYS`, so it never emits
+//!   `NO_PROXY` (a stray exemption would bypass the proxy's host filtering).
+//! - WSLc ([`apply_cooperative_proxy_env`]) *merges* over the image's baked-in
+//!   `ENV`, so an image `NO_PROXY=*` could survive. To neutralize it, WSLc
+//!   sets `NO_PROXY`/`no_proxy` ([`PROXY_NEUTRALIZE_KEYS`]) to the *empty*
+//!   string rather than omitting them.
 //!
-//! The functions here operate purely on `"KEY=VALUE"` strings so they are
+//! Functions here operate on `"KEY=VALUE"` strings, so they are
 //! platform-agnostic and unit-testable on every host.
 
 /// Proxy-related env var keys that are *scrubbed* from caller-supplied env so
@@ -39,7 +45,8 @@ pub const PROXY_ENV_KEYS: &[&str] = &[
 /// Proxy env var keys that are actively *set* to the configured proxy URL.
 ///
 /// The HTTP/HTTPS/ALL keys (upper- and lower-case) are set. `NO_PROXY` is
-/// deliberately omitted (see module docs).
+/// deliberately omitted (it is a host-exemption list, not a proxy target; see
+/// module docs and [`PROXY_NEUTRALIZE_KEYS`]).
 pub const PROXY_SET_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -48,6 +55,12 @@ pub const PROXY_SET_KEYS: &[&str] = &[
     "https_proxy",
     "all_proxy",
 ];
+
+/// Proxy env var keys that [`apply_cooperative_proxy_env`] sets to the *empty
+/// string* to neutralize any inherited (e.g. image-baked) value. Forcing
+/// `NO_PROXY` empty exempts nothing, so all cooperating traffic still routes
+/// through the proxy. (Bubblewrap uses `--clearenv` and does not use these.)
+pub const PROXY_NEUTRALIZE_KEYS: &[&str] = &["NO_PROXY", "no_proxy"];
 
 /// Returns the key portion of a `"KEY=VALUE"` env entry (the whole string if
 /// there is no `=`).
@@ -82,8 +95,11 @@ pub fn redact_proxy_url(url: &str) -> String {
 /// through a cooperative proxy at `proxy_url`.
 ///
 /// Every managed proxy key ([`PROXY_ENV_KEYS`]) is removed from `caller_env`,
-/// then each key in [`PROXY_SET_KEYS`] is appended pointing at `proxy_url`.
-/// All non-proxy entries are preserved in their original order.
+/// then each key in [`PROXY_SET_KEYS`] is appended pointing at `proxy_url`,
+/// and each key in [`PROXY_NEUTRALIZE_KEYS`] (`NO_PROXY`/`no_proxy`) is
+/// appended set to the *empty* string — so an inherited or image-baked
+/// exemption cannot disable the proxy. All non-proxy entries are preserved in
+/// their original order.
 ///
 /// `caller_env` entries are `"KEY=VALUE"` strings; the returned vector uses
 /// the same encoding.
@@ -96,6 +112,13 @@ pub fn apply_cooperative_proxy_env(caller_env: &[String], proxy_url: &str) -> Ve
 
     for key in PROXY_SET_KEYS {
         effective.push(format!("{key}={proxy_url}"));
+    }
+
+    // Neutralize any inherited NO_PROXY: WSLc merges over the image's ENV, so
+    // an image `NO_PROXY=*` would otherwise disable the proxy. Empty exempts
+    // nothing.
+    for key in PROXY_NEUTRALIZE_KEYS {
+        effective.push(format!("{key}="));
     }
 
     effective
@@ -117,12 +140,23 @@ mod tests {
     }
 
     #[test]
-    fn does_not_set_no_proxy() {
+    fn sets_no_proxy_empty() {
+        // NO_PROXY / no_proxy are forced to the empty string (never a value),
+        // so an inherited or image-baked exemption cannot disable the proxy.
         let env = apply_cooperative_proxy_env(&[], "http://127.0.0.1:8080");
+        for key in PROXY_NEUTRALIZE_KEYS {
+            assert!(
+                env.contains(&format!("{key}=")),
+                "expected empty {key}: {env:?}"
+            );
+        }
+        // ...and never carries a non-empty value.
         assert!(
-            !env.iter()
-                .any(|e| env_key(e) == "NO_PROXY" || env_key(e) == "no_proxy"),
-            "NO_PROXY must not be set: {env:?}"
+            !env.iter().any(|e| {
+                let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
+                k.eq_ignore_ascii_case("no_proxy") && !v.is_empty()
+            }),
+            "NO_PROXY must be empty: {env:?}"
         );
     }
 
@@ -145,8 +179,9 @@ mod tests {
         assert!(env.contains(&"HTTP_PROXY=http://127.0.0.1:9000".to_string()));
         // The attacker's values are gone.
         assert!(!env.iter().any(|e| e.contains("attacker.example")));
-        // Caller NO_PROXY was scrubbed and not re-added.
-        assert!(!env.iter().any(|e| env_key(e) == "NO_PROXY"));
+        // Caller NO_PROXY was scrubbed; only the empty neutralizer remains.
+        assert!(env.contains(&"NO_PROXY=".to_string()));
+        assert!(!env.iter().any(|e| e == "NO_PROXY=example.com"));
     }
 
     #[test]
@@ -183,9 +218,33 @@ mod tests {
         let env = apply_cooperative_proxy_env(&caller, "http://127.0.0.1:9000");
         assert!(env.contains(&"KEEP=1".to_string()));
         assert!(!env.iter().any(|e| e.contains("attacker.example")));
-        assert!(!env
-            .iter()
-            .any(|e| env_key(e).eq_ignore_ascii_case("no_proxy")));
+        // The mixed-case No_Proxy=* was scrubbed; only an empty neutralizer
+        // (never the `*` value) survives.
+        assert!(
+            !env.iter().any(|e| {
+                let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
+                k.eq_ignore_ascii_case("no_proxy") && !v.is_empty()
+            }),
+            "No_Proxy value must not survive: {env:?}"
+        );
+    }
+
+    #[test]
+    fn neutralizes_image_baked_no_proxy() {
+        // WSLc merges this env over the image's ENV (process env wins per key),
+        // so we must emit an explicit empty NO_PROXY/no_proxy to override an
+        // image `ENV NO_PROXY=*`.
+        let env = apply_cooperative_proxy_env(&[], "http://127.0.0.1:8888");
+        assert!(
+            env.contains(&"NO_PROXY=".to_string()),
+            "empty NO_PROXY override missing: {env:?}"
+        );
+        assert!(
+            env.contains(&"no_proxy=".to_string()),
+            "empty no_proxy override missing: {env:?}"
+        );
+        // Neither override may carry a value (which would re-add an exemption).
+        assert!(!env.iter().any(|e| e == "NO_PROXY=*" || e == "no_proxy=*"));
     }
 
     #[test]

@@ -9,9 +9,10 @@
 # This script proves that path end-to-end:
 #
 #   1. Parser accepts the `wslc` backend with a `url`-form proxy.
-#   2. The runner injects HTTP_PROXY/HTTPS_PROXY from network.proxy.url AND
-#      scrubs the attacker-supplied proxy env vars in the config's process.env
-#      (so a workload cannot defeat the cooperative proxy).
+#   2. The runner injects HTTP_PROXY/HTTPS_PROXY from network.proxy.url,
+#      scrubs the attacker-supplied proxy env vars in the config's process.env,
+#      and neutralizes NO_PROXY/no_proxy to empty (so a caller- or image-baked
+#      exemption like NO_PROXY=* cannot defeat the cooperative proxy).
 #   3. A cooperating client (busybox wget) routes through the proxy.
 #
 # The proxy is an in-container marker server on 127.0.0.1 (a WSLC container
@@ -75,15 +76,31 @@ if ($exitCode -ne 0) {
     $reason = "wxc-exec returned non-zero exit $exitCode"
 }
 
+# Scope env assertions to the child's own `PROXY_ENV ...` line: the raw stream
+# also holds executor diagnostics (diagnostic-console logging echoes the input
+# JSON, which carries attacker.invalid), so matching $output would false-flag.
+$childLine = ($output -split "`r?`n" | Where-Object { $_ -match '^PROXY_ENV ' } | Select-Object -First 1)
+if ($pass -and (-not $childLine)) {
+    $pass = $false
+    $reason = "child did not emit the PROXY_ENV diagnostic line"
+}
+
 # The runner must have injected the configured proxy URL, replacing the
 # attacker.invalid values supplied in the config's process.env.
-if ($pass -and ($output -notmatch "HTTP_PROXY=http://127\.0\.0\.1:8888")) {
+if ($pass -and ($childLine -notmatch 'HTTP_PROXY=\[http://127\.0\.0\.1:8888\]')) {
     $pass = $false
     $reason = "runner did not inject/scrub HTTP_PROXY (expected http://127.0.0.1:8888)"
 }
-if ($pass -and ($output -match "attacker\.invalid")) {
+if ($pass -and ($childLine -match 'attacker\.invalid')) {
     $pass = $false
-    $reason = "caller-supplied proxy env var leaked (attacker.invalid not scrubbed)"
+    $reason = "caller-supplied proxy env var leaked to the child (attacker.invalid not scrubbed)"
+}
+
+# NO_PROXY / no_proxy must be neutralized to empty so an image-baked or
+# caller-supplied exemption (e.g. NO_PROXY=*) cannot disable the proxy.
+if ($pass -and (($childLine -notmatch 'NO_PROXY=\[\]') -or ($childLine -notmatch 'no_proxy=\[\]'))) {
+    $pass = $false
+    $reason = "runner did not neutralize NO_PROXY/no_proxy to empty"
 }
 
 # The cooperating client must have routed through the marker proxy.
@@ -93,7 +110,7 @@ if ($pass -and ($output -notmatch "WSLC_PROXY_FUNCTIONAL_OK")) {
 }
 
 if ($pass) {
-    Write-Host "PASS: WSLC cooperative proxy is functional (env injected, caller vars scrubbed, client routed)." -ForegroundColor Green
+    Write-Host "PASS: WSLC cooperative proxy is functional (env injected, caller vars scrubbed, NO_PROXY neutralized, client routed)." -ForegroundColor Green
     exit 0
 } else {
     Write-Host "FAIL: $reason" -ForegroundColor Red
