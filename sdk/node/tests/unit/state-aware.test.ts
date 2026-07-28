@@ -209,7 +209,10 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     _setSpawnImpl(fake.spawn);
     const result = await provisionSandbox(
       'isolation_session',
-      { user: new IsolationSessionUserConfig('alice@contoso.com', 'tok') },
+      {
+        network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+        user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+      },
       testOptions(),
     );
     assert.strictEqual(result.sandboxId, 'iso:reg-abc:prov-1');
@@ -218,6 +221,11 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
     assert.strictEqual(fake.captured.envelope?.phase, 'provision');
     assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
+    // The unrestricted-network acknowledgment is lifted to the envelope top level.
+    assert.deepStrictEqual(fake.captured.envelope?.network, {
+      defaultPolicy: 'allow',
+      allowLocalNetwork: true,
+    });
     assert.ok(fake.captured.args?.includes('--experimental'));
   });
 

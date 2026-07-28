@@ -144,13 +144,19 @@ $encodedLoop = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loop
 # ---------------- Build the wxc-exec config envelope ----------------
 #
 # Shape matches tests/configs/isolation_session_powershell_interactive.json:
-# top-level version + containerId + containment + process. timeout=0 lets
-# the loop run until Ctrl-C.
+# top-level version + containerId + containment + network + process. The
+# network block is the canonical unrestricted-network acknowledgment the
+# IsolationSession backend requires (it has no primitive to filter or deny
+# the container's network). timeout=0 lets the loop run until Ctrl-C.
 
 $config = [ordered]@{
     version     = '0.6.0-alpha'
     containerId = 'isolation-session-resize-smoke'
     containment = 'isolation_session'
+    network     = [ordered]@{
+        defaultPolicy     = 'allow'
+        allowLocalNetwork = $true
+    }
     process     = [ordered]@{
         commandLine = "powershell.exe -NoProfile -EncodedCommand $encodedLoop"
         timeout     = 0

@@ -268,9 +268,10 @@ type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_sessi
 
 interface IsolationSessionProvisionConfig {
   version?: string;
-  filesystem?: FilesystemConfig;
-  network?: NetworkConfig;
-  ui?: UiConfig;
+  // IsolationSession cannot filter or deny the container network, so provision
+  // requires the canonical unrestricted-network acknowledgment — the only accepted
+  // value. filesystem policy is rejected by this backend (§10.3).
+  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 
 interface IsolationSessionStartConfig {
@@ -500,18 +501,14 @@ import {
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,
-  getAvailableToolsPolicy,
   IsolationSessionProvisionConfig,
   SandboxSpawnOptions,
 } from '@microsoft/mxc-sdk';
 
-const tools = getAvailableToolsPolicy();
 const provisionConfig: IsolationSessionProvisionConfig = {
-  filesystem: {
-    readwritePaths: ['C:\\workspace', ...tools.readwritePaths],
-    readonlyPaths: tools.readonlyPaths,
-  },
-  network: { defaultPolicy: 'allow', allowedHosts: ['api.anthropic.com'] },
+  // IsolationSession cannot filter or deny the container network, so provision
+  // requires the canonical unrestricted-network acknowledgment (the only accepted value).
+  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
 };
 
 // IsolationSession is experimental, so every call carries `experimental: true`.
@@ -570,8 +567,10 @@ The existing policy-discovery helpers (`getAvailableToolsPolicy`,
 `getUserProfilePolicy`, `getTemporaryFilesPolicy`) compose with state-aware Configs
 unchanged. They produce `FilesystemPolicyResult` fragments — `{ readonlyPaths,
 readwritePaths }` — whose shape matches `FilesystemConfig`'s readonly / readwrite path
-arrays. Consumers merge the fragments directly into a state-aware Config's `filesystem`
-field, as in the §6.3 example.
+arrays. Consumers merge the fragments directly into the `filesystem` field of a
+state-aware Config for a backend that honors filesystem policy at provision (e.g.
+WindowsSandbox); IsolationSession rejects filesystem policy, so its provision Config
+omits it.
 
 ## 7. Wire contract
 
@@ -777,8 +776,7 @@ shape, across all five phases.
 
 ```typescript
 const config: IsolationSessionProvisionConfig = {
-  filesystem: { readwritePaths: ['C:\\workspace'] },
-  network: { defaultPolicy: 'allow', allowedHosts: ['api.anthropic.com'] },
+  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
 };
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
@@ -793,8 +791,7 @@ const { sandboxId } = await provisionSandbox(
   "version": "0.6.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
-  "filesystem": { "readwritePaths": ["C:\\workspace"] },
-  "network": { "defaultPolicy": "allow", "allowedHosts": ["api.anthropic.com"] }
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
 }
 ```
 
@@ -1530,9 +1527,9 @@ documented in the backend's plan doc):
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
-| `filesystem` | applied | rejected | rejected | rejected | rejected |
+| `filesystem` | rejected | rejected | rejected | rejected | rejected |
 | `network` | applied | rejected | rejected | rejected | rejected |
-| `ui` | applied | rejected | rejected | rejected | rejected |
+| `ui` | ignored | ignored | ignored | ignored | ignored |
 
 For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
 applied at provision and frozen for the life of the sandbox; later phases reject it.
@@ -1556,8 +1553,9 @@ unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundl
   the backend does not honor at that phase, and also fields the matrix would mark as
   `applied` but the runtime does not yet implement. For IsolationSession's matrix
   above, `IsolationSessionProvisionConfig` is the only Config that carries any
-  cross-cutting fields. The SDK currently exposes `filesystem` only; `network` and
-  `ui` will be added at provision when the IsolationSession runtime honors them.
+  cross-cutting fields. The SDK exposes `network` at provision — the required
+  unrestricted-network acknowledgment (`{ defaultPolicy: 'allow', allowLocalNetwork:
+  true }`), the only value the backend accepts; `filesystem` is rejected.
   The start, exec, stop, and deprovision Configs carry none of these fields. Callers
   cannot accidentally pass them.
 - **Runtime enforcement at Rust.** The backend's `validate_<phase>` hooks reject

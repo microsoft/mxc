@@ -47,6 +47,7 @@ contract (including fields not yet exposed via the SDK).
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
+| `network` | `{ defaultPolicy: 'allow'; allowLocalNetwork: true }` | — (**required**) | Unrestricted-network acknowledgment. The container runs on a network MXC cannot filter or deny (outbound open; a process inside can listen on a port reachable from outside via localhost), so the caller must explicitly acknowledge it. This exact value is the only one accepted; any other network policy (or omission) is rejected at provision, and `network` is not accepted on the post-provision phases (the posture is fixed at provision). |
 | `user` | `IsolationSessionUserConfig` | absent | Optional Entra credentials (see below). |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
