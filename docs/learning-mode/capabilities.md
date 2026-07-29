@@ -141,14 +141,14 @@ regenerate its sandbox policy:
       "resourceType": "file",
       "accessType": "read",
       "pid": 1234,
-      "filetime": 132847890123456789
+      "filetime": "132847890123456789"
     },
     {
       "resource": "internetClient",
       "resourceType": "capability",
       "accessType": "unknown",
       "pid": 1234,
-      "filetime": 132847890123512345
+      "filetime": "132847890123512345"
     }
   ],
   "summary": {
@@ -172,6 +172,8 @@ regenerate its sandbox policy:
   denials are recorded under `block`; current `allow` traces expose capability
   checks as empty-`ObjectType` access events that are omitted because they do
   not carry a stable capability identifier.
+- `filetime` is a decimal string containing the Windows `FILETIME` value, so
+  JavaScript consumers retain all 64 bits without numeric precision loss.
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique

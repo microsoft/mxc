@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn denied_resource_accepts_legacy_numeric_filetime() {
         let parsed: DeniedResource = serde_json::from_str(
-            r#"{"path":"C:\\foo","resourceType":"file","accessType":"read","pid":1,"filetime":42}"#,
+            r#"{"resource":"C:\\foo","resourceType":"file","accessType":"read","pid":1,"filetime":42}"#,
         )
         .unwrap();
         assert_eq!(parsed.filetime, 42);
