@@ -36,6 +36,37 @@ const PROPERTY_PARAM_LENGTH: i32 = 0x2;
 const PROPERTY_PARAM_COUNT: i32 = 0x4;
 const MAX_PROPERTY_ELEMENTS: usize = 4096;
 
+struct TdhInfoBuffer {
+    storage: Vec<std::mem::MaybeUninit<TRACE_EVENT_INFO>>,
+    len: usize,
+}
+
+impl TdhInfoBuffer {
+    fn new(len: usize) -> Self {
+        let element_size = std::mem::size_of::<TRACE_EVENT_INFO>();
+        let element_count = len.div_ceil(element_size).max(1);
+        let mut storage = Vec::with_capacity(element_count);
+        storage.resize_with(element_count, std::mem::MaybeUninit::uninit);
+        // SAFETY: `storage` owns `element_count` writable elements. Zeroing
+        // them makes the complete byte view initialized before TDH fills it.
+        unsafe {
+            std::ptr::write_bytes(storage.as_mut_ptr(), 0, element_count);
+        }
+        Self { storage, len }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut TRACE_EVENT_INFO {
+        self.storage.as_mut_ptr().cast()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `new` zero-initializes the allocation, and `len` never
+        // exceeds its capacity in bytes. The storage alignment is that of
+        // `TRACE_EVENT_INFO`, while this view is used only for byte offsets.
+        unsafe { std::slice::from_raw_parts(self.storage.as_ptr().cast(), self.len) }
+    }
+}
+
 /// Decodes an `EVENT_RECORD` into `DecodedEventParts`.
 ///
 /// Returns `None` when TDH can't describe the event (rare — usually
@@ -57,8 +88,8 @@ pub unsafe fn decode_event_parts(
         ));
     }
 
-    let mut buffer = vec![0u8; buf_size as usize];
-    let info_ptr = buffer.as_mut_ptr().cast::<TRACE_EVENT_INFO>();
+    let mut buffer = TdhInfoBuffer::new(buf_size as usize);
+    let info_ptr = buffer.as_mut_ptr();
     let status =
         unsafe { TdhGetEventInformation(event_record, None, Some(info_ptr), &mut buf_size) };
     if status != 0 {
@@ -71,7 +102,7 @@ pub unsafe fn decode_event_parts(
 
     let header = unsafe { (*event_record).EventHeader };
     let event_id = header.EventDescriptor.Id;
-    let props = decode_properties(&buffer, info, event_record)?;
+    let props = decode_properties(buffer.as_bytes(), info, event_record)?;
 
     Ok(DecodedEventParts {
         provider: header.ProviderId,
@@ -282,16 +313,26 @@ fn format_property_value(
                 available
             };
             let max_wchars = byte_len / 2;
-            // SAFETY: data is valid for `available` bytes; max_wchars
-            // bounds the slice.
-            let wchars = unsafe { std::slice::from_raw_parts(data.cast::<u16>(), max_wchars) };
-            let len = wchars.iter().position(|&c| c == 0).unwrap_or(max_wchars);
-            let s = String::from_utf16_lossy(&wchars[..len]);
+            // SAFETY: data is valid for `available` bytes; byte_len is bounded
+            // by available. Decode from byte pairs because ETW does not
+            // guarantee payload alignment.
+            let bytes = unsafe { std::slice::from_raw_parts(data, byte_len) };
+            let mut wchars = Vec::with_capacity(max_wchars);
+            let mut terminator_index = None;
+            for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+                let wchar = u16::from_le_bytes([chunk[0], chunk[1]]);
+                if wchar == 0 {
+                    terminator_index = Some(index);
+                    break;
+                }
+                wchars.push(wchar);
+            }
+            let s = String::from_utf16_lossy(&wchars);
             // Include the null terminator in consumed bytes when present.
             let consumed = if declared_length > 0 {
                 byte_len
             } else {
-                ((len + 1).min(max_wchars)) * 2
+                terminator_index.map_or(max_wchars * 2, |index| (index + 1) * 2)
             };
             (format!("\"{s}\""), consumed)
         }
@@ -439,6 +480,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tdh_info_buffer_is_aligned_and_initialized() {
+        let mut buffer = TdhInfoBuffer::new(std::mem::size_of::<TRACE_EVENT_INFO>() + 7);
+
+        assert_eq!(
+            buffer
+                .as_mut_ptr()
+                .align_offset(std::mem::align_of::<TRACE_EVENT_INFO>()),
+            0
+        );
+        assert!(buffer.as_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
     fn wide_str_at_reads_utf16_until_null() {
         // "hi\0extra" as UTF-16 LE: 68 00 69 00 00 00 65 00 78 00 74 00 72 00 61 00
         let buf = [
@@ -464,6 +518,27 @@ mod tests {
             format_property_value(TDH_INTYPE_UNICODESTRING, 0, bytes.as_ptr(), bytes.len());
         assert_eq!(val, "\"hello\"");
         assert_eq!(consumed, bytes.len()); // 5 chars + null = 12 bytes
+    }
+
+    #[test]
+    fn format_property_value_unicode_string_accepts_unaligned_data() {
+        let encoded: Vec<u8> = "hello"
+            .encode_utf16()
+            .flat_map(|wchar| wchar.to_le_bytes())
+            .chain([0, 0])
+            .collect();
+        let mut storage = vec![0u8; encoded.len() + 1];
+        let base = storage.as_ptr() as usize;
+        let offset = usize::from(base.is_multiple_of(std::mem::align_of::<u16>()));
+        storage[offset..offset + encoded.len()].copy_from_slice(&encoded);
+        let data = unsafe { storage.as_ptr().add(offset) };
+        assert_ne!((data as usize) % std::mem::align_of::<u16>(), 0);
+
+        let (value, consumed) =
+            format_property_value(TDH_INTYPE_UNICODESTRING, 0, data, encoded.len());
+
+        assert_eq!(value, "\"hello\"");
+        assert_eq!(consumed, encoded.len());
     }
 
     #[test]
