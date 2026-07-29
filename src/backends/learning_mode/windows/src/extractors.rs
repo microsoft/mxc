@@ -33,11 +33,28 @@
 //!   record (`Denied` / `PackageSid` / `ProcessId`), emitted under
 //!   `block`; `allow` folds the same information into the
 //!   empty-`ObjectType` event 14 above. Mapped to [`ResourceType::Capability`].
-//!   The capability *name* is carried in the `PackageSid` blob and is not
-//!   yet decoded, so the resource path is left empty for now (see the crate
-//!   mode caveat).
+//!   Records are emitted only when TDH surfaces a decoded capability
+//!   identifier; otherwise they are omitted until SID/ACE decoding is
+//!   available.
 
 use learning_mode_core::{AccessType, ResourceType};
+use windows::core::GUID;
+
+/// Microsoft-Windows-Kernel-General provider.
+pub(crate) const KERNEL_GENERAL_PROVIDER: GUID = GUID {
+    data1: 0xa68c_a8b7,
+    data2: 0x004f,
+    data3: 0xd7b6,
+    data4: [0xa6, 0x98, 0x07, 0xe2, 0xde, 0x0f, 0x1f, 0x5d],
+};
+
+/// Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode provider.
+pub(crate) const PRIVACY_LEARNING_MODE_PROVIDER: GUID = GUID {
+    data1: 0x811a_1ddb,
+    data2: 0x2e69,
+    data3: 0x5f25,
+    data4: [0xad, 0xc0, 0x4b, 0x18, 0x61, 0x70, 0xe7, 0x60],
+};
 
 /// Pre-decoded event payload handed to the extractors.
 ///
@@ -46,6 +63,8 @@ use learning_mode_core::{AccessType, ResourceType};
 /// extractors take only this representation so they stay unit-testable.
 #[derive(Debug, Clone)]
 pub struct DecodedEventParts {
+    /// Provider that emitted the event. Event IDs are provider-scoped.
+    pub provider: GUID,
     /// Originating ETW event ID.
     pub event_id: u16,
     /// `(name, value)` pairs from the decoded payload. String values are
@@ -79,11 +98,25 @@ pub struct RawDenial {
 /// Returns `None` for events that are not learning-mode denials or that
 /// carry an object type we don't surface.
 pub fn extract_denial(parts: &DecodedEventParts, pid: u32, filetime: u64) -> Option<RawDenial> {
+    if !is_learning_mode_event(parts.provider, parts.event_id) {
+        return None;
+    }
     match parts.event_id {
         14 | 4907 => build_denial_from_access_check(parts, pid, filetime),
         27 => build_denial_from_learning_mode(parts, pid, filetime),
         28 => build_denial_from_capability(parts, pid, filetime),
         _ => None,
+    }
+}
+
+/// Whether a provider/event pair belongs to the Learning Mode capture schema.
+pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
+    if provider == KERNEL_GENERAL_PROVIDER {
+        matches!(event_id, 14 | 27 | 28)
+    } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
+        matches!(event_id, 14 | 27 | 4907)
+    } else {
+        false
     }
 }
 
@@ -120,6 +153,9 @@ pub fn build_denial_from_access_check(
     let object_name = find_prop(&parts.props, "ObjectName")
         .map(|v| v.trim_matches('"').to_string())
         .unwrap_or_default();
+    if resource_type == ResourceType::Capability && object_name.is_empty() {
+        return None;
+    }
 
     let access_type = if resource_type == ResourceType::Capability {
         // Capability checks report a mask (often 0x1) that is not a
@@ -149,19 +185,26 @@ pub fn build_denial_from_access_check(
 
 /// Builds a [`RawDenial`] from a `LearningModeViolation` (event 27) payload.
 ///
-/// These represent UI-surface denials; the resource identifier is taken
-/// from the first UI-ish field present. The event carries no usable access
-/// mask, so the access type stays [`AccessType::Unknown`].
+/// These represent UI-surface denials. `Category` identifies the class and
+/// `Detail` identifies the concrete UI operation; `ProcessName` is the caller
+/// and must not be emitted as the denied resource.
 pub fn build_denial_from_learning_mode(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
 ) -> Option<RawDenial> {
-    let object_name = find_prop(&parts.props, "ObjectName")
-        .or_else(|| find_prop(&parts.props, "ResourceName"))
-        .or_else(|| find_prop(&parts.props, "ProcessName"))
-        .map(|v| v.trim_matches('"').to_string())
-        .unwrap_or_default();
+    let category = find_prop(&parts.props, "Category")?
+        .trim_matches('"')
+        .to_string();
+    let detail = find_prop(&parts.props, "Detail")?.trim_matches('"');
+    let object_name = match category.as_str() {
+        "1" => "ConvertToGui".to_string(),
+        "2" => parse_u32(detail)
+            .and_then(ui_operation_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("UiOperation({detail})")),
+        _ => format!("Category({category})/Detail({detail})"),
+    };
 
     Some(RawDenial {
         pid,
@@ -178,9 +221,8 @@ pub fn build_denial_from_learning_mode(
 /// Emitted under `block`. The record reports a `Denied` boolean; we
 /// only surface actual denials. The originating process is taken from the
 /// payload `ProcessId` (which is more precise than the ETW header pid for
-/// brokered checks) when present, else the header pid. The capability name
-/// is carried in the `PackageSid` blob and is not yet decoded, so the
-/// resource name is left empty for now.
+/// brokered checks) when present, else the header pid. Records without a
+/// decoded capability identifier are omitted.
 pub fn build_denial_from_capability(
     parts: &DecodedEventParts,
     pid: u32,
@@ -198,12 +240,13 @@ pub fn build_denial_from_capability(
         .and_then(|v| parse_u32(v))
         .unwrap_or(pid);
 
-    // Prefer a decoded capability name if a future decoder surfaces one;
-    // otherwise leave the name empty until the PackageSid blob is decoded.
+    // Emit only when the decoder has surfaced a usable identifier. Empty
+    // capability records collapse during dedup and cannot guide policy fixes.
     let object_name = find_prop(&parts.props, "CapabilityName")
         .or_else(|| find_prop(&parts.props, "Capability"))
+        .or_else(|| find_prop(&parts.props, "PackageSid"))
         .map(|v| v.trim_matches('"').to_string())
-        .unwrap_or_default();
+        .filter(|name| !name.is_empty() && name != "<unsupported>" && name != "<invalid SID>")?;
 
     Some(RawDenial {
         pid,
@@ -213,6 +256,22 @@ pub fn build_denial_from_capability(
         filetime,
         event_id: parts.event_id,
     })
+}
+
+fn ui_operation_name(value: u32) -> Option<&'static str> {
+    match value {
+        0x001 => Some("Handles"),
+        0x002 => Some("ReadClipboard"),
+        0x004 => Some("WriteClipboard"),
+        0x008 => Some("SystemParameters"),
+        0x010 => Some("DisplaySettings"),
+        0x020 => Some("GlobalAtoms"),
+        0x040 => Some("Desktop"),
+        0x080 => Some("ExitWindows"),
+        0x100 => Some("IME"),
+        0x200 => Some("Injection"),
+        _ => None,
+    }
 }
 
 /// Parses a `"0x…"` / decimal / bare-hex property value into a `u32`.
@@ -326,7 +385,21 @@ mod tests {
     const FIXED_FILETIME: u64 = 132_847_890_123_456_789;
 
     fn parts(event_id: u16, kv: &[(&str, &str)]) -> DecodedEventParts {
+        let provider = if event_id == 4907 {
+            PRIVACY_LEARNING_MODE_PROVIDER
+        } else {
+            KERNEL_GENERAL_PROVIDER
+        };
+        parts_with_provider(provider, event_id, kv)
+    }
+
+    fn parts_with_provider(
+        provider: GUID,
+        event_id: u16,
+        kv: &[(&str, &str)],
+    ) -> DecodedEventParts {
         DecodedEventParts {
+            provider,
             event_id,
             props: kv
                 .iter()
@@ -409,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn access_check_empty_object_type_is_capability() {
+    fn access_check_empty_capability_identifier_is_dropped() {
         // Permissive-mode capability check: present-but-empty ObjectType,
         // empty ObjectName, mask 0x1 (not a file read verb here).
         let p = parts(
@@ -421,10 +494,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        let ev = extract_denial(&p, 5900, FIXED_FILETIME).expect("should extract");
-        assert_eq!(ev.resource_type, ResourceType::Capability);
-        assert_eq!(ev.access_type, AccessType::Unknown);
-        assert_eq!(ev.object_name, "");
+        assert!(extract_denial(&p, 5900, FIXED_FILETIME).is_none());
     }
 
     #[test]
@@ -453,12 +523,19 @@ mod tests {
 
     #[test]
     fn learning_mode_violation_extracted_as_ui() {
-        let p = parts(27, &[("ObjectName", "\"Clipboard\"")]);
+        let p = parts(
+            27,
+            &[
+                ("ProcessName", "\"caller.exe\""),
+                ("Category", "2"),
+                ("Detail", "4"),
+            ],
+        );
         let ev = extract_denial(&p, 9999, FIXED_FILETIME).expect("should extract");
         assert_eq!(ev.event_id, 27);
         assert_eq!(ev.resource_type, ResourceType::Ui);
         assert_eq!(ev.access_type, AccessType::Unknown);
-        assert_eq!(ev.object_name, "Clipboard");
+        assert_eq!(ev.object_name, "WriteClipboard");
     }
 
     // ---- event 28 capability denial ---------------------------------------
@@ -473,6 +550,7 @@ mod tests {
                 ("ProcessId", "0x1acc"),
                 ("Category", "1"),
                 ("Denied", "true"),
+                ("PackageSid", "S-1-15-3-1"),
             ],
         );
         let ev = extract_denial(&p, 42, FIXED_FILETIME).expect("should extract");
@@ -480,7 +558,7 @@ mod tests {
         assert_eq!(ev.access_type, AccessType::Unknown);
         // pid comes from the payload ProcessId (0x1acc), not the header.
         assert_eq!(ev.pid, 0x1acc);
-        assert_eq!(ev.object_name, "");
+        assert_eq!(ev.object_name, "S-1-15-3-1");
     }
 
     #[test]
@@ -490,8 +568,18 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_provider_event_id_is_dropped() {
+        let p = parts_with_provider(
+            GUID::from_u128(0x12345678_1234_1234_1234_1234567890ab),
+            27,
+            &[("Category", "2"), ("Detail", "4")],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+    }
+
+    #[test]
     fn capability_denial_falls_back_to_header_pid() {
-        let p = parts(28, &[("Denied", "true")]);
+        let p = parts(28, &[("Denied", "true"), ("PackageSid", "S-1-15-3-1")]);
         let ev = extract_denial(&p, 555, FIXED_FILETIME).unwrap();
         assert_eq!(ev.pid, 555);
     }

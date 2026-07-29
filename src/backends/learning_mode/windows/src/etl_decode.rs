@@ -8,8 +8,8 @@
 //! without `PROCESS_TRACE_MODE_REAL_TIME`). `ProcessTrace` walks every
 //! buffered event and returns on its own at end-of-file, so there is no
 //! controller session to stop and no worker thread to join — we run it
-//! synchronously, collect the decoded events, then extract and
-//! de-duplicate denials.
+//! synchronously and extract/de-duplicate denials inside the callback so large
+//! traces do not accumulate every decoded event in memory.
 //!
 //! [`EtlDenialAnalyzer`] implements the cross-platform
 //! [`learning_mode_core::DenialAnalyzer`] trait so the runner and tests can
@@ -19,32 +19,99 @@ use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use learning_mode_core::{AnalyzeError, DenialAnalyzer, DeniedResource};
+use learning_mode_core::{AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource};
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, OpenTraceW, ProcessTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW,
     PROCESS_TRACE_MODE_EVENT_RECORD,
 };
 
-use crate::extractors::{extract_denial, DecodedEventParts, RawDenial};
+use crate::extractors::{extract_denial, is_learning_mode_event, DecodedEventParts, RawDenial};
 use crate::{path_norm, tdh_decode};
 
 /// `OpenTraceW` returns this sentinel (`(TRACEHANDLE)-1`) on failure.
 const INVALID_PROCESSTRACE_HANDLE: u64 = u64::MAX;
+const MAX_UNIQUE_DENIALS: usize = 10_000;
 
 /// One decoded ETW event, retaining the header context the extractors need.
+#[cfg(test)]
 struct CollectedEvent {
     pid: u32,
     filetime: u64,
     parts: DecodedEventParts,
 }
 
-/// Accumulates decoded events during a `ProcessTrace` pass. A pointer to
-/// this is handed to ETW via `EVENT_TRACE_LOGFILEW.Context` and read back
-/// in the record callback.
-#[derive(Default)]
+#[derive(Clone, Copy)]
+enum CollectionMode {
+    Analyze,
+    Raw,
+}
+
+/// Accumulates bounded analysis results or raw diagnostic events during a
+/// `ProcessTrace` pass.
 struct Accumulator {
-    events: Vec<CollectedEvent>,
+    mode: CollectionMode,
+    denials: Vec<DeniedResource>,
+    seen: HashSet<(String, learning_mode_core::AccessType)>,
+    truncated: bool,
+    raw_events: Vec<DecodedEventParts>,
+    decode_error: Option<String>,
+}
+
+impl Accumulator {
+    fn analyze() -> Self {
+        Self {
+            mode: CollectionMode::Analyze,
+            denials: Vec::new(),
+            seen: HashSet::new(),
+            truncated: false,
+            raw_events: Vec::new(),
+            decode_error: None,
+        }
+    }
+
+    fn raw() -> Self {
+        Self {
+            mode: CollectionMode::Raw,
+            ..Self::analyze()
+        }
+    }
+
+    fn add_raw_denial(&mut self, raw: RawDenial) {
+        let path =
+            path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone());
+        let dedup_path = match raw.resource_type {
+            learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
+                path.to_ascii_lowercase()
+            }
+            _ => path.clone(),
+        };
+        if self.seen.contains(&(dedup_path.clone(), raw.access_type)) {
+            return;
+        }
+        if self.denials.len() >= MAX_UNIQUE_DENIALS {
+            self.truncated = true;
+            return;
+        }
+        self.seen.insert((dedup_path, raw.access_type));
+        self.denials.push(DeniedResource {
+            path,
+            resource_type: raw.resource_type,
+            access_type: raw.access_type,
+            pid: raw.pid,
+            filetime: raw.filetime,
+        });
+    }
+
+    fn into_analysis(self) -> Result<AnalysisResult, AnalyzeError> {
+        if let Some(error) = self.decode_error {
+            return Err(AnalyzeError::Decode(error));
+        }
+        Ok(AnalysisResult {
+            denials: self.denials,
+            denied_resources_truncated: self.truncated,
+        })
+    }
 }
 
 /// A [`DenialAnalyzer`] over a sealed learning-mode `.etl` file.
@@ -52,9 +119,8 @@ struct Accumulator {
 pub struct EtlDenialAnalyzer;
 
 impl DenialAnalyzer for EtlDenialAnalyzer {
-    fn analyze(&self, source_path: &Path) -> Result<Vec<DeniedResource>, AnalyzeError> {
-        let events = process_trace_file(source_path)?;
-        Ok(resources_from_events(&events))
+    fn analyze(&self, source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
+        process_trace_file(source_path, CollectionMode::Analyze)?.into_analysis()
     }
 }
 
@@ -64,7 +130,8 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
 /// [`EtlDenialAnalyzer::analyze`] so it can be tested with hand-built events
 /// that mirror real traces, without a live ETW/TDH read (which needs the
 /// provider manifests registered on the machine).
-fn resources_from_events(events: &[CollectedEvent]) -> Vec<DeniedResource> {
+#[cfg(test)]
+fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
     dedup_to_resources(
         events
             .iter()
@@ -79,37 +146,33 @@ fn resources_from_events(events: &[CollectedEvent]) -> Vec<DeniedResource> {
 ///
 /// Returns [`AnalyzeError`] if the trace cannot be opened or processed.
 pub fn decode_raw_events(source_path: &Path) -> Result<Vec<DecodedEventParts>, AnalyzeError> {
-    Ok(process_trace_file(source_path)?
-        .into_iter()
-        .map(|e| e.parts)
-        .collect())
+    let accumulator = process_trace_file(source_path, CollectionMode::Raw)?;
+    if let Some(error) = accumulator.decode_error {
+        return Err(AnalyzeError::Decode(error));
+    }
+    Ok(accumulator.raw_events)
 }
 
 /// De-duplicates raw denials by `(user-visible path, accessType)`,
 /// normalising kernel paths to drive-letter form and preserving first-seen
 /// order.
-fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> Vec<DeniedResource> {
-    let mut seen: HashSet<(String, learning_mode_core::AccessType)> = HashSet::new();
-    let mut out = Vec::new();
+#[cfg(test)]
+fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> AnalysisResult {
+    let mut accumulator = Accumulator::analyze();
     for raw in raws {
-        let path =
-            path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone());
-        if seen.insert((path.clone(), raw.access_type)) {
-            out.push(DeniedResource {
-                path,
-                resource_type: raw.resource_type,
-                access_type: raw.access_type,
-                pid: raw.pid,
-                filetime: raw.filetime,
-            });
-        }
+        accumulator.add_raw_denial(raw);
     }
-    out
+    accumulator
+        .into_analysis()
+        .expect("pure denial accumulation cannot decode-fail")
 }
 
 /// Opens `source_path` as an ETL log file, runs `ProcessTrace` to
 /// completion, and returns the decoded events.
-fn process_trace_file(source_path: &Path) -> Result<Vec<CollectedEvent>, AnalyzeError> {
+fn process_trace_file(
+    source_path: &Path,
+    mode: CollectionMode,
+) -> Result<Accumulator, AnalyzeError> {
     // Fail fast with a clear error if the file is missing/unreadable,
     // rather than surfacing an opaque OpenTraceW Win32 code.
     std::fs::File::open(source_path).map_err(|source| AnalyzeError::Open {
@@ -123,7 +186,10 @@ fn process_trace_file(source_path: &Path) -> Result<Vec<CollectedEvent>, Analyze
         .chain(std::iter::once(0))
         .collect();
 
-    let mut accumulator = Accumulator::default();
+    let mut accumulator = match mode {
+        CollectionMode::Analyze => Accumulator::analyze(),
+        CollectionMode::Raw => Accumulator::raw(),
+    };
 
     let mut logfile: EVENT_TRACE_LOGFILEW = unsafe { core::mem::zeroed() };
     logfile.LogFileName = PWSTR(name_wide.as_mut_ptr());
@@ -164,7 +230,7 @@ fn process_trace_file(source_path: &Path) -> Result<Vec<CollectedEvent>, Analyze
         )));
     }
 
-    Ok(accumulator.events)
+    Ok(accumulator)
 }
 
 /// ETW record callback, invoked by `ProcessTrace` for every event in the
@@ -190,12 +256,28 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     // aliasing/concurrency with the owner occurs.
     let acc = unsafe { &mut *context };
 
-    if let Some(parts) = unsafe { tdh_decode::decode_event_parts(event_record) } {
-        acc.events.push(CollectedEvent {
-            pid: header.ProcessId,
-            filetime: header.TimeStamp as u64,
-            parts,
-        });
+    let provider = header.ProviderId;
+    let event_id = header.EventDescriptor.Id;
+    if matches!(acc.mode, CollectionMode::Analyze) && !is_learning_mode_event(provider, event_id) {
+        return;
+    }
+
+    match unsafe { tdh_decode::decode_event_parts(event_record) } {
+        Ok(parts) => match acc.mode {
+            CollectionMode::Analyze => {
+                if let Some(raw) = extract_denial(&parts, header.ProcessId, header.TimeStamp as u64)
+                {
+                    acc.add_raw_denial(raw);
+                }
+            }
+            CollectionMode::Raw => acc.raw_events.push(parts),
+        },
+        Err(error) => {
+            if acc.decode_error.is_none() {
+                acc.decode_error =
+                    Some(format!("provider {:?} event {event_id}: {error}", provider));
+            }
+        }
     }
 }
 
@@ -223,7 +305,7 @@ mod tests {
             raw(r"C:\a", AccessType::Write, ResourceType::File),
             raw(r"C:\b", AccessType::Read, ResourceType::File),
         ];
-        let out = dedup_to_resources(denials);
+        let out = dedup_to_resources(denials).denials;
         assert_eq!(out.len(), 3, "unique (path, access) pairs");
         assert_eq!(out[0].path, r"C:\a");
         assert_eq!(out[0].access_type, AccessType::Read);
@@ -237,9 +319,34 @@ mod tests {
             raw(r"C:\z", AccessType::Read, ResourceType::File),
             raw(r"C:\a", AccessType::Read, ResourceType::File),
         ];
-        let out = dedup_to_resources(denials);
+        let out = dedup_to_resources(denials).denials;
         assert_eq!(out[0].path, r"C:\z");
         assert_eq!(out[1].path, r"C:\a");
+    }
+
+    #[test]
+    fn dedup_is_case_insensitive_and_preserves_first_spelling() {
+        let denials = vec![
+            raw(r"C:\Data\File.txt", AccessType::Read, ResourceType::File),
+            raw(r"c:\data\file.TXT", AccessType::Read, ResourceType::File),
+        ];
+        let out = dedup_to_resources(denials).denials;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, r"C:\Data\File.txt");
+    }
+
+    #[test]
+    fn result_is_bounded_and_reports_truncation() {
+        let denials = (0..=MAX_UNIQUE_DENIALS).map(|index| {
+            raw(
+                &format!(r"C:\data\{index}.txt"),
+                AccessType::Read,
+                ResourceType::File,
+            )
+        });
+        let out = dedup_to_resources(denials);
+        assert_eq!(out.denials.len(), MAX_UNIQUE_DENIALS);
+        assert!(out.denied_resources_truncated);
     }
 
     #[test]
@@ -249,6 +356,17 @@ mod tests {
             .analyze(Path::new(r"C:\does\not\exist\nope.etl"))
             .unwrap_err();
         assert!(matches!(err, AnalyzeError::Open { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn target_event_decode_failure_is_reported() {
+        let accumulator = Accumulator {
+            decode_error: Some("event 14 malformed".to_string()),
+            ..Accumulator::analyze()
+        };
+        let error = accumulator.into_analysis().expect_err("decode must fail");
+        assert!(matches!(error, AnalyzeError::Decode(_)));
+        assert!(error.to_string().contains("event 14 malformed"));
     }
 
     // ---- decode composition over real event shapes ------------------------
@@ -264,6 +382,11 @@ mod tests {
             pid,
             filetime,
             parts: DecodedEventParts {
+                provider: if event_id == 4907 {
+                    crate::extractors::PRIVACY_LEARNING_MODE_PROVIDER
+                } else {
+                    crate::extractors::KERNEL_GENERAL_PROVIDER
+                },
                 event_id,
                 props: kv
                     .iter()
@@ -276,7 +399,7 @@ mod tests {
     /// Mirrors the real `Mode="Normal"` (`block`) capture: file/registry
     /// access checks as event 14 plus a compact capability denial as event 28.
     #[test]
-    fn block_and_log_shape_decodes_and_classifies() {
+    fn block_shape_decodes_and_classifies() {
         let events = vec![
             // File write (DELETE | FILE_READ_DATA -> Write), \??\ prefix.
             event(
@@ -302,7 +425,7 @@ mod tests {
                     ("AccessMask", "0x20019"),
                 ],
             ),
-            // Capability denial (event 28) -> empty path, unknown access.
+            // Capability denial (event 28) with a decoded identifier.
             event(
                 28,
                 0,
@@ -311,11 +434,12 @@ mod tests {
                     ("ProcessName", "\"conhost.exe\""),
                     ("ProcessId", "0x1acc"),
                     ("Denied", "true"),
+                    ("PackageSid", "S-1-15-3-1"),
                 ],
             ),
         ];
 
-        let out = resources_from_events(&events);
+        let out = resources_from_events(&events).denials;
         assert_eq!(out.len(), 3);
 
         assert_eq!(out[0].path, r"C:\data\test\bin\");
@@ -327,7 +451,7 @@ mod tests {
         assert_eq!(out[1].resource_type, ResourceType::Other);
         assert_eq!(out[1].access_type, AccessType::Read);
 
-        assert_eq!(out[2].path, "");
+        assert_eq!(out[2].path, "S-1-15-3-1");
         assert_eq!(out[2].resource_type, ResourceType::Capability);
         assert_eq!(out[2].access_type, AccessType::Unknown);
         assert_eq!(out[2].pid, 0x1acc, "pid from payload ProcessId");
@@ -337,7 +461,7 @@ mod tests {
     /// file/registry checks plus a capability check folded into an
     /// empty-`ObjectType` event 14 (there is no event 28 in this mode).
     #[test]
-    fn allow_and_log_shape_folds_capability_into_event_14() {
+    fn allow_shape_omits_unidentified_capability_event() {
         let events = vec![
             event(
                 14,
@@ -364,20 +488,14 @@ mod tests {
             ),
         ];
 
-        let out = resources_from_events(&events);
-        assert_eq!(out.len(), 2);
+        let out = resources_from_events(&events).denials;
+        assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, r"C:\data\test\bin\");
         assert_eq!(out[0].access_type, AccessType::Write);
-        assert_eq!(out[1].resource_type, ResourceType::Capability);
-        assert_eq!(out[1].path, "");
-        assert_eq!(out[1].access_type, AccessType::Unknown);
     }
 
-    /// Both a permissive empty-`ObjectType` event 14 and a block-mode event 28
-    /// capability denial reduce to the same `("", Unknown)` key, so they
-    /// collapse to a single capability resource.
     #[test]
-    fn empty_path_capabilities_collapse_to_one() {
+    fn unidentified_capability_events_are_omitted() {
         let events = vec![
             event(
                 14,
@@ -392,10 +510,7 @@ mod tests {
             event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "true")]),
             event(28, 0, 3, &[("ProcessId", "0x20"), ("Denied", "true")]),
         ];
-        let out = resources_from_events(&events);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].resource_type, ResourceType::Capability);
-        assert_eq!(out[0].path, "");
+        assert!(resources_from_events(&events).denials.is_empty());
     }
 
     /// Non-actionable object types and not-denied capability records are
@@ -407,6 +522,6 @@ mod tests {
             event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "false")]),
             event(9999, 1, 3, &[("Foo", "\"bar\"")]),
         ];
-        assert!(resources_from_events(&events).is_empty());
+        assert!(resources_from_events(&events).denials.is_empty());
     }
 }

@@ -25,11 +25,10 @@
 //! ## Mode caveat
 //!
 //! What a capture contains depends on the active OS learning mode.
-//! File/path and UI denials are recorded under both `learningMode`
-//! (`block`) and `permissiveLearningMode` (`allow`), but
-//! **capability** ([`ResourceType::Capability`]) denials are currently
-//! only recorded under permissive learning mode. Consumers must not
-//! assume capability records are present under plain `learningMode`.
+//! File/path, UI, and capability denials may be recorded under both
+//! `learningMode` (`block`) and `permissiveLearningMode` (`allow`). The
+//! concrete ETW event shape differs by mode, and records without a decoded
+//! resource identifier are omitted rather than emitted as empty resources.
 
 #![deny(missing_docs)]
 
@@ -39,7 +38,7 @@ pub mod frame;
 pub mod model;
 pub mod summary;
 
-pub use analyze::{AnalyzeError, DenialAnalyzer};
+pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer};
 pub use emit::{write_frame, write_stream, RECORD_SEPARATOR};
 pub use frame::DenialFrame;
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};

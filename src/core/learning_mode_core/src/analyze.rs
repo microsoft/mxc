@@ -17,6 +17,27 @@ use thiserror::Error;
 
 use crate::model::DeniedResource;
 
+/// Result of decoding a capture source into bounded, de-duplicated denials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisResult {
+    /// Unique denials retained by the analyzer in first-seen order.
+    pub denials: Vec<DeniedResource>,
+    /// Whether additional unique denials were observed after the result bound
+    /// was reached.
+    pub denied_resources_truncated: bool,
+}
+
+impl AnalysisResult {
+    /// Creates a complete, non-truncated result.
+    #[must_use]
+    pub fn complete(denials: Vec<DeniedResource>) -> Self {
+        Self {
+            denials,
+            denied_resources_truncated: false,
+        }
+    }
+}
+
 /// Failure modes when analysing a capture source into denials.
 #[derive(Debug, Error)]
 pub enum AnalyzeError {
@@ -41,19 +62,19 @@ pub enum AnalyzeError {
 
 /// Decodes a platform-native capture source into de-duplicated denials.
 ///
-/// Implementors return the unique `(path, accessType)` observations found
-/// in `source_path`; the caller wraps them with a
+/// Implementors return bounded unique `(path, accessType)` observations and
+/// whether additional unique records were truncated; the caller wraps them with a
 /// [`crate::summary::DenialSummary`] and emits an NDJSON stream via
 /// [`crate::emit`].
 pub trait DenialAnalyzer {
-    /// Analyses the capture at `source_path`, returning the denials it
-    /// contains.
+    /// Analyses the capture at `source_path`, returning its bounded denial
+    /// result.
     ///
     /// # Errors
     ///
     /// Returns [`AnalyzeError`] if the source cannot be opened, cannot be
     /// decoded, or analysis is unsupported on this platform.
-    fn analyze(&self, source_path: &Path) -> Result<Vec<DeniedResource>, AnalyzeError>;
+    fn analyze(&self, source_path: &Path) -> Result<AnalysisResult, AnalyzeError>;
 }
 
 #[cfg(test)]
@@ -66,8 +87,8 @@ mod tests {
     struct FakeAnalyzer(Vec<DeniedResource>);
 
     impl DenialAnalyzer for FakeAnalyzer {
-        fn analyze(&self, _source_path: &Path) -> Result<Vec<DeniedResource>, AnalyzeError> {
-            Ok(self.0.clone())
+        fn analyze(&self, _source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
+            Ok(AnalysisResult::complete(self.0.clone()))
         }
     }
 
@@ -82,7 +103,8 @@ mod tests {
         }];
         let analyzer: Box<dyn DenialAnalyzer> = Box::new(FakeAnalyzer(denials.clone()));
         let got = analyzer.analyze(Path::new("ignored.etl")).unwrap();
-        assert_eq!(got, denials);
+        assert_eq!(got.denials, denials);
+        assert!(!got.denied_resources_truncated);
     }
 
     #[test]

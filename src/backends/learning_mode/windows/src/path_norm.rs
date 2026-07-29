@@ -58,7 +58,9 @@ pub fn to_user_visible(kernel_path: &str) -> Option<String> {
 
     for (letter, prefix) in map {
         if let Some(rest) = kernel_path.strip_prefix(prefix.as_str()) {
-            return Some(format!("{letter}{rest}"));
+            if rest.is_empty() || rest.starts_with('\\') {
+                return Some(format!("{letter}{rest}"));
+            }
         }
     }
     None
@@ -153,6 +155,18 @@ mod tests {
             assert_eq!(
                 canon,
                 format!(r"{letter}\Windows\System32\drivers\etc\hosts")
+            );
+        }
+    }
+
+    #[test]
+    fn device_prefix_requires_component_boundary() {
+        let map = rebuild_drive_map_for_tests();
+        if let Some((_, kernel_prefix)) = map.first() {
+            let false_prefix = format!("{kernel_prefix}0\\Windows");
+            assert!(
+                to_user_visible(&false_prefix).is_none(),
+                "{kernel_prefix} must not match {false_prefix}"
             );
         }
     }

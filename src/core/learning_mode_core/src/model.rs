@@ -32,8 +32,8 @@ pub enum ResourceType {
     /// current Windows backend does not yet produce this variant.
     Network,
     /// A named OS capability (AppContainer / brokered capability) the
-    /// workload was denied. Only produced under permissive learning
-    /// mode today — see the mode caveat in the crate docs.
+    /// workload was denied. Capability records may be produced under either
+    /// learning mode when the source event contains a decoded identifier.
     Capability,
     /// Unclassified denial (registry, COM, IPC, section object, etc.).
     Other,
