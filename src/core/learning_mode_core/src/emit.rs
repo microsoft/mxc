@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Framed NDJSON emitter for captureDenials output files.
+//! RFC 7464 JSON text sequence emitter for captureDenials output files.
 //!
 //! The output file follows the [RFC 7464] "JSON Text Sequences" framing:
 //! every record is preceded by an ASCII Record Separator (`0x1E`) and
