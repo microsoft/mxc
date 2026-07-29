@@ -12,13 +12,13 @@
 //!    [`DeniedResource`] records. The per-OS decoder implements
 //!    [`DenialAnalyzer`]; this crate owns the trait and the model.
 //! 3. **Emit** — the records plus a terminating [`DenialSummary`] are
-//!    written to an NDJSON output file that host applications read to
+//!    written to an RFC 7464 JSON text sequence that host applications read to
 //!    regenerate their sandbox policy. See [`emit`].
 //!
 //! This crate is the cross-platform hinge between stages 2 and 3: it
 //! defines the public [`DeniedResource`] model, the [`DenialSummary`]
 //! terminator, the self-describing [`DenialFrame`] wire records, the
-//! RFC 7464 NDJSON [`emit`]ter, and the [`DenialAnalyzer`] decode trait.
+//! RFC 7464 JSON text sequence [`emit`]ter, and the [`DenialAnalyzer`] decode trait.
 //! It carries no OS-specific code so the wire format never encodes a
 //! platform assumption.
 //!

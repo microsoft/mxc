@@ -4,7 +4,7 @@
 //! Terminating summary frame for a captureDenials output stream.
 //!
 //! Exactly one [`DenialSummary`] is written after the last
-//! [`crate::model::DeniedResource`] in an NDJSON output file. It gives
+//! [`crate::model::DeniedResource`] in an RFC 7464 JSON text sequence. It gives
 //! consumers the child's exit code, the count of unique denials, and a
 //! flag indicating whether the decoder had to truncate the set (so a UX
 //! can tell the user "showing N of many").

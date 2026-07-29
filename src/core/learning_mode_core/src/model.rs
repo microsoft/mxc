@@ -6,7 +6,7 @@
 //! [`DeniedResource`] is the shape every backend decoder emits, every
 //! transport carries, and every SDK consumer parses. New OS backends
 //! produce it from their native sources (Windows ETW today; Linux/macOS
-//! later); the NDJSON output file (see [`crate::emit`]) is just a framed
+//! later); the JSON text sequence (see [`crate::emit`]) is a framed
 //! stream of these records plus a trailing [`crate::summary::DenialSummary`].
 //!
 //! The types stay tiny and cross-platform so the wire format never

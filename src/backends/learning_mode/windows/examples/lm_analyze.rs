@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Decode a sealed learning-mode `.etl` into the captureDenials NDJSON
-//! output stream, or dump its raw ETW events for schema discovery.
+//! Decode a sealed learning-mode `.etl` into the captureDenials RFC 7464
+//! JSON text sequence, or dump its raw ETW events for schema discovery.
 //!
 //! Usage:
 //!
 //! ```text
-//! # Emit the DeniedResource NDJSON stream (0x1E-framed) to stdout:
+//! # Emit the DeniedResource JSON text sequence (0x1E-framed) to stdout:
 //! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --exit-code <code>
 //!
 //! # Dump every decoded event (id + property name/value pairs):
@@ -53,7 +53,7 @@ mod windows_impl {
                 eprintln!("--exit-code <code> is required unless --raw is used");
                 return 2;
             };
-            emit_ndjson(path, exit_code)
+            emit_json_sequence(path, exit_code)
         }
     }
 
@@ -62,8 +62,8 @@ mod windows_impl {
         args.get(index + 1)?.parse().ok()
     }
 
-    /// Decodes denials and writes the 0x1E-framed NDJSON stream to stdout.
-    fn emit_ndjson(path: &Path, exit_code: i32) -> i32 {
+    /// Decodes denials and writes the RFC 7464 JSON text sequence to stdout.
+    fn emit_json_sequence(path: &Path, exit_code: i32) -> i32 {
         let analysis = match EtlDenialAnalyzer.analyze(path) {
             Ok(d) => d,
             Err(e) => {

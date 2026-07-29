@@ -64,7 +64,7 @@ pub enum AnalyzeError {
 ///
 /// Implementors return bounded unique `(path, accessType)` observations and
 /// whether additional unique records were truncated; the caller wraps them with a
-/// [`crate::summary::DenialSummary`] and emits an NDJSON stream via
+/// [`crate::summary::DenialSummary`] and emits an RFC 7464 JSON text sequence via
 /// [`crate::emit`].
 pub trait DenialAnalyzer {
     /// Analyses the capture at `source_path`, returning its bounded denial

@@ -27,7 +27,7 @@ use crate::summary::DenialSummary;
 /// One record in a captureDenials output stream.
 ///
 /// Serialises with an internal `type` tag (`"denial"` / `"summary"`)
-/// flattened alongside the payload fields, matching the on-disk NDJSON
+/// flattened alongside the payload fields, matching the on-disk JSON sequence
 /// contract consumers parse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
