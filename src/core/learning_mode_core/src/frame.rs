@@ -9,7 +9,7 @@
 //! positional assumptions:
 //!
 //! ```text
-//! {"type":"denial","path":"...","resourceType":"file","accessType":"read","pid":123,"filetime":...}
+//! {"type":"denial","path":"...","resourceType":"file","accessType":"read","pid":123,"filetime":"..."}
 //! {"type":"denial", ...}
 //! {"type":"summary","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
 //! ```

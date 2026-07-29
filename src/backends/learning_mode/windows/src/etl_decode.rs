@@ -47,33 +47,45 @@ enum CollectionMode {
     Raw,
 }
 
-/// Accumulates bounded analysis results or raw diagnostic events during a
-/// `ProcessTrace` pass.
-struct Accumulator {
+type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> + 'a;
+
+/// Accumulates bounded analysis results or streams raw diagnostic events
+/// during a `ProcessTrace` pass.
+struct Accumulator<'visitor> {
     mode: CollectionMode,
     denials: Vec<DeniedResource>,
     seen: HashSet<(String, learning_mode_core::AccessType)>,
     truncated: bool,
-    raw_events: Vec<DecodedEventParts>,
+    raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
+    raw_event_count: usize,
     decode_error: Option<String>,
+    visitor_panic: Option<Box<dyn std::any::Any + Send>>,
 }
 
-impl Accumulator {
+impl<'visitor> Accumulator<'visitor> {
     fn analyze() -> Self {
         Self {
             mode: CollectionMode::Analyze,
             denials: Vec::new(),
             seen: HashSet::new(),
             truncated: false,
-            raw_events: Vec::new(),
+            raw_visitor: None,
+            raw_event_count: 0,
             decode_error: None,
+            visitor_panic: None,
         }
     }
 
-    fn raw() -> Self {
+    fn raw(visitor: &'visitor mut RawEventVisitor<'visitor>) -> Self {
         Self {
             mode: CollectionMode::Raw,
-            ..Self::analyze()
+            denials: Vec::new(),
+            seen: HashSet::new(),
+            truncated: false,
+            raw_visitor: Some(visitor),
+            raw_event_count: 0,
+            decode_error: None,
+            visitor_panic: None,
         }
     }
 
@@ -103,6 +115,19 @@ impl Accumulator {
         });
     }
 
+    fn visit_raw_event(&mut self, parts: &DecodedEventParts) {
+        let Some(visitor) = self.raw_visitor.as_mut() else {
+            return;
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| visitor(parts))) {
+            Ok(Ok(())) => self.raw_event_count += 1,
+            Ok(Err(error)) => {
+                self.decode_error = Some(format!("raw event consumer failed: {error}"));
+            }
+            Err(payload) => self.visitor_panic = Some(payload),
+        }
+    }
+
     fn into_analysis(self) -> Result<AnalysisResult, AnalyzeError> {
         if let Some(error) = self.decode_error {
             return Err(AnalyzeError::Decode(error));
@@ -120,7 +145,9 @@ pub struct EtlDenialAnalyzer;
 
 impl DenialAnalyzer for EtlDenialAnalyzer {
     fn analyze(&self, source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
-        process_trace_file(source_path, CollectionMode::Analyze)?.into_analysis()
+        let mut accumulator = Accumulator::analyze();
+        process_trace_file(source_path, &mut accumulator)?;
+        accumulator.into_analysis()
     }
 }
 
@@ -139,18 +166,23 @@ fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
     )
 }
 
-/// Decodes every event in the ETL into `(event_id, props)` pairs, for
-/// schema discovery / diagnostics. Preserves the on-disk order.
+/// Streams every decoded event in the ETL to `visitor` for schema discovery
+/// and diagnostics, preserving on-disk order without retaining the trace in
+/// memory. Returns the number of events delivered.
 ///
 /// # Errors
 ///
 /// Returns [`AnalyzeError`] if the trace cannot be opened or processed.
-pub fn decode_raw_events(source_path: &Path) -> Result<Vec<DecodedEventParts>, AnalyzeError> {
-    let accumulator = process_trace_file(source_path, CollectionMode::Raw)?;
+pub fn visit_raw_events(
+    source_path: &Path,
+    visitor: &mut RawEventVisitor<'_>,
+) -> Result<usize, AnalyzeError> {
+    let mut accumulator = Accumulator::raw(visitor);
+    process_trace_file(source_path, &mut accumulator)?;
     if let Some(error) = accumulator.decode_error {
         return Err(AnalyzeError::Decode(error));
     }
-    Ok(accumulator.raw_events)
+    Ok(accumulator.raw_event_count)
 }
 
 /// De-duplicates raw denials by `(user-visible path, accessType)`,
@@ -171,8 +203,8 @@ fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> AnalysisRes
 /// completion, and returns the decoded events.
 fn process_trace_file(
     source_path: &Path,
-    mode: CollectionMode,
-) -> Result<Accumulator, AnalyzeError> {
+    accumulator: &mut Accumulator<'_>,
+) -> Result<(), AnalyzeError> {
     // Fail fast with a clear error if the file is missing/unreadable,
     // rather than surfacing an opaque OpenTraceW Win32 code.
     std::fs::File::open(source_path).map_err(|source| AnalyzeError::Open {
@@ -186,16 +218,11 @@ fn process_trace_file(
         .chain(std::iter::once(0))
         .collect();
 
-    let mut accumulator = match mode {
-        CollectionMode::Analyze => Accumulator::analyze(),
-        CollectionMode::Raw => Accumulator::raw(),
-    };
-
     let mut logfile: EVENT_TRACE_LOGFILEW = unsafe { core::mem::zeroed() };
     logfile.LogFileName = PWSTR(name_wide.as_mut_ptr());
     logfile.Anonymous1.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD;
     logfile.Anonymous2.EventRecordCallback = Some(event_record_callback);
-    logfile.Context = std::ptr::addr_of_mut!(accumulator).cast();
+    logfile.Context = std::ptr::from_mut(accumulator).cast();
 
     // SAFETY: `logfile` and `name_wide` outlive the OpenTraceW call; the
     // callback pointer is valid and the Context points at a live stack
@@ -220,6 +247,10 @@ fn process_trace_file(
         let _ = CloseTrace(handle);
     }
 
+    if let Some(payload) = accumulator.visitor_panic.take() {
+        std::panic::resume_unwind(payload);
+    }
+
     // ERROR_SUCCESS (0) and ERROR_CANCELLED (1223) are both acceptable
     // terminal states for a completed file trace.
     if status.0 != 0 && status.0 != 1223 {
@@ -230,7 +261,7 @@ fn process_trace_file(
         )));
     }
 
-    Ok(accumulator)
+    Ok(())
 }
 
 /// ETW record callback, invoked by `ProcessTrace` for every event in the
@@ -246,7 +277,7 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     }
     // SAFETY: ETW guarantees a valid record; we only read POD header fields.
     let header = unsafe { (*event_record).EventHeader };
-    let context = unsafe { (*event_record).UserContext } as *mut Accumulator;
+    let context = unsafe { (*event_record).UserContext } as *mut Accumulator<'_>;
     if context.is_null() {
         return;
     }
@@ -255,6 +286,9 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     // ProcessTrace invokes this callback synchronously on our thread, so no
     // aliasing/concurrency with the owner occurs.
     let acc = unsafe { &mut *context };
+    if acc.decode_error.is_some() || acc.visitor_panic.is_some() {
+        return;
+    }
 
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
@@ -270,7 +304,7 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
                     acc.add_raw_denial(raw);
                 }
             }
-            CollectionMode::Raw => acc.raw_events.push(parts),
+            CollectionMode::Raw => acc.visit_raw_event(&parts),
         },
         Err(error) => {
             if acc.decode_error.is_none() {
@@ -285,6 +319,22 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
 mod tests {
     use super::*;
     use learning_mode_core::{AccessType, ResourceType};
+
+    #[test]
+    fn raw_visitor_panic_is_captured_inside_callback_state() {
+        let mut visitor =
+            |_: &DecodedEventParts| -> std::io::Result<()> { panic!("simulated visitor panic") };
+        let mut accumulator = Accumulator::raw(&mut visitor);
+        let parts = DecodedEventParts {
+            provider: windows::core::GUID::from_u128(0),
+            event_id: 1,
+            props: Vec::new(),
+        };
+
+        accumulator.visit_raw_event(&parts);
+
+        assert!(accumulator.visitor_panic.is_some());
+    }
 
     fn raw(path: &str, access: AccessType, rt: ResourceType) -> RawDenial {
         RawDenial {

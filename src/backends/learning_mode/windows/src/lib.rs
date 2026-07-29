@@ -45,7 +45,9 @@ mod path_norm;
 mod tdh_decode;
 
 #[cfg(target_os = "windows")]
-pub use etl_decode::{decode_raw_events, EtlDenialAnalyzer};
+pub use etl_decode::{visit_raw_events, EtlDenialAnalyzer};
+#[cfg(target_os = "windows")]
+pub use extractors::DecodedEventParts;
 #[cfg(target_os = "windows")]
 pub use ffi::{is_learning_mode_api_available, LearningModeApi, LearningModeTraceHandle};
 #[cfg(target_os = "windows")]

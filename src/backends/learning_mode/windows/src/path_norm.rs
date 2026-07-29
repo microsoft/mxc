@@ -5,15 +5,15 @@
 //!
 //! ETW emits filesystem paths in two kernel forms:
 //!
-//! - the NT object-manager DOS-devices form `\??\C:\Users\foo\file.txt`
-//!   (and `\??\UNC\server\share` for network paths), and
+//! - DOS-device forms (`\??\`, `\\?\`, or `\\.\`) followed by a drive
+//!   path or `UNC\server\share`, and
 //! - the device form `\Device\HarddiskVolume3\Users\foo\file.txt`.
 //!
 //! User-visible paths use drive letters (`C:\Users\foo\file.txt`). This
 //! module owns both mappings.
 //!
-//! The `\??\` form is a pure textual prefix strip. For the `\Device\` form
-//! we walk `A:` through `Z:` calling `QueryDosDeviceW` to discover each
+//! The DOS-device forms are pure textual prefix strips. For the `\Device\`
+//! form we walk `A:` through `Z:` calling `QueryDosDeviceW` to discover each
 //! drive's kernel mount (`\Device\HarddiskVolumeN`), then check the input
 //! path for a prefix match. The device map is cached for the lifetime of
 //! the process -- the mapping is stable in practice (drive-letter changes
@@ -34,17 +34,24 @@ static DRIVE_MAP: OnceLock<Vec<(String, String)>> = OnceLock::new();
 /// Maps a kernel-form path to its user-visible drive-letter form.
 ///
 /// Returns `Some(canonical)` when the input starts with the NT
-/// object-manager DOS-devices prefix (`\??\C:\...`, `\??\UNC\...`) or a
+/// DOS-devices prefix (`\??\`, `\\?\`, or `\\.\`) or a
 /// known `\Device\HarddiskVolumeN\...` prefix. Returns `None` when the path
 /// is not a filesystem path that can be canonicalized (registry, MUP,
 /// unknown device). Callers should fall back to the original input on
 /// `None`.
 pub fn to_user_visible(kernel_path: &str) -> Option<String> {
-    // NT object-manager DOS-devices prefix: `\??\C:\...` is exactly
-    // `C:\...`, and `\??\UNC\server\share` is `\\server\share`. This is a
-    // pure textual mapping that needs no device lookup.
-    if let Some(rest) = kernel_path.strip_prefix(r"\??\") {
-        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+    // DOS-device prefixes map directly to the path that follows. The UNC
+    // spelling retains its network-path leading slashes.
+    if let Some(rest) = kernel_path
+        .strip_prefix(r"\??\")
+        .or_else(|| kernel_path.strip_prefix(r"\\?\"))
+        .or_else(|| kernel_path.strip_prefix(r"\\.\"))
+    {
+        if let Some(prefix) = rest
+            .get(..4)
+            .filter(|prefix| prefix.eq_ignore_ascii_case(r"UNC\"))
+        {
+            let unc = &rest[prefix.len()..];
             return Some(format!(r"\\{unc}"));
         }
         return Some(rest.to_string());
@@ -132,6 +139,23 @@ mod tests {
             to_user_visible(r"\??\UNC\server\share\file.txt").as_deref(),
             Some(r"\\server\share\file.txt")
         );
+    }
+
+    #[test]
+    fn win32_device_prefixes_are_normalized() {
+        for path in [r"\\?\C:\data\file.txt", r"\\.\C:\data\file.txt"] {
+            assert_eq!(to_user_visible(path).as_deref(), Some(r"C:\data\file.txt"));
+        }
+        for path in [
+            r"\\?\UNC\server\share\file.txt",
+            r"\\?\unc\server\share\file.txt",
+            r"\\.\UNC\server\share\file.txt",
+        ] {
+            assert_eq!(
+                to_user_visible(path).as_deref(),
+                Some(r"\\server\share\file.txt")
+            );
+        }
     }
 
     #[test]
