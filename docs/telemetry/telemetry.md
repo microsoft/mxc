@@ -231,6 +231,63 @@ free-form text.
 | Linux | No-op — all telemetry functions return immediately |
 | macOS | No-op — all telemetry functions return immediately |
 
+## Consent
+
+Telemetry emission is gated by a **persisted, MXC-owned consent flag**, not
+just the `experimental.telemetry.enabled` config field. See
+[`docs/telemetry/telemetry-consent-design.md`](telemetry-consent-design.md)
+for the full design; the summary:
+
+- Consent state (`granted` / `denied` / `undetermined`) is stored per-user at
+  `%LOCALAPPDATA%\mxc\telemetry-consent.json`, owned entirely by
+  `wxc_common::telemetry::consent`. It is **never** derived from, synced
+  with, or read from any Windows-level setting — not the OS Diagnostic Data
+  level (Settings → Privacy → Diagnostics & feedback), not a UTC opt-in
+  policy, nothing. MXC is an application, not a Windows system component, so
+  it is responsible for its own notice-and-consent experience (see
+  [Provider group vs. consent](#provider-group-vs-consent) below).
+- `wxc_common::telemetry::is_enabled()` resolves to
+  `config.enabled == Some(true) && policy::get_policy().allows_collection() && consent::get_consent().allows_collection()`:
+  the JSON config field is an **explicit per-invocation opt-in that can only
+  subtract** — omitting it or setting `false` disables collection, and `true`
+  can never bypass a lack of consent. Only `ConsentState::Granted` allows
+  collection; `Undetermined`, `Denied`, and `NotApplicable` (non-Windows) all
+  block it.
+- An administrator can additionally *block* collection device-wide via
+  `HKLM\SOFTWARE\Policies\Mxc\AllowTelemetry` — MXC's **own**
+  policy, not Windows'. It is a deny-only ceiling: it can subtract from what
+  the user permitted but can never stand in for the user's consent. See
+  [`docs/telemetry/telemetry-policy.md`](telemetry-policy.md).
+- `wxc-exec.exe` exposes `--telemetry-consent-status` / `--telemetry-consent-grant`
+  / `--telemetry-consent-revoke` (+ `--telemetry-consent-source`) so a hosting
+  agent/SDK can prompt on first run and let the end user flip the decision at
+  any later time. `lxc-exec` and `mxc-exec-mac` accept the same flags for
+  CLI-surface parity but always report `not-applicable` and refuse
+  grant/revoke — MXC must not gather telemetry, and therefore must not offer
+  a consent toggle, on any non-Windows platform.
+- Flipping consent never itself emits telemetry (no "last ping on the way
+  out" when revoking).
+
+### Provider group vs. consent
+
+MXC's ETW provider may be registered under a UTC provider group. A provider
+group only affects how already-emitted events are *classified and routed* —
+for example, keeping an application's data separated from Windows diagnostic
+data. It does not determine whose consent gates emission.
+
+MXC is an application, not a Windows system component, so it is responsible
+for its own notice and consent experience and must not rely on the Windows
+diagnostic consent. Regardless of which UTC provider group its ETW provider
+is ultimately classified under (see *Private GUID Substitution* below),
+**the gate is always MXC's own persisted consent flag, never the Windows
+Diagnostics & feedback setting.**
+
+The same reasoning is why MXC's administrative policy is its own key rather
+than the Windows `AllowTelemetry` policy: Microsoft documents that the
+Windows policy "doesn't apply to any additional apps installed by your
+organization", and the supported OS APIs for evaluating it deliberately
+combine it with the user's Settings-app choice — which MXC must not read.
+
 ## Private GUID Substitution (Internal Builds)
 
 MXC supports an optional Microsoft telemetry group GUID for internal builds.

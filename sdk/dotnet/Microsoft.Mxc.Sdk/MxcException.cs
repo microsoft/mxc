@@ -20,6 +20,18 @@ public sealed class MxcException : Exception
         Code = code;
     }
 
+    /// <summary>
+    /// Create an exception wrapping an underlying cause. Used where an
+    /// unexpected exception is converted to the SDK's documented failure type
+    /// so it does not escape raw, while preserving the original for diagnosis.
+    /// </summary>
+    public MxcException(ErrorCode code, string message, Exception innerException)
+        : base(message, innerException)
+    {
+        Code = code;
+    }
+
     /// <inheritdoc/>
-    public override string ToString() => $"{Code}: {Message}";
+    public override string ToString() =>
+        InnerException is null ? $"{Code}: {Message}" : $"{Code}: {Message} ---> {InnerException}";
 }

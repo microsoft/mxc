@@ -1521,6 +1521,7 @@ dependencies = [
  "csbindgen",
  "mxc-sdk",
  "serde_json",
+ "wxc_common",
 ]
 
 [[package]]

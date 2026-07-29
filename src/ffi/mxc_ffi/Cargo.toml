@@ -14,6 +14,7 @@ crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
 mxc-sdk = { workspace = true }
+wxc_common = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
@@ -23,6 +24,12 @@ serde_json = { workspace = true }
 # gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
 # regenerate the committed bindings.
 dotnetsdk = ["dep:csbindgen"]
+
+[dev-dependencies]
+# Gives the FFI tests the policy-key redirector, so they can assert the exact
+# string this layer marshals for each administrative policy state rather than
+# accepting whatever the host machine's real policy happens to produce.
+wxc_common = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 csbindgen = { version = "1", optional = true }

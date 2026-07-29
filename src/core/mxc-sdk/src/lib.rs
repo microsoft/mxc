@@ -80,6 +80,8 @@
 
 mod sandbox;
 
+pub mod telemetry;
+
 pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_tools_policy, build_request, platform_support, temporary_files_policy,

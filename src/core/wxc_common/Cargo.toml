@@ -9,6 +9,12 @@ microvm = ["dep:nanvix_common", "dep:uuid"]
 # Enables JSON Schema generation from the dedicated wire model. Off by default
 # so normal builds don't carry schemars.
 schema-gen = ["dep:schemars"]
+# Exposes the telemetry test harnesses (the policy-key redirector) outside this
+# crate's own unit tests, so downstream crates — notably `mxc_ffi` — can drive
+# exact administrative-policy states instead of asserting weak set membership
+# against whatever policy the host machine happens to have. Test-only: never
+# enable it for a shipping build.
+test-support = []
 
 [dependencies]
 serde = { workspace = true }

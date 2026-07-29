@@ -61,6 +61,54 @@ struct Cli {
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
     log_file: Option<String>,
+
+    /// Report the persisted telemetry consent state and exit. MXC only
+    /// ever collects telemetry on Windows, so on macOS this always
+    /// reports "not-applicable" — there is no consent to grant or
+    /// revoke here. See docs/telemetry/telemetry-consent-design.md.
+    #[arg(long = "telemetry-consent-status")]
+    telemetry_consent_status: bool,
+
+    /// Not supported on macOS; always fails. Present for CLI-surface
+    /// parity with wxc-exec.exe.
+    #[arg(long = "telemetry-consent-grant")]
+    telemetry_consent_grant: bool,
+
+    /// Not supported on macOS; always fails. Present for CLI-surface
+    /// parity with wxc-exec.exe.
+    #[arg(long = "telemetry-consent-revoke")]
+    telemetry_consent_revoke: bool,
+
+    /// Unused on macOS; accepted only for CLI-surface parity.
+    #[arg(long = "telemetry-consent-source")]
+    telemetry_consent_source: Option<String>,
+}
+
+/// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
+/// mirrors. On macOS, `wxc_common::telemetry::consent` always reports
+/// `NotApplicable` and rejects writes, so `--telemetry-consent-grant`/
+/// `-revoke` fail loudly here instead of pretending to record a decision
+/// MXC can never act on (MXC must never gather telemetry off Windows).
+/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
+/// this fast path can't drift from `wxc-exec`/`lxc-exec`. The shared handler
+/// returns the outcome as data; terminating the process is this binary's
+/// job, not the foundation crate's.
+fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
+    let Some(outcome) = wxc_common::telemetry::consent_cli::handle_consent_flags(
+        &wxc_common::telemetry::consent_cli::ConsentCliFlags {
+            status: cli.telemetry_consent_status,
+            grant: cli.telemetry_consent_grant,
+            revoke: cli.telemetry_consent_revoke,
+            source: cli.telemetry_consent_source.as_deref(),
+        },
+    ) else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -81,6 +129,12 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
 
 fn main() {
     let cli = Cli::parse();
+
+    // --telemetry-consent-{status,grant,revoke}: report/administer the
+    // (always not-applicable on macOS) consent state and exit.
+    if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
 
     // Determine config input.
     let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {

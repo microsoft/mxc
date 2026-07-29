@@ -175,6 +175,72 @@ Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
 WSLC, LXC) returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the standalone
 executor binaries for those.
 
+## Telemetry consent
+
+MXC only ever collects telemetry on Windows, and only after the end user has
+explicitly opted in — a persisted, MXC-owned consent flag gates every
+emission (never a Windows-level setting like Diagnostics & feedback). See
+[`docs/telemetry/telemetry-consent-design.md`](../../../docs/telemetry/telemetry-consent-design.md)
+for the full design.
+
+The crate is UI-agnostic: it does not render a prompt. Call
+`needs_consent_prompt()` once at first sandbox run, show your own UI, then
+record the answer — and let a settings surface flip it at any later time.
+
+```rust,no_run
+use mxc_sdk::telemetry;
+
+if telemetry::needs_consent_prompt() {
+    // Show your own consent UI, then record the user's choice:
+    telemetry::set_consent(user_opted_in, "prompt")?;
+}
+
+// Anywhere later, e.g. a settings toggle:
+let _state = telemetry::get_consent();
+telemetry::set_consent(false, "settings-toggle")?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Off Windows `get_consent()` always returns `ConsentState::NotApplicable`,
+`needs_consent_prompt()` is always `false`, and `set_consent(..)` always
+fails — MXC neither collects nor offers consent for telemetry there, so a
+host can call these unconditionally without special-casing the platform.
+
+`ConsentState` and `PolicyState` are SDK-owned types, so the public API never
+leaks the internal `wxc_common` foundation crate. The *decision logic* behind
+them is not duplicated: every function here delegates to
+`wxc_common::telemetry`, the same code the `wxc-exec` CLI flags, the C# SDK
+(via `mxc_ffi`), and the Node SDK all resolve consent through. There is
+deliberately no Rust-SDK-specific consent logic to drift.
+
+### Administrative policy
+
+An IT administrator can block MXC telemetry device-wide via MXC's own
+Group Policy / MDM setting. `telemetry::get_policy()` reports the result:
+
+```rust,no_run
+use mxc_sdk::telemetry::{self, PolicyState};
+
+if telemetry::get_policy() == PolicyState::Blocked {
+    // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+Two things worth designing around:
+
+- The policy is a **ceiling, never a grant**. `PolicyState::Allowed` does not
+  mean telemetry is on — the user must still consent. Only
+  `ConsentState::Granted` *and* a non-blocking policy result in collection.
+- When the policy blocks, `needs_consent_prompt()` is `false`, because asking
+  for permission an administrator has already refused is a meaningless
+  question. Word any UI as "telemetry is unavailable on this device" rather
+  than blaming the user's own choice.
+
+It never fails: any unreadable or unrecognized value reads back as
+`PolicyState::Blocked`. Off Windows it is always `PolicyState::NotApplicable`.
+`telemetry::is_blocked_by_policy()` is the convenience predicate. See
+[`docs/telemetry/telemetry-policy.md`](../../../docs/telemetry/telemetry-policy.md).
+
 ## No pty
 
 The child's stdio is always wired to ordinary pipes — the library never

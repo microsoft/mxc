@@ -44,7 +44,9 @@
 //! frozen ABI to link third-party consumers against; consume MXC through a
 //! versioned binding (the C# SDK) matched to the same release.
 
+use std::any::Any;
 use std::ffi::{c_char, CStr, CString};
+use std::io::{self, Write};
 use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
@@ -55,6 +57,48 @@ mod state_aware;
 mod streaming;
 pub use state_aware::*;
 pub use streaming::*;
+
+/// Write a diagnostic line to stderr without ever panicking.
+///
+/// `eprintln!` **panics** if the write fails, and a closed or broken stderr is
+/// routine when a host redirects its streams. Every caller here runs either at
+/// an `extern "C"` boundary or while unwinding from one, where a panic would
+/// abort the process or unwind into foreign frames (undefined behaviour). So
+/// the write has to be infallible by construction, not merely unlikely to fail.
+fn report_to_stderr(args: std::fmt::Arguments<'_>) {
+    let stderr = io::stderr();
+    let mut handle = stderr.lock();
+    let _ = handle.write_fmt(args);
+    let _ = handle.write_all(b"\n");
+    let _ = handle.flush();
+}
+
+/// Report a panic caught at the FFI boundary.
+///
+/// A panic here is always a bug in MXC, and `catch_unwind` would otherwise
+/// discard the payload entirely — leaving the host with a bare status code and
+/// no way to find out what failed. Writing to stderr keeps the diagnosis
+/// possible without unwinding into the host's foreign frames, which would be
+/// undefined behaviour.
+///
+/// Deliberately unconditional (not gated behind `MXC_DIAG_CONSOLE`): this path
+/// is a should-never-happen bug, not routine diagnostic chatter, and it cannot
+/// spam because the operation has already failed.
+///
+/// Never panics itself: the write goes through [`report_to_stderr`], which
+/// discards I/O errors, and the payload downcast falls back to a placeholder.
+/// A second panic while already unwinding would abort the embedding process.
+fn report_panic(operation: &str, payload: &(dyn Any + Send)) {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string panic payload>");
+    report_to_stderr(format_args!(
+        "mxc: internal error: panic caught at the FFI boundary in {operation}: {message}. \
+         Failing closed; the calling process is unaffected."
+    ));
+}
 
 // ---------------------------------------------------------------------------
 // Status codes
@@ -95,6 +139,10 @@ pub const MXC_STATUS_NULL_ARGUMENT: i32 = 100;
 pub const MXC_STATUS_INVALID_UTF8: i32 = 101;
 /// The Rust side panicked; the panic was caught at the boundary.
 pub const MXC_STATUS_PANIC: i32 = 102;
+/// Telemetry consent could not be persisted (e.g. non-Windows host, or
+/// `%LOCALAPPDATA%` unavailable/unwritable). Never returned by
+/// [`mxc_telemetry_get_consent`], which always succeeds.
+pub const MXC_STATUS_CONSENT_WRITE_FAILED: i32 = 103;
 
 /// Map an [`ErrorCode`] to its stable FFI status code.
 pub(crate) fn status_from_error_code(code: ErrorCode) -> i32 {
@@ -234,8 +282,10 @@ pub unsafe extern "C" fn mxc_run(
     command_utf8: *const c_char,
     out: *mut MxcRunResult,
 ) -> i32 {
-    let result = catch_unwind(|| run_inner(policy_json_utf8, command_utf8))
-        .unwrap_or_else(|_| MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
+    let result = catch_unwind(|| run_inner(policy_json_utf8, command_utf8)).unwrap_or_else(|p| {
+        report_panic("mxc_run", &*p);
+        MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
 
     if out.is_null() {
         // Nowhere to hand ownership; free anything we allocated to avoid a leak.
@@ -319,10 +369,12 @@ pub unsafe extern "C" fn mxc_run_result_free(r: *mut MxcRunResult) {
     if r.is_null() {
         return;
     }
-    let _ = catch_unwind(|| {
+    if let Err(p) = catch_unwind(|| {
         // SAFETY: caller guarantees `r` points to a valid, not-yet-freed result.
         unsafe { (*r).free_strings() };
-    });
+    }) {
+        report_panic("mxc_run_result_free", &*p);
+    }
 }
 
 /// Free a single heap C string returned by this library.
@@ -335,10 +387,12 @@ pub unsafe extern "C" fn mxc_string_free(s: *mut c_char) {
     if s.is_null() {
         return;
     }
-    let _ = catch_unwind(|| {
+    if let Err(p) = catch_unwind(|| {
         let mut p = s;
         free_cstr(&mut p);
-    });
+    }) {
+        report_panic("mxc_string_free", &*p);
+    }
 }
 
 /// Return the library version as a static, NUL-terminated C string.
@@ -351,6 +405,175 @@ pub extern "C" fn mxc_version() -> *const c_char {
     VERSION
         .get_or_init(|| CString::new(env!("CARGO_PKG_VERSION")).unwrap_or_default())
         .as_ptr()
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry consent
+// ---------------------------------------------------------------------------
+//
+// See docs/telemetry/telemetry-consent-design.md. MXC only ever collects
+// telemetry on Windows, and only when this persisted, MXC-owned consent flag
+// is granted — never derived from any Windows-level diagnostics setting.
+// `wxc_common::telemetry::consent` compiles a non-Windows stub that always
+// reports "not-applicable" and rejects writes, so these entry points behave
+// identically here across platforms: callers get one C ABI regardless of
+// host OS, and the platform gate lives in exactly one place (the Rust
+// module), not duplicated at the FFI boundary.
+
+/// Read the persisted telemetry consent state.
+///
+/// Always succeeds and writes one of `"granted"`, `"denied"`,
+/// `"undetermined"`, or `"not-applicable"` (non-Windows hosts) into
+/// `*out_utf8` as a heap-allocated, NUL-terminated UTF-8 string. The caller
+/// must free it with [`mxc_string_free`].
+///
+/// Returns [`MXC_STATUS_SUCCESS`] on success, or [`MXC_STATUS_NULL_ARGUMENT`]
+/// without touching `*out_utf8` if `out_utf8` is null.
+///
+/// # Safety
+/// `out_utf8` must be null or point to writable `*mut c_char`-sized storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_telemetry_get_consent(out_utf8: *mut *mut c_char) -> i32 {
+    let result = catch_unwind(|| wxc_common::telemetry::consent::get_consent().as_str());
+    let state_str = match result {
+        Ok(s) => s,
+        Err(p) => {
+            report_panic("mxc_telemetry_get_consent", &*p);
+            return MXC_STATUS_PANIC;
+        }
+    };
+
+    if out_utf8.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    // SAFETY: `out_utf8` is non-null and caller-guaranteed writable.
+    unsafe { ptr::write(out_utf8, alloc_cstring(state_str.as_bytes())) };
+    MXC_STATUS_SUCCESS
+}
+
+/// Grant or revoke telemetry consent and persist the decision.
+///
+/// `granted` is `1` to grant, `0` to revoke/deny. `source_utf8` is an
+/// optional, free-form provenance string (e.g. `"prompt"`, `"settings-ui"`)
+/// recorded for support/debugging only — it is never transmitted anywhere. A
+/// null `source_utf8` records `"sdk"`.
+///
+/// Returns [`MXC_STATUS_SUCCESS`] on success. Returns
+/// [`MXC_STATUS_CONSENT_WRITE_FAILED`] if the decision could not be
+/// persisted — always the case on non-Windows hosts, since MXC must not
+/// collect (and therefore must not offer consent for) telemetry there.
+///
+/// # Safety
+/// `source_utf8` must be null or a valid NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_telemetry_set_consent(
+    granted: i32,
+    source_utf8: *const c_char,
+) -> i32 {
+    // SAFETY: caller contract above.
+    let source = match unsafe { cstr_to_str(source_utf8) } {
+        Some(s) => s,
+        None if source_utf8.is_null() => "sdk",
+        None => return MXC_STATUS_INVALID_UTF8,
+    };
+    let source = source.to_string();
+    let granted = granted != 0;
+
+    let result = catch_unwind(|| wxc_common::telemetry::consent::set_consent(granted, &source));
+    match result {
+        Ok(Ok(())) => MXC_STATUS_SUCCESS,
+        Ok(Err(e)) => {
+            // The status code alone cannot say *why* the write failed (missing
+            // profile directory, denied ACL, read-only volume). Without this the
+            // reason is lost and a host sees only "consent did not stick".
+            // This arm runs *outside* `catch_unwind`, so it must not panic.
+            report_to_stderr(format_args!(
+                "mxc: failed to persist telemetry consent: {e}"
+            ));
+            MXC_STATUS_CONSENT_WRITE_FAILED
+        }
+        Err(p) => {
+            report_panic("mxc_telemetry_set_consent", &*p);
+            MXC_STATUS_PANIC
+        }
+    }
+}
+
+/// Whether a hosting application should offer its own first-run telemetry
+/// consent prompt.
+///
+/// Writes `1` or `0` into `*out_needs_prompt`. Always `0` on non-Windows
+/// hosts, where MXC collects no telemetry and consent is not a meaningful
+/// concept.
+///
+/// This is exported rather than left for each binding to derive from
+/// [`mxc_telemetry_get_consent`] so that the prompt policy has exactly one
+/// implementation (`ConsentState::needs_prompt`) shared by every language.
+///
+/// Returns [`MXC_STATUS_SUCCESS`] on success, or [`MXC_STATUS_NULL_ARGUMENT`]
+/// without touching `*out_needs_prompt` if it is null.
+///
+/// # Safety
+/// `out_needs_prompt` must be null or point to writable `i32`-sized storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_telemetry_needs_consent_prompt(out_needs_prompt: *mut i32) -> i32 {
+    if out_needs_prompt.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let needs_prompt = match catch_unwind(wxc_common::telemetry::consent::needs_consent_prompt) {
+        Ok(b) => b,
+        Err(p) => {
+            report_panic("mxc_telemetry_needs_consent_prompt", &*p);
+            return MXC_STATUS_PANIC;
+        }
+    };
+
+    // SAFETY: `out_needs_prompt` is non-null and caller-guaranteed writable.
+    unsafe { ptr::write(out_needs_prompt, i32::from(needs_prompt)) };
+    MXC_STATUS_SUCCESS
+}
+
+/// Read the administrative (MDM / Group Policy) telemetry policy.
+///
+/// Always succeeds and writes one of `"unrestricted"` (no policy configured),
+/// `"allowed"`, `"blocked"`, or `"not-applicable"` (non-Windows hosts) into
+/// `*out_utf8` as a heap-allocated, NUL-terminated UTF-8 string. The caller
+/// must free it with [`mxc_string_free`].
+///
+/// The policy is a *ceiling*, never a grant: `"allowed"` does not mean
+/// telemetry is on, only that an administrator has not forbidden it. An
+/// explicit user consent grant is still required. `"blocked"` means nothing is
+/// collected regardless of consent, and a host must not offer a consent
+/// prompt — [`mxc_telemetry_needs_consent_prompt`] already reports `0` in that
+/// case.
+///
+/// Exposed so a host can distinguish "the user has not opted in" from "an
+/// administrator has disabled this" and explain the difference, rather than
+/// rendering a toggle that silently does nothing.
+///
+/// Returns [`MXC_STATUS_SUCCESS`] on success, or [`MXC_STATUS_NULL_ARGUMENT`]
+/// without touching `*out_utf8` if `out_utf8` is null.
+///
+/// # Safety
+/// `out_utf8` must be null or point to writable `*mut c_char`-sized storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_telemetry_get_policy(out_utf8: *mut *mut c_char) -> i32 {
+    let result = catch_unwind(|| wxc_common::telemetry::policy::get_policy().as_str());
+    let state_str = match result {
+        Ok(s) => s,
+        Err(p) => {
+            report_panic("mxc_telemetry_get_policy", &*p);
+            return MXC_STATUS_PANIC;
+        }
+    };
+
+    if out_utf8.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    // SAFETY: `out_utf8` is non-null and caller-guaranteed writable.
+    unsafe { ptr::write(out_utf8, alloc_cstring(state_str.as_bytes())) };
+    MXC_STATUS_SUCCESS
 }
 
 #[cfg(test)]
@@ -412,5 +635,296 @@ mod tests {
             mxc_run_result_free(ptr::null_mut());
             mxc_string_free(ptr::null_mut());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Telemetry consent
+    // -----------------------------------------------------------------
+    //
+    // These tests drive both process-global telemetry test overrides:
+    // `MXC_TEST_LOCALAPPDATA_OVERRIDE` (consent store) and the policy
+    // registry redirect. Both are debug-build-only escape hatches that
+    // `wxc_common::telemetry` reads instead of trusting the real
+    // `LOCALAPPDATA` / `HKLM` locations (see those modules for the security
+    // rationale — a release binary compiles both overrides out entirely).
+    //
+    // Because the overrides do not exist in a release build, the whole
+    // section below is `#[cfg(debug_assertions)]`. Without that gate,
+    // `cargo test -p mxc_ffi --release` would silently read and *write* the
+    // developer's real telemetry consent record: the tests would still pass,
+    // having proved nothing and mutated live state.
+    //
+    // Everything here serializes on `CONSENT_ENV_LOCK`, and `TelemetryTestEnv`
+    // additionally takes `POLICY_LOCK` via its `PolicyKeyGuard`, so consent
+    // tests are mutually exclusive both with each other and with the policy
+    // tests further down. The `mxc_run` tests above touch neither override and
+    // may run in parallel with these.
+    #[cfg(debug_assertions)]
+    static CONSENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Isolates *both* process-global telemetry test overrides for the
+    /// lifetime of the guard: `MXC_TEST_LOCALAPPDATA_OVERRIDE` points at a
+    /// fresh temp directory, and the administrative policy read is redirected
+    /// to a fresh, empty `HKCU` key.
+    ///
+    /// Both are required even for a consent-only assertion. `needs_prompt` is
+    /// `consent AND policy`, so a policy test mutating the shared registry
+    /// override concurrently would flip a consent test's expected result;
+    /// equally, an ambient policy genuinely configured on the developer's
+    /// machine would otherwise leak into these assertions. Owning the
+    /// [`PolicyKeyGuard`] here takes `POLICY_LOCK` too, which mutually
+    /// excludes the policy tests below.
+    ///
+    /// The two locks are always taken in this order — consent, then policy —
+    /// and this is the only place in the crate that holds both, so the
+    /// ordering cannot deadlock.
+    #[cfg(debug_assertions)]
+    struct TelemetryTestEnv {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _policy: wxc_common::telemetry::policy::test_support::PolicyKeyGuard,
+        original: Option<std::ffi::OsString>,
+        _dir: tempfile_like::TempDir,
+    }
+
+    // A tiny, dependency-free stand-in for a temp directory: create a unique
+    // subdirectory under `env::temp_dir()` and remove it on drop. Avoids
+    // pulling in the `tempfile` crate for two tests.
+    #[cfg(debug_assertions)]
+    mod tempfile_like {
+        use std::path::{Path, PathBuf};
+
+        pub struct TempDir(PathBuf);
+
+        impl TempDir {
+            pub fn new(label: &str) -> Self {
+                let mut path = std::env::temp_dir();
+                path.push(format!(
+                    "mxc_ffi_consent_test_{label}_{}_{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&path).expect("create temp dir");
+                Self(path)
+            }
+
+            pub fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    impl TelemetryTestEnv {
+        fn new(label: &str) -> Self {
+            let lock = CONSENT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let policy = wxc_common::telemetry::policy::test_support::PolicyKeyGuard::new();
+            let original = std::env::var_os("MXC_TEST_LOCALAPPDATA_OVERRIDE");
+            let dir = tempfile_like::TempDir::new(label);
+            std::env::set_var("MXC_TEST_LOCALAPPDATA_OVERRIDE", dir.path());
+            Self {
+                _lock: lock,
+                _policy: policy,
+                original,
+                _dir: dir,
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    impl Drop for TelemetryTestEnv {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => std::env::set_var("MXC_TEST_LOCALAPPDATA_OVERRIDE", v),
+                None => std::env::remove_var("MXC_TEST_LOCALAPPDATA_OVERRIDE"),
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn get_consent_reports_string_and_never_errors() {
+        let _guard = TelemetryTestEnv::new("get_default");
+        let mut out: *mut c_char = ptr::null_mut();
+        // SAFETY: `out` is a valid writable pointer to a local variable.
+        let status = unsafe { mxc_telemetry_get_consent(&mut out) };
+        assert_eq!(status, MXC_STATUS_SUCCESS);
+        assert!(!out.is_null());
+        // SAFETY: `out` was just allocated by `mxc_telemetry_get_consent`.
+        let s = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        #[cfg(target_os = "windows")]
+        assert_eq!(s, "undetermined");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(s, "not-applicable");
+        // SAFETY: `out` was allocated via `alloc_cstring`/`CString::into_raw`.
+        unsafe { mxc_string_free(out) };
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn get_consent_null_out_reports_null_argument() {
+        let _guard = TelemetryTestEnv::new("get_null_out");
+        // SAFETY: null out-pointer is explicitly handled.
+        let status = unsafe { mxc_telemetry_get_consent(ptr::null_mut()) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn set_then_get_consent_round_trips() {
+        let _guard = TelemetryTestEnv::new("round_trip");
+        let source = CString::new("prompt").unwrap();
+        // SAFETY: `source` is a valid NUL-terminated UTF-8 C string.
+        let set_status = unsafe { mxc_telemetry_set_consent(1, source.as_ptr()) };
+
+        let mut out: *mut c_char = ptr::null_mut();
+        // SAFETY: `out` is a valid writable pointer to a local variable.
+        let get_status = unsafe { mxc_telemetry_get_consent(&mut out) };
+        assert_eq!(get_status, MXC_STATUS_SUCCESS);
+        // SAFETY: `out` was just allocated by `mxc_telemetry_get_consent`.
+        let s = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { mxc_string_free(out) };
+
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(set_status, MXC_STATUS_SUCCESS);
+            assert_eq!(s, "granted");
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(set_status, MXC_STATUS_CONSENT_WRITE_FAILED);
+            assert_eq!(s, "not-applicable");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn set_consent_null_source_defaults_to_sdk() {
+        let _guard = TelemetryTestEnv::new("null_source");
+        // SAFETY: null source is explicitly allowed (defaults to "sdk").
+        let status = unsafe { mxc_telemetry_set_consent(0, ptr::null()) };
+        #[cfg(target_os = "windows")]
+        assert_eq!(status, MXC_STATUS_SUCCESS);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(status, MXC_STATUS_CONSENT_WRITE_FAILED);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn needs_consent_prompt_tracks_the_store() {
+        let _guard = TelemetryTestEnv::new("needs_prompt");
+        let mut needs: i32 = -1;
+        // SAFETY: `needs` is a valid writable pointer to a local variable.
+        let status = unsafe { mxc_telemetry_needs_consent_prompt(&mut needs) };
+        assert_eq!(status, MXC_STATUS_SUCCESS);
+        // Fresh store on Windows must prompt; off Windows nothing is collected
+        // so nothing may be asked.
+        #[cfg(target_os = "windows")]
+        assert_eq!(needs, 1);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(needs, 0);
+
+        #[cfg(target_os = "windows")]
+        {
+            let source = CString::new("prompt").unwrap();
+            // SAFETY: `source` is a valid NUL-terminated UTF-8 C string.
+            assert_eq!(
+                unsafe { mxc_telemetry_set_consent(0, source.as_ptr()) },
+                MXC_STATUS_SUCCESS
+            );
+            // SAFETY: `needs` is a valid writable pointer to a local variable.
+            let status = unsafe { mxc_telemetry_needs_consent_prompt(&mut needs) };
+            assert_eq!(status, MXC_STATUS_SUCCESS);
+            assert_eq!(needs, 0, "a recorded denial must not re-prompt");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn needs_consent_prompt_null_out_reports_null_argument() {
+        let _guard = TelemetryTestEnv::new("needs_prompt_null");
+        // SAFETY: null out-pointer is explicitly handled.
+        let status = unsafe { mxc_telemetry_needs_consent_prompt(ptr::null_mut()) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+    }
+
+    /// The policy *semantics* (which registry values map to which state) are
+    /// exhaustively tested in `wxc_common::telemetry::policy`. What this layer
+    /// owns is that the export marshals the exact corresponding string, and
+    /// that the caller can free it.
+    #[test]
+    fn get_policy_returns_a_valid_state_string() {
+        let s = read_policy_string();
+        #[cfg(target_os = "windows")]
+        assert!(
+            ["unrestricted", "allowed", "blocked"].contains(&s.as_str()),
+            "unexpected policy state {s:?}"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(s, "not-applicable");
+    }
+
+    /// Calls the export and returns the marshalled string, freeing the
+    /// allocation. Shared by the policy tests below.
+    fn read_policy_string() -> String {
+        let mut out: *mut c_char = ptr::null_mut();
+        // SAFETY: `out` is a valid writable pointer to a local variable.
+        let status = unsafe { mxc_telemetry_get_policy(&mut out) };
+        assert_eq!(status, MXC_STATUS_SUCCESS);
+        assert!(!out.is_null());
+        // SAFETY: `out` was just allocated by `mxc_telemetry_get_policy`.
+        let s = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { mxc_string_free(out) };
+        s
+    }
+
+    /// Drives every administrative policy state through a redirected registry
+    /// key and asserts the exact string this layer marshals for each. Without
+    /// this the export could return one hard-coded valid state and still pass.
+    ///
+    /// Debug-only: `PolicyKeyGuard` redirects the policy read, and that
+    /// override is compiled out of a release build by design. Without this
+    /// gate the test would read the developer's *real* machine policy and
+    /// fail (or, on an unmanaged machine, pass for the wrong reason).
+    #[cfg(all(target_os = "windows", debug_assertions))]
+    #[test]
+    fn get_policy_marshals_the_exact_state_for_each_registry_value() {
+        use wxc_common::telemetry::policy::test_support::PolicyKeyGuard;
+
+        let guard = PolicyKeyGuard::new();
+        // No value set: an unmanaged machine.
+        assert_eq!(read_policy_string(), "unrestricted");
+
+        guard.set_value(3);
+        assert_eq!(read_policy_string(), "allowed");
+
+        for blocked in [0u32, 1, 2, 99, u32::MAX] {
+            guard.set_value(blocked);
+            assert_eq!(
+                read_policy_string(),
+                "blocked",
+                "value {blocked} must marshal as blocked"
+            );
+        }
+
+        // A wrong-typed value is a policy we cannot evaluate: it must fail
+        // closed all the way out through the ABI, not read as unmanaged.
+        guard.set_string_value("0");
+        assert_eq!(read_policy_string(), "blocked");
+    }
+
+    #[test]
+    fn get_policy_null_out_reports_null_argument() {
+        // SAFETY: null out-pointer is explicitly handled.
+        let status = unsafe { mxc_telemetry_get_policy(ptr::null_mut()) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 }

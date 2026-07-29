@@ -111,6 +111,34 @@ struct Cli {
     #[arg(long)]
     probe: bool,
 
+    /// Print the current persisted telemetry consent state as one-line JSON
+    /// and exit, without spawning a sandbox. The payload is
+    /// `{"consent":...,"needsPrompt":...,"policy":...}`. Windows-only: on
+    /// other platforms every field reports `not-applicable`/`false` and
+    /// nothing touches disk, since MXC does not collect telemetry there. See
+    /// `docs/telemetry/telemetry-consent-design.md`.
+    #[arg(long = "telemetry-consent-status")]
+    telemetry_consent_status: bool,
+
+    /// Persist telemetry consent as granted for the current Windows user and
+    /// exit. Fails with a clear error on non-Windows platforms — MXC must
+    /// not accept a consent decision it can never act on.
+    #[arg(long = "telemetry-consent-grant")]
+    telemetry_consent_grant: bool,
+
+    /// Persist telemetry consent as denied for the current Windows user and
+    /// exit. Fails with a clear error on non-Windows platforms, for the same
+    /// reason as `--telemetry-consent-grant`.
+    #[arg(long = "telemetry-consent-revoke")]
+    telemetry_consent_revoke: bool,
+
+    /// Provenance recorded alongside a `--telemetry-consent-grant` /
+    /// `--telemetry-consent-revoke` decision (e.g. `"prompt"`,
+    /// `"settings-toggle"`). Defaults to `"cli"` when omitted. Never
+    /// transmitted anywhere; local diagnostic metadata only.
+    #[arg(long = "telemetry-consent-source")]
+    telemetry_consent_source: Option<String>,
+
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
     /// launched, instead of refusing — clears a host wedged by an orphan left
     /// after a launcher hard-kill. DANGER: proofless, so it may also kill a
@@ -210,6 +238,37 @@ fn validate_audit_containment(containment: &ContainmentBackend) -> Result<(), St
             containment.wire_name()
         ))
     }
+}
+
+/// Handles the `--telemetry-consent-{status,grant,revoke}` fast paths.
+///
+/// Returns `true` if one of the flags was handled (and the caller should
+/// exit immediately), `false` if none were passed and normal execution
+/// should proceed. Never spawns a sandbox, never touches config parsing, and
+/// runs before COM/WinRT init — mirroring the `--probe` fast path.
+///
+/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler
+/// (identical across all three executors) so this fast path can't drift
+/// between `wxc-exec`, `lxc-exec`, and `mxc-exec-mac`. The shared handler
+/// returns the outcome as data; terminating the process is this binary's
+/// job, not the foundation crate's. See
+/// `docs/telemetry/telemetry-consent-design.md`.
+fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
+    let Some(outcome) =
+        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
+            status: cli.telemetry_consent_status,
+            grant: cli.telemetry_consent_grant,
+            revoke: cli.telemetry_consent_revoke,
+            source: cli.telemetry_consent_source.as_deref(),
+        })
+    else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
 }
 
 fn command_override_from_cli(
@@ -769,6 +828,13 @@ fn main() {
             }
         }
         Err(e) => eprintln!("DACL recovery failed: {e}"),
+    }
+
+    // --telemetry-consent-{status,grant,revoke}: administer the persisted
+    // consent flag and exit. Run before --probe (cheapest possible fast
+    // path — no config parsing, no policy defaults needed).
+    if handle_telemetry_consent_flags(&cli) {
+        return;
     }
 
     // --probe is a detection-only fast path used by SDK
