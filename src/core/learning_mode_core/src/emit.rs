@@ -69,8 +69,7 @@ impl DenialsDocument {
 /// Returns any [`io::Error`] from the underlying writer, or a
 /// serialisation error surfaced as [`io::ErrorKind::Other`].
 pub fn write_document<W: Write>(writer: &mut W, document: &DenialsDocument) -> io::Result<()> {
-    let json = serde_json::to_vec_pretty(document).map_err(io::Error::other)?;
-    writer.write_all(&json)?;
+    serde_json::to_writer_pretty(&mut *writer, document).map_err(io::Error::other)?;
     writer.write_all(b"\n")?;
     writer.flush()
 }
@@ -136,6 +135,29 @@ mod tests {
     use super::*;
     use crate::model::{AccessType, DeniedResource, ResourceType};
 
+    struct BoundedWriteSize {
+        bytes: Vec<u8>,
+        max_write_size: usize,
+    }
+
+    impl Write for BoundedWriteSize {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf.len() > self.max_write_size {
+                return Err(io::Error::other(format!(
+                    "write of {} bytes exceeded limit {}",
+                    buf.len(),
+                    self.max_write_size
+                )));
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn sample(resource: &str) -> DeniedResource {
         DeniedResource {
             resource: resource.to_string(),
@@ -172,6 +194,23 @@ mod tests {
         write_document(&mut buf, &doc).unwrap();
         let parsed: DenialsDocument = serde_json::from_slice(&buf).unwrap();
         assert_eq!(doc, parsed);
+    }
+
+    #[test]
+    fn write_document_streams_without_a_document_sized_write() {
+        let denials = (0..1000)
+            .map(|index| sample(&format!(r"C:\{index}")))
+            .collect::<Vec<_>>();
+        let doc = DenialsDocument::new(denials, DenialSummary::new(0, 1000, false));
+        let mut writer = BoundedWriteSize {
+            bytes: Vec::new(),
+            max_write_size: 128,
+        };
+
+        write_document(&mut writer, &doc).unwrap();
+
+        let parsed: DenialsDocument = serde_json::from_slice(&writer.bytes).unwrap();
+        assert_eq!(parsed.denials.len(), 1000);
     }
 
     #[test]

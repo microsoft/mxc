@@ -168,8 +168,10 @@ regenerate its sandbox policy:
   resolved to their policy name; custom (hashed) capability SIDs that can't be
   reversed fall back to the `S-1-15-3-…` SID string.
 - `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
-  `accessType` is one of `read`, `write`, `execute`, `unknown`. (Capability
-  denials are only recorded under `allow` today — see the mode caveat.)
+  `accessType` is one of `read`, `write`, `execute`, `unknown`. Capability
+  denials are recorded under `block`; current `allow` traces expose capability
+  checks as empty-`ObjectType` access events that are omitted because they do
+  not carry a stable capability identifier.
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique
@@ -181,7 +183,7 @@ omitted, MXC writes a managed per-run temp file. Either way, `wxc-exec` prints
 path — so the caller can locate the deliverable without scanning the filesystem:
 
 ```json
-{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
+{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
 ```
 
 The pointer echoes the file's `summary`; the authoritative record is the file
