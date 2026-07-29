@@ -193,6 +193,23 @@ pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
     delete_tracking_key(sid_string, logger);
 }
 
+/// Cleans up a sandbox whose process was never launched.
+///
+/// The tracking entry is removed only after profile deletion succeeds. If
+/// deletion fails, the entry is retained and marked deferred so a later
+/// maintenance pass still has the identity and SID needed for recovery.
+pub fn cleanup_unlaunched_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
+    if crate::appcontainer_runner::delete_app_container_profile(identity, logger) {
+        delete_tracking_key(sid_string, logger);
+    } else {
+        mark_cleanup_deferred(
+            sid_string,
+            "capture initialization failed and the AppContainer profile could not be deleted",
+            logger,
+        );
+    }
+}
+
 /// Remove the registry tracking key and all its subkeys (including Active).
 fn delete_tracking_key(sid_string: &str, logger: &mut Logger) {
     let key_path = format!("{}\\{}", TRACKING_BASE, sid_string);

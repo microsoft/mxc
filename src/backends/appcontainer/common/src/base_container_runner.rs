@@ -140,6 +140,13 @@ fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningMode
     }
 }
 
+fn learning_mode_cleanup_failed(error: &learning_mode_windows::LearningModeError) -> bool {
+    matches!(
+        error,
+        learning_mode_windows::LearningModeError::CleanupFailed { .. }
+    )
+}
+
 /// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 #[derive(Default)]
@@ -1072,6 +1079,26 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
+                    if request.lifecycle.destroy_on_exit {
+                        if learning_mode_cleanup_failed(&e) {
+                            sandbox_tracking::mark_cleanup_deferred(
+                                &sid_string,
+                                "capture initialization failed and the process security environment could not be closed",
+                                logger,
+                            );
+                        } else {
+                            // No process was launched and the security
+                            // environment is closed, so real profile/tracking
+                            // cleanup is safe.
+                            sandbox_tracking::cleanup_unlaunched_sandbox(
+                                &identity,
+                                &sid_string,
+                                logger,
+                            );
+                        }
+                        sandbox_tracking::unregister_ctrl_c_cleanup();
+                    }
+                    self.proxy_coordinator.stop(logger);
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1810,6 +1837,29 @@ mod tests {
             code: 87,
         };
         assert!(!learning_mode_api_not_implemented(&ordinary));
+    }
+
+    #[test]
+    fn learning_mode_cleanup_failure_is_detected() {
+        use learning_mode_windows::LearningModeError;
+
+        let error = LearningModeError::CleanupFailed {
+            primary: Box::new(LearningModeError::ApiCall {
+                function: "StartLearningModeTrace",
+                code: 87,
+            }),
+            cleanup: Box::new(LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                code: 5,
+            }),
+        };
+        assert!(learning_mode_cleanup_failed(&error));
+
+        let ordinary = LearningModeError::ApiCall {
+            function: "StartLearningModeTrace",
+            code: 87,
+        };
+        assert!(!learning_mode_cleanup_failed(&ordinary));
     }
 
     #[test]
