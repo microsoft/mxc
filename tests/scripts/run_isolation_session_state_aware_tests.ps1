@@ -641,6 +641,12 @@ try {
 
             # Structured failure fields: an API failure names the operation
             # that failed and carries the underlying HRESULT.
+            #
+            # Pinning the exact operation string is deliberate here: this
+            # verifies MXC's own mapping (that the right `op::` constant
+            # reaches the wire), so it is expected to move together with that
+            # constant. Consumers should not pin these values -- they mirror
+            # the projected WinRT names, which MXC does not own.
             $operation = if ($envObj) { [string]$envObj.error.operation } else { '' }
             Assert-True ($operation -eq 'IsoSessionOps.StopSessionAsync') `
                 "error.operation is 'IsoSessionOps.StopSessionAsync' (got '$operation')"

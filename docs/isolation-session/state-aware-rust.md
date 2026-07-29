@@ -253,7 +253,16 @@ in `operation`) so that consumers can aggregate on it. Where a lifecycle call su
 but reading one of its result properties fails, `operation` stays the lifecycle call and
 the finer step is described in `message`.
 
+These values are **best-effort diagnostics, not a versioned contract**: they mirror the
+projected WinRT class and method names, which this repo does not own. Branch on `code`;
+treat `operation` as telemetry and log detail. See the
+[cross-backend contract](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) §7.3.
+
 `nativeCode` is the HRESULT rendered as lowercase hex, e.g. `0x80070490`.
+
+`message` is the API's own text, passed through verbatim, and is never empty: when the
+API reports a failure without a message, a short stand-in is substituted, because the
+operation and status now live in their own fields and no longer backfill it.
 
 `error.details` is unused by this backend. It remains the escape hatch for
 backend-specific structured data that has no cross-backend meaning; the three named

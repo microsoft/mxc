@@ -61,6 +61,15 @@ fn format_native_code(code: u32) -> String {
     format!("{code:#010x}")
 }
 
+/// Substituted when the API reports a failure but supplies no message text.
+///
+/// `message` is a required field on the wire envelope. Before the components
+/// were split out it was always non-empty because it embedded the operation
+/// and HRESULT; now that those have their own fields, nothing backfills it, so
+/// a failed or empty `Message()` getter would otherwise surface as
+/// `"message": ""`.
+const NO_API_MESSAGE: &str = "the IsolationSession API reported a failure without a message";
+
 /// The components of a failure raised by the IsolationSession API, kept
 /// separate rather than pre-formatted.
 ///
@@ -68,7 +77,8 @@ fn format_native_code(code: u32) -> String {
 /// API call was in flight. `code` is absent only when the status could not be
 /// read; `remediation` only when the API supplied one. That is what upholds
 /// the `MxcError` invariant that `nativeCode` and `remediation` never appear
-/// without `operation`.
+/// without `operation`. `message` is likewise never empty — see
+/// [`IsoApiFailure::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IsoApiFailure {
     /// Interface-qualified operation, e.g. `IsoSessionOps.AddUserAsync`.
@@ -76,13 +86,39 @@ pub(super) struct IsoApiFailure {
     /// The underlying HRESULT, when it could be read.
     pub code: Option<u32>,
     /// The bare human-readable message — no operation prefix, no HRESULT, no
-    /// remediation folded in.
+    /// remediation folded in. Never empty.
     pub message: String,
     /// The API-supplied "how to fix it" hint, when it provided one.
     pub remediation: Option<String>,
 }
 
 impl IsoApiFailure {
+    /// Builds a failure, normalising the two best-effort text fields.
+    ///
+    /// `Message()` and `Remediation()` are fallible getters that the API may
+    /// also answer with an empty string, so both arrive as `Option`. An absent
+    /// or empty `message` is replaced with [`NO_API_MESSAGE`] — the wire
+    /// requires the field, and no other field backfills it. An absent or empty
+    /// `remediation` stays absent, since that field is optional on the wire.
+    ///
+    /// Normalising here rather than at each call site is what keeps the
+    /// guarantee from having to be re-stated (and re-remembered) per branch.
+    fn new(
+        operation: &str,
+        code: Option<u32>,
+        message: Option<String>,
+        remediation: Option<String>,
+    ) -> Self {
+        Self {
+            operation: operation.to_string(),
+            code,
+            message: message
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| NO_API_MESSAGE.to_string()),
+            remediation: remediation.filter(|r| !r.is_empty()),
+        }
+    }
+
     /// Folds the components back into one human-readable string.
     ///
     /// Only the one-shot path consumes this: it has no structured error
@@ -195,12 +231,12 @@ pub(super) fn transport_err(
     step: &str,
     err: &windows_core::Error,
 ) -> IsolationSessionError {
-    IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure {
-        operation: operation.to_string(),
-        code: Some(err.code().0 as u32),
-        message: format!("{}: {}", step, err.message()),
-        remediation: None,
-    }))
+    IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure::new(
+        operation,
+        Some(err.code().0 as u32),
+        Some(format!("{}: {}", step, err.message())),
+        None,
+    )))
 }
 
 /// Maps an activation failure of the in-proc IsolationSession runtime API to
@@ -218,12 +254,12 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
         } else {
             format!("IsolationSession runtime API activation failed: {detail}")
         };
-    IsolationSessionError::ServiceUnavailable(IsoApiFailure {
-        operation: op::ACTIVATE.to_string(),
-        code: Some(code),
-        message,
-        remediation: None,
-    })
+    IsolationSessionError::ServiceUnavailable(IsoApiFailure::new(
+        op::ACTIVATE,
+        Some(code),
+        Some(message),
+        None,
+    ))
 }
 
 /// Whether an `ERROR_NOT_FOUND` from this operation means "the sandbox is
@@ -272,12 +308,15 @@ pub(super) fn format_iso_error(
     err: &IsoSessionError,
     promotion: StalePromotion,
 ) -> IsolationSessionError {
-    let message = err.Message().map(|h| h.to_string()).unwrap_or_default();
-    let remediation = err
-        .Remediation()
+    // Both getters are best-effort and may also answer with an empty string,
+    // so both collapse to `None` here and `IsoApiFailure::new` decides what an
+    // absent value means for each field.
+    let message = err
+        .Message()
         .map(|h| h.to_string())
         .ok()
-        .filter(|r| !r.is_empty());
+        .filter(|m| !m.is_empty());
+    let remediation = err.Remediation().map(|h| h.to_string()).ok();
 
     // `Code()` is the classification-critical field: it drives the `Stale`
     // promotion, so fabricating 0 when the getter fails would silently
@@ -287,26 +326,23 @@ pub(super) fn format_iso_error(
     // HRESULT — that would describe reading the field, not the operation.
     match err.Code() {
         Ok(code) => classify_api_failure(
-            IsoApiFailure {
-                operation: operation.to_string(),
-                code: Some(code.0 as u32),
-                message,
-                remediation,
-            },
+            IsoApiFailure::new(operation, Some(code.0 as u32), message, remediation),
             promotion,
         ),
         Err(read_err) => {
+            // No usable status, so the note is the only signal that
+            // classification is degraded — keep it in the message.
             let note = format!("could not read HRESULT code: {read_err}");
-            IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure {
-                operation: operation.to_string(),
-                code: None,
-                message: if message.is_empty() {
-                    note
-                } else {
-                    format!("{message} ({note})")
-                },
+            let message = Some(match message {
+                Some(m) => format!("{m} ({note})"),
+                None => note,
+            });
+            IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure::new(
+                operation,
+                None,
+                message,
                 remediation,
-            }))
+            )))
         }
     }
 }
@@ -352,12 +388,59 @@ mod tests {
     use super::*;
 
     fn api_failure(code: Option<u32>) -> IsoApiFailure {
-        IsoApiFailure {
-            operation: op::STOP_SESSION.to_string(),
+        IsoApiFailure::new(
+            op::STOP_SESSION,
             code,
-            message: "agent user not found".to_string(),
-            remediation: Some("Re-provision the sandbox.".to_string()),
+            Some("agent user not found".to_string()),
+            Some("Re-provision the sandbox.".to_string()),
+        )
+    }
+
+    // ── Best-effort text fields are normalised at construction ───────────
+
+    /// `message` is required on the wire, and since the operation and status
+    /// moved to their own fields nothing else backfills it. A failed or empty
+    /// `Message()` getter must not reach a consumer as `"message": ""`.
+    #[test]
+    fn absent_or_empty_api_message_is_replaced_with_a_stand_in() {
+        for supplied in [None, Some(String::new())] {
+            let failure = IsoApiFailure::new(op::ADD_USER, Some(0x80004005), supplied, None);
+            assert_eq!(failure.message, NO_API_MESSAGE);
+            assert!(!failure.message.is_empty());
         }
+    }
+
+    #[test]
+    fn a_supplied_api_message_is_kept_verbatim() {
+        let failure = IsoApiFailure::new(
+            op::ADD_USER,
+            Some(0x80004005),
+            Some("The provision was not found.".to_string()),
+            None,
+        );
+        assert_eq!(failure.message, "The provision was not found.");
+    }
+
+    /// `remediation` is optional on the wire, so an empty one stays absent
+    /// rather than being stood in for -- the opposite treatment to `message`,
+    /// and the reason both go through one constructor.
+    #[test]
+    fn absent_or_empty_remediation_stays_absent() {
+        for supplied in [None, Some(String::new())] {
+            let failure = IsoApiFailure::new(op::ADD_USER, None, None, supplied);
+            assert_eq!(failure.remediation, None);
+        }
+    }
+
+    /// The stand-in must survive to the wire, not just to the internal type.
+    #[test]
+    fn stand_in_message_reaches_the_envelope() {
+        let mapped = map_lifecycle_error(classify_api_failure(
+            IsoApiFailure::new(op::STOP_SESSION, Some(0x80004005), None, None),
+            StalePromotion::Eligible,
+        ));
+        assert_eq!(mapped.message, NO_API_MESSAGE);
+        assert!(!mapped.to_envelope().message.is_empty());
     }
 
     // ── Constants pinned to the OS values they mirror ────────────────────

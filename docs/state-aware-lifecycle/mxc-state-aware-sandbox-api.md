@@ -792,9 +792,11 @@ platform API:
 
 | Field | Meaning |
 |---|---|
-| `operation` | The API call that failed, namespaced by its interface — e.g. `IsoSessionOps.RunProcessWithOptionsAsync`. Low-cardinality and free of call parameters, so it is safe to aggregate on in telemetry. |
+| `operation` | The API call that failed, namespaced by its interface — e.g. `IsoSessionOps.RunProcessWithOptionsAsync`. Low-cardinality and free of call parameters, so it is safe to aggregate on in telemetry. **Best-effort diagnostic, not a versioned contract** — see below. |
 | `nativeCode` | The underlying platform status as a string. An HRESULT such as `0x80070490` on Windows; the field is platform-neutral, so another backend can carry an errno or equivalent. |
 | `remediation` | The API's actionable "how to fix it" hint, when it supplies one. |
+
+**Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
 
 **Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
 `operation` marks that an API operation was in flight; the other two refine it, and
