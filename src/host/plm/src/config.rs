@@ -1517,8 +1517,9 @@ mod tests {
 
     #[test]
     fn resolve_adjusted_derives_sibling_name() {
-        let got = resolve_adjusted_config_path(Path::new("C:\\logs\\config.json")).unwrap();
-        assert_eq!(got, PathBuf::from("C:\\logs\\Adjusted_config.json"));
+        let dest = Path::new("logs").join("config.json");
+        let got = resolve_adjusted_config_path(&dest).unwrap();
+        assert_eq!(got, PathBuf::from("logs").join("Adjusted_config.json"));
     }
 
     #[test]
@@ -1527,6 +1528,7 @@ mod tests {
         assert_eq!(got, PathBuf::from("Adjusted_config.json"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn resolve_adjusted_errors_without_file_name() {
         // A bare root has no file_name — error rather than emitting a
