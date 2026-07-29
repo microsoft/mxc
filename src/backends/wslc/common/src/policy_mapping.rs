@@ -367,13 +367,15 @@ fn validate_denied_path_overlap_with(
                 return Err(overlap_error(denied, mounted, list_name, true));
             }
             // Exact canonical equality is an overlap only when it comes from an
-            // on-disk alias (the two original strings differ lexically). A
-            // literal/case/separator/`..`-variant deny == mount is the
-            // enforceable exact-match case (collapsed most-restrictive-wins at
-            // parse time), so accept it. But a deny that aliases onto the mount
-            // root via a symlink, junction, or short name targets the mounted
-            // object with no exclusion primitive — `contains_strictly`
-            // (strictly-deeper only) misses that, so reject it here.
+            // on-disk alias — the two spellings normalize to *different lexical*
+            // forms yet resolve to the same object. A case/separator/`..` variant
+            // of the same spelling folds to an equal `NormalizedPath` here (via
+            // `NormalizedPath::parse`, NOT `normalize_filesystem_paths`, which only
+            // dedupes byte-identical strings) and is the enforceable exact-match
+            // case (enforced by not mounting the path), so accept it. But a deny
+            // that aliases onto the mount root via a symlink, junction, or short
+            // name has no exclusion primitive — `contains_strictly` (strictly
+            // deeper only) misses that, so reject it here.
             let mount_lexical = NormalizedPath::parse(mounted);
             if mount_norm == denied_norm && mount_lexical != denied_lexical {
                 return Err(overlap_error(denied, mounted, list_name, true));
@@ -808,6 +810,55 @@ mod tests {
             resolve,
         )
         .expect("literal exact-match deny is enforceable and must be accepted");
+    }
+
+    #[test]
+    fn canonical_allows_case_and_separator_variant_exact_match() {
+        // `NormalizedPath::parse` case-folds and folds `/` vs `\`, so these are the
+        // same spelling, not an on-disk alias: enforceable by not mounting → accept.
+        let resolve = resolver(vec![
+            (r"C:\Project", canonical(r"C:\project")),
+            ("c:/project", canonical(r"C:\project")),
+        ]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\Project"]),
+            &[],
+            &strings(&["c:/project"]),
+            resolve,
+        )
+        .expect("case/separator variant of the same path must be accepted");
+    }
+
+    #[test]
+    fn canonical_allows_dot_dot_variant_exact_match() {
+        // `C:\x\..\project` folds to `C:\project` lexically — same spelling, not an alias.
+        let resolve = resolver(vec![
+            (r"C:\project", canonical(r"C:\project")),
+            (r"C:\x\..\project", canonical(r"C:\project")),
+        ]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\x\..\project"]),
+            resolve,
+        )
+        .expect("`..`-variant of the same path must be accepted");
+    }
+
+    #[test]
+    fn canonical_allows_trailing_separator_variant_exact_match() {
+        // `parse` drops empty segments, so a trailing separator is the same spelling.
+        let resolve = resolver(vec![
+            (r"C:\project", canonical(r"C:\project")),
+            (r"C:\project\", canonical(r"C:\project")),
+        ]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\project\"]),
+            resolve,
+        )
+        .expect("trailing-separator variant of the same path must be accepted");
     }
 
     #[test]

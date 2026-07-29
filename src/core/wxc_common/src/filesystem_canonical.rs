@@ -116,8 +116,21 @@ pub fn canonicalize_path(path: &str) -> PathCanonical {
                     let _guard = OwnedHandle(h);
                     PathCanonical::Unknown
                 }
-                // Nothing here at all (or a genuinely missing parent): absent.
-                _ => PathCanonical::Absent,
+                // Success with an invalid handle: no error to read → unexaminable.
+                Ok(_) => PathCanonical::Unknown,
+                Err(e) => {
+                    let code = e.code();
+                    if code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
+                        || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
+                    {
+                        // Genuinely missing (or a missing parent): absent.
+                        PathCanonical::Absent
+                    } else {
+                        // Present but unexaminable (access denied, sharing
+                        // violation, I/O) → fail closed.
+                        PathCanonical::Unknown
+                    }
+                }
             };
         }
         // CreateFileW reported success but returned an invalid handle: there is
@@ -392,14 +405,17 @@ mod tests {
         // callers do not treat it as cleanly-missing and replay a stale alias.
         use std::process::Command;
 
+        // Thread id keeps concurrent tests from colliding on the fixture dir.
         let tmp = std::env::temp_dir();
         let base = format!(
-            r"{}\mxc-dangling-{}",
+            r"{}\mxc-dangling-{}-{:?}",
             tmp.to_string_lossy().trim_end_matches('\\'),
-            std::process::id()
+            std::process::id(),
+            std::thread::current().id()
         );
         let link = format!(r"{base}\link");
         let missing_target = format!(r"{base}\no-such-target");
+        let _ = std::fs::remove_dir_all(&base); // clear any leftover from an aborted run
         std::fs::create_dir_all(&base).unwrap();
 
         // `mklink /J` creates a junction even when the target does not exist.
@@ -407,11 +423,13 @@ mod tests {
             .args(["/c", "mklink", "/J", &link, &missing_target])
             .status()
             .unwrap();
-        if !status.success() {
-            eprintln!("skipping dangling_reparse_point_is_unknown_not_absent: mklink /J failed");
-            let _ = std::fs::remove_dir_all(&base);
-            return;
-        }
+        // mklink /J needs no elevation, so a failure is a broken environment,
+        // not an expected skip — surface it rather than silently no-op.
+        assert!(
+            status.success(),
+            "mklink /J failed ({status}); junction creation needs no elevation, so this \
+             indicates a broken test environment rather than an expected skip"
+        );
 
         let result = canonicalize_path(&link);
         // Remove the junction itself (do not follow it) before clearing base.
@@ -422,6 +440,49 @@ mod tests {
             result,
             PathCanonical::Unknown,
             "a dangling junction must be Unknown (fail closed), not Absent"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_junction_ancestor_is_unknown_not_canonical() {
+        // Chain-level guard where the security property lives: a deny under a
+        // dangling-junction *ancestor* must fail closed, never replay the absent
+        // tail onto a resolved grandparent and return Canonical(<path with the
+        // junction>) — which the overlap check would then miss.
+        use std::process::Command;
+
+        let tmp = std::env::temp_dir();
+        let base = format!(
+            r"{}\mxc-dangling-anc-{}-{:?}",
+            tmp.to_string_lossy().trim_end_matches('\\'),
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let link = format!(r"{base}\link");
+        let missing_target = format!(r"{base}\no-such-target");
+        let leaf = format!(r"{link}\file");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let status = Command::new("cmd")
+            .args(["/c", "mklink", "/J", &link, &missing_target])
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "mklink /J failed ({status}); junction creation needs no elevation"
+        );
+
+        let result = canonicalize_allowing_absent_tail(&leaf);
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            result,
+            PathCanonical::Unknown,
+            "a deny under a dangling-junction ancestor must fail closed, not \
+             resolve to a Canonical path still containing the junction"
         );
     }
 
