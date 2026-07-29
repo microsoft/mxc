@@ -96,10 +96,53 @@ production configs and the dev schema when working on experimental features:
         },
         "telemetry": {                // Telemetry (experimental, Windows only)
             "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
+        },
+        "tamperProtection": {         // Per-application tamper protection (experimental, Windows only; one-shot only)
+            "enabled": true,               // Master switch (default true); false disables the whole section
+            "debugProtection": {           // Debugger-attach controls
+                "allowDebugging": false,       // false (default) blocks debugger attach + SeDebugPrivilege
+                "requireEntitlement": false,   // Allow an entitlement to override the debug block
+                "useSpecificEntitlement": false, // Use the explicit `entitlement` vs the built-in one
+                "entitlement": {               // Only evaluated when the two flags above are true
+                    "requiredSigningLevel": "none", // none|authenticode|store|microsoft|windows
+                    "requiredSids": []              // SIDs required on the caller's token
+                }
+            },
+            "uiProtection": {              // Cross-compartment UI (allow-by-exception; false blocks)
+                "blockUiAccess": false,        // The one UI field allowed by default (UIAccess on)
+                "allowExternalHook": false,    // Block SetWindowsHookEx
+                "allowHandleAccess": false,    // Block access to the process's USER handles
+                "allowWindowMessages": false,  // Block window messages (anti-shatter)
+                "allowSyntheticInput": false   // Block SendInput injection
+            },
+            "processProtection": {         // Instance isolation + cross-instance access
+                "neverInheritFromParent": false,     // Always take a fresh isolated instance
+                "allowInheritFromAnyIdentity": false, // Drop the identity-match on inheritance
+                "shareInstanceWithChildren": false,   // Parent-side opt-in to share its instance
+                "crossInstanceAccess": {
+                    "readVirtualMemory": false,  // Block cross-instance VM_READ
+                    "duplicateHandle": false     // Block cross-instance handle duplication
+                }
+            },
+            "requireSigning": {            // Code-signing requirements
+                "executable": true,            // Main executable must be signed (default true)
+                "libraries": true,             // All loaded DLLs must be signed (default true)
+                "requiredSigningLevel": "none" // Minimum signer trust level
+            }
         }
     }
 }
 ```
+
+> **`tamperProtection` is closed.** Unlike the rest of the permissive
+> `experimental` block, every `tamperProtection` object rejects unknown fields:
+> a misspelled protection flag (e.g. `blockUIAccess` for `blockUiAccess`) is a
+> hard config error rather than a silently-dropped field that leaves a
+> protection off. It is **one-shot only** for now — a state-aware request
+> carrying `experimental.tamperProtection` is rejected. Omitted fields resolve
+> to their most restrictive value, so `"tamperProtection": {}` is maximum
+> lockdown. Only meaningful for a process with a verifiable App Identity. See
+> [`docs/tamper-protection-policy.md`](tamper-protection-policy.md).
 
 > **State-aware fields.** The `phase` top-level field is the **state-aware
 > discriminator**: a request that includes it is parsed as a state-aware

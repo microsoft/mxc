@@ -675,6 +675,251 @@ impl TestFeatureConfig {
     }
 }
 
+/// Resolved per-application tamper-protection policy
+/// (`experimental.tamperProtection`). All defaults are applied here (the wire
+/// model carries `Option`s); `TamperProtectionConfig::default()` is the
+/// fully-resolved default-deny policy. See `docs/tamper-protection-policy.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TamperProtectionConfig {
+    /// Master switch (default true).
+    pub enabled: bool,
+    /// Debugger-attach controls.
+    pub debug_protection: DebugProtectionConfig,
+    /// Cross-compartment UI interaction controls.
+    pub ui_protection: UiProtectionConfig,
+    /// Process isolation and cross-instance access controls.
+    pub process_protection: ProcessProtectionConfig,
+    /// Code-signing requirements.
+    pub require_signing: RequireSigningConfig,
+}
+
+impl Default for TamperProtectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debug_protection: DebugProtectionConfig::default(),
+            ui_protection: UiProtectionConfig::default(),
+            process_protection: ProcessProtectionConfig::default(),
+            require_signing: RequireSigningConfig::default(),
+        }
+    }
+}
+
+impl From<crate::wire::TamperProtection> for TamperProtectionConfig {
+    fn from(w: crate::wire::TamperProtection) -> Self {
+        let crate::wire::TamperProtection {
+            enabled,
+            debug_protection,
+            ui_protection,
+            process_protection,
+            require_signing,
+        } = w;
+        Self {
+            enabled: enabled.unwrap_or(true),
+            debug_protection: debug_protection.map(Into::into).unwrap_or_default(),
+            ui_protection: ui_protection.map(Into::into).unwrap_or_default(),
+            process_protection: process_protection.map(Into::into).unwrap_or_default(),
+            require_signing: require_signing.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+/// Debugger-attach controls and the entitlement that permits exceptions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugProtectionConfig {
+    pub allow_debugging: bool,
+    pub require_entitlement: bool,
+    pub use_specific_entitlement: bool,
+    pub entitlement: DebugEntitlementConfig,
+}
+
+impl From<crate::wire::DebugProtection> for DebugProtectionConfig {
+    fn from(w: crate::wire::DebugProtection) -> Self {
+        let crate::wire::DebugProtection {
+            allow_debugging,
+            require_entitlement,
+            use_specific_entitlement,
+            entitlement,
+        } = w;
+        Self {
+            allow_debugging: allow_debugging.unwrap_or(false),
+            require_entitlement: require_entitlement.unwrap_or(false),
+            use_specific_entitlement: use_specific_entitlement.unwrap_or(false),
+            entitlement: entitlement.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+/// Explicit debug entitlement requirements.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugEntitlementConfig {
+    pub required_signing_level: SigningLevel,
+    pub required_sids: Vec<String>,
+}
+
+impl From<crate::wire::DebugEntitlement> for DebugEntitlementConfig {
+    fn from(w: crate::wire::DebugEntitlement) -> Self {
+        let crate::wire::DebugEntitlement {
+            required_signing_level,
+            required_sids,
+        } = w;
+        Self {
+            required_signing_level: required_signing_level.map(Into::into).unwrap_or_default(),
+            required_sids: required_sids.unwrap_or_default(),
+        }
+    }
+}
+
+/// UI interaction controls across the compartment boundary. Every field is
+/// allow-by-exception (false blocks), except `block_ui_access` which blocks
+/// when true.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiProtectionConfig {
+    pub block_ui_access: bool,
+    pub allow_external_hook: bool,
+    pub allow_handle_access: bool,
+    pub allow_window_messages: bool,
+    pub allow_synthetic_input: bool,
+}
+
+impl From<crate::wire::UiProtection> for UiProtectionConfig {
+    fn from(w: crate::wire::UiProtection) -> Self {
+        let crate::wire::UiProtection {
+            block_ui_access,
+            allow_external_hook,
+            allow_handle_access,
+            allow_window_messages,
+            allow_synthetic_input,
+        } = w;
+        Self {
+            block_ui_access: block_ui_access.unwrap_or(false),
+            allow_external_hook: allow_external_hook.unwrap_or(false),
+            allow_handle_access: allow_handle_access.unwrap_or(false),
+            allow_window_messages: allow_window_messages.unwrap_or(false),
+            allow_synthetic_input: allow_synthetic_input.unwrap_or(false),
+        }
+    }
+}
+
+/// Process isolation and cross-instance access restrictions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessProtectionConfig {
+    pub never_inherit_from_parent: bool,
+    pub allow_inherit_from_any_identity: bool,
+    pub share_instance_with_children: bool,
+    pub cross_instance_access: CrossInstanceAccessConfig,
+}
+
+impl From<crate::wire::ProcessProtection> for ProcessProtectionConfig {
+    fn from(w: crate::wire::ProcessProtection) -> Self {
+        let crate::wire::ProcessProtection {
+            never_inherit_from_parent,
+            allow_inherit_from_any_identity,
+            share_instance_with_children,
+            cross_instance_access,
+        } = w;
+        Self {
+            never_inherit_from_parent: never_inherit_from_parent.unwrap_or(false),
+            allow_inherit_from_any_identity: allow_inherit_from_any_identity.unwrap_or(false),
+            share_instance_with_children: share_instance_with_children.unwrap_or(false),
+            cross_instance_access: cross_instance_access.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+/// Cross-instance access between separate instances of the same application.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossInstanceAccessConfig {
+    pub read_virtual_memory: bool,
+    pub duplicate_handle: bool,
+}
+
+impl From<crate::wire::CrossInstanceAccess> for CrossInstanceAccessConfig {
+    fn from(w: crate::wire::CrossInstanceAccess) -> Self {
+        let crate::wire::CrossInstanceAccess {
+            read_virtual_memory,
+            duplicate_handle,
+        } = w;
+        Self {
+            read_virtual_memory: read_virtual_memory.unwrap_or(false),
+            duplicate_handle: duplicate_handle.unwrap_or(false),
+        }
+    }
+}
+
+/// Code-signing requirements for the protected process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RequireSigningConfig {
+    /// Main executable must be signed (default true).
+    pub executable: bool,
+    /// All loaded DLLs must be signed (default true).
+    pub libraries: bool,
+    /// Minimum signing level (default `none`).
+    pub required_signing_level: SigningLevel,
+}
+
+impl Default for RequireSigningConfig {
+    fn default() -> Self {
+        Self {
+            executable: true,
+            libraries: true,
+            required_signing_level: SigningLevel::default(),
+        }
+    }
+}
+
+impl From<crate::wire::RequireSigning> for RequireSigningConfig {
+    fn from(w: crate::wire::RequireSigning) -> Self {
+        let crate::wire::RequireSigning {
+            executable,
+            libraries,
+            required_signing_level,
+        } = w;
+        Self {
+            executable: executable.unwrap_or(true),
+            libraries: libraries.unwrap_or(true),
+            required_signing_level: required_signing_level.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+/// Minimum code-signing level. A higher level demands a more trusted signer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SigningLevel {
+    /// No signing-level requirement (default).
+    #[default]
+    None,
+    /// Authenticode-signed.
+    Authenticode,
+    /// Microsoft Store signing level.
+    Store,
+    /// Microsoft signing level.
+    Microsoft,
+    /// Windows signing level.
+    Windows,
+}
+
+impl From<crate::wire::SigningLevel> for SigningLevel {
+    fn from(l: crate::wire::SigningLevel) -> Self {
+        use crate::wire::SigningLevel as W;
+        match l {
+            W::None => Self::None,
+            W::Authenticode => Self::Authenticode,
+            W::Store => Self::Store,
+            W::Microsoft => Self::Microsoft,
+            W::Windows => Self::Windows,
+        }
+    }
+}
+
 /// Container for all experimental feature configs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -691,6 +936,8 @@ pub struct ExperimentalConfig {
     pub isolation_session: Option<IsolationSessionConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
+    /// Per-application tamper-protection policy (experimental, Windows).
+    pub tamper_protection: Option<TamperProtectionConfig>,
 }
 
 /// Telemetry configuration parsed from the JSON config `experimental.telemetry` section.

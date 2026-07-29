@@ -448,6 +448,12 @@ pub struct Experimental {
     /// Seatbelt backend config (pre-promotion alias).
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
+    /// Per-application tamper-protection policy (Windows). Maps developer
+    /// intent to per-application mandatory access control and security
+    /// compartments; only meaningful for a process with a verifiable App
+    /// Identity.
+    #[serde(rename = "tamperProtection")]
+    pub tamper_protection: Option<TamperProtection>,
     /// Telemetry configuration.
     pub telemetry: Option<Telemetry>,
 }
@@ -469,6 +475,161 @@ pub struct Telemetry {
 pub struct TestFeature {
     /// Message to log when the feature is applied.
     pub message: Option<String>,
+}
+
+/// Per-application tamper-protection policy (`experimental.tamperProtection`).
+///
+/// Unlike the rest of the permissive `experimental` block, every
+/// tamper-protection struct is **closed** (`deny_unknown_fields`). This is a
+/// deliberate, selective fail-closed choice: a misspelled protection flag (e.g.
+/// `blockUIAccess` for `blockUiAccess`) is a hard config error rather than a
+/// silently-dropped field that leaves a protection off while the author
+/// believes it is on. It restricts only this security-sensitive section without
+/// imposing version-lockstep on the other in-flux experimental backends. See
+/// `docs/tamper-protection-policy.md`; the broader "flip all of `experimental`
+/// to closed" question is tracked separately.
+///
+/// Default-deny: every omitted field resolves to its most restrictive value, so
+/// `"tamperProtection": {}` is maximum lockdown. A handful of fields
+/// (`enabled`, `requireSigning.executable`, `requireSigning.libraries`) default
+/// to `true` because their restrictive value *is* enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TamperProtection {
+    /// Master switch for app protection (default true). When false, the entire
+    /// section is disabled and no protections are applied.
+    pub enabled: Option<bool>,
+    /// Debugger-attach controls and the entitlement that permits exceptions.
+    pub debug_protection: Option<DebugProtection>,
+    /// UI interaction and accessibility across the compartment boundary.
+    pub ui_protection: Option<UiProtection>,
+    /// Process-level isolation and cross-instance access restrictions.
+    pub process_protection: Option<ProcessProtection>,
+    /// Code-signing requirements for the protected process.
+    pub require_signing: Option<RequireSigning>,
+}
+
+/// Controls whether external debuggers may attach to the process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DebugProtection {
+    /// When false (default), debugger attachment and SeDebugPrivilege-based
+    /// process manipulation are blocked. When true, anti-debug restrictions are
+    /// lifted (development/debug builds only).
+    pub allow_debugging: Option<bool>,
+    /// When true, callers seeking otherwise-denied debug-class access must
+    /// present a matching entitlement (default false: the restriction is
+    /// absolute).
+    pub require_entitlement: Option<bool>,
+    /// Selects which entitlement satisfies `requireEntitlement`. When false
+    /// (default), the built-in anti-tamper debug entitlement is used and
+    /// `entitlement` is ignored; when true, the explicit `entitlement` applies.
+    pub use_specific_entitlement: Option<bool>,
+    /// Explicit entitlement, evaluated only when `requireEntitlement` and
+    /// `useSpecificEntitlement` are both true.
+    pub entitlement: Option<DebugEntitlement>,
+}
+
+/// Explicit debug entitlement requirements.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DebugEntitlement {
+    /// Minimum signing level the caller must present (default `none`).
+    pub required_signing_level: Option<SigningLevel>,
+    /// SIDs that must all be present and enabled on the caller's token
+    /// (default empty: no specific SIDs required).
+    pub required_sids: Option<Vec<String>>,
+}
+
+/// Controls UI interaction across the compartment boundary. With the exception
+/// of `blockUiAccess`, every field is allow-by-exception: false (default)
+/// blocks the interaction, true permits it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiProtection {
+    /// When true, UIAccess (assistive technology, IMEs) is blocked across the
+    /// compartment boundary. False (default) permits UIAccess — the one UI
+    /// field allowed by default.
+    pub block_ui_access: Option<bool>,
+    /// When false (default), external hooks (e.g. `SetWindowsHookEx`) into the
+    /// protected process are blocked.
+    pub allow_external_hook: Option<bool>,
+    /// When false (default), access to the USER handles owned by the protected
+    /// process is blocked.
+    pub allow_handle_access: Option<bool>,
+    /// When false (default), window messages sent to the protected process are
+    /// blocked (mitigates shatter attacks).
+    pub allow_window_messages: Option<bool>,
+    /// When false (default), injected (synthetic) input targeting the protected
+    /// process is blocked.
+    pub allow_synthetic_input: Option<bool>,
+}
+
+/// Controls process-level isolation and cross-instance access restrictions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessProtection {
+    /// When true, the process never inherits protection from its parent and
+    /// always receives its own isolated instance (default false).
+    pub never_inherit_from_parent: Option<bool>,
+    /// When true, a child may inherit the parent's instance regardless of app
+    /// identity. False (default) restricts inheritance to a matching identity.
+    pub allow_inherit_from_any_identity: Option<bool>,
+    /// Parent-side opt-in: when true, this process shares its anti-tamper
+    /// instance with its children (default false: each child is isolated).
+    pub share_instance_with_children: Option<bool>,
+    /// Cross-instance operations permitted between separate instances of the
+    /// same protected application.
+    pub cross_instance_access: Option<CrossInstanceAccess>,
+}
+
+/// Cross-instance access between separate instances of the same application.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CrossInstanceAccess {
+    /// When false (default), one instance cannot read another instance's
+    /// virtual memory.
+    pub read_virtual_memory: Option<bool>,
+    /// When false (default), one instance cannot duplicate handles from another
+    /// instance.
+    pub duplicate_handle: Option<bool>,
+}
+
+/// Code-signing requirements for the protected process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequireSigning {
+    /// When true (default), the main executable (or package) must be signed.
+    pub executable: Option<bool>,
+    /// When true (default), all loaded DLLs must be signed.
+    pub libraries: Option<bool>,
+    /// Minimum code-signing level required (default `none` — no minimum beyond
+    /// the presence check implied by `executable`/`libraries`).
+    pub required_signing_level: Option<SigningLevel>,
+}
+
+/// Minimum code-signing level. A higher level demands a more trusted signer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum SigningLevel {
+    /// No signing-level requirement.
+    None,
+    /// Authenticode-signed.
+    Authenticode,
+    /// Microsoft Store signing level.
+    Store,
+    /// Microsoft signing level.
+    Microsoft,
+    /// Windows signing level.
+    Windows,
 }
 
 /// Windows Sandbox backend config.

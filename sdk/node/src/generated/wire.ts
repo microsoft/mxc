@@ -67,6 +67,56 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
+ * Cross-instance access between separate instances of the same application.
+ */
+export interface CrossInstanceAccess {
+  /**
+   * When false (default), one instance cannot duplicate handles from another instance.
+   */
+  duplicateHandle?: boolean | null;
+  /**
+   * When false (default), one instance cannot read another instance's virtual memory.
+   */
+  readVirtualMemory?: boolean | null;
+}
+
+/**
+ * Explicit debug entitlement requirements.
+ */
+export interface DebugEntitlement {
+  /**
+   * SIDs that must all be present and enabled on the caller's token (default empty: no specific SIDs required).
+   */
+  requiredSids?: string[] | null;
+  /**
+   * Minimum signing level the caller must present (default `none`).
+   */
+  requiredSigningLevel?: SigningLevel | null;
+}
+
+/**
+ * Controls whether external debuggers may attach to the process.
+ */
+export interface DebugProtection {
+  /**
+   * When false (default), debugger attachment and SeDebugPrivilege-based process manipulation are blocked. When true, anti-debug restrictions are lifted (development/debug builds only).
+   */
+  allowDebugging?: boolean | null;
+  /**
+   * Explicit entitlement, evaluated only when `requireEntitlement` and `useSpecificEntitlement` are both true.
+   */
+  entitlement?: DebugEntitlement | null;
+  /**
+   * When true, callers seeking otherwise-denied debug-class access must present a matching entitlement (default false: the restriction is absolute).
+   */
+  requireEntitlement?: boolean | null;
+  /**
+   * Selects which entitlement satisfies `requireEntitlement`. When false (default), the built-in anti-tamper debug entitlement is used and `entitlement` is ignored; when true, the explicit `entitlement` applies.
+   */
+  useSpecificEntitlement?: boolean | null;
+}
+
+/**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
  */
 export interface Experimental {
@@ -78,6 +128,10 @@ export interface Experimental {
    * Seatbelt backend config (pre-promotion alias).
    */
   seatbelt?: Seatbelt | null;
+  /**
+   * Per-application tamper-protection policy (Windows). Maps developer intent to per-application mandatory access control and security compartments; only meaningful for a process with a verifiable App Identity.
+   */
+  tamperProtection?: TamperProtection | null;
   /**
    * Telemetry configuration.
    */
@@ -337,6 +391,28 @@ export interface ProcessContainer {
 }
 
 /**
+ * Controls process-level isolation and cross-instance access restrictions.
+ */
+export interface ProcessProtection {
+  /**
+   * When true, a child may inherit the parent's instance regardless of app identity. False (default) restricts inheritance to a matching identity.
+   */
+  allowInheritFromAnyIdentity?: boolean | null;
+  /**
+   * Cross-instance operations permitted between separate instances of the same protected application.
+   */
+  crossInstanceAccess?: CrossInstanceAccess | null;
+  /**
+   * When true, the process never inherits protection from its parent and always receives its own isolated instance (default false).
+   */
+  neverInheritFromParent?: boolean | null;
+  /**
+   * Parent-side opt-in: when true, this process shares its anti-tamper instance with its children (default false: each child is isolated).
+   */
+  shareInstanceWithChildren?: boolean | null;
+}
+
+/**
  * Proxy configuration. Exactly one variant applies.
  */
 export interface Proxy {
@@ -352,6 +428,24 @@ export interface Proxy {
    * Proxy URL (parsed into host:port).
    */
   url?: string | null;
+}
+
+/**
+ * Code-signing requirements for the protected process.
+ */
+export interface RequireSigning {
+  /**
+   * When true (default), the main executable (or package) must be signed.
+   */
+  executable?: boolean | null;
+  /**
+   * When true (default), all loaded DLLs must be signed.
+   */
+  libraries?: boolean | null;
+  /**
+   * Minimum code-signing level required (default `none` — no minimum beyond the presence check implied by `executable`/`libraries`).
+   */
+  requiredSigningLevel?: SigningLevel | null;
 }
 
 /**
@@ -382,6 +476,41 @@ export interface Seatbelt {
    * Replace the generated profile entirely (advanced/testing escape hatch).
    */
   profileOverride?: string | null;
+}
+
+/**
+ * Minimum code-signing level. A higher level demands a more trusted signer.
+ */
+export type SigningLevel = "none" | "authenticode" | "store" | "microsoft" | "windows";
+
+/**
+ * Per-application tamper-protection policy (`experimental.tamperProtection`).
+ * 
+ * Unlike the rest of the permissive `experimental` block, every tamper-protection struct is **closed** (`deny_unknown_fields`). This is a deliberate, selective fail-closed choice: a misspelled protection flag (e.g. `blockUIAccess` for `blockUiAccess`) is a hard config error rather than a silently-dropped field that leaves a protection off while the author believes it is on. It restricts only this security-sensitive section without imposing version-lockstep on the other in-flux experimental backends. See `docs/tamper-protection-policy.md`; the broader "flip all of `experimental` to closed" question is tracked separately.
+ * 
+ * Default-deny: every omitted field resolves to its most restrictive value, so `"tamperProtection": {}` is maximum lockdown. A handful of fields (`enabled`, `requireSigning.executable`, `requireSigning.libraries`) default to `true` because their restrictive value *is* enabled.
+ */
+export interface TamperProtection {
+  /**
+   * Debugger-attach controls and the entitlement that permits exceptions.
+   */
+  debugProtection?: DebugProtection | null;
+  /**
+   * Master switch for app protection (default true). When false, the entire section is disabled and no protections are applied.
+   */
+  enabled?: boolean | null;
+  /**
+   * Process-level isolation and cross-instance access restrictions.
+   */
+  processProtection?: ProcessProtection | null;
+  /**
+   * Code-signing requirements for the protected process.
+   */
+  requireSigning?: RequireSigning | null;
+  /**
+   * UI interaction and accessibility across the compartment boundary.
+   */
+  uiProtection?: UiProtection | null;
 }
 
 /**
@@ -433,6 +562,32 @@ export interface Ui {
  * Desktop UI isolation level.
  */
 export type UiIsolation = "desktop" | "handles" | "atoms" | "container";
+
+/**
+ * Controls UI interaction across the compartment boundary. With the exception of `blockUiAccess`, every field is allow-by-exception: false (default) blocks the interaction, true permits it.
+ */
+export interface UiProtection {
+  /**
+   * When false (default), external hooks (e.g. `SetWindowsHookEx`) into the protected process are blocked.
+   */
+  allowExternalHook?: boolean | null;
+  /**
+   * When false (default), access to the USER handles owned by the protected process is blocked.
+   */
+  allowHandleAccess?: boolean | null;
+  /**
+   * When false (default), injected (synthetic) input targeting the protected process is blocked.
+   */
+  allowSyntheticInput?: boolean | null;
+  /**
+   * When false (default), window messages sent to the protected process are blocked (mitigates shatter attacks).
+   */
+  allowWindowMessages?: boolean | null;
+  /**
+   * When true, UIAccess (assistive technology, IMEs) is blocked across the compartment boundary. False (default) permits UIAccess — the one UI field allowed by default.
+   */
+  blockUiAccess?: boolean | null;
+}
 
 /**
  * Windows Sandbox backend config.

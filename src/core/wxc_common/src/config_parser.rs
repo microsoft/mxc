@@ -1152,12 +1152,14 @@ enforced; access denials are recorded for diagnostics.\n",
         let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
             enabled: raw_t.enabled,
         });
+        let tamper_protection = raw_exp.tamper_protection.map(Into::into);
         ExperimentalConfig {
             test,
             windows_sandbox,
             wslc,
             isolation_session,
             telemetry,
+            tamper_protection,
         }
     } else {
         ExperimentalConfig::default()
@@ -1260,6 +1262,18 @@ fn convert_wire_state_aware(
                 );
                 return Err(WxcError::ConfigParse(msg));
             }
+        }
+        // tamperProtection is currently a one-shot-only policy. The state-aware
+        // path re-types `experimental` per-backend and would otherwise silently
+        // drop it (the same silent-policy-drop class guarded above) — a security
+        // policy the caller believes is in effect. Reject it explicitly until
+        // state-aware semantics for it are designed.
+        if exp.contains_key("tamperProtection") {
+            return Err(WxcError::ConfigParse(
+                "'experimental.tamperProtection' is not supported on state-aware \
+                 lifecycle requests; it is currently a one-shot-only policy."
+                    .to_string(),
+            ));
         }
     }
 
@@ -1419,6 +1433,7 @@ mod tests {
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
     use crate::models::ClipboardPolicy;
+    use crate::models::{SigningLevel, TamperProtectionConfig};
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
@@ -5076,5 +5091,179 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let telem = req.experimental.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, None);
+    }
+
+    // ── Tamper protection ────────────────────────────────────────────
+
+    #[test]
+    fn tamper_protection_not_set() {
+        let json = r#"{"process":{"commandLine":"echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.experimental.tamper_protection.is_none());
+    }
+
+    #[test]
+    fn tamper_protection_empty_object_resolves_default_deny() {
+        // `"tamperProtection": {}` = maximum lockdown: enabled + signing on,
+        // every allow-flag off.
+        let json =
+            r#"{"process":{"commandLine":"echo hi"},"experimental":{"tamperProtection":{}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let tp = req
+            .experimental
+            .tamper_protection
+            .expect("tamperProtection should be set");
+        assert_eq!(tp, TamperProtectionConfig::default());
+        assert!(tp.enabled);
+        assert!(tp.require_signing.executable);
+        assert!(tp.require_signing.libraries);
+        assert_eq!(
+            tp.require_signing.required_signing_level,
+            SigningLevel::None
+        );
+        assert!(!tp.ui_protection.block_ui_access);
+        assert!(!tp.debug_protection.allow_debugging);
+        assert!(
+            !tp.process_protection
+                .cross_instance_access
+                .read_virtual_memory
+        );
+    }
+
+    #[test]
+    fn tamper_protection_full_config_maps() {
+        let json = r#"{
+            "process":{"commandLine":"echo hi"},
+            "experimental":{"tamperProtection":{
+                "enabled": true,
+                "debugProtection": {
+                    "allowDebugging": true,
+                    "requireEntitlement": true,
+                    "useSpecificEntitlement": true,
+                    "entitlement": {
+                        "requiredSigningLevel": "microsoft",
+                        "requiredSids": ["S-1-5-18"]
+                    }
+                },
+                "uiProtection": {
+                    "blockUiAccess": true,
+                    "allowExternalHook": true,
+                    "allowHandleAccess": true,
+                    "allowWindowMessages": true,
+                    "allowSyntheticInput": true
+                },
+                "processProtection": {
+                    "neverInheritFromParent": true,
+                    "allowInheritFromAnyIdentity": true,
+                    "shareInstanceWithChildren": true,
+                    "crossInstanceAccess": {
+                        "readVirtualMemory": true,
+                        "duplicateHandle": true
+                    }
+                },
+                "requireSigning": {
+                    "executable": false,
+                    "libraries": false,
+                    "requiredSigningLevel": "windows"
+                }
+            }}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let tp = req
+            .experimental
+            .tamper_protection
+            .expect("tamperProtection should be set");
+        assert!(tp.enabled);
+        assert!(tp.debug_protection.allow_debugging);
+        assert!(tp.debug_protection.require_entitlement);
+        assert!(tp.debug_protection.use_specific_entitlement);
+        assert_eq!(
+            tp.debug_protection.entitlement.required_signing_level,
+            SigningLevel::Microsoft
+        );
+        assert_eq!(
+            tp.debug_protection.entitlement.required_sids,
+            vec!["S-1-5-18".to_string()]
+        );
+        assert!(tp.ui_protection.block_ui_access);
+        assert!(tp.ui_protection.allow_synthetic_input);
+        assert!(tp.process_protection.never_inherit_from_parent);
+        assert!(tp.process_protection.cross_instance_access.duplicate_handle);
+        assert!(!tp.require_signing.executable);
+        assert!(!tp.require_signing.libraries);
+        assert_eq!(
+            tp.require_signing.required_signing_level,
+            SigningLevel::Windows
+        );
+    }
+
+    #[test]
+    fn tamper_protection_partial_uses_defaults() {
+        // Only `enabled: false` is given; signing defaults still resolve to true.
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"tamperProtection":{"enabled":false}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let tp = req
+            .experimental
+            .tamper_protection
+            .expect("tamperProtection should be set");
+        assert!(!tp.enabled);
+        assert!(tp.require_signing.executable);
+        assert!(tp.require_signing.libraries);
+    }
+
+    #[test]
+    fn tamper_protection_unknown_nested_field_is_rejected() {
+        // Selective deny_unknown_fields: a misspelled protection flag
+        // (`blockUIAccess` vs `blockUiAccess`) is a hard error rather than a
+        // silently-dropped field that leaves a protection off.
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"tamperProtection":{"uiProtection":{"blockUIAccess":true}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn tamper_protection_excluded_field_is_rejected() {
+        // `protectNewFiles` was intentionally left out of the schema; because
+        // the section is closed, referencing it is a hard error.
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"tamperProtection":{"protectNewFiles":true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn tamper_protection_invalid_signing_level_is_rejected() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"tamperProtection":{"requireSigning":{"requiredSigningLevel":"ultra"}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        assert!(load_request(&encoded, &mut logger, true).is_err());
+    }
+
+    #[test]
+    fn tamper_protection_rejected_on_state_aware() {
+        // One-shot-only for now: rejected explicitly on state-aware rather than
+        // silently dropped (a security policy the caller believes is in effect).
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"tamperProtection": {}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e,
+            other => panic!("expected state-aware rejection, got {other:?}"),
+        };
+        assert!(
+            err.to_string().contains("tamperProtection"),
+            "unexpected error: {err}"
+        );
     }
 }
