@@ -5,7 +5,9 @@
   "process": {
     "commandLine": "sh -c 'echo About to exit with code 42; exit 42'"
   },
-  "network": {},
+  "network": {
+    "defaultPolicy": "block"
+  },
   "experimental": {
     "wslc": {
       "image": "alpine:latest"

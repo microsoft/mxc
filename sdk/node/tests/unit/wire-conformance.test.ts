@@ -77,11 +77,8 @@ import type {
   MXCConfiguration as WireMxcConfig,
   ClipboardPolicy as WireClipboardPolicy,
   Containment as WireContainment,
-  // AB#62830582: legacy network enums removed from the GA wire schema; the SDK
-  // types.ts + wire-conformance migration is deferred to a follow-up. Re-add
-  // once the SDK adopts the GA egress/ingress network model.
-  // NetworkPolicy as WireNetworkPolicy,
-  // NetworkEnforcement as WireNetworkEnforcement,
+  NetworkPolicy as WireNetworkPolicy,
+  NetworkEnforcement as WireNetworkEnforcement,
   UiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
 } from '../../src/generated/wire.js';
@@ -111,15 +108,12 @@ type _Containment = AssertTrue<
 // field the SDK exposes inline is checked for exact equivalence with its wire
 // enum. `NonNullable` strips the generated `| null` so only the value set is
 // compared. A new wire enum value now fails the build until the SDK adds it.
-// AB#62830582: legacy network enum fields (defaultPolicy/enforcementMode) were
-// dropped by the GA wire schema; re-enable once the SDK types.ts is migrated to
-// the egress/ingress model.
-// type _NetDefaultPolicy = AssertTrue<
-//   Equivalent<NonNullable<NetworkConfig['defaultPolicy']>, WireNetworkPolicy>
-// >;
-// type _NetEnforcement = AssertTrue<
-//   Equivalent<NonNullable<NetworkConfig['enforcementMode']>, WireNetworkEnforcement>
-// >;
+type _NetDefaultPolicy = AssertTrue<
+  Equivalent<NonNullable<NetworkConfig['defaultPolicy']>, WireNetworkPolicy>
+>;
+type _NetEnforcement = AssertTrue<
+  Equivalent<NonNullable<NetworkConfig['enforcementMode']>, WireNetworkEnforcement>
+>;
 type _BaseProcessUiIsolation = AssertTrue<
   Equivalent<NonNullable<BaseProcessUiConfig['isolation']>, WireUiIsolation>
 >;
@@ -134,8 +128,7 @@ type _PortProtocol = AssertTrue<
 type _ProcessVals = AssertTrue<Assignable<ProcessConfig, WireProcess>>;
 type _LifecycleVals = AssertTrue<Assignable<LifecycleConfig, WireLifecycle>>;
 type _FilesystemVals = AssertTrue<Assignable<FilesystemConfig, WireFilesystem>>;
-// AB#62830582: legacy network schema migration deferred (see wire-conformance note above).
-// type _NetworkVals = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
+type _NetworkVals = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
 type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
 type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
 type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
@@ -169,8 +162,7 @@ type _FilesystemKeys = AssertTrue<Equivalent<OnlyInPublic<FilesystemConfig, Wire
 
 // `NetworkConfig.removeRulesOnExit` is deprecated (use `lifecycle.preservePolicy`)
 // and not a wire `network` field.
-// AB#62830582: legacy network schema migration deferred.
-// type _NetworkKeys = AssertTrue<Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>>;
+type _NetworkKeys = AssertTrue<Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>>;
 
 // `ProcessContainerConfig.name` is the deprecated AppContainer profile name
 // (superseded by top-level `containerId`); not a wire `processContainer` field.
@@ -188,8 +180,7 @@ type _LxcKeys = AssertTrue<Equivalent<OnlyInPublic<LxcConfig, WireLxc>, 'contain
 //  * key-drift: the only public-but-not-wire root key is `appContainer`, the
 //    deprecated serde alias the schema folds away (so it is absent from the
 //    generated root). A NEW root divergence fails the build.
-// AB#62830582: root value-shape check embeds the legacy network schema; deferred.
-// type _RootVals = AssertTrue<Assignable<ContainerConfig, WireMxcConfig>>;
+type _RootVals = AssertTrue<Assignable<ContainerConfig, WireMxcConfig>>;
 type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConfig>, 'appContainer'>>;
 
 // --- reverse key conformance: wire-only fields (review finding F1, gpt-5.5) --
@@ -201,19 +192,16 @@ type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConf
 type _ProcessWireKeys = AssertTrue<Equivalent<OnlyInWire<ProcessConfig, WireProcess>, never>>;
 type _LifecycleWireKeys = AssertTrue<Equivalent<OnlyInWire<LifecycleConfig, WireLifecycle>, never>>;
 type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, WireFilesystem>, never>>;
-// AB#62830582: legacy network schema migration deferred.
-// type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
+type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
 type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
 type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, never>>;
 type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
 
-// AB#62830582: GA wire processContainer gained a `network` (allowedPeers) field
-// the SDK does not yet mirror; re-enable after the types.ts migration.
-// type _ProcessContainerWireKeys = AssertTrue<
-//   Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'captureDenials'>
-// >;
+type _ProcessContainerWireKeys = AssertTrue<
+  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'captureDenials'>
+>;
 
 // `seatbelt.guiAccess` and `seatbelt.launchMethod` are wire fields the one-shot
 // `SeatbeltConfig` does not expose today.
@@ -226,31 +214,27 @@ type _SeatbeltWireKeys = AssertTrue<
 // `correlationVector` — see `state-aware-types.ts`), and `fallback` (AppContainer
 // DACL-mutation policy not surfaced through the one-shot policy API). Any OTHER
 // new root wire field fails.
-// AB#62830582: root wire-only key check embeds the GA network schema; deferred.
-// type _RootWireKeys = AssertTrue<
-//   Equivalent<
-//     OnlyInWire<ContainerConfig, WireMxcConfig>,
-//     '$schema' | '_comment' | 'phase' | 'sandboxId' | 'correlationVector' | 'fallback'
-//   >
-// >;
+type _RootWireKeys = AssertTrue<
+  Equivalent<
+    OnlyInWire<ContainerConfig, WireMxcConfig>,
+    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'correlationVector' | 'fallback'
+  >
+>;
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
   _Clipboard, _Containment,
-  // AB#62830582: _NetDefaultPolicy, _NetEnforcement disabled (legacy network enums).
-  _BaseProcessUiIsolation, _PortProtocol,
-  _ProcessVals, _LifecycleVals, _FilesystemVals, _UiVals,
+  _NetDefaultPolicy, _NetEnforcement, _BaseProcessUiIsolation, _PortProtocol,
+  _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
   _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _PortMappingVals,
   _SeatbeltVals, _LxcVals,
-  _ProcessKeys, _LifecycleKeys, _FilesystemKeys, _UiKeys,
+  _ProcessKeys, _LifecycleKeys, _FilesystemKeys, _NetworkKeys, _UiKeys,
   _ProcessContainerKeys, _BaseProcessUiKeys, _WslcKeys, _PortMappingKeys,
   _SeatbeltKeys, _LxcKeys,
-  _RootKeys,
-  _ProcessWireKeys, _LifecycleWireKeys, _FilesystemWireKeys,
+  _RootVals, _RootKeys,
+  _ProcessWireKeys, _LifecycleWireKeys, _FilesystemWireKeys, _NetworkWireKeys,
   _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys, _PortMappingWireKeys,
-  _LxcWireKeys, _SeatbeltWireKeys,
-  // AB#62830582: _NetworkVals, _NetworkKeys, _NetworkWireKeys, _RootVals,
-  // _ProcessContainerWireKeys, _RootWireKeys disabled (GA network schema migration).
+  _LxcWireKeys, _ProcessContainerWireKeys, _SeatbeltWireKeys, _RootWireKeys,
 ];
 
 test('public SDK wire types conform to the generated wire schema (compile-time)', () => {

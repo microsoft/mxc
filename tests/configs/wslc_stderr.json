@@ -5,7 +5,9 @@
   "process": {
     "commandLine": "echo 'stdout message' && echo 'stderr message' >&2 && echo 'another stdout'"
   },
-  "network": {},
+  "network": {
+    "defaultPolicy": "block"
+  },
   "experimental": {
     "wslc": {
       "image": "alpine:latest"

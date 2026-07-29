@@ -229,7 +229,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn streaming_rejects_dry_run() {
         // `dry_run` ("validate, don't execute") has no process to stream, so the
         // streaming spawn rejects it. The public `SandboxRequest` can't set it,
@@ -245,7 +244,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn streaming_rejects_unsupported_containment() {
         // LXC has no streaming path in the library; selecting it must surface a
         // clear `UnsupportedContainment` rather than spawning. The public

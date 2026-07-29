@@ -67,11 +67,6 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
- * Egress default outbound action applied when no egress rule matches.
- */
-export type EgressDefault = "allow" | "deny";
-
-/**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
  */
 export interface Experimental {
@@ -129,11 +124,6 @@ export interface Filesystem {
    */
   readwritePaths?: string[] | null;
 }
-
-/**
- * Host loopback ingress policy.
- */
-export type HostLoopbackPolicy = "allow" | "deny";
 
 /**
  * IsolationSession sizing profile.
@@ -239,93 +229,40 @@ export interface Lxc {
  */
 export interface Network {
   /**
-   * Outbound policy rules.
+   * Allow binding/listening on local IPs and accepting inbound connections.
    */
-  egress?: NetworkEgress | null;
+  allowLocalNetwork?: boolean | null;
   /**
-   * Inbound policy.
+   * Hosts explicitly allowed.
    */
-  ingress?: NetworkIngress | null;
+  allowedHosts?: string[] | null;
+  /**
+   * Hosts explicitly blocked.
+   */
+  blockedHosts?: string[] | null;
+  /**
+   * Default outbound policy when no host rule matches.
+   */
+  defaultPolicy?: NetworkPolicy | null;
+  /**
+   * How the policy is enforced.
+   */
+  enforcementMode?: NetworkEnforcement | null;
+  /**
+   * Proxy configuration (one of localhost / builtinTestServer / url).
+   */
+  proxy?: Proxy | null;
 }
 
 /**
- * Outbound destination.
+ * Network enforcement mechanism.
  */
-export interface NetworkDestination {
-  /**
-   * IPv4/IPv6 CIDR range, or a bare IP address.
-   */
-  cidr: string;
-  /**
-   * Optional CIDR exclusions carved out of `cidr` (Kubernetes `ipBlock.except` style). Traffic to these ranges does not match this destination.
-   */
-  except?: string[];
-}
+export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
- * Outbound policy rule set.
+ * Default network policy.
  */
-export interface NetworkEgress {
-  /**
-   * Rules that allow matching outbound connections.
-   */
-  allow?: NetworkRules[];
-  /**
-   * Default outbound action when no egress rule matches (`allow` or `deny`). When omitted, defaults to `deny` (fail-closed). Setting `default: "allow"` expresses the "allow everything except this deny-list" model; when egress is present it supersedes the legacy `defaultPolicy`.
-   */
-  default?: EgressDefault | null;
-  /**
-   * Rules that deny matching outbound connections.
-   */
-  deny?: NetworkRules[];
-}
-
-/**
- * Inbound policy.
- */
-export interface NetworkIngress {
-  /**
-   * Whether host loopback can connect inbound to the sandbox.
-   */
-  hostLoopback?: HostLoopbackPolicy | null;
-}
-
-/**
- * Outbound port selector.
- */
-export interface NetworkPort {
-  /**
-   * End of an inclusive destination port range. When set, the selector matches `port..=endPort` and requires `port` with `endPort >= port`.
-   */
-  endPort?: number | null;
-  /**
-   * Destination port. Must be omitted for `icmp` (which has no ports); the parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp` the selector matches all ports for that protocol. Acts as the start of an inclusive range when `endPort` is also set.
-   */
-  port?: number | null;
-  /**
-   * Transport protocol.
-   */
-  protocol: unknown;
-}
-
-/**
- * Outbound transport protocol. `any` matches every protocol.
- */
-export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
-
-/**
- * Outbound policy rule.
- */
-export interface NetworkRules {
-  /**
-   * Destination ports and protocols. When omitted or empty, the rule matches all ports and all protocols to the listed destinations.
-   */
-  ports?: NetworkPort[];
-  /**
-   * Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
-   */
-  to: NetworkDestination[];
-}
+export type NetworkPolicy = "allow" | "block";
 
 /**
  * State-aware lifecycle phase.
@@ -394,33 +331,27 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
-   * Network settings specific to the processcontainer backend (loopback peer exemptions). Distinct from the shared top-level `network` policy.
-   */
-  network?: ProcessContainerNetwork | null;
-  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
 }
 
 /**
- * ProcessContainer-specific network settings (Windows).
+ * Proxy configuration. Exactly one variant applies.
  */
-export interface ProcessContainerNetwork {
+export interface Proxy {
   /**
-   * AppContainer friendly names whose loopback traffic is exempted (for example a caller-provided proxy container). MXC resolves each friendly name to a SID at launch to scope the loopback exemption rules.
+   * Have wxc launch its own built-in test proxy.
    */
-  allowedPeers?: string[];
-}
-
-/**
- * Runtime configuration applied to the launched container.
- */
-export interface RuntimeConfig {
+  builtinTestServer?: boolean | null;
   /**
-   * Proxy URL the container's outbound traffic is routed through, e.g. `"http://127.0.0.1:8080"`. Per the GA network spec this is a bare URL string restricted to a loopback proxy: only `localhost:<port>`, `127.0.0.1:<port>` and `[::1]:<port>` are permitted.
+   * External localhost proxy port.
    */
-  networkProxy?: string | null;
+  localhost?: number | null;
+  /**
+   * Proxy URL (parsed into host:port).
+   */
+  url?: string | null;
 }
 
 /**
@@ -621,10 +552,6 @@ export interface MXCConfiguration {
    * ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.
    */
   processContainer?: ProcessContainer | null;
-  /**
-   * Runtime configuration applied to the launched container.
-   */
-  runtimeConfig?: RuntimeConfig | null;
   /**
    * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
    */

@@ -9,5 +9,10 @@
   "processContainer": {
     "capabilities": ["internetClient"]
   },
-  "network": {}
+  "network": {
+    "enforcementMode": "firewall",
+    "defaultPolicy": "block",
+    "allowedHosts": ["api.github.com", "140.82.121.0/24"],
+    "blockedHosts": []
+  }
 }

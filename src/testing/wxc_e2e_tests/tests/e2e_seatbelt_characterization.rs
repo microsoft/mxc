@@ -143,7 +143,6 @@ fn seatbelt_applies_requested_env() {
 /// Uses the external `url` variant so no bundled proxy or `--allow-testing-features`
 /// flag is required — this characterizes the env-injection wiring end-to-end.
 #[test]
-#[ignore = "AB#62830582: legacy network.defaultPolicy/proxy schema; re-enable after GA-network parser/SDK migration"]
 fn seatbelt_injects_proxy_env_from_network_proxy() {
     if !has_platform_exec() {
         return;

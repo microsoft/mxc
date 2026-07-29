@@ -102,28 +102,13 @@ jobs:
           BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
           if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
-      # AB#62830582: The Node SDK still emits the legacy network schema
-      # (sdk/node/src/sandbox.ts writes `network.defaultPolicy`), because its
-      # generated wire types have not been regenerated from the new GA
-      # `wire.rs` yet. The GA parser now rejects that field, so every
-      # SDK-generated config fails to parse and all integration tests error
-      # with "unknown field `defaultPolicy`, expected `egress` or `ingress`".
-      # Regenerating the SDK wire types and migrating config emission to the GA
-      # egress/ingress shape is deferred to the follow-up PR (see PR #676
-      # description, which intentionally limits this change to wire.rs + the
-      # test-config fixtures). Skip the suite until then so this schema-only PR
-      # is not blocked by the deferred SDK work.
-      #
-      # Re-enable by restoring the original invocation preserved below.
-      - name: npm test (deferred — AB#62830582)
+      # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
+      # preserves the env vars above.
+      - name: npm test
         shell: bash
         run: |
-          echo "SDK integration tests are temporarily skipped (AB#62830582):"
-          echo "the SDK still emits the legacy network schema (network.defaultPolicy),"
-          echo "which the GA wire.rs parser rejects. Migration is deferred to a follow-up PR."
-          # Original invocation (restore once the SDK is migrated to the GA network schema):
-          # if [ "${{ matrix.os_label }}" = "linux" ]; then
-          #   sudo -E npm test
-          # else
-          #   npm test
-          # fi
+          if [ "${{ matrix.os_label }}" = "linux" ]; then
+            sudo -E npm test
+          else
+            npm test
+          fi

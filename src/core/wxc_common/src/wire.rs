@@ -115,9 +115,6 @@ pub struct MxcConfig {
 
     /// Experimental features. Only honored when `--experimental` is passed.
     pub experimental: Option<Experimental>,
-
-    /// Runtime configuration applied to the launched container.
-    pub runtime_config: Option<RuntimeConfig>,
 }
 
 /// State-aware lifecycle phase.
@@ -215,21 +212,6 @@ pub struct ProcessContainer {
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
-    /// Network settings specific to the processcontainer backend (loopback
-    /// peer exemptions). Distinct from the shared top-level `network` policy.
-    pub network: Option<ProcessContainerNetwork>,
-}
-
-/// ProcessContainer-specific network settings (Windows).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProcessContainerNetwork {
-    /// AppContainer friendly names whose loopback traffic is exempted (for
-    /// example a caller-provided proxy container). MXC resolves each friendly
-    /// name to a SID at launch to scope the loopback exemption rules.
-    #[serde(default)]
-    pub allowed_peers: Vec<String>,
 }
 
 /// Windows denial-capture settings. The presence of the `captureDenials`
@@ -340,113 +322,18 @@ pub struct Fallback {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Network {
-    /// Outbound policy rules.
-    pub egress: Option<NetworkEgress>,
-    /// Inbound policy.
-    pub ingress: Option<NetworkIngress>,
-}
-
-/// Outbound policy rule set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkEgress {
-    /// Rules that allow matching outbound connections.
-    #[serde(default)]
-    pub allow: Vec<NetworkRules>,
-    /// Rules that deny matching outbound connections.
-    #[serde(default)]
-    pub deny: Vec<NetworkRules>,
-    /// Default outbound action when no egress rule matches (`allow` or `deny`).
-    /// When omitted, defaults to `deny` (fail-closed). Setting `default: "allow"`
-    /// expresses the "allow everything except this deny-list" model; when
-    /// egress is present it supersedes the legacy `defaultPolicy`.
-    #[serde(rename = "default")]
-    pub default_action: Option<EgressDefault>,
-}
-
-/// Egress default outbound action applied when no egress rule matches.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum EgressDefault {
-    Allow,
-    Deny,
-}
-
-/// Outbound policy rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkRules {
-    /// Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
-    pub to: Vec<NetworkDestination>,
-    /// Destination ports and protocols. When omitted or empty, the rule matches
-    /// all ports and all protocols to the listed destinations.
-    #[serde(default)]
-    pub ports: Vec<NetworkPort>,
-}
-
-/// Outbound destination.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkDestination {
-    /// IPv4/IPv6 CIDR range, or a bare IP address.
-    pub cidr: String,
-    /// Optional CIDR exclusions carved out of `cidr` (Kubernetes `ipBlock.except`
-    /// style). Traffic to these ranges does not match this destination.
-    #[serde(default)]
-    pub except: Vec<String>,
-}
-
-/// Outbound port selector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkPort {
-    /// Transport protocol.
-    pub protocol: NetworkProtocol,
-    /// Destination port. Must be omitted for `icmp` (which has no ports); the
-    /// parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp`
-    /// the selector matches all ports for that protocol. Acts as the start of an
-    /// inclusive range when `endPort` is also set.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
-    pub port: Option<u16>,
-    /// End of an inclusive destination port range. When set, the selector matches
-    /// `port..=endPort` and requires `port` with `endPort >= port`.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
-    pub end_port: Option<u16>,
-}
-
-/// Outbound transport protocol. `any` matches every protocol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkProtocol {
-    Tcp,
-    Udp,
-    Icmp,
-    Any,
-}
-
-/// Inbound policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkIngress {
-    /// Whether host loopback can connect inbound to the sandbox.
-    #[serde(rename = "hostLoopback")]
-    pub host_loopback: Option<HostLoopbackPolicy>,
-}
-
-/// Host loopback ingress policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum HostLoopbackPolicy {
-    Allow,
-    Deny,
+    /// Default outbound policy when no host rule matches.
+    pub default_policy: Option<NetworkPolicy>,
+    /// How the policy is enforced.
+    pub enforcement_mode: Option<NetworkEnforcement>,
+    /// Allow binding/listening on local IPs and accepting inbound connections.
+    pub allow_local_network: Option<bool>,
+    /// Hosts explicitly allowed.
+    pub allowed_hosts: Option<Vec<String>>,
+    /// Hosts explicitly blocked.
+    pub blocked_hosts: Option<Vec<String>>,
+    /// Proxy configuration (one of localhost / builtinTestServer / url).
+    pub proxy: Option<Proxy>,
 }
 
 /// Default network policy.
@@ -471,16 +358,18 @@ pub enum NetworkEnforcement {
     Both,
 }
 
-/// Runtime configuration applied to the launched container.
+/// Proxy configuration. Exactly one variant applies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeConfig {
-    /// Proxy URL the container's outbound traffic is routed through, e.g.
-    /// `"http://127.0.0.1:8080"`. Per the GA network spec this is a bare URL
-    /// string restricted to a loopback proxy: only `localhost:<port>`,
-    /// `127.0.0.1:<port>` and `[::1]:<port>` are permitted.
-    pub network_proxy: Option<String>,
+pub struct Proxy {
+    /// External localhost proxy port.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
+    pub localhost: Option<u16>,
+    /// Have wxc launch its own built-in test proxy.
+    pub builtin_test_server: Option<bool>,
+    /// Proxy URL (parsed into host:port).
+    pub url: Option<String>,
 }
 
 /// Cross-platform UI isolation policy.

@@ -366,7 +366,6 @@ fn test_microvm_basic() {
 }
 
 #[test]
-#[ignore = "AB#62830582: migrated microvm_network.json GA egress schema not yet honored by the executor; re-enable after network parser/executor migration"]
 fn test_microvm_network() {
     if !cached_has_wxc_exe() {
         return;
@@ -378,7 +377,6 @@ fn test_microvm_network() {
 }
 
 #[test]
-#[ignore = "AB#62830582: legacy network.blockedHosts/defaultPolicy schema; re-enable after network parser/executor migration"]
 fn test_microvm_network_blocked() {
     if !cached_has_wxc_exe() {
         return;
@@ -754,22 +752,18 @@ fn hyperlight_suite() {
             expected_exit: 42,
             output_contains: None,
         },
-        // AB#62830582: hyperlight_networking{,_blocked}.json were migrated to the GA
-        // network schema, which drops DNS-name allowedHosts (out of GA scope), so these
-        // cases can no longer express the allow rule they assert. Disabled pending the
-        // follow-up network parser/executor migration.
-        // HyperlightCase {
-        //     config: "hyperlight_networking.json",
-        //     description: "HTTP GET with allowedHosts network policy",
-        //     expected_exit: 0,
-        //     output_contains: Some("200"),
-        // },
-        // HyperlightCase {
-        //     config: "hyperlight_networking_blocked.json",
-        //     description: "HTTP GET to unlisted host is blocked by allowedHosts",
-        //     expected_exit: 0,
-        //     output_contains: Some("BLOCKED"),
-        // },
+        HyperlightCase {
+            config: "hyperlight_networking.json",
+            description: "HTTP GET with allowedHosts network policy",
+            expected_exit: 0,
+            output_contains: Some("200"),
+        },
+        HyperlightCase {
+            config: "hyperlight_networking_blocked.json",
+            description: "HTTP GET to unlisted host is blocked by allowedHosts",
+            expected_exit: 0,
+            output_contains: Some("BLOCKED"),
+        },
         HyperlightCase {
             config: "hyperlight_timeout.json",
             description: "time.sleep(120) killed by 1s timeout",

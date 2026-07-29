@@ -12,8 +12,6 @@
         ]
     },
     "network": {
-      "egress": {
-        "default": "allow"
-      }
+        "defaultPolicy": "allow"
     }
 }

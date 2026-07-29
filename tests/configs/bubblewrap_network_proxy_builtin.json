@@ -6,8 +6,7 @@
     "commandLine": "curl -fsSL https://api.github.com/zen && echo PROXY_OK"
   },
   "network": {
-    "egress": {
-      "default": "allow"
-    }
+    "defaultPolicy": "allow",
+    "proxy": { "builtinTestServer": true }
   }
 }

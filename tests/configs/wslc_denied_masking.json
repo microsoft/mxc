@@ -10,9 +10,7 @@
     "deniedPaths": ["C:\\wslcmask\\secret_file.txt", "C:\\wslcmask\\secret_dir"]
   },
   "network": {
-    "egress": {
-      "default": "allow"
-    }
+    "defaultPolicy": "allow"
   },
   "experimental": {
     "wslc": {

@@ -7,8 +7,9 @@
         "timeout": 10000
     },
     "network": {
-      "egress": {
-        "default": "allow"
-      }
+        "defaultPolicy": "allow",
+        "blockedHosts": [
+            "evil.example.com"
+        ]
     }
 }

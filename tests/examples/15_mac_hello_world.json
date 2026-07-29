@@ -11,5 +11,7 @@
             "/tmp"
         ]
     },
-    "network": {}
+    "network": {
+        "defaultPolicy": "block"
+    }
 }

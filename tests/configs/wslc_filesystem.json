@@ -10,9 +10,7 @@
     "readwritePaths": ["C:\\workspace"]
   },
   "network": {
-    "egress": {
-      "default": "allow"
-    }
+    "defaultPolicy": "allow"
   },
   "experimental": {
     "wslc": {

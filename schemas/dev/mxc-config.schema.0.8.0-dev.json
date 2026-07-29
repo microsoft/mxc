@@ -180,14 +180,6 @@
         }
       ]
     },
-    "EgressDefault": {
-      "description": "Egress default outbound action applied when no egress rule matches.",
-      "enum": [
-        "allow",
-        "deny"
-      ],
-      "type": "string"
-    },
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
@@ -310,14 +302,6 @@
         }
       },
       "type": "object"
-    },
-    "HostLoopbackPolicy": {
-      "description": "Host loopback ingress policy.",
-      "enum": [
-        "allow",
-        "deny"
-      ],
-      "type": "string"
     },
     "IsolationConfigurationId": {
       "description": "IsolationSession sizing profile.",
@@ -512,175 +496,102 @@
       "additionalProperties": false,
       "description": "Network access policy.",
       "properties": {
-        "egress": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/NetworkEgress"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Outbound policy rules."
+        "allowLocalNetwork": {
+          "description": "Allow binding/listening on local IPs and accepting inbound connections.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
-        "ingress": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/NetworkIngress"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Inbound policy."
-        }
-      },
-      "type": "object"
-    },
-    "NetworkDestination": {
-      "additionalProperties": false,
-      "description": "Outbound destination.",
-      "properties": {
-        "cidr": {
-          "description": "IPv4/IPv6 CIDR range, or a bare IP address.",
-          "type": "string"
-        },
-        "except": {
-          "default": [],
-          "description": "Optional CIDR exclusions carved out of `cidr` (Kubernetes `ipBlock.except` style). Traffic to these ranges does not match this destination.",
+        "allowedHosts": {
+          "description": "Hosts explicitly allowed.",
           "items": {
             "type": "string"
           },
-          "type": "array"
-        }
-      },
-      "required": [
-        "cidr"
-      ],
-      "type": "object"
-    },
-    "NetworkEgress": {
-      "additionalProperties": false,
-      "description": "Outbound policy rule set.",
-      "properties": {
-        "allow": {
-          "default": [],
-          "description": "Rules that allow matching outbound connections.",
-          "items": {
-            "$ref": "#/definitions/NetworkRules"
-          },
-          "type": "array"
+          "type": [
+            "array",
+            "null"
+          ]
         },
-        "default": {
+        "blockedHosts": {
+          "description": "Hosts explicitly blocked.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "defaultPolicy": {
           "anyOf": [
             {
-              "$ref": "#/definitions/EgressDefault"
+              "$ref": "#/definitions/NetworkPolicy"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Default outbound action when no egress rule matches (`allow` or `deny`). When omitted, defaults to `deny` (fail-closed). Setting `default: \"allow\"` expresses the \"allow everything except this deny-list\" model; when egress is present it supersedes the legacy `defaultPolicy`."
+          "description": "Default outbound policy when no host rule matches."
         },
-        "deny": {
-          "default": [],
-          "description": "Rules that deny matching outbound connections.",
-          "items": {
-            "$ref": "#/definitions/NetworkRules"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
-    },
-    "NetworkIngress": {
-      "additionalProperties": false,
-      "description": "Inbound policy.",
-      "properties": {
-        "hostLoopback": {
+        "enforcementMode": {
           "anyOf": [
             {
-              "$ref": "#/definitions/HostLoopbackPolicy"
+              "$ref": "#/definitions/NetworkEnforcement"
             },
             {
               "type": "null"
             }
           ],
-          "description": "Whether host loopback can connect inbound to the sandbox."
-        }
-      },
-      "type": "object"
-    },
-    "NetworkPort": {
-      "additionalProperties": false,
-      "description": "Outbound port selector.",
-      "properties": {
-        "endPort": {
-          "description": "End of an inclusive destination port range. When set, the selector matches `port..=endPort` and requires `port` with `endPort >= port`.",
-          "maximum": 65535.0,
-          "minimum": 1.0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "description": "How the policy is enforced."
         },
-        "port": {
-          "description": "Destination port. Must be omitted for `icmp` (which has no ports); the parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp` the selector matches all ports for that protocol. Acts as the start of an inclusive range when `endPort` is also set.",
-          "maximum": 65535.0,
-          "minimum": 1.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "protocol": {
-          "allOf": [
+        "proxy": {
+          "anyOf": [
             {
-              "$ref": "#/definitions/NetworkProtocol"
+              "$ref": "#/definitions/Proxy"
+            },
+            {
+              "type": "null"
             }
           ],
-          "description": "Transport protocol."
+          "description": "Proxy configuration (one of localhost / builtinTestServer / url)."
         }
       },
-      "required": [
-        "protocol"
-      ],
       "type": "object"
     },
-    "NetworkProtocol": {
-      "description": "Outbound transport protocol. `any` matches every protocol.",
+    "NetworkEnforcement": {
+      "description": "Network enforcement mechanism.",
+      "oneOf": [
+        {
+          "description": "Per-process capability-based filtering.",
+          "enum": [
+            "capabilities"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Host firewall rules.",
+          "enum": [
+            "firewall"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Both capability and firewall enforcement.",
+          "enum": [
+            "both"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "NetworkPolicy": {
+      "description": "Default network policy.",
       "enum": [
-        "tcp",
-        "udp",
-        "icmp",
-        "any"
+        "allow",
+        "block"
       ],
       "type": "string"
-    },
-    "NetworkRules": {
-      "additionalProperties": false,
-      "description": "Outbound policy rule.",
-      "properties": {
-        "ports": {
-          "default": [],
-          "description": "Destination ports and protocols. When omitted or empty, the rule matches all ports and all protocols to the listed destinations.",
-          "items": {
-            "$ref": "#/definitions/NetworkPort"
-          },
-          "type": "array"
-        },
-        "to": {
-          "description": "Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.",
-          "items": {
-            "$ref": "#/definitions/NetworkDestination"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "to"
-      ],
-      "type": "object"
     },
     "Phase": {
       "description": "State-aware lifecycle phase.",
@@ -804,17 +715,6 @@
             "null"
           ]
         },
-        "network": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ProcessContainerNetwork"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Network settings specific to the processcontainer backend (loopback peer exemptions). Distinct from the shared top-level `network` policy."
-        },
         "ui": {
           "anyOf": [
             {
@@ -829,27 +729,28 @@
       },
       "type": "object"
     },
-    "ProcessContainerNetwork": {
+    "Proxy": {
       "additionalProperties": false,
-      "description": "ProcessContainer-specific network settings (Windows).",
+      "description": "Proxy configuration. Exactly one variant applies.",
       "properties": {
-        "allowedPeers": {
-          "default": [],
-          "description": "AppContainer friendly names whose loopback traffic is exempted (for example a caller-provided proxy container). MXC resolves each friendly name to a SID at launch to scope the loopback exemption rules.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "type": "object"
-    },
-    "RuntimeConfig": {
-      "additionalProperties": false,
-      "description": "Runtime configuration applied to the launched container.",
-      "properties": {
-        "networkProxy": {
-          "description": "Proxy URL the container's outbound traffic is routed through, e.g. `\"http://127.0.0.1:8080\"`. Per the GA network spec this is a bare URL string restricted to a loopback proxy: only `localhost:<port>`, `127.0.0.1:<port>` and `[::1]:<port>` are permitted.",
+        "builtinTestServer": {
+          "description": "Have wxc launch its own built-in test proxy.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "localhost": {
+          "description": "External localhost proxy port.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Proxy URL (parsed into host:port).",
           "type": [
             "string",
             "null"
@@ -1220,17 +1121,6 @@
         }
       ],
       "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`."
-    },
-    "runtimeConfig": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/RuntimeConfig"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Runtime configuration applied to the launched container."
     },
     "sandboxId": {
       "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.",

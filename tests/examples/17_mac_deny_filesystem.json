@@ -14,5 +14,7 @@
             "/Users"
         ]
     },
-    "network": {}
+    "network": {
+        "defaultPolicy": "block"
+    }
 }

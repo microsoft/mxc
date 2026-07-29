@@ -6,9 +6,7 @@
     "commandLine": "echo 'Image pulled from MCR' && cat /etc/os-release | head -4"
   },
   "network": {
-    "egress": {
-      "default": "allow"
-    }
+    "defaultPolicy": "allow"
   },
   "experimental": {
     "wslc": {
