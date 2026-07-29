@@ -200,16 +200,22 @@ fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
     }
 }
 
-fn validate_audit_containment(containment: &ContainmentBackend) -> Result<(), String> {
-    if *containment == ContainmentBackend::ProcessContainer {
-        Ok(())
-    } else {
-        Err(format!(
+fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
+    if request.containment != ContainmentBackend::ProcessContainer {
+        return Err(format!(
             "--audit is only supported with the Windows ProcessContainer backend; \
              resolved containment is '{}'",
-            containment.wire_name()
-        ))
+            request.containment.wire_name()
+        ));
     }
+    if request.policy.capture_denials.is_some() {
+        return Err(
+            "--audit cannot be combined with processContainer.captureDenials; \
+             use captureDenials.mode: \"allow\" for permissive capture"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn command_override_from_cli(
@@ -1074,7 +1080,7 @@ fn main() {
     // because Windows derives capability SIDs case-insensitively.
     #[cfg(target_os = "windows")]
     if cli.audit {
-        if let Err(message) = validate_audit_containment(&request.containment) {
+        if let Err(message) = validate_audit_request(&request) {
             eprintln!("Error: {message}");
             telemetry::emit_early_exit(
                 telemetry_active,
@@ -1434,7 +1440,11 @@ mod tests {
 
     #[test]
     fn audit_mode_only_accepts_process_container() {
-        assert!(validate_audit_containment(&ContainmentBackend::ProcessContainer).is_ok());
+        let mut request = ExecutionRequest {
+            containment: ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        };
+        assert!(validate_audit_request(&request).is_ok());
 
         for containment in [
             ContainmentBackend::WindowsSandbox,
@@ -1442,9 +1452,32 @@ mod tests {
             ContainmentBackend::IsolationSession,
             ContainmentBackend::MicroVm,
         ] {
-            let error = validate_audit_containment(&containment)
+            let containment_name = containment.wire_name();
+            request.containment = containment;
+            let error = validate_audit_request(&request)
                 .expect_err("non-ProcessContainer backend must reject --audit");
-            assert!(error.contains(containment.wire_name()));
+            assert!(error.contains(containment_name));
+        }
+    }
+
+    #[test]
+    fn audit_mode_rejects_both_capture_denials_modes() {
+        use wxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
+
+        for mode in [CaptureDenialsMode::Block, CaptureDenialsMode::Allow] {
+            let mut request = ExecutionRequest {
+                containment: ContainmentBackend::ProcessContainer,
+                ..Default::default()
+            };
+            request.policy.capture_denials = Some(CaptureDenialsConfig {
+                mode,
+                output_path: None,
+            });
+
+            let error = validate_audit_request(&request)
+                .expect_err("--audit and captureDenials must be mutually exclusive");
+            assert!(error.contains("cannot be combined"));
+            assert!(error.contains(r#"mode: "allow""#));
         }
     }
 
