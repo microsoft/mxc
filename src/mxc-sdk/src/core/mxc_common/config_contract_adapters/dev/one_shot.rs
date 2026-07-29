@@ -278,6 +278,7 @@ pub(super) fn into_common_request_ir(
         runtime_config,
         telemetry,
         test,
+        tamper_protection,
         windows_sandbox,
         wslc,
         hyperlight,
@@ -305,6 +306,7 @@ pub(super) fn into_common_request_ir(
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         test_feature: test.into_option().map(convert_test),
+        tamper_protection: tamper_protection.into_option().map(Into::into),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         hyperlight: hyperlight.into_option().map(convert_hyperlight),
     }

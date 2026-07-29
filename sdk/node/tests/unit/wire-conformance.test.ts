@@ -359,7 +359,7 @@ type _SeatbeltWireKeys = AssertTrue<
 type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, WireTelemetry>, never>>;
 
 // Root: the high-level builder intentionally omits schema metadata, fallback,
-// development-only test and Windows Sandbox sections.
+// development-only test, Windows Sandbox, and tamper-protection sections.
 type _RootWireKeys = AssertTrue<
   Equivalent<
     OnlyInWire<PublicV1OneShotConfig, WireMxcConfig>,
@@ -367,6 +367,7 @@ type _RootWireKeys = AssertTrue<
     | '_comment'
     | 'fallback'
     | 'test'
+    | 'tamperProtection'
     | 'windowsSandbox'
   >
 >;

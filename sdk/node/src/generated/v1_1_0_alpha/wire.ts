@@ -32,6 +32,32 @@ export interface CaptureDenials {
 
 export type CaptureDenialsMode = "block" | "allow";
 
+/**
+ * Access between instances of the same application.
+ */
+export interface CrossInstanceAccess {
+  duplicateHandle?: boolean;
+  readVirtualMemory?: boolean;
+}
+
+/**
+ * Explicit entitlement required of a debugger.
+ */
+export interface DebugEntitlement {
+  requiredSids?: string[];
+  requiredSigningLevel?: SigningLevel;
+}
+
+/**
+ * Debugger-attach controls and entitlement requirements.
+ */
+export interface DebugProtection {
+  allowDebugging?: boolean;
+  entitlement?: DebugEntitlement;
+  requireEntitlement?: boolean;
+  useSpecificEntitlement?: boolean;
+}
+
 export type DeprovisionPhase = "deprovision";
 
 /**
@@ -429,6 +455,10 @@ export interface OneShotRequest {
    */
   seatbelt?: Seatbelt;
   /**
+   * Optional one-shot tamper-protection policy (development only).
+   */
+  tamperProtection?: TamperProtection;
+  /**
    * Optional telemetry configuration.
    */
   telemetry?: Telemetry;
@@ -636,7 +666,26 @@ export interface ProcessContainerUi {
 
 export type ProcessContainerUiIsolation = "container" | "desktop" | "handles" | "atoms";
 
+/**
+ * Process isolation and cross-instance access.
+ */
+export interface ProcessProtection {
+  allowInheritFromAnyIdentity?: boolean;
+  crossInstanceAccess?: CrossInstanceAccess;
+  neverInheritFromParent?: boolean;
+  shareInstanceWithChildren?: boolean;
+}
+
 export type ProvisionPhase = "provision";
+
+/**
+ * Signing requirements for the process and its libraries.
+ */
+export interface RequireSigning {
+  executable?: boolean;
+  libraries?: boolean;
+  requiredSigningLevel?: SigningLevel;
+}
 
 /**
  * Runtime configuration supplied alongside the sandbox policy.
@@ -673,6 +722,8 @@ export interface Seatbelt {
    */
   profileOverride?: string;
 }
+
+export type SigningLevel = "none" | "authenticode" | "store" | "microsoft" | "windows";
 
 export type StartPhase = "start";
 
@@ -759,6 +810,32 @@ export interface StopRequest {
 }
 
 /**
+ * Per-application tamper-protection policy for one-shot requests.
+ */
+export interface TamperProtection {
+  /**
+   * Debugger-attach controls.
+   */
+  debugProtection?: DebugProtection;
+  /**
+   * Master switch (default true).
+   */
+  enabled?: boolean;
+  /**
+   * Process and cross-instance isolation controls.
+   */
+  processProtection?: ProcessProtection;
+  /**
+   * Code-signing requirements.
+   */
+  requireSigning?: RequireSigning;
+  /**
+   * Cross-compartment UI controls.
+   */
+  uiProtection?: UiProtection;
+}
+
+/**
  * Telemetry settings.
  */
 export interface Telemetry {
@@ -799,6 +876,17 @@ export interface Ui {
 }
 
 export type UiClipboard = "none" | "read" | "write" | "all";
+
+/**
+ * Cross-compartment UI interactions.
+ */
+export interface UiProtection {
+  allowExternalHook?: boolean;
+  allowHandleAccess?: boolean;
+  allowSyntheticInput?: boolean;
+  allowWindowMessages?: boolean;
+  blockUiAccess?: boolean;
+}
 
 export type Version = "1.1.0-alpha";
 

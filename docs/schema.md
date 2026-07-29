@@ -125,7 +125,7 @@ that can be executed independently.
 
 ```json
 {
-    "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
+    "version": "1.1.0-alpha",             // Development example. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -238,11 +238,55 @@ that can be executed independently.
         ]
     },
 
-    "hyperlight": {                        // Hyperlight settings (v0.10+)
+    "hyperlight": {                        // Hyperlight settings (v1.1 development)
         "runtime": "node"                  // Guest runtime: agent (default), python, python-shell, node, bash or dotnet-jit
+    },
+
+    "tamperProtection": {                  // Development one-shot policy (Windows only)
+        "enabled": true,                   // Master switch (default true)
+        "debugProtection": {
+            "allowDebugging": false,
+            "requireEntitlement": false,
+            "useSpecificEntitlement": false,
+            "entitlement": {
+                "requiredSigningLevel": "none",
+                "requiredSids": []
+            }
+        },
+        "uiProtection": {
+            "blockUiAccess": false,
+            "allowExternalHook": false,
+            "allowHandleAccess": false,
+            "allowWindowMessages": false,
+            "allowSyntheticInput": false
+        },
+        "processProtection": {
+            "neverInheritFromParent": false,
+            "allowInheritFromAnyIdentity": false,
+            "shareInstanceWithChildren": false,
+            "crossInstanceAccess": {
+                "readVirtualMemory": false,
+                "duplicateHandle": false
+            }
+        },
+        "requireSigning": {
+            "executable": true,
+            "libraries": true,
+            "requiredSigningLevel": "none"
+        }
     }
 }
 ```
+
+> **`tamperProtection` is a development-only, one-shot policy.** Its objects reject unknown fields:
+> a misspelled protection flag (e.g. `blockUIAccess` for `blockUiAccess`) is a
+> hard config error rather than a silently-dropped field that leaves a
+> protection off. State-aware and published-version requests carrying
+> `tamperProtection` are rejected. Omitted fields resolve
+> to their most restrictive values. **Runtime enforcement is not implemented;**
+> this config currently does not protect a process. The intended policy is only
+> meaningful for a process with a verifiable App Identity. See
+> [`docs/tamper-protection-policy.md`](tamper-protection-policy.md).
 
 > **State-aware fields.** The `phase` top-level field is the **state-aware
 > discriminator**: a request that includes it is parsed as a state-aware

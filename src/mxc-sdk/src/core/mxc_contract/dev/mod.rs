@@ -231,7 +231,11 @@ mod stable;
 mod state_aware;
 mod wslc;
 
-pub use experimental::{HyperlightRuntime, OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
+pub use experimental::{
+    CrossInstanceAccess, DebugEntitlement, DebugProtection, HyperlightRuntime, OneShotHyperlight,
+    OneShotWindowsSandbox, ProcessProtection, RequireSigning, SigningLevel, TamperProtection,
+    TestFeature, UiProtection,
+};
 pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
     NetworkProtocol, NetworkRule,

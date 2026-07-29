@@ -222,6 +222,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
         test_feature: _excluded_test_feature,
+        // Parsed only; runtime anti-tamper enforcement is not implemented yet.
+        tamper_protection: _excluded_tamper_protection,
         // Backend selection authorization is not an enforcement decision.
         experimental_enabled: _excluded_experimental_authorization,
         // --- deliberately excluded; see the module docs ---

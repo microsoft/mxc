@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::experimental::{OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
+use super::experimental::{
+    OneShotHyperlight, OneShotWindowsSandbox, TamperProtection, TestFeature,
+};
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
@@ -100,6 +102,9 @@ pub struct Request {
     /// Optional placeholder development feature.
     #[serde(default)]
     pub test: OptionalField<TestFeature>,
+    /// Optional one-shot tamper-protection policy (development only).
+    #[serde(default)]
+    pub tamper_protection: OptionalField<TamperProtection>,
     /// Optional one-shot Windows Sandbox compatibility settings.
     #[serde(default)]
     pub windows_sandbox: OptionalField<OneShotWindowsSandbox>,

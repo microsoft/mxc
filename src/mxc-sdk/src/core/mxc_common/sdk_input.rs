@@ -186,6 +186,7 @@ impl SdkStateAwareInput {
                 enabled: Some(enabled),
             }),
             test_feature: None,
+            tamper_protection: None,
             windows_sandbox: None,
             hyperlight: None,
         };

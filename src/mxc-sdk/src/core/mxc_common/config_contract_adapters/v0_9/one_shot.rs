@@ -277,6 +277,7 @@ pub(super) fn into_common_request_ir(
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         test_feature: None,
+        tamper_protection: None,
         windows_sandbox: None,
         hyperlight: None,
     }

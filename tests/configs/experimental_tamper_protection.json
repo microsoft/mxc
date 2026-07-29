@@ -1,0 +1,35 @@
+{
+  "version": "1.1.0-alpha",
+  "containerId": "CLI-Experimental-TamperProtection",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /c echo tamper protection test"
+  },
+  "tamperProtection": {
+    "debugProtection": {
+      "allowDebugging": false,
+      "requireEntitlement": true,
+      "useSpecificEntitlement": true,
+      "entitlement": {
+        "requiredSigningLevel": "microsoft",
+        "requiredSids": ["S-1-5-18"]
+      }
+    },
+    "uiProtection": {
+      "blockUiAccess": true
+    },
+    "processProtection": {
+      "crossInstanceAccess": {
+        "readVirtualMemory": true
+      }
+    },
+    "requireSigning": {
+      "executable": true,
+      "libraries": true,
+      "requiredSigningLevel": "store"
+    }
+  },
+  "ui": {
+    "disable": false
+  }
+}

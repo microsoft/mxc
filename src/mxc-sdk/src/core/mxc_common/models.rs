@@ -858,6 +858,261 @@ impl TestFeatureConfig {
     }
 }
 
+/// Resolved per-application tamper-protection policy for one-shot requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TamperProtectionConfig {
+    pub enabled: bool,
+    pub debug_protection: DebugProtectionConfig,
+    pub ui_protection: UiProtectionConfig,
+    pub process_protection: ProcessProtectionConfig,
+    pub require_signing: RequireSigningConfig,
+}
+
+impl Default for TamperProtectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debug_protection: DebugProtectionConfig::default(),
+            ui_protection: UiProtectionConfig::default(),
+            process_protection: ProcessProtectionConfig::default(),
+            require_signing: RequireSigningConfig::default(),
+        }
+    }
+}
+
+impl From<crate::mxc_contract::dev::TamperProtection> for TamperProtectionConfig {
+    fn from(value: crate::mxc_contract::dev::TamperProtection) -> Self {
+        let crate::mxc_contract::dev::TamperProtection {
+            enabled,
+            debug_protection,
+            ui_protection,
+            process_protection,
+            require_signing,
+        } = value;
+        Self {
+            enabled: enabled.into_option().unwrap_or(true),
+            debug_protection: debug_protection
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+            ui_protection: ui_protection
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+            process_protection: process_protection
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+            require_signing: require_signing
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Debugger-attach controls and entitlement requirements.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugProtectionConfig {
+    pub allow_debugging: bool,
+    pub require_entitlement: bool,
+    pub use_specific_entitlement: bool,
+    pub entitlement: DebugEntitlementConfig,
+}
+
+impl From<crate::mxc_contract::dev::DebugProtection> for DebugProtectionConfig {
+    fn from(value: crate::mxc_contract::dev::DebugProtection) -> Self {
+        let crate::mxc_contract::dev::DebugProtection {
+            allow_debugging,
+            require_entitlement,
+            use_specific_entitlement,
+            entitlement,
+        } = value;
+        Self {
+            allow_debugging: allow_debugging.into_option().unwrap_or(false),
+            require_entitlement: require_entitlement.into_option().unwrap_or(false),
+            use_specific_entitlement: use_specific_entitlement.into_option().unwrap_or(false),
+            entitlement: entitlement
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Explicit debug entitlement requirements.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugEntitlementConfig {
+    pub required_signing_level: SigningLevel,
+    pub required_sids: Vec<String>,
+}
+
+impl From<crate::mxc_contract::dev::DebugEntitlement> for DebugEntitlementConfig {
+    fn from(value: crate::mxc_contract::dev::DebugEntitlement) -> Self {
+        let crate::mxc_contract::dev::DebugEntitlement {
+            required_signing_level,
+            required_sids,
+        } = value;
+        Self {
+            required_signing_level: required_signing_level
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+            required_sids: required_sids.into_option().unwrap_or_default(),
+        }
+    }
+}
+
+/// UI interactions permitted across the compartment boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiProtectionConfig {
+    pub block_ui_access: bool,
+    pub allow_external_hook: bool,
+    pub allow_handle_access: bool,
+    pub allow_window_messages: bool,
+    pub allow_synthetic_input: bool,
+}
+
+impl From<crate::mxc_contract::dev::UiProtection> for UiProtectionConfig {
+    fn from(value: crate::mxc_contract::dev::UiProtection) -> Self {
+        let crate::mxc_contract::dev::UiProtection {
+            block_ui_access,
+            allow_external_hook,
+            allow_handle_access,
+            allow_window_messages,
+            allow_synthetic_input,
+        } = value;
+        Self {
+            block_ui_access: block_ui_access.into_option().unwrap_or(false),
+            allow_external_hook: allow_external_hook.into_option().unwrap_or(false),
+            allow_handle_access: allow_handle_access.into_option().unwrap_or(false),
+            allow_window_messages: allow_window_messages.into_option().unwrap_or(false),
+            allow_synthetic_input: allow_synthetic_input.into_option().unwrap_or(false),
+        }
+    }
+}
+
+/// Process isolation and cross-instance access controls.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessProtectionConfig {
+    pub never_inherit_from_parent: bool,
+    pub allow_inherit_from_any_identity: bool,
+    pub share_instance_with_children: bool,
+    pub cross_instance_access: CrossInstanceAccessConfig,
+}
+
+impl From<crate::mxc_contract::dev::ProcessProtection> for ProcessProtectionConfig {
+    fn from(value: crate::mxc_contract::dev::ProcessProtection) -> Self {
+        let crate::mxc_contract::dev::ProcessProtection {
+            never_inherit_from_parent,
+            allow_inherit_from_any_identity,
+            share_instance_with_children,
+            cross_instance_access,
+        } = value;
+        Self {
+            never_inherit_from_parent: never_inherit_from_parent.into_option().unwrap_or(false),
+            allow_inherit_from_any_identity: allow_inherit_from_any_identity
+                .into_option()
+                .unwrap_or(false),
+            share_instance_with_children: share_instance_with_children
+                .into_option()
+                .unwrap_or(false),
+            cross_instance_access: cross_instance_access
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Access between instances of the same protected application.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossInstanceAccessConfig {
+    pub read_virtual_memory: bool,
+    pub duplicate_handle: bool,
+}
+
+impl From<crate::mxc_contract::dev::CrossInstanceAccess> for CrossInstanceAccessConfig {
+    fn from(value: crate::mxc_contract::dev::CrossInstanceAccess) -> Self {
+        let crate::mxc_contract::dev::CrossInstanceAccess {
+            read_virtual_memory,
+            duplicate_handle,
+        } = value;
+        Self {
+            read_virtual_memory: read_virtual_memory.into_option().unwrap_or(false),
+            duplicate_handle: duplicate_handle.into_option().unwrap_or(false),
+        }
+    }
+}
+
+/// Code-signing requirements for the process and its libraries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RequireSigningConfig {
+    pub executable: bool,
+    pub libraries: bool,
+    pub required_signing_level: SigningLevel,
+}
+
+impl Default for RequireSigningConfig {
+    fn default() -> Self {
+        Self {
+            executable: true,
+            libraries: true,
+            required_signing_level: SigningLevel::default(),
+        }
+    }
+}
+
+impl From<crate::mxc_contract::dev::RequireSigning> for RequireSigningConfig {
+    fn from(value: crate::mxc_contract::dev::RequireSigning) -> Self {
+        let crate::mxc_contract::dev::RequireSigning {
+            executable,
+            libraries,
+            required_signing_level,
+        } = value;
+        Self {
+            executable: executable.into_option().unwrap_or(true),
+            libraries: libraries.into_option().unwrap_or(true),
+            required_signing_level: required_signing_level
+                .into_option()
+                .map(Into::into)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Minimum trust level required of a signer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SigningLevel {
+    #[default]
+    None,
+    Authenticode,
+    Store,
+    Microsoft,
+    Windows,
+}
+
+impl From<crate::mxc_contract::dev::SigningLevel> for SigningLevel {
+    fn from(value: crate::mxc_contract::dev::SigningLevel) -> Self {
+        use crate::mxc_contract::dev::SigningLevel as Wire;
+        match value {
+            Wire::None => Self::None,
+            Wire::Authenticode => Self::Authenticode,
+            Wire::Store => Self::Store,
+            Wire::Microsoft => Self::Microsoft,
+            Wire::Windows => Self::Windows,
+        }
+    }
+}
+
 /// Telemetry configuration parsed from the top-level JSON config `telemetry` section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1003,6 +1258,8 @@ pub struct ExecutionRequest {
     pub telemetry: Option<TelemetryConfig>,
     /// Placeholder feature for testing experimental infrastructure.
     pub test_feature: Option<TestFeatureConfig>,
+    /// Per-application tamper-protection policy for development one-shot requests.
+    pub tamper_protection: Option<TamperProtectionConfig>,
     /// Windows Sandbox backend configuration.
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// Hyperlight backend configuration (used when containment == Hyperlight).

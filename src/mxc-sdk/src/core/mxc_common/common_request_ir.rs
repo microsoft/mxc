@@ -28,6 +28,7 @@ pub(crate) struct CommonRequestIR {
     pub(crate) seatbelt: Option<wire::Seatbelt>,
     pub(crate) telemetry: Option<wire::Telemetry>,
     pub(crate) test_feature: Option<wire::TestFeature>,
+    pub(crate) tamper_protection: Option<crate::mxc_common::models::TamperProtectionConfig>,
     pub(crate) windows_sandbox: Option<wire::WindowsSandbox>,
     pub(crate) hyperlight: Option<wire::Hyperlight>,
 }

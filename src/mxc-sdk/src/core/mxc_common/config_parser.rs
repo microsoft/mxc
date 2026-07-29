@@ -1614,6 +1614,7 @@ fn normalize_common_request_ir(
         seatbelt,
         telemetry,
         test_feature,
+        tamper_protection: cfg.tamper_protection,
         windows_sandbox,
         hyperlight,
         experimental_enabled: false,
@@ -2904,6 +2905,111 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         load_mxc_request(&encoded, &mut logger, true)
+    }
+
+    #[test]
+    fn tamper_protection_defaults_and_explicit_options_survive_normalization() {
+        use crate::mxc_common::models::{SigningLevel, TamperProtectionConfig};
+
+        let absent =
+            load_mxc(r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hi"}}"#).unwrap();
+        let MxcRequest::OneShot(absent) = absent else {
+            panic!("expected one-shot request");
+        };
+        assert!(absent.tamper_protection.is_none());
+
+        let defaults = load_mxc(
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hi"},"tamperProtection":{}}"#,
+        )
+        .unwrap();
+        let MxcRequest::OneShot(defaults) = defaults else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(
+            defaults.tamper_protection,
+            Some(TamperProtectionConfig::default())
+        );
+
+        let configured = load_mxc(
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hi"},"tamperProtection":{
+                "enabled":false,
+                "debugProtection":{"allowDebugging":true,"requireEntitlement":true,
+                    "useSpecificEntitlement":true,"entitlement":{"requiredSigningLevel":"microsoft",
+                    "requiredSids":["S-1-5-18"]}},
+                "uiProtection":{"blockUiAccess":true,"allowExternalHook":true,
+                    "allowHandleAccess":true,"allowWindowMessages":true,"allowSyntheticInput":true},
+                "processProtection":{"neverInheritFromParent":true,
+                    "allowInheritFromAnyIdentity":true,"shareInstanceWithChildren":true,
+                    "crossInstanceAccess":{"readVirtualMemory":true,"duplicateHandle":true}},
+                "requireSigning":{"executable":false,"libraries":false,
+                    "requiredSigningLevel":"windows"}
+            }}"#,
+        )
+        .unwrap();
+        let MxcRequest::OneShot(configured) = configured else {
+            panic!("expected one-shot request");
+        };
+        let policy = configured.tamper_protection.unwrap();
+        assert!(!policy.enabled);
+        assert!(policy.debug_protection.allow_debugging);
+        assert!(policy.debug_protection.require_entitlement);
+        assert!(policy.debug_protection.use_specific_entitlement);
+        assert_eq!(
+            policy.debug_protection.entitlement.required_signing_level,
+            SigningLevel::Microsoft
+        );
+        assert_eq!(
+            policy.debug_protection.entitlement.required_sids,
+            ["S-1-5-18"]
+        );
+        assert!(policy.ui_protection.block_ui_access);
+        assert!(policy.ui_protection.allow_external_hook);
+        assert!(policy.ui_protection.allow_handle_access);
+        assert!(policy.ui_protection.allow_window_messages);
+        assert!(policy.ui_protection.allow_synthetic_input);
+        assert!(policy.process_protection.never_inherit_from_parent);
+        assert!(policy.process_protection.allow_inherit_from_any_identity);
+        assert!(policy.process_protection.share_instance_with_children);
+        assert!(
+            policy
+                .process_protection
+                .cross_instance_access
+                .read_virtual_memory
+        );
+        assert!(
+            policy
+                .process_protection
+                .cross_instance_access
+                .duplicate_handle
+        );
+        assert!(!policy.require_signing.executable);
+        assert!(!policy.require_signing.libraries);
+        assert_eq!(
+            policy.require_signing.required_signing_level,
+            SigningLevel::Windows
+        );
+    }
+
+    #[test]
+    fn tamper_protection_rejects_unknown_fields_and_wrong_contracts() {
+        for json in [
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hi"},"tamperProtection":{"uiProtection":{"blockUIAccess":true}}}"#,
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hi"},"tamperProtection":{"protectNewFiles":true}}"#,
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hi"},"tamperProtection":{"requireSigning":{"requiredSigningLevel":"ultra"}}}"#,
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hi"},"tamperProtection":{"enabled":null}}"#,
+            r#"{"version":"1.0.0","process":{"commandLine":"echo hi"},"tamperProtection":{}}"#,
+        ] {
+            assert!(
+                matches!(load_mxc(json), Err(ParseError::OneShot(_))),
+                "{json}"
+            );
+        }
+        let state_aware = r#"{"version":"1.1.0-alpha","phase":"provision",
+            "containment":"windows_sandbox","tamperProtection":{}}"#;
+        assert!(
+            matches!(load_mxc(state_aware), Err(ParseError::StateAware(_))),
+            "state-aware requests must reject tamper protection"
+        );
     }
 
     fn load_mxc_with_cli(json: &str, cli_command: &[String]) -> Result<MxcRequest, ParseError> {

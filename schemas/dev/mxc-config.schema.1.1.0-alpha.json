@@ -242,6 +242,54 @@
         }
       ]
     },
+    "CrossInstanceAccess": {
+      "additionalProperties": false,
+      "description": "Access between instances of the same application.",
+      "properties": {
+        "duplicateHandle": {
+          "type": "boolean"
+        },
+        "readVirtualMemory": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "DebugEntitlement": {
+      "additionalProperties": false,
+      "description": "Explicit entitlement required of a debugger.",
+      "properties": {
+        "requiredSids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requiredSigningLevel": {
+          "$ref": "#/definitions/SigningLevel"
+        }
+      },
+      "type": "object"
+    },
+    "DebugProtection": {
+      "additionalProperties": false,
+      "description": "Debugger-attach controls and entitlement requirements.",
+      "properties": {
+        "allowDebugging": {
+          "type": "boolean"
+        },
+        "entitlement": {
+          "$ref": "#/definitions/DebugEntitlement"
+        },
+        "requireEntitlement": {
+          "type": "boolean"
+        },
+        "useSpecificEntitlement": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "DeprovisionPhase": {
       "enum": [
         "deprovision"
@@ -902,6 +950,10 @@
           "$ref": "#/definitions/Seatbelt",
           "description": "Optional macOS Seatbelt configuration."
         },
+        "tamperProtection": {
+          "$ref": "#/definitions/TamperProtection",
+          "description": "Optional one-shot tamper-protection policy (development only)."
+        },
         "telemetry": {
           "$ref": "#/definitions/Telemetry",
           "description": "Optional telemetry configuration."
@@ -1186,11 +1238,46 @@
         }
       ]
     },
+    "ProcessProtection": {
+      "additionalProperties": false,
+      "description": "Process isolation and cross-instance access.",
+      "properties": {
+        "allowInheritFromAnyIdentity": {
+          "type": "boolean"
+        },
+        "crossInstanceAccess": {
+          "$ref": "#/definitions/CrossInstanceAccess"
+        },
+        "neverInheritFromParent": {
+          "type": "boolean"
+        },
+        "shareInstanceWithChildren": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ProvisionPhase": {
       "enum": [
         "provision"
       ],
       "type": "string"
+    },
+    "RequireSigning": {
+      "additionalProperties": false,
+      "description": "Signing requirements for the process and its libraries.",
+      "properties": {
+        "executable": {
+          "type": "boolean"
+        },
+        "libraries": {
+          "type": "boolean"
+        },
+        "requiredSigningLevel": {
+          "$ref": "#/definitions/SigningLevel"
+        }
+      },
+      "type": "object"
     },
     "RuntimeConfig": {
       "additionalProperties": false,
@@ -1232,6 +1319,45 @@
         }
       },
       "type": "object"
+    },
+    "SigningLevel": {
+      "oneOf": [
+        {
+          "description": "None",
+          "enum": [
+            "none"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Authenticode",
+          "enum": [
+            "authenticode"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Store",
+          "enum": [
+            "store"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Microsoft",
+          "enum": [
+            "microsoft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Windows",
+          "enum": [
+            "windows"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "StartPhase": {
       "enum": [
@@ -1337,6 +1463,33 @@
       ],
       "type": "object"
     },
+    "TamperProtection": {
+      "additionalProperties": false,
+      "description": "Per-application tamper-protection policy for one-shot requests.",
+      "properties": {
+        "debugProtection": {
+          "$ref": "#/definitions/DebugProtection",
+          "description": "Debugger-attach controls."
+        },
+        "enabled": {
+          "description": "Master switch (default true).",
+          "type": "boolean"
+        },
+        "processProtection": {
+          "$ref": "#/definitions/ProcessProtection",
+          "description": "Process and cross-instance isolation controls."
+        },
+        "requireSigning": {
+          "$ref": "#/definitions/RequireSigning",
+          "description": "Code-signing requirements."
+        },
+        "uiProtection": {
+          "$ref": "#/definitions/UiProtection",
+          "description": "Cross-compartment UI controls."
+        }
+      },
+      "type": "object"
+    },
     "Telemetry": {
       "additionalProperties": false,
       "description": "Telemetry settings.",
@@ -1420,6 +1573,28 @@
           "type": "string"
         }
       ]
+    },
+    "UiProtection": {
+      "additionalProperties": false,
+      "description": "Cross-compartment UI interactions.",
+      "properties": {
+        "allowExternalHook": {
+          "type": "boolean"
+        },
+        "allowHandleAccess": {
+          "type": "boolean"
+        },
+        "allowSyntheticInput": {
+          "type": "boolean"
+        },
+        "allowWindowMessages": {
+          "type": "boolean"
+        },
+        "blockUiAccess": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "Version": {
       "oneOf": [

@@ -80,6 +80,7 @@ fn state_aware_common(
         source_contract: crate::mxc_contract::ContractVersion::V0_9_0Alpha,
         phase: None,
         test_feature: None,
+        tamper_protection: None,
         windows_sandbox: None,
         containment: None,
         container_id: None,
