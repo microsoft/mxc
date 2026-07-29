@@ -1692,19 +1692,7 @@ impl BaseContainerSandboxProcess {
         );
         let document = DenialsDocument::new(analysis.denials, summary);
 
-        let file = std::fs::File::create(output_path).map_err(|error| {
-            std::io::Error::other(format!(
-                "captureDenials failed to create denials output file {}: {error}",
-                output_path.display()
-            ))
-        })?;
-        let mut writer = std::io::BufWriter::new(file);
-        write_document(&mut writer, &document).map_err(|error| {
-            std::io::Error::other(format!(
-                "captureDenials failed to write denials output file {}: {error}",
-                output_path.display()
-            ))
-        })?;
+        write_denials_output_file(output_path, |writer| write_document(writer, &document))?;
 
         // Surface a single structured pointer line on our own stderr so a
         // caller can locate the deliverable (the authoritative summary lives in
@@ -1713,6 +1701,45 @@ impl BaseContainerSandboxProcess {
         eprintln!("{}", pointer.to_line());
         Ok(())
     }
+}
+
+fn write_denials_output_file(
+    output_path: &Path,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .map_err(|error| {
+            std::io::Error::other(format!(
+                "captureDenials failed to create denials output file {}: {error}",
+                output_path.display()
+            ))
+        })?;
+
+    let write_result = {
+        let mut writer = std::io::BufWriter::new(file);
+        write(&mut writer)
+    };
+    if let Err(error) = write_result {
+        let write_error = std::io::Error::other(format!(
+            "captureDenials failed to write denials output file {}: {error}",
+            output_path.display()
+        ));
+        return match std::fs::remove_file(output_path) {
+            Ok(()) => Err(write_error),
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
+                Err(write_error)
+            }
+            Err(cleanup_error) => Err(std::io::Error::other(format!(
+                "{write_error}; additionally failed to remove incomplete output file {}: {cleanup_error}",
+                output_path.display()
+            ))),
+        };
+    }
+
+    Ok(())
 }
 
 /// Inserts a per-run identifier into a denials output path's file stem so
@@ -1955,6 +1982,35 @@ mod tests {
         assert_eq!(first.parent(), Some(std::env::temp_dir().as_path()));
         assert_eq!(second.parent(), Some(std::env::temp_dir().as_path()));
         assert_eq!(first.extension().and_then(|ext| ext.to_str()), Some("json"));
+    }
+
+    #[test]
+    fn failed_denials_write_removes_incomplete_output() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+
+        let error = write_denials_output_file(&output_path, |writer| {
+            std::io::Write::write_all(writer, b"{\"partial\":")?;
+            Err(std::io::Error::other("simulated write failure"))
+        })
+        .expect_err("write should fail");
+
+        assert!(error.to_string().contains("simulated write failure"));
+        assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn denials_output_does_not_overwrite_an_existing_file() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&output_path, b"existing").expect("seed output");
+
+        write_denials_output_file(&output_path, |_| Ok(())).expect_err("collision should fail");
+
+        assert_eq!(
+            std::fs::read(&output_path).expect("read existing output"),
+            b"existing"
+        );
     }
 
     #[test]
