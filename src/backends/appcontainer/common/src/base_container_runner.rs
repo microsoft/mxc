@@ -1700,7 +1700,7 @@ impl BaseContainerSandboxProcess {
         let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
         let stderr = std::io::stderr();
         let mut stderr = stderr.lock();
-        write_denials_output_pointer(&mut stderr, &pointer)
+        publish_denials_output_pointer(output_path, &mut stderr, &pointer)
     }
 }
 
@@ -1735,6 +1735,26 @@ fn write_denials_output_pointer(
 ) -> std::io::Result<()> {
     writeln!(writer, "{}", pointer.to_line())?;
     writer.flush()
+}
+
+fn publish_denials_output_pointer(
+    output_path: &Path,
+    writer: &mut impl std::io::Write,
+    pointer: &DenialsOutputPointer,
+) -> std::io::Result<()> {
+    if let Err(pointer_error) = write_denials_output_pointer(writer, pointer) {
+        return match std::fs::remove_file(output_path) {
+            Ok(()) => Err(pointer_error),
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
+                Err(pointer_error)
+            }
+            Err(cleanup_error) => Err(std::io::Error::other(format!(
+                "{pointer_error}; additionally failed to remove unpublished denials output file {}: {cleanup_error}",
+                output_path.display()
+            ))),
+        };
+    }
+    Ok(())
 }
 
 fn write_stderr_line_best_effort(message: std::fmt::Arguments<'_>) {
@@ -2102,6 +2122,21 @@ mod tests {
             .expect_err("pointer write should fail");
 
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn pointer_publication_failure_removes_output_file() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&output_path, b"complete json").expect("seed output");
+        let summary = DenialSummary::new(0, 1, false);
+        let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &summary);
+
+        let error = publish_denials_output_pointer(&output_path, &mut FailingWriter, &pointer)
+            .expect_err("pointer publication should fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(!output_path.exists());
     }
 
     #[test]
