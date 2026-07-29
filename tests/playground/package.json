@@ -100,7 +100,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "@microsoft/mxc-sdk": "file:../../sdk",
+    "@microsoft/mxc-sdk": "file:../../sdk/node",
     "node-pty": "^1.0.0"
   }
 }
