@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! # Emit the DeniedResource NDJSON stream (0x1E-framed) to stdout:
-//! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl>
+//! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --exit-code <code>
 //!
 //! # Dump every decoded event (id + property name/value pairs):
 //! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --raw
@@ -40,7 +40,7 @@ mod windows_impl {
     pub fn run() -> i32 {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let Some(etl_path) = args.first() else {
-            eprintln!("usage: lm_analyze <path-to.etl> [--raw]");
+            eprintln!("usage: lm_analyze <path-to.etl> [--raw | --exit-code <code>]");
             return 2;
         };
         let raw = args.iter().any(|a| a == "--raw");
@@ -49,27 +49,48 @@ mod windows_impl {
         if raw {
             dump_raw(path)
         } else {
-            emit_ndjson(path)
+            let Some(exit_code) = parse_exit_code(&args) else {
+                eprintln!("--exit-code <code> is required unless --raw is used");
+                return 2;
+            };
+            emit_ndjson(path, exit_code)
         }
     }
 
+    fn parse_exit_code(args: &[String]) -> Option<i32> {
+        let index = args.iter().position(|arg| arg == "--exit-code")?;
+        args.get(index + 1)?.parse().ok()
+    }
+
     /// Decodes denials and writes the 0x1E-framed NDJSON stream to stdout.
-    fn emit_ndjson(path: &Path) -> i32 {
-        let denials = match EtlDenialAnalyzer.analyze(path) {
+    fn emit_ndjson(path: &Path, exit_code: i32) -> i32 {
+        let analysis = match EtlDenialAnalyzer.analyze(path) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("analyze failed: {e}");
                 return 1;
             }
         };
-        let summary = DenialSummary::new(0, denials.len(), false);
+        let summary = DenialSummary::new(
+            exit_code,
+            analysis.denials.len(),
+            analysis.denied_resources_truncated,
+        );
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
-        if let Err(e) = emit::write_stream(&mut handle, &denials, &summary) {
+        if let Err(e) = emit::write_stream(&mut handle, &analysis.denials, &summary) {
             eprintln!("write failed: {e}");
             return 1;
         }
-        eprintln!("lm_analyze: {} unique denial(s)", denials.len());
+        eprintln!(
+            "lm_analyze: {} unique denial(s){}",
+            analysis.denials.len(),
+            if analysis.denied_resources_truncated {
+                " (truncated)"
+            } else {
+                ""
+            }
+        );
         0
     }
 
