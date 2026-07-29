@@ -128,6 +128,18 @@ fn is_api_not_implemented(err: u32) -> bool {
     err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
 }
 
+fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningModeError) -> bool {
+    match error {
+        learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
+            is_api_not_implemented(*code)
+        }
+        learning_mode_windows::LearningModeError::CleanupFailed { primary, .. } => {
+            learning_mode_api_not_implemented(primary)
+        }
+        _ => false,
+    }
+}
+
 /// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 #[derive(Default)]
@@ -1055,11 +1067,16 @@ impl BaseContainerRunner {
                 Err(e) => {
                     let msg = format!("captureDenials: failed to start learning-mode capture: {e}");
                     let _ = writeln!(logger, "Error: {msg}");
+                    let failure_phase = if learning_mode_api_not_implemented(&e) {
+                        FailurePhase::BackendUnavailable
+                    } else {
+                        FailurePhase::LaunchFailed
+                    };
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
                         standard_err: msg,
-                        failure_phase: FailurePhase::LaunchFailed,
+                        failure_phase,
                         ..Default::default()
                     });
                 }
@@ -1594,6 +1611,9 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     return Err(std::io::Error::other("GetExitCodeProcess failed"));
                 }
+                if self.capture_session.is_none() && self.teardown_result.is_none() {
+                    return Ok(Some(code as i32));
+                }
                 // A terminal observation must not become visible before
                 // captureDenials is sealed. This is the path used by polling
                 // SDK waits, so finalize synchronously before reporting exit.
@@ -1767,6 +1787,29 @@ mod tests {
         // ERROR_INVALID_PARAMETER (87) and success are ordinary, not "disabled".
         assert!(!is_api_not_implemented(87));
         assert!(!is_api_not_implemented(0));
+    }
+
+    #[test]
+    fn learning_mode_api_not_implemented_checks_primary_failure() {
+        use learning_mode_windows::LearningModeError;
+
+        let disabled = LearningModeError::CleanupFailed {
+            primary: Box::new(LearningModeError::ApiCall {
+                function: "CreateProcessSecurityEnvironment",
+                code: ERROR_CALL_NOT_IMPLEMENTED.0,
+            }),
+            cleanup: Box::new(LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                code: 87,
+            }),
+        };
+        assert!(learning_mode_api_not_implemented(&disabled));
+
+        let ordinary = LearningModeError::ApiCall {
+            function: "StartLearningModeTrace",
+            code: 87,
+        };
+        assert!(!learning_mode_api_not_implemented(&ordinary));
     }
 
     #[test]
