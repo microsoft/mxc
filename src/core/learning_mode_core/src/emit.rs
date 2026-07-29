@@ -10,7 +10,7 @@
 //! {
 //!   "denials": [
 //!     { "resource": "C:\\Users\\test\\secret.txt", "resourceType": "file",
-//!       "accessType": "read", "pid": 1234, "filetime": 132847890123456789 }
+//!       "accessType": "read", "pid": 1234, "filetime": "132847890123456789" }
 //!   ],
 //!   "summary": { "exitCode": 0, "totalDenials": 1,
 //!                "deniedResourcesTruncated": false }

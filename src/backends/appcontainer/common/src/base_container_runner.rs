@@ -1630,11 +1630,11 @@ impl BaseContainerSandboxProcess {
                     "captureDenials failed to seal the denial trace: {error}"
                 ))),
             };
-            // The internal ETL temp is never handed to callers.
-            if let Some(etl) = &etl_path {
-                let _ = std::fs::remove_file(etl);
-            }
-            result
+            let cleanup_result = etl_path
+                .as_deref()
+                .map(remove_internal_capture_file)
+                .unwrap_or(Ok(()));
+            combine_capture_and_cleanup_results(result, cleanup_result)
         } else {
             Ok(())
         };
@@ -1698,9 +1698,50 @@ impl BaseContainerSandboxProcess {
         // caller can locate the deliverable (the authoritative summary lives in
         // the file).
         let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
-        eprintln!("{}", pointer.to_line());
-        Ok(())
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        write_denials_output_pointer(&mut stderr, &pointer)
     }
+}
+
+fn remove_internal_capture_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(std::io::Error::other(format!(
+            "captureDenials failed to remove internal ETL file {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn combine_capture_and_cleanup_results(
+    capture_result: std::io::Result<()>,
+    cleanup_result: std::io::Result<()>,
+) -> std::io::Result<()> {
+    match (capture_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(capture_error), Ok(())) => Err(capture_error),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(capture_error), Err(cleanup_error)) => Err(std::io::Error::other(format!(
+            "{capture_error}; additionally failed to clean up the internal ETL: {cleanup_error}"
+        ))),
+    }
+}
+
+fn write_denials_output_pointer(
+    writer: &mut impl std::io::Write,
+    pointer: &DenialsOutputPointer,
+) -> std::io::Result<()> {
+    writeln!(writer, "{}", pointer.to_line())?;
+    writer.flush()
+}
+
+fn write_stderr_line_best_effort(message: std::fmt::Arguments<'_>) {
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    let _ = std::io::Write::write_fmt(&mut stderr, format_args!("{message}\n"));
+    let _ = std::io::Write::flush(&mut stderr);
 }
 
 fn write_denials_output_file(
@@ -1800,12 +1841,14 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 if self.capture_session.is_none() && self.teardown_result.is_none() {
                     return Ok(Some(code as i32));
                 }
+                let exit_code = code as i32;
+                self.last_exit_code = Some(exit_code);
                 // A terminal observation must not become visible before
                 // captureDenials is sealed. This is the path used by polling
                 // SDK waits, so finalize synchronously before reporting exit.
                 self.terminate_and_reap();
                 let teardown_result = self.run_teardown();
-                combine_process_and_teardown_results(Ok(code as i32), teardown_result).map(Some)
+                combine_process_and_teardown_results(Ok(exit_code), teardown_result).map(Some)
             }
             WAIT_TIMEOUT => Ok(None),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
@@ -1874,7 +1917,9 @@ impl Drop for BaseContainerSandboxProcess {
         // leak as an orphan).
         self.terminate_and_reap();
         if let Err(error) = self.run_teardown() {
-            eprintln!("captureDenials teardown failed during drop: {error}");
+            write_stderr_line_best_effort(format_args!(
+                "captureDenials teardown failed during drop: {error}"
+            ));
         }
     }
 }
@@ -1918,9 +1963,9 @@ fn combine_process_and_teardown_results(
         (Ok(_), Err(teardown_error)) => Err(teardown_error),
         (Err(wait_error), Ok(())) => Err(wait_error),
         (Err(wait_error), Err(teardown_error)) => {
-            eprintln!(
+            write_stderr_line_best_effort(format_args!(
                 "captureDenials teardown also failed after process wait failure: {teardown_error}"
-            );
+            ));
             Err(wait_error)
         }
     }
@@ -1957,6 +2002,21 @@ mod tests {
     use sandbox_spec::base_container_layout;
     use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
     use wxc_common::ui_policy::EffectiveUiRestrictions;
+
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "simulated stderr failure",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn expected_mask(r: EffectiveUiRestrictions) -> u64 {
         to_job_object_uilimit_mask(&r) as u64
@@ -2011,6 +2071,37 @@ mod tests {
             std::fs::read(&output_path).expect("read existing output"),
             b"existing"
         );
+    }
+
+    #[test]
+    fn missing_internal_etl_is_already_clean() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let missing = directory.path().join("missing.etl");
+        remove_internal_capture_file(&missing).expect("missing file should be clean");
+    }
+
+    #[test]
+    fn capture_and_etl_cleanup_failures_are_both_preserved() {
+        let error = combine_capture_and_cleanup_results(
+            Err(std::io::Error::other("decode failed")),
+            Err(std::io::Error::other("delete failed")),
+        )
+        .expect_err("combined operation should fail");
+
+        let message = error.to_string();
+        assert!(message.contains("decode failed"));
+        assert!(message.contains("delete failed"));
+    }
+
+    #[test]
+    fn pointer_write_failure_is_returned() {
+        let summary = DenialSummary::new(0, 1, false);
+        let pointer = DenialsOutputPointer::new("denials.json", &summary);
+
+        let error = write_denials_output_pointer(&mut FailingWriter, &pointer)
+            .expect_err("pointer write should fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
     }
 
     #[test]
