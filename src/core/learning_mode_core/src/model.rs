@@ -16,6 +16,28 @@
 
 use serde::{Deserialize, Serialize};
 
+mod decimal_u64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Decimal(String),
+        LegacyNumber(u64),
+    }
+
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        match Repr::deserialize(deserializer)? {
+            Repr::Decimal(value) => value.parse().map_err(serde::de::Error::custom),
+            Repr::LegacyNumber(value) => Ok(value),
+        }
+    }
+}
+
 /// The kind of resource an access denial was recorded against.
 ///
 /// The variant set is deliberately closed and cross-platform. The
@@ -98,7 +120,9 @@ pub struct DeniedResource {
     /// (100-nanosecond intervals since 1601-01-01 UTC), copied from
     /// `EVENT_RECORD.EventHeader.TimeStamp`. Other backends normalise
     /// their native clocks onto the same epoch so consumers can treat
-    /// the field uniformly.
+    /// the field uniformly. The JSON wire format uses a decimal string so
+    /// JavaScript consumers do not lose precision.
+    #[serde(with = "decimal_u64")]
     pub filetime: u64,
 }
 
@@ -139,7 +163,7 @@ mod tests {
         assert!(json.contains("\"resourceType\":\"file\""), "got {json}");
         assert!(json.contains("\"accessType\":\"read\""), "got {json}");
         assert!(
-            json.contains("\"filetime\":132847890123456789"),
+            json.contains("\"filetime\":\"132847890123456789\""),
             "got {json}"
         );
     }
@@ -156,6 +180,15 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let parsed: DeniedResource = serde_json::from_str(&json).unwrap();
         assert_eq!(r, parsed);
+    }
+
+    #[test]
+    fn denied_resource_accepts_legacy_numeric_filetime() {
+        let parsed: DeniedResource = serde_json::from_str(
+            r#"{"path":"C:\\foo","resourceType":"file","accessType":"read","pid":1,"filetime":42}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.filetime, 42);
     }
 
     #[test]

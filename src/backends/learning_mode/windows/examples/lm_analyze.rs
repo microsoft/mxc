@@ -35,7 +35,7 @@ mod windows_impl {
     use std::path::Path;
 
     use learning_mode_core::{emit, DenialAnalyzer, DenialSummary};
-    use learning_mode_windows::{decode_raw_events, EtlDenialAnalyzer};
+    use learning_mode_windows::{visit_raw_events, EtlDenialAnalyzer};
 
     pub fn run() -> i32 {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -97,25 +97,40 @@ mod windows_impl {
     /// Dumps every decoded event, plus a per-event-id histogram, so the
     /// real provider/ID/field schema can be confirmed against hardware.
     fn dump_raw(path: &Path) -> i32 {
-        let events = match decode_raw_events(path) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("decode failed: {e}");
-                return 1;
+        let mut histogram: BTreeMap<(String, u16), usize> = BTreeMap::new();
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let event_count = {
+            let mut visitor = |ev: &learning_mode_windows::DecodedEventParts| {
+                let provider = format!("{:?}", ev.provider);
+                *histogram
+                    .entry((provider.clone(), ev.event_id))
+                    .or_default() += 1;
+                let props: Vec<String> = ev.props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                writeln!(
+                    out,
+                    "provider {} event {} | {}",
+                    provider,
+                    ev.event_id,
+                    props.join(" | ")
+                )
+            };
+            match visit_raw_events(path, &mut visitor) {
+                Ok(count) => count,
+                Err(e) => {
+                    eprintln!("decode failed: {e}");
+                    return 1;
+                }
             }
         };
 
-        let mut histogram: BTreeMap<u16, usize> = BTreeMap::new();
-        let stdout = std::io::stdout();
-        let mut out = stdout.lock();
-        for ev in &events {
-            *histogram.entry(ev.event_id).or_default() += 1;
-            let props: Vec<String> = ev.props.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            let _ = writeln!(out, "event {} | {}", ev.event_id, props.join(" | "));
+        if writeln!(out, "--- {event_count} event(s) total ---").is_err() {
+            return 1;
         }
-        let _ = writeln!(out, "--- {} event(s) total ---", events.len());
-        for (id, count) in &histogram {
-            let _ = writeln!(out, "  id {id}: {count}");
+        for ((provider, id), count) in &histogram {
+            if writeln!(out, "  provider {provider:?} id {id}: {count}").is_err() {
+                return 1;
+            }
         }
         0
     }

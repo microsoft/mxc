@@ -35,6 +35,7 @@ const PROPERTY_STRUCT: i32 = 0x1;
 const PROPERTY_PARAM_LENGTH: i32 = 0x2;
 const PROPERTY_PARAM_COUNT: i32 = 0x4;
 const MAX_PROPERTY_ELEMENTS: usize = 4096;
+const EVENT_HEADER_FLAG_32_BIT_HEADER: u16 = 0x20;
 
 struct TdhInfoBuffer {
     storage: Vec<std::mem::MaybeUninit<TRACE_EVENT_INFO>>,
@@ -102,7 +103,8 @@ pub unsafe fn decode_event_parts(
 
     let header = unsafe { (*event_record).EventHeader };
     let event_id = header.EventDescriptor.Id;
-    let props = decode_properties(buffer.as_bytes(), info, event_record)?;
+    let pointer_size = pointer_size_from_header_flags(header.Flags);
+    let props = decode_properties(buffer.as_bytes(), info, event_record, pointer_size)?;
 
     Ok(DecodedEventParts {
         provider: header.ProviderId,
@@ -115,6 +117,7 @@ fn decode_properties(
     info_buf: &[u8],
     info: &TRACE_EVENT_INFO,
     event_record: *mut EVENT_RECORD,
+    pointer_size: usize,
 ) -> Result<Vec<(String, String)>, String> {
     // SAFETY: caller passes a valid EVENT_RECORD; the field accesses
     // are reads of POD fields.
@@ -131,38 +134,42 @@ fn decode_properties(
     let mut results = Vec::with_capacity(prop_count);
     let mut numeric_values = vec![None; property_count];
     let mut offset: usize = 0;
+    let context = PropertyDecodeContext {
+        info_buf,
+        info,
+        user_data,
+        user_data_len,
+        pointer_size,
+    };
 
     for i in 0..prop_count {
-        let value = decode_property(
-            i,
-            info_buf,
-            info,
-            user_data,
-            user_data_len,
-            &mut offset,
-            &mut numeric_values,
-        )?;
+        let value = decode_property(i, &context, &mut offset, &mut numeric_values)?;
         results.push(value);
     }
 
     Ok(results)
 }
 
-fn decode_property(
-    index: usize,
-    info_buf: &[u8],
-    info: &TRACE_EVENT_INFO,
+struct PropertyDecodeContext<'a> {
+    info_buf: &'a [u8],
+    info: &'a TRACE_EVENT_INFO,
     user_data: *const u8,
     user_data_len: usize,
+    pointer_size: usize,
+}
+
+fn decode_property(
+    index: usize,
+    context: &PropertyDecodeContext<'_>,
     offset: &mut usize,
     numeric_values: &mut [Option<usize>],
 ) -> Result<(String, String), String> {
-    if index >= info.PropertyCount as usize {
+    if index >= context.info.PropertyCount as usize {
         return Err(format!("property index {index} is out of range"));
     }
-    let prop_info = event_property_info(info, index);
-    let prop_name =
-        wide_str_at(info_buf, prop_info.NameOffset).unwrap_or_else(|| format!("prop{index}"));
+    let prop_info = event_property_info(context.info, index);
+    let prop_name = wide_str_at(context.info_buf, prop_info.NameOffset)
+        .unwrap_or_else(|| format!("prop{index}"));
     let flags = prop_info.Flags.0;
     let count = resolve_property_count(prop_info, flags, numeric_values, index)?;
     if count > MAX_PROPERTY_ELEMENTS {
@@ -176,15 +183,7 @@ fn decode_property(
         let member_count = unsafe { prop_info.Anonymous1.structType.NumOfStructMembers } as usize;
         for _ in 0..count {
             for child_index in start_index..start_index + member_count {
-                let _ = decode_property(
-                    child_index,
-                    info_buf,
-                    info,
-                    user_data,
-                    user_data_len,
-                    offset,
-                    numeric_values,
-                )?;
+                let _ = decode_property(child_index, context, offset, numeric_values)?;
             }
         }
         return Ok((prop_name, "<struct>".to_string()));
@@ -200,21 +199,27 @@ fn decode_property(
 
     let mut values = Vec::with_capacity(count.min(available_element_bound(
         in_type,
-        user_data_len.saturating_sub(*offset),
+        context.user_data_len.saturating_sub(*offset),
+        context.pointer_size,
     )));
     let mut numeric_value = None;
     for _ in 0..count {
-        let remaining = user_data_len.saturating_sub(*offset);
+        let remaining = context.user_data_len.saturating_sub(*offset);
         if remaining == 0 {
             return Err(format!("property '{prop_name}' exceeds the event payload"));
         }
         let data_ptr = if remaining > 0 {
-            unsafe { user_data.add(*offset) }
+            unsafe { context.user_data.add(*offset) }
         } else {
             std::ptr::null()
         };
-        let (value, consumed) =
-            format_property_value(in_type, declared_length, data_ptr, remaining);
+        let (value, consumed) = format_property_value_with_pointer_size(
+            in_type,
+            declared_length,
+            data_ptr,
+            remaining,
+            context.pointer_size,
+        );
         if consumed == 0 && remaining > 0 {
             return Err(format!(
                 "property '{prop_name}' has unsupported variable length"
@@ -252,12 +257,21 @@ fn resolve_property_count(
     }
 }
 
-fn available_element_bound(in_type: u16, available: usize) -> usize {
+fn pointer_size_from_header_flags(flags: u16) -> usize {
+    if flags & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 {
+        4
+    } else {
+        8
+    }
+}
+
+fn available_element_bound(in_type: u16, available: usize, pointer_size: usize) -> usize {
     let element_size = match in_type {
         TDH_INTYPE_INT8 | TDH_INTYPE_UINT8 => 1,
         TDH_INTYPE_INT16 | TDH_INTYPE_UINT16 => 2,
         TDH_INTYPE_INT32 | TDH_INTYPE_UINT32 | TDH_INTYPE_BOOLEAN | TDH_INTYPE_HEXINT32 => 4,
-        TDH_INTYPE_INT64 | TDH_INTYPE_UINT64 | TDH_INTYPE_POINTER | TDH_INTYPE_HEXINT64 => 8,
+        TDH_INTYPE_POINTER => pointer_size,
+        TDH_INTYPE_INT64 | TDH_INTYPE_UINT64 | TDH_INTYPE_HEXINT64 => 8,
         _ => 1,
     };
     (available / element_size).max(1)
@@ -295,11 +309,12 @@ fn parse_numeric_metadata(value: &str) -> Option<usize> {
         .or_else(|| value.parse().ok())
 }
 
-fn format_property_value(
+fn format_property_value_with_pointer_size(
     in_type: u16,
     declared_length: usize,
     data: *const u8,
     available: usize,
+    pointer_size: usize,
 ) -> (String, usize) {
     if data.is_null() || available == 0 {
         return ("<no data>".to_string(), 0);
@@ -398,10 +413,11 @@ fn format_property_value(
             format!("{:#x}", unsafe { (data.cast::<u64>()).read_unaligned() }),
             8,
         ),
-        TDH_INTYPE_POINTER if available >= 8 => (
-            // 64-bit pointer; on 32-bit hosts this would be 4 bytes but
-            // we only target x64. Unaligned read because ETW payload
-            // alignment is not guaranteed.
+        TDH_INTYPE_POINTER if pointer_size == 4 && available >= 4 => (
+            format!("{:#x}", unsafe { (data.cast::<u32>()).read_unaligned() }),
+            4,
+        ),
+        TDH_INTYPE_POINTER if pointer_size == 8 && available >= 8 => (
             format!("{:#x}", unsafe { (data.cast::<u64>()).read_unaligned() }),
             8,
         ),
@@ -411,6 +427,16 @@ fn format_property_value(
         // consistent; otherwise consume zero.
         _ => ("<unsupported>".to_string(), declared_length.min(available)),
     }
+}
+
+#[cfg(test)]
+fn format_property_value(
+    in_type: u16,
+    declared_length: usize,
+    data: *const u8,
+    available: usize,
+) -> (String, usize) {
+    format_property_value_with_pointer_size(in_type, declared_length, data, available, 8)
 }
 
 fn format_sid(data: *const u8, available: usize) -> (String, usize) {
@@ -557,6 +583,40 @@ mod tests {
             format_property_value(TDH_INTYPE_UINT32, 4, bytes.as_ptr(), bytes.len());
         assert_eq!(val, "3405691582");
         assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn pointer_width_follows_event_header_flags() {
+        assert_eq!(pointer_size_from_header_flags(0), 8);
+        assert_eq!(
+            pointer_size_from_header_flags(EVENT_HEADER_FLAG_32_BIT_HEADER),
+            4
+        );
+    }
+
+    #[test]
+    fn format_property_value_pointer_supports_32_and_64_bit_events() {
+        let pointer32 = 0xCAFE_BABEu32.to_le_bytes();
+        let (value, consumed) = format_property_value_with_pointer_size(
+            TDH_INTYPE_POINTER,
+            0,
+            pointer32.as_ptr(),
+            pointer32.len(),
+            4,
+        );
+        assert_eq!(value, "0xcafebabe");
+        assert_eq!(consumed, 4);
+
+        let pointer64 = 0xCAFE_BABE_DEAD_BEEFu64.to_le_bytes();
+        let (value, consumed) = format_property_value_with_pointer_size(
+            TDH_INTYPE_POINTER,
+            0,
+            pointer64.as_ptr(),
+            pointer64.len(),
+            8,
+        );
+        assert_eq!(value, "0xcafebabedeadbeef");
+        assert_eq!(consumed, 8);
     }
 
     #[test]

@@ -152,10 +152,7 @@ pub fn build_denial_from_access_check(
 
     let object_name = find_prop(&parts.props, "ObjectName")
         .map(|v| v.trim_matches('"').to_string())
-        .unwrap_or_default();
-    if resource_type == ResourceType::Capability && object_name.is_empty() {
-        return None;
-    }
+        .filter(|name| !name.is_empty())?;
 
     let access_type = if resource_type == ResourceType::Capability {
         // Capability checks report a mask (often 0x1) that is not a
@@ -330,7 +327,12 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
         const KEY_NOTIFY: u32 = 0x0010;
         const KEY_CREATE_LINK: u32 = 0x0020;
         (
-            KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY | READ_CONTROL | GENERIC_READ,
+            KEY_QUERY_VALUE
+                | KEY_ENUMERATE_SUB_KEYS
+                | KEY_NOTIFY
+                | READ_CONTROL
+                | GENERIC_READ
+                | GENERIC_EXECUTE,
             KEY_SET_VALUE
                 | KEY_CREATE_SUB_KEY
                 | KEY_CREATE_LINK
@@ -338,7 +340,7 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
                 | GENERIC_WRITE
                 | GENERIC_ALL,
             // Registry has no execute concept (KEY_EXECUTE aliases KEY_READ).
-            GENERIC_EXECUTE,
+            0,
         )
     } else {
         // File/directory-specific rights (winnt.h FILE_*).
@@ -348,6 +350,7 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
         const FILE_READ_EA: u32 = 0x0008;
         const FILE_WRITE_EA: u32 = 0x0010;
         const FILE_EXECUTE: u32 = 0x0020; // a.k.a. FILE_TRAVERSE
+        const FILE_DELETE_CHILD: u32 = 0x0040;
         const FILE_READ_ATTRIBUTES: u32 = 0x0080;
         const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
         (
@@ -355,6 +358,7 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
             FILE_WRITE_DATA
                 | FILE_APPEND_DATA
                 | FILE_WRITE_EA
+                | FILE_DELETE_CHILD
                 | FILE_WRITE_ATTRIBUTES
                 | standard_write
                 | GENERIC_WRITE
@@ -498,6 +502,21 @@ mod tests {
     }
 
     #[test]
+    fn access_check_empty_file_and_registry_identifiers_are_dropped() {
+        for object_type in ["File", "Key"] {
+            let p = parts(
+                14,
+                &[
+                    ("ObjectType", object_type),
+                    ("ObjectName", "\"\""),
+                    ("AccessMask", "0x1"),
+                ],
+            );
+            assert!(extract_denial(&p, 5900, FIXED_FILETIME).is_none());
+        }
+    }
+
+    #[test]
     fn access_check_missing_mask_defaults_to_unknown() {
         let p = parts(
             4907,
@@ -627,6 +646,7 @@ mod tests {
         ); // GENERIC_EXECUTE
            // Writes (incl. delete / take-ownership fold into Write).
         assert_eq!(access_type_from_mask(0x0002, false), AccessType::Write); // FILE_WRITE_DATA
+        assert_eq!(access_type_from_mask(0x0040, false), AccessType::Write); // FILE_DELETE_CHILD
         assert_eq!(access_type_from_mask(0x0001_0000, false), AccessType::Write); // DELETE
         assert_eq!(access_type_from_mask(0x4000_0000, false), AccessType::Write); // GENERIC_WRITE
         assert_eq!(access_type_from_mask(0x1000_0000, false), AccessType::Write); // GENERIC_ALL
@@ -662,7 +682,8 @@ mod tests {
         // KEY_QUERY_VALUE / ENUMERATE / NOTIFY are reads.
         assert_eq!(access_type_from_mask(0x0001, true), AccessType::Read); // KEY_QUERY_VALUE
         assert_eq!(access_type_from_mask(0x0010, true), AccessType::Read); // KEY_NOTIFY (write for files!)
-                                                                           // KEY_SET_VALUE / CREATE_SUB_KEY / CREATE_LINK are writes.
+        assert_eq!(access_type_from_mask(0x2000_0000, true), AccessType::Read); // GENERIC_EXECUTE maps to KEY_READ
+                                                                                // KEY_SET_VALUE / CREATE_SUB_KEY / CREATE_LINK are writes.
         assert_eq!(access_type_from_mask(0x0002, true), AccessType::Write); // KEY_SET_VALUE
         assert_eq!(access_type_from_mask(0x0020, true), AccessType::Write); // KEY_CREATE_LINK (execute for files!)
                                                                             // Registry has no execute concept: 0x20 is a write here, not execute.
