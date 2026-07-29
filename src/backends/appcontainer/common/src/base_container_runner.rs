@@ -1456,7 +1456,9 @@ struct BaseContainerSandboxProcess {
     identity: String,
     sid_string: String,
     proxy_coordinator: ProxyCoordinator,
-    teardown_done: bool,
+    /// Cached teardown outcome so repeated terminal waits cannot hide a
+    /// capture failure after the session has been consumed.
+    teardown_result: Option<Result<(), String>>,
     /// Live learning-mode capture session, moved from the `BaseChild`. Sealed
     /// in `run_teardown` once the child has exited and been reaped.
     capture_session: Option<CaptureSession>,
@@ -1495,17 +1497,16 @@ impl BaseContainerSandboxProcess {
             identity: std::mem::take(&mut child.identity),
             sid_string: std::mem::take(&mut child.sid_string),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
-            teardown_done: false,
+            teardown_result: None,
             capture_session: child.capture_session.take(),
             capture_output_path: child.capture_output_path.take(),
         }
     }
 
     fn run_teardown(&mut self) -> std::io::Result<()> {
-        if self.teardown_done {
-            return Ok(());
+        if let Some(result) = &self.teardown_result {
+            return result.clone().map_err(std::io::Error::other);
         }
-        self.teardown_done = true;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
         // Seal the learning-mode ETL trace now that the child has exited and
@@ -1541,7 +1542,27 @@ impl BaseContainerSandboxProcess {
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
         self.proxy_coordinator.stop(&mut logger);
-        capture_result
+        let result = capture_result.map_err(|error| error.to_string());
+        self.teardown_result = Some(result.clone());
+        result.map_err(std::io::Error::other)
+    }
+
+    fn kill_process_tree(&mut self) -> std::io::Result<()> {
+        if let Some(job) = &self.job {
+            job.terminate(u32::MAX);
+        } else {
+            unsafe {
+                let _ = TerminateProcess(self.process.get(), u32::MAX);
+            }
+        }
+        Ok(())
+    }
+
+    fn terminate_and_reap(&mut self) {
+        let _ = self.kill_process_tree();
+        unsafe {
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        }
     }
 }
 
@@ -1573,7 +1594,12 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     return Err(std::io::Error::other("GetExitCodeProcess failed"));
                 }
-                Ok(Some(code as i32))
+                // A terminal observation must not become visible before
+                // captureDenials is sealed. This is the path used by polling
+                // SDK waits, so finalize synchronously before reporting exit.
+                self.terminate_and_reap();
+                let teardown_result = self.run_teardown();
+                combine_process_and_teardown_results(Ok(code as i32), teardown_result).map(Some)
             }
             WAIT_TIMEOUT => Ok(None),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
@@ -1587,14 +1613,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Tree-kill via the job object when the child was successfully assigned
         // to one; otherwise fall back to terminating the root process.
-        if let Some(job) = &self.job {
-            job.terminate(u32::MAX);
-        } else {
-            unsafe {
-                let _ = TerminateProcess(self.process.get(), u32::MAX);
-            }
-        }
-        Ok(())
+        self.kill_process_tree()
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -1631,10 +1650,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         // failure this also terminates it. Then reap the root before releasing
         // the pipe drains — and killing the tree closes the descendant's pipe
         // write-ends, so the drains can finish.
-        let _ = self.kill();
-        unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
-        }
+        self.terminate_and_reap();
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
         let teardown_result = self.run_teardown();
@@ -1647,10 +1663,7 @@ impl Drop for BaseContainerSandboxProcess {
         // Kill and reap before tearing down proxy / sandbox state, so an
         // abandoned-but-running sandbox cannot outlive its enforcement (or
         // leak as an orphan).
-        let _ = self.kill();
-        unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
-        }
+        self.terminate_and_reap();
         if let Err(error) = self.run_teardown() {
             eprintln!("captureDenials teardown failed during drop: {error}");
         }
