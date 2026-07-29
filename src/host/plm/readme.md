@@ -2,7 +2,7 @@
 
 `plm.exe` is the Windows-only trace driver for permissive learning mode. Long-form, it captures the access-denied events emitted by Windows' permissive sandbox layer, decodes them into structured findings, and merges those findings back into an MXC container config so the next enforcing run succeeds.
 
-This PR introduces **capability extraction**: `EventID=14` DACL ACE blobs are decoded into AppContainer capability names via `extract_caps`, and those names are merged into the config's containment-backend `capabilities` array (when the backend supports it). UI relaxation arrives in a subsequent PR.
+This PR introduces **capability extraction**: `EventID=14` DACL ACE blobs are decoded into AppContainer capability names via `extract_caps`, and those names are merged into `processContainer.capabilities`. UI relaxation arrives in a subsequent PR.
 
 PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mode-permissive-learning-mode); the standalone CLI documented here is for capturing traces, interactive iteration, and debugging the parser itself.
 
@@ -12,7 +12,9 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs `EventID=14` / `EventID=27` for every access that *would* have been denied.
 3. **Stop** — `plm stop` calls `wpr -stop <trace.etl>` and walks the `.etl` with `EvtQuery` / `EvtRender`.
 4. **Parse** — for each `EventID=14`, the parser pulls the file path / access mask and decodes the DACL ACE blob into AppContainer capability names. `EventID=27` UI relaxation lands in a later PR.
-5. **Merge** — file paths are added to `filesystem.readwritePaths` / `filesystem.readonlyPaths`; capability names are added to the containment-backend's `capabilities` array; results are written as `Adjusted_<name>.json` next to the captured trace.
+5. **Merge** — file paths are added to `filesystem.readwritePaths` / `filesystem.readonlyPaths`; capability names are added to `processContainer.capabilities` (deduplicated case-insensitively against any capabilities already authored there, then sorted); results are written as `Adjusted_<name>.json` next to the captured trace.
+
+> **Capability merge caveats.** Capabilities are only merged into a `processContainer` block — backends that cannot express AppContainer capabilities (LXC, Windows Sandbox, …) are left untouched and the discovered set is reported on stderr instead. The reserved names `learningModeLogging` and `permissiveLearningMode` are never written back, because `processContainer.capabilities` rejects them.
 
 ## Layout (this PR)
 
@@ -63,6 +65,8 @@ Decode a raw hex-encoded DACL ACE buffer into a sorted list of AppContainer capa
 ```powershell
 plm.exe extract-caps --hex-bytes <hex> [--verbose-logging]
 ```
+
+> **An empty result does not mean the blob contained no capabilities.** Only names on the module's built-in known-capability list are recognized, and only when the OS resolves them via `DeriveCapabilitySidsFromName` — names this Windows build rejects are skipped at table-build time, and any SID that is not in the resulting index is ignored. Capabilities are also only collected from *allow* ACEs that grant a non-zero access mask. Use `--verbose-logging` to see per-ACE decisions, including SIDs that resolved to nothing.
 
 ### `plm log`
 

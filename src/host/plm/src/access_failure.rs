@@ -36,12 +36,24 @@ pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedE
         if let Some(blob) = ev.event_data.get(idx) {
             let blob_str = blob.as_str();
             if !blob_str.trim().is_empty() {
-                let _ = crate::extract_caps::extract_caps_with_index_into(
+                // A structurally invalid ACE blob must not vanish: the
+                // file-path half of this event still succeeds, so
+                // dropping the error here would silently lose every
+                // capability the event carried with nothing in the
+                // output to show for it. Count it like any other parse
+                // failure so the end-of-parse total stays honest.
+                if let Err(err) = crate::extract_caps::extract_caps_with_index_into(
                     blob_str,
                     &acc.capability_index,
                     acc.verbose,
+                    &mut acc.ace_scratch,
                     &mut acc.requested_capabilities,
-                );
+                ) {
+                    acc.parse_failures += 1;
+                    if acc.verbose {
+                        eprintln!("Failed to decode DACL ACE blob for an EventID=14 event: {err}");
+                    }
+                }
             }
         }
     }

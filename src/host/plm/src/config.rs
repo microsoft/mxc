@@ -1,8 +1,8 @@
 //! Port of the config-update logic from `stop_plm_logging.ps1`.
 //!
 //! Reads an MXC container config (JSON) and merges discovered
-//! file-access paths into it. Capability-merge and the Adjusted_*.json
-//! writer arrive in the config-generation PR.
+//! file-access paths and AppContainer capabilities into it, then writes
+//! the result out as `Adjusted_*.json`.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -853,14 +853,128 @@ pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose
     }
 }
 
+/// Capability names the schema reserves for internal use. They are
+/// injected by `--audit` / `learningMode` rather than authored, and
+/// `processContainer.capabilities` rejects them outright — so a learned
+/// set must never write them back into the adjusted config.
+const RESERVED_CAPABILITIES: &[&str] = &["learningModeLogging", "permissiveLearningMode"];
+
+/// Case-insensitive ASCII ordering, shared with the CLI so merged and
+/// printed capability lists agree. See
+/// [`crate::extract_caps::ascii_ci_cmp`].
+use crate::extract_caps::ascii_ci_cmp;
+
+/// Look up a key in a JSON object ignoring ASCII case, returning the
+/// key's actual spelling. MXC configs are normally camelCase, but the
+/// parser accepts other spellings and we must not silently create a
+/// second `processcontainer` block alongside an existing
+/// `processContainer`.
+fn object_key_ignore_ascii_case(config: &Value, wanted: &str) -> Option<String> {
+    config
+        .as_object()?
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(wanted))
+        .cloned()
+}
+
 /// Merge discovered AppContainer capability names into the config's
-/// containment-backend block. Implementation arrives in the
-/// capability-extraction PR; until then this is a no-op. Callers may
-/// pass a non-empty set (e.g. when a future stop.rs wires in the
-/// EventID=14 ACE-blob parser ahead of this merge) without triggering
-/// a spurious failure — the actual merge is landed atomically in the
-/// capability-extraction PR.
-pub fn merge_capabilities(_config: &mut Value, _requested: &HashSet<String>) -> Result<()> {
+/// containment-backend block (`processContainer.capabilities`).
+///
+/// Existing entries are preserved with their original spelling; the
+/// merged array is deduplicated case-insensitively and sorted. Reserved
+/// learning-mode capability names are dropped (see
+/// [`RESERVED_CAPABILITIES`]) because the schema rejects them.
+///
+/// Backends that have no capability array (anything that is not a
+/// process container) cannot express capabilities, so the discovered set
+/// is reported on stderr and left unmerged rather than silently dropped.
+pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Result<()> {
+    if requested.is_empty() {
+        return Ok(());
+    }
+
+    let mergeable: Vec<&str> = requested
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            !RESERVED_CAPABILITIES
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    if mergeable.is_empty() {
+        return Ok(());
+    }
+
+    let Some(pc_key) = object_key_ignore_ascii_case(config, "processContainer") else {
+        let mut names: Vec<&str> = mergeable.clone();
+        names.sort_by(|a, b| ascii_ci_cmp(a, b));
+        eprintln!(
+            "warning: config has no processContainer block, so this containment backend has no \
+             capabilities array; {} discovered capability/capabilities not merged: {}",
+            names.len(),
+            names.join(", ")
+        );
+        return Ok(());
+    };
+
+    let caps_slot = {
+        let pc = &mut config[&pc_key];
+        if !pc.is_object() {
+            eprintln!(
+                "warning: config's \"{pc_key}\" is not an object; {} discovered capability/\
+                 capabilities not merged",
+                mergeable.len()
+            );
+            return Ok(());
+        }
+        match object_key_ignore_ascii_case(pc, "capabilities") {
+            Some(existing) => existing,
+            None => {
+                // The block exists but has never carried capabilities.
+                // Creating the array is the whole point of learning mode,
+                // so add it rather than warning.
+                pc["capabilities"] = json!([]);
+                "capabilities".to_string()
+            }
+        }
+    };
+
+    let slot = &mut config[&pc_key][&caps_slot];
+    if slot.is_null() {
+        *slot = json!([]);
+    }
+    let Some(existing) = slot.as_array() else {
+        eprintln!(
+            "warning: \"{pc_key}.{caps_slot}\" is not an array; {} discovered capability/\
+             capabilities not merged",
+            mergeable.len()
+        );
+        return Ok(());
+    };
+
+    // Preserve existing entries verbatim (including any non-string
+    // values, which validation elsewhere owns) and append only the
+    // discovered names that are not already present under a
+    // case-insensitive comparison.
+    let mut merged: Vec<String> = existing
+        .iter()
+        .map(|v| match v.as_str() {
+            Some(s) => s.to_string(),
+            None => v.to_string(),
+        })
+        .collect();
+
+    for name in mergeable {
+        if !merged.iter().any(|e| e.eq_ignore_ascii_case(name)) {
+            merged.push(name.to_string());
+        }
+    }
+
+    merged.sort_by(|a, b| ascii_ci_cmp(a, b));
+    merged.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+    *slot = Value::Array(merged.into_iter().map(Value::String).collect());
     Ok(())
 }
 
@@ -1568,5 +1682,161 @@ mod tests {
         let back2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(back2, cfg2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- merge_capabilities ---------------------------------------------
+
+    fn caps_of(config: &Value) -> Vec<String> {
+        config["processContainer"]["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn requested(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn merge_capabilities_adds_to_existing_array_sorted() {
+        let mut cfg = json!({"processContainer": {"capabilities": ["registryRead"]}});
+        merge_capabilities(
+            &mut cfg,
+            &requested(&["internetClient", "documentsLibrary"]),
+        )
+        .unwrap();
+        assert_eq!(
+            caps_of(&cfg),
+            vec!["documentsLibrary", "internetClient", "registryRead"]
+        );
+    }
+
+    #[test]
+    fn merge_capabilities_preserves_existing_spelling_and_dedupes_case_insensitively() {
+        // An existing entry must not be duplicated by a discovered name
+        // that differs only in case, and the authored spelling wins.
+        let mut cfg = json!({"processContainer": {"capabilities": ["InternetClient"]}});
+        merge_capabilities(&mut cfg, &requested(&["internetclient"])).unwrap();
+        assert_eq!(caps_of(&cfg), vec!["InternetClient"]);
+    }
+
+    #[test]
+    fn merge_capabilities_creates_missing_array() {
+        let mut cfg = json!({"processContainer": {"learningMode": true}});
+        merge_capabilities(&mut cfg, &requested(&["internetClient"])).unwrap();
+        assert_eq!(caps_of(&cfg), vec!["internetClient"]);
+        // Sibling keys survive.
+        assert_eq!(cfg["processContainer"]["learningMode"], json!(true));
+    }
+
+    #[test]
+    fn merge_capabilities_replaces_null_array() {
+        let mut cfg = json!({"processContainer": {"capabilities": null}});
+        merge_capabilities(&mut cfg, &requested(&["internetClient"])).unwrap();
+        assert_eq!(caps_of(&cfg), vec!["internetClient"]);
+    }
+
+    #[test]
+    fn merge_capabilities_resolves_containment_key_case_insensitively() {
+        // Must merge into the existing block rather than creating a
+        // second, differently-cased one.
+        let mut cfg = json!({"ProcessContainer": {"capabilities": []}});
+        merge_capabilities(&mut cfg, &requested(&["internetClient"])).unwrap();
+        assert!(cfg.get("processContainer").is_none());
+        assert_eq!(
+            cfg["ProcessContainer"]["capabilities"],
+            json!(["internetClient"])
+        );
+    }
+
+    #[test]
+    fn merge_capabilities_is_noop_without_process_container() {
+        // Backends with no capability array (lxc, windows sandbox, …)
+        // must be left untouched rather than growing a bogus block.
+        let mut cfg = json!({"lxc": {"image": "ubuntu"}});
+        let before = cfg.clone();
+        merge_capabilities(&mut cfg, &requested(&["internetClient"])).unwrap();
+        assert_eq!(cfg, before);
+    }
+
+    #[test]
+    fn merge_capabilities_drops_reserved_names() {
+        // The schema rejects these in processContainer.capabilities, so
+        // a learned set must never write them back.
+        let mut cfg = json!({"processContainer": {"capabilities": []}});
+        merge_capabilities(
+            &mut cfg,
+            &requested(&[
+                "permissiveLearningMode",
+                "learningModeLogging",
+                "internetClient",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(caps_of(&cfg), vec!["internetClient"]);
+    }
+
+    #[test]
+    fn merge_capabilities_reserved_only_leaves_config_untouched() {
+        let mut cfg = json!({"processContainer": {"learningMode": true}});
+        let before = cfg.clone();
+        merge_capabilities(&mut cfg, &requested(&["permissiveLearningMode"])).unwrap();
+        assert_eq!(cfg, before);
+    }
+
+    #[test]
+    fn merge_capabilities_empty_request_is_noop() {
+        let mut cfg = json!({"processContainer": {"learningMode": true}});
+        let before = cfg.clone();
+        merge_capabilities(&mut cfg, &HashSet::new()).unwrap();
+        assert_eq!(cfg, before);
+    }
+
+    #[test]
+    fn merge_capabilities_is_idempotent() {
+        let mut cfg = json!({"processContainer": {"capabilities": []}});
+        let req = requested(&["internetClient", "documentsLibrary"]);
+        merge_capabilities(&mut cfg, &req).unwrap();
+        let once = cfg.clone();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert_eq!(cfg, once, "re-merging the same set must not change output");
+    }
+
+    #[test]
+    fn merge_capabilities_leaves_non_array_capabilities_alone() {
+        let mut cfg = json!({"processContainer": {"capabilities": "internetClient"}});
+        let before = cfg.clone();
+        merge_capabilities(&mut cfg, &requested(&["documentsLibrary"])).unwrap();
+        assert_eq!(
+            cfg, before,
+            "must not clobber a malformed capabilities slot"
+        );
+    }
+
+    #[test]
+    fn ascii_ci_cmp_is_a_total_order_including_non_ascii() {
+        use std::cmp::Ordering;
+        // Case-folding must not break antisymmetry/transitivity, and
+        // non-ASCII input must still order deterministically.
+        assert_eq!(ascii_ci_cmp("abc", "ABC"), Ordering::Equal);
+        assert_eq!(ascii_ci_cmp("abc", "abcd"), Ordering::Less);
+        assert_eq!(ascii_ci_cmp("Zeta", "alpha"), Ordering::Greater);
+        let a = "café";
+        let b = "CAFÉ";
+        assert_eq!(ascii_ci_cmp(a, b), ascii_ci_cmp(a, b));
+        assert_eq!(ascii_ci_cmp(a, a), Ordering::Equal);
+    }
+
+    #[test]
+    fn merge_capabilities_sorts_case_insensitively() {
+        let mut cfg = json!({"processContainer": {"capabilities": []}});
+        merge_capabilities(
+            &mut cfg,
+            &requested(&["Zebra", "apple", "Banana", "cherry"]),
+        )
+        .unwrap();
+        assert_eq!(caps_of(&cfg), vec!["apple", "Banana", "cherry", "Zebra"]);
     }
 }

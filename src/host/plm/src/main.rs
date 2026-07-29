@@ -445,9 +445,7 @@ fn main() -> Result<()> {
             verbose_logging,
         } => {
             let caps = extract_caps::extract_caps(&hex_bytes, verbose_logging)?;
-            let mut sorted: Vec<&String> = caps.iter().collect();
-            sorted.sort();
-            for c in sorted {
+            for c in extract_caps::sorted_capability_names(&caps) {
                 println!("{c}");
             }
             Ok(())
