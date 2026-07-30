@@ -71,6 +71,86 @@ fn state_aware_unknown_containment_emits_error_envelope_on_stdout() {
 }
 
 #[test]
+fn state_aware_non_phase_key_under_backend_block_emits_error_envelope() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+
+    // Per-backend config nests under a phase name (design §7.2). The one-shot
+    // spelling `experimental.isolation_session.user` on a state-aware request
+    // is a mis-slotted payload no code path reads — the dispatcher navigates
+    // only `experimental.<backend>.<phase>` — so it must be refused rather than
+    // silently provisioning a local sandbox for a caller who asked for an
+    // Entra-backed one. Parser-level rejection, so no OS-side service is
+    // required for this to run.
+    let request = json!({
+        "containment": "isolation_session",
+        "phase": "provision",
+        "experimental": {
+            "isolation_session": {
+                "user": { "upn": "alice@contoso.com", "wamToken": "tok" }
+            }
+        }
+    });
+    let result = run_wxc_state_aware("state-aware non-phase backend key", &request, &[]);
+    let code = assert_error_envelope_on_stdout(&result);
+    assert_eq!(
+        code, "malformed_request",
+        "expected malformed_request for a non-phase inner key, got {:?}; stdout={:?}",
+        code, result.stdout
+    );
+    assert_ne!(result.code, Some(0), "non-zero exit expected on error");
+}
+
+#[test]
+fn state_aware_process_on_non_exec_phase_emits_error_envelope() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+
+    // `process` is exec-only (design §7.1). Without the guard the parser maps
+    // cwd/env/timeout into a request whose non-exec phase methods never read
+    // them — a silently-ignored policy.
+    let request = json!({
+        "phase": "start",
+        "sandboxId": "iso:abcd1234",
+        "process": { "commandLine": "echo hi" }
+    });
+    let result = run_wxc_state_aware("state-aware process on non-exec", &request, &[]);
+    let code = assert_error_envelope_on_stdout(&result);
+    assert_eq!(
+        code, "malformed_request",
+        "expected malformed_request for `process` on a non-exec phase, got {:?}; stdout={:?}",
+        code, result.stdout
+    );
+    assert_ne!(result.code, Some(0), "non-zero exit expected on error");
+}
+
+#[test]
+fn state_aware_lone_foreign_experimental_block_emits_error_envelope() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+
+    // Non-provision phases carry no `containment`, but the `iso:` prefix
+    // resolves the backend, so a lone `wslc` block is foreign. Previously the
+    // unresolved backend let exactly one foreign key through, silently dropped.
+    let request = json!({
+        "phase": "start",
+        "sandboxId": "iso:abcd1234",
+        "experimental": { "wslc": { "image": "alpine:latest" } }
+    });
+    let result = run_wxc_state_aware("state-aware lone foreign experimental", &request, &[]);
+    let code = assert_error_envelope_on_stdout(&result);
+    assert_eq!(
+        code, "malformed_request",
+        "expected malformed_request for a foreign experimental block, got {:?}; stdout={:?}",
+        code, result.stdout
+    );
+    assert_ne!(result.code, Some(0), "non-zero exit expected on error");
+}
+
+#[test]
 fn state_aware_recognized_but_non_state_aware_backend_emits_unsupported_phase() {
     if !cached_has_wxc_exe() {
         return;

@@ -294,6 +294,11 @@ const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 /// section or graduating one from experimental.
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
+/// Wire-format phase names. On a state-aware request, per-backend config nests
+/// one level deeper under one of these (`experimental.<backend>.<phase>`), which
+/// is the only shape `ParsedStateAwareRequest::deserialize_config` navigates.
+const STATE_AWARE_PHASE_KEYS: &[&str] = &["provision", "start", "exec", "stop", "deprovision"];
+
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
 fn validate_schema_version(version: &str) -> Result<(), WxcError> {
@@ -732,18 +737,45 @@ fn convert_wire_config(
     // Backend sections present in the config (captured before fields move out).
     let present_backend_sections = present_backend_sections(&cfg);
 
-    let schema_version = cfg.version.unwrap_or_default();
+    // Destructure (no `..`) so a new wire field fails to compile until it is
+    // either mapped below or explicitly ignored here. Without this, adding a
+    // field to `wire::MxcConfig` silently drops it: the generated schema and SDK
+    // types would advertise a knob the parser never reads. `schema` / `comment`
+    // are the two documented accept-and-ignore annotations; `phase` /
+    // `sandbox_id` / `correlation_vector` were rejected above.
+    let wire::MxcConfig {
+        schema: _,
+        comment: _,
+        version,
+        phase: _,
+        sandbox_id: _,
+        correlation_vector: _,
+        container_id,
+        containment,
+        process,
+        lifecycle,
+        process_container,
+        lxc,
+        filesystem,
+        fallback,
+        network,
+        ui,
+        seatbelt,
+        experimental,
+    } = cfg;
+
+    let schema_version = version.unwrap_or_default();
 
     // Validate the schema version up front so an unsupported version fails fast.
     validate_schema_version(&schema_version)?;
 
-    let container_id = cfg.container_id.unwrap_or_default();
+    let container_id = container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
     // non-exec state-aware phases (require_process == false) or when the driver
     // signalled a CLI command-line override (allow_missing_command).
     let command_required = require_process && !allow_missing_command;
-    let (script_code, working_directory, script_timeout, env) = match cfg.process {
+    let (script_code, working_directory, script_timeout, env) = match process {
         Some(process) => {
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
@@ -785,12 +817,12 @@ fn convert_wire_config(
     // Containment backend selection. The wire enum has already constrained the
     // value to a known variant (invalid strings fail at deserialize); abstract
     // intents and the omitted case resolve to the OS-native backend here.
-    let containment = map_wire_containment(cfg.containment.as_ref());
+    let containment = map_wire_containment(containment.as_ref());
 
     validate_single_backend_section(containment.clone(), &present_backend_sections)?;
 
     // LXC configuration
-    let lxc_config = match cfg.lxc {
+    let lxc_config = match lxc {
         Some(l) => LxcConfig {
             distribution: l.distribution.unwrap_or_default(),
             release: l.release.unwrap_or_default(),
@@ -804,7 +836,7 @@ fn convert_wire_config(
     // process-level backend regardless of whether the runner picks the legacy
     // AppContainer implementation (capabilities/learningMode/leastPrivilege) or
     // the newer BaseContainer implementation (ui).
-    if let Some(ac) = cfg.process_container {
+    if let Some(ac) = process_container {
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
         }
@@ -886,7 +918,7 @@ enforced; access denials are recorded for diagnostics.\n",
     }
 
     // Filesystem section
-    if let Some(fscfg) = cfg.filesystem {
+    if let Some(fscfg) = filesystem {
         if let Some(v) = fscfg.denied_paths {
             policy.denied_paths = v;
         }
@@ -901,18 +933,18 @@ enforced; access denials are recorded for diagnostics.\n",
     normalize_filesystem_paths(&mut policy, logger);
 
     // Fallback section
-    if let Some(fbcfg) = cfg.fallback {
+    if let Some(fbcfg) = fallback {
         if let Some(v) = fbcfg.allow_dacl_mutation {
             policy.fallback.allow_dacl_mutation = v;
         }
     }
 
     // Network section. Capture presence before the typed mapping consumes
-    // `cfg.network` so backends can distinguish an absent policy from an
+    // `network` so backends can distinguish an absent policy from an
     // explicit default-valued one (the domain `default_network_policy` defaults
     // to `Block` either way).
-    policy.network_specified = cfg.network.is_some();
-    if let Some(net) = cfg.network {
+    policy.network_specified = network.is_some();
+    if let Some(net) = network {
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
@@ -1051,7 +1083,7 @@ enforced; access denials are recorded for diagnostics.\n",
     }
 
     // Lifecycle section
-    let lifecycle = match cfg.lifecycle {
+    let lifecycle = match lifecycle {
         Some(lc) => LifecycleConfig {
             destroy_on_exit: lc.destroy_on_exit.unwrap_or(true),
             preserve_policy: lc.preserve_policy.unwrap_or(false),
@@ -1063,9 +1095,20 @@ enforced; access denials are recorded for diagnostics.\n",
     };
 
     // Experimental section (parsed but only applied when --experimental is set).
-    let experimental = if let Some(raw_exp) = cfg.experimental {
-        let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
-        let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
+    let experimental = if let Some(raw_exp) = experimental {
+        // Destructure (no `..`) so a new experimental backend block fails to
+        // compile until it is mapped. `seatbelt` is rejected below (moved to
+        // the stable section), not mapped.
+        let wire::Experimental {
+            test: raw_test,
+            windows_sandbox: raw_windows_sandbox,
+            wslc: raw_wslc,
+            isolation_session: raw_isolation_session,
+            seatbelt: raw_exp_seatbelt,
+            telemetry: raw_telemetry,
+        } = raw_exp;
+        let test = raw_test.map(|t| TestFeatureConfig::from_raw(t.message));
+        let windows_sandbox = raw_windows_sandbox.map(|sb| {
             let mut config = WindowsSandboxConfig::default();
             if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
                 config.idle_timeout_ms = t;
@@ -1075,7 +1118,7 @@ enforced; access denials are recorded for diagnostics.\n",
             }
             config
         });
-        let wslc = if let Some(cc) = raw_exp.wslc {
+        let wslc = if let Some(cc) = raw_wslc {
             let mut config = WslcConfig::default();
             if let Some(os) = cc.target_os {
                 config.target_os = os;
@@ -1139,18 +1182,45 @@ enforced; access denials are recorded for diagnostics.\n",
         } else {
             None
         };
-        let isolation_session = raw_exp
-            .isolation_session
-            .map(|as_cfg| IsolationSessionConfig {
-                user: as_cfg.user.map(Into::into),
-            });
-        if raw_exp.seatbelt.is_some() {
+        // Destructure (no `..`): `provision` / `start` are state-aware-only
+        // per-phase blocks. Reading only `user` here silently dropped them —
+        // which also let the nested spelling slip past the one-shot `user`
+        // rejection in the backend's `validate_runner`, quietly provisioning a
+        // local sandbox for a caller who asked for an Entra-backed one.
+        let isolation_session = match raw_isolation_session {
+            Some(wire::IsolationSession {
+                user,
+                provision,
+                start,
+            }) => {
+                let mut nested: Vec<&'static str> = Vec::new();
+                if provision.is_some() {
+                    nested.push("experimental.isolation_session.provision");
+                }
+                if start.is_some() {
+                    nested.push("experimental.isolation_session.start");
+                }
+                if !nested.is_empty() {
+                    let msg = format!(
+                        "{} is a per-phase config and is only valid on state-aware lifecycle \
+                         requests; use the state-aware lifecycle.",
+                        nested.join(", "),
+                    );
+                    return Err(WxcError::ConfigParse(msg));
+                }
+                Some(IsolationSessionConfig {
+                    user: user.map(Into::into),
+                })
+            }
+            None => None,
+        };
+        if raw_exp_seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
                 .to_string();
             return Err(WxcError::ConfigParse(msg));
         }
-        let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
+        let telemetry = raw_telemetry.map(|raw_t| TelemetryConfig {
             enabled: raw_t.enabled,
         });
         ExperimentalConfig {
@@ -1166,10 +1236,10 @@ enforced; access denials are recorded for diagnostics.\n",
 
     // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
     // rejected above.
-    let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
+    let seatbelt = seatbelt.map(make_seatbelt_config);
 
     // UI section
-    if let Some(raw_ui) = cfg.ui {
+    if let Some(raw_ui) = ui {
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
             disable: raw_ui.disable.unwrap_or(true),
@@ -1264,7 +1334,52 @@ fn convert_wire_state_aware(
         }
     }
 
-    validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
+    // On non-provision phases the request carries no `containment` — the backend
+    // is implied by the `sandboxId` prefix. Resolve it so a foreign experimental
+    // block is caught here too: with an unresolved backend,
+    // `validate_experimental_backend_keys` tolerates a *lone* foreign key, so
+    // `{phase: start, sandboxId: "iso:…", experimental: {wslc: {…}}}` used to be
+    // accepted and silently dropped even though the prefix names the backend
+    // unambiguously. An unknown prefix stays unresolved here; the dispatcher
+    // reports it.
+    let experimental_scope = containment.clone().or_else(|| {
+        cfg.sandbox_id
+            .as_deref()
+            .and_then(|id| crate::id::parse_sandbox_id_prefix(id).ok())
+            .and_then(|prefix| crate::state_aware_dispatch::backend_from_prefix(prefix).ok())
+    });
+    validate_experimental_backend_keys(experimental_scope.as_ref(), experimental_raw.as_ref())?;
+
+    // Per-backend config nests under a phase name on the state-aware wire
+    // contract (design §7.2: "Inner key | A subset of `Phase`"). A non-phase
+    // inner key is a mis-slotted payload that no code path reads —
+    // `deserialize_config` navigates only `experimental.<backend>.<phase>` — so
+    // reject it rather than acting on a config the caller believes is applied.
+    // The motivating case is the one-shot spelling
+    // `experimental.isolation_session.user`: silently ignored, it provisions a
+    // local sandbox for a caller who asked for an Entra-backed one.
+    if let Some(serde_json::Value::Object(exp)) = experimental_raw.as_ref() {
+        for backend_key in KNOWN_EXPERIMENTAL_BACKENDS {
+            let Some(serde_json::Value::Object(backend_obj)) = exp.get(*backend_key) else {
+                continue;
+            };
+            let qualified: Vec<String> = backend_obj
+                .keys()
+                .filter(|k| !STATE_AWARE_PHASE_KEYS.contains(&k.as_str()))
+                .map(|k| format!("experimental.{backend_key}.{k}"))
+                .collect();
+            if !qualified.is_empty() {
+                let msg = format!(
+                    "State-aware per-backend config nests under a phase name ({}); {} \
+                     {} not a phase. Move the value under the phase it applies to.",
+                    STATE_AWARE_PHASE_KEYS.join(" / "),
+                    qualified.join(", "),
+                    if qualified.len() == 1 { "is" } else { "are" },
+                );
+                return Err(WxcError::ConfigParse(msg));
+            }
+        }
+    }
 
     let sandbox_id = cfg.sandbox_id.clone();
     let correlation_vector = cfg.correlation_vector.clone();
@@ -1292,6 +1407,19 @@ fn convert_wire_state_aware(
             "State-aware lifecycle requests do not accept one-shot section(s): {}. \
              Remove them; per-backend policy and lifecycle are fixed at provision time.",
             stray.join(", ")
+        );
+        return Err(WxcError::ConfigParse(msg));
+    }
+
+    // `process` is exec-only on the state-aware wire contract (design §7.1:
+    // "Required for `exec`; absent otherwise"). Without this the parser maps
+    // `cwd` / `env` / `timeout` into a request whose non-exec phase methods
+    // never read them — a silently-ignored policy of exactly the kind the
+    // stray-section check above exists to prevent.
+    if phase != Phase::Exec && cfg.process.is_some() {
+        let msg = format!(
+            "'process' is only valid on the exec phase; the {phase} phase does not run a \
+             process. Remove the 'process' section."
         );
         return Err(WxcError::ConfigParse(msg));
     }
@@ -3950,6 +4078,212 @@ mod tests {
         assert!(
             err.contains("has moved to the stable section"),
             "got: {err}"
+        );
+    }
+
+    // ---- Per-backend config must nest under a phase name (design §7.2) ----
+
+    #[test]
+    fn state_aware_rejects_non_phase_key_under_backend_block() {
+        // The one-shot spelling `experimental.isolation_session.user` on a
+        // state-aware request. `deserialize_config` navigates only
+        // `experimental.<backend>.<phase>`, so this used to be silently dropped
+        // — provisioning a local sandbox for a caller who asked for an
+        // Entra-backed one.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {
+                "isolation_session": {
+                    "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
+                }
+            }
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("experimental.isolation_session.user") && err.contains("not a phase"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_accepts_phase_named_key_under_backend_block() {
+        // Positive control for the rule above: the honored spelling still parses.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {
+                "isolation_session": {
+                    "provision": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}
+                }
+            }
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Provision),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_aware_non_phase_key_rejected_for_every_known_backend() {
+        // The rule is generic — no backend-specific knowledge in the parser.
+        for (backend, containment) in [
+            ("isolation_session", "isolation_session"),
+            ("windows_sandbox", "windows_sandbox"),
+            ("wslc", "wslc"),
+        ] {
+            let json = format!(
+                r#"{{"phase": "provision", "containment": "{containment}",
+                     "experimental": {{"{backend}": {{"notAPhase": {{}}}}}}}}"#
+            );
+            let err = match load_mxc(&json) {
+                Err(ParseError::StateAware(e)) => e.to_string(),
+                other => panic!("expected rejection for {backend}, got: {other:?}"),
+            };
+            assert!(
+                err.contains(&format!("experimental.{backend}.notAPhase")),
+                "{backend}: got {err}"
+            );
+        }
+    }
+
+    // ---- `process` is exec-only on state-aware requests (design §7.1) ----
+
+    #[test]
+    fn state_aware_rejects_process_on_non_exec_phases() {
+        for (phase, routing) in [
+            ("provision", r#""containment": "isolation_session""#),
+            ("start", r#""sandboxId": "iso:abcd1234""#),
+            ("stop", r#""sandboxId": "iso:abcd1234""#),
+            ("deprovision", r#""sandboxId": "iso:abcd1234""#),
+        ] {
+            let json = format!(
+                r#"{{"phase": "{phase}", {routing}, "process": {{"commandLine": "echo hi"}}}}"#
+            );
+            let err = match load_mxc(&json) {
+                Err(ParseError::StateAware(e)) => e.to_string(),
+                other => panic!("expected rejection for {phase}, got: {other:?}"),
+            };
+            assert!(
+                err.contains("'process' is only valid on the exec phase"),
+                "{phase}: got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_aware_exec_still_accepts_process() {
+        // Positive control: exec is the one phase that carries `process`, and
+        // every field still maps.
+        let json = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "echo hi", "cwd": "C:\\tmp", "timeout": 1000}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Exec);
+                assert_eq!(p.request.script_code, "echo hi");
+                assert_eq!(p.request.working_directory, "C:\\tmp");
+                assert_eq!(p.request.script_timeout, 1000);
+            }
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
+    }
+
+    // ---- Foreign experimental block resolved via the sandboxId prefix ----
+
+    #[test]
+    fn state_aware_lone_foreign_experimental_backend_rejected_via_sandbox_id_prefix() {
+        // Non-provision phases carry no `containment`, but the `iso:` prefix
+        // resolves the backend unambiguously — so a lone `wslc` block is
+        // foreign. Previously the unresolved backend let exactly one foreign
+        // key through, silently dropped.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": {"wslc": {"image": "alpine:latest"}}
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("Multiple containment backends configured")
+                && err.contains("experimental.wslc"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_matching_experimental_backend_still_accepted_via_prefix() {
+        // Positive control: the block matching the prefix-resolved backend is
+        // still accepted.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abcd1234",
+            "experimental": {"isolation_session": {"start": {}}}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Start),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_aware_unknown_sandbox_id_prefix_does_not_block_parsing() {
+        // An unresolvable prefix stays unresolved at parse time; the dispatcher
+        // is what reports it. Parsing must not hard-fail here.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "unknownxyz:abc"
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Start),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
+    }
+
+    // ---- One-shot rejects the state-aware per-phase nesting ----
+
+    #[test]
+    fn one_shot_rejects_nested_per_phase_isolation_session_config() {
+        // Previously dropped by the mapping, which also let the nested spelling
+        // slip past the backend's one-shot `user` rejection.
+        for key in ["provision", "start"] {
+            let json = format!(
+                r#"{{"process": {{"commandLine": "echo hi"}},
+                     "containment": "isolation_session",
+                     "experimental": {{"isolation_session": {{"{key}": {{"user": {{"upn": "a@b.com", "wamToken": "t"}}}}}}}}}}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(&format!("experimental.isolation_session.{key}"))
+                    && msg.contains("state-aware"),
+                "{key}: got {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_shot_still_accepts_flat_isolation_session_user_for_backend_rejection() {
+        // The flat spelling stays parseable so the backend's `validate_runner`
+        // can reject it with its own message; turning it into a parse error
+        // here would move the diagnostic away from the backend that owns it.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "a@b.com", "wamToken": "t"}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cfg = req.experimental.isolation_session.expect("iso config");
+        assert!(
+            cfg.user.is_some(),
+            "flat user should still reach the backend"
         );
     }
 

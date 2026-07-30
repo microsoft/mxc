@@ -175,7 +175,7 @@ pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBa
 
 /// Maps a state-aware sandbox-id prefix to its `ContainmentBackend`.
 /// Subsequent state-aware backends register their prefix here.
-fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
+pub(crate) fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
         "wsb" => Ok(ContainmentBackend::WindowsSandbox),

@@ -534,17 +534,21 @@ pub enum TransportProtocol {
     Tcp,
 }
 
-/// IsolationSession backend config. Carries the one-shot `user` field and
-/// the per-phase state-aware nesting for the phases that take config
-/// (`provision` / `start`). `stop`, `deprovision`, and `exec` take no
-/// per-phase config payload: `stop` and `deprovision` are invoked with only
-/// the top-level `phase` and `sandboxId`, and `exec` additionally carries
-/// the top-level `process` block.
+/// IsolationSession backend config. Per-phase state-aware config nests under
+/// the phase it applies to (`provision` / `start`); `stop`, `deprovision`, and
+/// `exec` take no per-phase config payload: `stop` and `deprovision` are invoked
+/// with only the top-level `phase` and `sandboxId`, and `exec` additionally
+/// carries the top-level `process` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
-    /// Optional Entra cloud-agent user bundle (one-shot).
+    /// Deprecated flat spelling of the Entra cloud-agent user bundle, retained
+    /// so it is *rejected* rather than silently ignored. It is not honored on
+    /// either surface: the one-shot path has no Entra mode, and a state-aware
+    /// request must nest the bundle under the phase it applies to. Supply it as
+    /// `experimental.isolation_session.provision.user`, and again at
+    /// `experimental.isolation_session.start.user` to re-present the token.
     pub user: Option<IsolationUser>,
     /// State-aware provision-phase configuration.
     pub provision: Option<IsolationSessionPhase>,
