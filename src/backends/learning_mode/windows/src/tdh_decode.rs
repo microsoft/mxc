@@ -66,6 +66,13 @@ impl TdhInfoBuffer {
         // `TRACE_EVENT_INFO`, while this view is used only for byte offsets.
         unsafe { std::slice::from_raw_parts(self.storage.as_ptr().cast(), self.len) }
     }
+
+    #[cfg(test)]
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: same allocation and bounds as `as_bytes`, with exclusive
+        // access through `&mut self`.
+        unsafe { std::slice::from_raw_parts_mut(self.storage.as_mut_ptr().cast(), self.len) }
+    }
 }
 
 /// Decodes an `EVENT_RECORD` into `DecodedEventParts`.
@@ -143,8 +150,12 @@ fn decode_properties(
     };
 
     for i in 0..prop_count {
-        let value = decode_property(i, &context, &mut offset, &mut numeric_values)?;
-        results.push(value);
+        results.extend(decode_property(
+            i,
+            &context,
+            &mut offset,
+            &mut numeric_values,
+        )?);
     }
 
     Ok(results)
@@ -163,7 +174,7 @@ fn decode_property(
     context: &PropertyDecodeContext<'_>,
     offset: &mut usize,
     numeric_values: &mut [Option<usize>],
-) -> Result<(String, String), String> {
+) -> Result<Vec<(String, String)>, String> {
     if index >= context.info.PropertyCount as usize {
         return Err(format!("property index {index} is out of range"));
     }
@@ -181,12 +192,18 @@ fn decode_property(
     if flags & PROPERTY_STRUCT != 0 {
         let start_index = unsafe { prop_info.Anonymous1.structType.StructStartIndex } as usize;
         let member_count = unsafe { prop_info.Anonymous1.structType.NumOfStructMembers } as usize;
+        let mut values = vec![(prop_name, "<struct>".to_string())];
         for _ in 0..count {
             for child_index in start_index..start_index + member_count {
-                let _ = decode_property(child_index, context, offset, numeric_values)?;
+                values.extend(decode_property(
+                    child_index,
+                    context,
+                    offset,
+                    numeric_values,
+                )?);
             }
         }
-        return Ok((prop_name, "<struct>".to_string()));
+        return Ok(values);
     }
 
     let in_type = unsafe { prop_info.Anonymous1.nonStructType.InType };
@@ -239,7 +256,7 @@ fn decode_property(
     } else {
         format!("[{}]", values.join(", "))
     };
-    Ok((prop_name, rendered))
+    Ok(vec![(prop_name, rendered)])
 }
 
 fn resolve_property_count(
@@ -505,6 +522,14 @@ fn wide_str_at(buf: &[u8], offset: u32) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn utf16_bytes(value: &str) -> Vec<u8> {
+        value
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+
     #[test]
     fn tdh_info_buffer_is_aligned_and_initialized() {
         let mut buffer = TdhInfoBuffer::new(std::mem::size_of::<TRACE_EVENT_INFO>() + 7);
@@ -516,6 +541,60 @@ mod tests {
             0
         );
         assert!(buffer.as_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn decode_property_surfaces_struct_children() {
+        let struct_name = utf16_bytes("AccessCheck");
+        let child_name = utf16_bytes("Denied");
+        let metadata_len =
+            std::mem::size_of::<TRACE_EVENT_INFO>() + std::mem::size_of::<EVENT_PROPERTY_INFO>();
+        let struct_name_offset = metadata_len;
+        let child_name_offset = struct_name_offset + struct_name.len();
+        let mut buffer = TdhInfoBuffer::new(child_name_offset + child_name.len());
+        buffer.as_bytes_mut()[struct_name_offset..child_name_offset].copy_from_slice(&struct_name);
+        buffer.as_bytes_mut()[child_name_offset..].copy_from_slice(&child_name);
+
+        let info = unsafe { &mut *buffer.as_mut_ptr() };
+        info.PropertyCount = 2;
+        let properties =
+            std::ptr::addr_of_mut!(info.EventPropertyInfoArray) as *mut EVENT_PROPERTY_INFO;
+        unsafe {
+            (*properties).NameOffset = struct_name_offset as u32;
+            (*properties).Flags.0 = PROPERTY_STRUCT;
+            (*properties).Anonymous1.structType.StructStartIndex = 1;
+            (*properties).Anonymous1.structType.NumOfStructMembers = 1;
+            (*properties).Anonymous2.count = 1;
+
+            let child = properties.add(1);
+            (*child).NameOffset = child_name_offset as u32;
+            (*child).Anonymous1.nonStructType.InType = TDH_INTYPE_UINT32;
+            (*child).Anonymous2.count = 1;
+            (*child).Anonymous3.length = 4;
+        }
+
+        let payload = 1u32.to_le_bytes();
+        let info = unsafe { &*buffer.as_mut_ptr() };
+        let context = PropertyDecodeContext {
+            info_buf: buffer.as_bytes(),
+            info,
+            user_data: payload.as_ptr(),
+            user_data_len: payload.len(),
+            pointer_size: 8,
+        };
+        let mut offset = 0;
+        let mut numeric_values = vec![None; 2];
+
+        let properties = decode_property(0, &context, &mut offset, &mut numeric_values).unwrap();
+
+        assert_eq!(
+            properties,
+            vec![
+                ("AccessCheck".to_string(), "<struct>".to_string()),
+                ("Denied".to_string(), "1".to_string()),
+            ]
+        );
+        assert_eq!(offset, payload.len());
     }
 
     #[test]

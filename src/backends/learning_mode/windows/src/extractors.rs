@@ -231,12 +231,12 @@ pub fn build_denial_from_capability(
     pid: u32,
     filetime: u64,
 ) -> Option<RawDenial> {
-    // If the record explicitly reports the check as not-denied, skip it;
-    // absence of the field is treated as a denial (fail open on decode gap).
-    if let Some(denied) = find_prop(&parts.props, "Denied") {
-        if !denied.trim_matches('"').eq_ignore_ascii_case("true") {
-            return None;
-        }
+    // A partially decoded event must not become a policy recommendation.
+    if !find_prop(&parts.props, "Denied")?
+        .trim_matches('"')
+        .eq_ignore_ascii_case("true")
+    {
+        return None;
     }
 
     let pid = find_prop(&parts.props, "ProcessId")
@@ -589,6 +589,12 @@ mod tests {
     #[test]
     fn capability_denial_not_denied_is_dropped() {
         let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "false")]);
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+    }
+
+    #[test]
+    fn capability_denial_without_denied_field_is_dropped() {
+        let p = parts(28, &[("PackageSid", "S-1-15-3-1")]);
         assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
     }
 

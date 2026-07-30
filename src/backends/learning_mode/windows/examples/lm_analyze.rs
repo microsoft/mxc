@@ -6,7 +6,8 @@
 //!
 //! This is a developer diagnostic for inspecting captured traces manually.
 //! End users and SDK agents do not invoke it: the BaseContainer runner seals
-//! and consumes the trace automatically during normal `captureDenials` use.
+//! the trace and reports its path, while this example performs the manual
+//! analysis until runner integration consumes the trace automatically.
 //!
 //! Usage:
 //!
