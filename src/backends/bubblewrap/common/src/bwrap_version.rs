@@ -334,6 +334,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_components_that_overflow_u32() {
+        // Shared contract with the SDK parser: an out-of-range component is a
+        // malformed banner, not a very new bwrap. Both sides must fail closed
+        // so the SDK gate cannot admit what this one rejects.
+        assert_eq!(parse_version("bubblewrap 99999999999999999999.0.0"), None);
+        assert_eq!(parse_version("bubblewrap 0.4294967296.0"), None);
+        assert_eq!(
+            parse_version("bubblewrap 4294967295.0.0"),
+            Some(BwrapVersion::new(4_294_967_295, 0, 0))
+        );
+    }
+
+    #[test]
     fn ordering_is_semantic() {
         assert!(BwrapVersion::new(0, 4, 9) < BwrapVersion::new(0, 5, 0));
         assert!(BwrapVersion::new(0, 11, 0) > BwrapVersion::new(0, 9, 9));

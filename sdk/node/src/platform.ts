@@ -435,7 +435,12 @@ export function _parseBwrapVersion(output: string): [number, number, number] | n
     const digits = /^\d+/.exec(part);
     // Present but non-numeric: fail closed rather than guessing 0.
     if (!digits) return null;
-    components.push(parseInt(digits[0], 10));
+    const value = parseInt(digits[0], 10);
+    // Mirror the Rust parser's `u32`: a larger value is not something bwrap
+    // could print, and accepting it would let this gate admit a banner the
+    // backend's gate rejects.
+    if (value > 0xffffffff) return null;
+    components.push(value);
   }
   // Only a genuinely absent component defaults to 0, so "0.6" is 0.6.0.
   return [components[0], components[1] ?? 0, components[2] ?? 0];

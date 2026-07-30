@@ -417,6 +417,15 @@ describe('bwrap version parsing', () => {
     assert.strictEqual(_parseBwrapVersion('bwrap 0.11.2'), null);
   });
 
+  it('rejects components that overflow the Rust parser\'s u32', () => {
+    // Shared contract with `bwrap_version.rs`: an out-of-range component is a
+    // malformed banner, not a very new bwrap. Without this the SDK gate would
+    // admit a banner the backend's gate rejects.
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 99999999999999999999.0.0'), null);
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 0.4294967296.0'), null);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 4294967295.0.0'), [4294967295, 0, 0]);
+  });
+
   it('rejects junk after the patch component', () => {
     // Regression: components past the patch were dropped unchecked, so
     // "0.5.0.invalid" cleared the gate as 0.5.0.
