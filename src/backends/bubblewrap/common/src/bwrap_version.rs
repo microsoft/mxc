@@ -140,9 +140,10 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
         .stdin(Stdio::null())
         .output()
         .map_err(|err| match err.kind() {
-            // Only a genuinely missing binary is "not installed"; anything else
-            // (permissions, loader errors) is a broken install, not a missing one.
-            std::io::ErrorKind::NotFound => BwrapUnavailable::NotFound,
+            // `ENOENT` covers both an absent binary and a present-but-unusable
+            // one (missing ELF interpreter / shebang target), so confirm the
+            // binary is really absent before blaming the package manager.
+            std::io::ErrorKind::NotFound if !bwrap_exists_on_path() => BwrapUnavailable::NotFound,
             _ => BwrapUnavailable::ProbeFailed {
                 status: None,
                 detail: err.to_string(),
@@ -183,9 +184,9 @@ fn check_version_output(output: &str) -> Result<BwrapVersion, BwrapUnavailable> 
 /// minimum-version gate.
 ///
 /// Lenient about what *surrounds* each number so distro-patched version strings
-/// (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the version
-/// token is split on `.` and each of the (up to three) components contributes
-/// its leading digits.
+/// (`0.4.1-1`, a bare `0.6`) still resolve: the version token is split on `.`
+/// and each of the (up to three) components contributes its leading digits.
+/// Debian's `+really` marker is honored rather than ignored — see below.
 ///
 /// Strict about components that are *present but not numeric*: only a component
 /// that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
@@ -198,14 +199,34 @@ fn parse_version(output: &str) -> Option<BwrapVersion> {
     if !tokens.next()?.eq_ignore_ascii_case("bubblewrap") {
         return None;
     }
+    let token = tokens.next()?;
+
+    // Debian's `+really` marker means the package ships the version that
+    // FOLLOWS it (used when a maintainer must ship an older upstream without
+    // decreasing the package version). Reading the leading version would
+    // over-report: `0.5.0+really0.4.1` is really 0.4.1, which predates
+    // `--clearenv` and must not clear the gate.
+    let token = token.rsplit_once("+really").map_or(token, |(_, real)| real);
 
     // `map_or(Some(0), ..)` is the absent-vs-unreadable split: an exhausted
     // iterator yields 0, a component `leading_number` rejects fails the parse.
-    let mut components = tokens.next()?.split('.');
+    let mut components = token.split('.');
     let major = leading_number(components.next()?)?;
     let minor = components.next().map_or(Some(0), leading_number)?;
     let patch = components.next().map_or(Some(0), leading_number)?;
     Some(BwrapVersion::new(major, minor, patch))
+}
+
+/// Whether a `bwrap` candidate exists anywhere on `PATH`.
+///
+/// Linux returns `ENOENT` both for a genuinely absent binary and for one that
+/// exists but cannot be executed (a missing ELF interpreter or script shebang
+/// target), so the spawn error alone cannot tell [`BwrapUnavailable::NotFound`]
+/// from [`BwrapUnavailable::ProbeFailed`]. A candidate on `PATH` means the
+/// package is installed and the failure is a broken install.
+fn bwrap_exists_on_path() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("bwrap").exists()))
 }
 
 /// Parse the leading run of ASCII digits of `component`, ignoring any suffix
@@ -232,19 +253,37 @@ mod tests {
 
     #[test]
     fn parses_distro_patched_and_short_versions() {
-        // Debian-style revision suffix, a "+really" epoch fixup, and a
-        // two-component version must all resolve.
+        // Debian-style revision suffix and a two-component version.
         assert_eq!(
             parse_version("bubblewrap 0.4.1-1"),
             Some(BwrapVersion::new(0, 4, 1))
         );
         assert_eq!(
-            parse_version("bubblewrap 0.11.0+really0.10.0"),
-            Some(BwrapVersion::new(0, 11, 0))
-        );
-        assert_eq!(
             parse_version("bubblewrap 0.6"),
             Some(BwrapVersion::new(0, 6, 0))
+        );
+    }
+
+    #[test]
+    fn honors_the_debian_really_marker() {
+        // `X+reallyY` ships upstream Y, not X, so Y is the effective version.
+        assert_eq!(
+            parse_version("bubblewrap 0.11.0+really0.10.0"),
+            Some(BwrapVersion::new(0, 10, 0))
+        );
+        assert_eq!(
+            parse_version("bubblewrap 0.11.0+really0.10.0-1"),
+            Some(BwrapVersion::new(0, 10, 0))
+        );
+    }
+
+    #[test]
+    fn really_marker_cannot_smuggle_a_below_floor_version_past_the_gate() {
+        // Regression: reading the leading version accepted this as 0.5.0, even
+        // though the installed bwrap is 0.4.1 and has no `--clearenv`.
+        assert_eq!(
+            check_version_output("bubblewrap 0.5.0+really0.4.1"),
+            Err(BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)))
         );
     }
 

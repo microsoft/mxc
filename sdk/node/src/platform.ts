@@ -342,6 +342,23 @@ type BwrapVersionResult =
   | { kind: 'failed'; status: number | null; detail: string };
 
 /**
+ * Whether a `bwrap` candidate exists anywhere on `PATH`.
+ *
+ * Linux reports `ENOENT` both for a genuinely absent binary and for one that
+ * exists but cannot be executed (a missing ELF interpreter or script shebang
+ * target), so the spawn error alone cannot tell `notFound` from `failed`. A
+ * candidate on `PATH` means the package is installed and the failure is a
+ * broken install.
+ */
+function bwrapExistsOnPath(): boolean {
+  const pathVar = process.env.PATH;
+  if (!pathVar) return false;
+  return pathVar
+    .split(path.delimiter)
+    .some((dir) => dir !== '' && fs.existsSync(path.join(dir, 'bwrap')));
+}
+
+/**
  * Default runner for `bwrap --version`. Uses `execFileSync` rather than a
  * shell so a missing binary surfaces as `ENOENT` instead of the shell's
  * indistinguishable exit code 127 — that separation is what lets us report
@@ -357,7 +374,10 @@ function defaultBwrapVersionRunner(): BwrapVersionResult {
     };
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: Buffer | string };
-    if (e.code === 'ENOENT') {
+    // `ENOENT` covers both an absent binary and a present-but-unusable one
+    // (missing ELF interpreter / shebang target), so confirm the binary is
+    // really absent before blaming the package manager.
+    if (e.code === 'ENOENT' && !bwrapExistsOnPath()) {
       return { kind: 'notFound' };
     }
     return {
@@ -385,9 +405,9 @@ export function _setBwrapVersionRunner(fn: (() => BwrapVersionResult) | null): v
  * minimum-version gate.
  *
  * Lenient about what *surrounds* each number so distro-patched version strings
- * (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the version
- * token is split on `.` and each of the (up to three) components contributes
- * its leading digits.
+ * (`0.4.1-1`, a bare `0.6`) still resolve: the version token is split on `.`
+ * and each of the (up to three) components contributes its leading digits.
+ * Debian's `+really` marker is honored rather than ignored — see below.
  *
  * Strict about components that are *present but not numeric*: only a component
  * that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
@@ -401,8 +421,13 @@ export function _parseBwrapVersion(output: string): [number, number, number] | n
   // has been stable since 0.1.0.
   const tokens = output.trim().split(/\s+/);
   if (tokens[0]?.toLowerCase() !== 'bubblewrap' || !tokens[1]) return null;
+  // Debian's `+really` marker means the package ships the version that FOLLOWS
+  // it, so `0.5.0+really0.4.1` is really 0.4.1 — which predates `--clearenv`
+  // and must not clear the gate.
+  const marker = tokens[1].lastIndexOf('+really');
+  const token = marker === -1 ? tokens[1] : tokens[1].slice(marker + '+really'.length);
   const components: number[] = [];
-  for (const part of tokens[1].split('.').slice(0, 3)) {
+  for (const part of token.split('.').slice(0, 3)) {
     const digits = /^\d+/.exec(part);
     // Present but non-numeric: fail closed rather than guessing 0.
     if (!digits) return null;

@@ -395,8 +395,13 @@ describe('bwrap version parsing', () => {
 
   it('parses distro-patched and short version strings', () => {
     assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.4.1-1'), [0, 4, 1]);
-    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.0+really0.10.0'), [0, 11, 0]);
     assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.6'), [0, 6, 0]);
+  });
+
+  it('honors the Debian `+really` marker', () => {
+    // `X+reallyY` ships upstream Y, not X, so Y is the effective version.
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.0+really0.10.0'), [0, 10, 0]);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.0+really0.10.0-1'), [0, 10, 0]);
   });
 
   it('returns null when no version token is present', () => {
@@ -456,6 +461,15 @@ describe('bwrap minimum-version gate', () => {
   it('rejects the release immediately below the floor', () => {
     withVersion('bubblewrap 0.4.99\n');
     assert.strictEqual(_probeBubblewrap().available, false);
+  });
+
+  it('does not let a `+really` version smuggle a below-floor bwrap past the gate', () => {
+    // Regression: reading the leading version accepted this as 0.5.0, even
+    // though the installed bwrap is 0.4.1 and has no `--clearenv`.
+    withVersion('bubblewrap 0.5.0+really0.4.1\n');
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /0\.4\.1 is too old/);
   });
 
   it('fails closed on unparsable probe output', () => {
