@@ -399,7 +399,23 @@ try {
         } | Out-Null
     }
 
-    # Test 2c: start rejects a request that carries a network policy. The
+    # Test 2c: start rejects a `process` block. On the state-aware contract
+    # `process` is exec-only (design §7.1) -- the dispatcher reads it on no other
+    # phase, so a non-exec `process` used to be mapped and then ignored, letting
+    # a caller believe a command line, cwd or timeout was in effect. Rejected at
+    # parse time, so the code is malformed_request and no started sandbox is
+    # needed -- only a syntactically valid id.
+    if ($null -ne $script:sandboxId) {
+        Run-StateAwareTest "start (process block rejected on non-exec phase)" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_rejected_process.json' -SandboxId $script:sandboxId -Experimental
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (exec-only field rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        } | Out-Null
+    }
+    # Test 2d: start rejects a request that carries a network policy. The
     # network posture is fixed at provision; ANY network policy on a
     # post-provision phase is rejected -- even the canonical acknowledgment,
     # because it is being supplied where the posture is immutable.
