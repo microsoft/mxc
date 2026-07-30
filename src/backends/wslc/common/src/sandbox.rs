@@ -79,13 +79,15 @@ struct WslcSandboxProcess {
     /// Exit code cached by the first successful wait, so repeat waits are
     /// idempotent (and don't re-run teardown).
     exit: Option<i32>,
-    /// Set once the first wait timed out, so repeat waits keep reporting the
-    /// timeout instead of re-waiting on an already-destroyed container.
+    /// Set once the first wait's deadline elapsed, so repeat waits keep
+    /// reporting the timeout instead of blocking for another full deadline (or
+    /// re-waiting on an already-destroyed container).
     timed_out: bool,
-    /// Set once the container has been torn down, so `Drop` doesn't repeat it.
-    /// Tracked separately from `exit`: a caller that only ever polls
-    /// [`try_wait`](SandboxProcess::try_wait) learns the exit code without any
-    /// teardown having run.
+    /// Set once the container has been *confirmed* torn down, so `Drop` doesn't
+    /// repeat it — and, just as importantly, still retries when teardown failed
+    /// or could not be confirmed. Tracked separately from `exit`: a caller that
+    /// only ever polls [`try_wait`](SandboxProcess::try_wait) learns the exit
+    /// code without any teardown having run.
     torn_down: bool,
     /// Diagnostics from the SDK calls this handle makes after the spawn
     /// returned. The streaming contract has nowhere to flush them — the spawn
@@ -229,13 +231,30 @@ impl SandboxProcess for WslcSandboxProcess {
         // what was already buffered.
         self.started.close_streams();
 
-        self.started.destroy(&mut self.logger);
-        self.torn_down = true;
-
         if timed_out {
+            // The deadline elapsing is a fact, so record it before teardown:
+            // whatever happens below, a repeat `wait` must report the timeout
+            // rather than block for another full deadline.
             self.timed_out = true;
+            // Nothing so far proves the sandboxed process actually died —
+            // `wait_for_exit`'s timeout branch only *asks* the container to stop
+            // and ignores the result. Returning `TimedOut` promises it was
+            // terminated, so confirm that before making the promise, and before
+            // `torn_down` waives `Drop`'s retry.
+            self.started
+                .confirm_terminated(&mut self.logger)
+                .map_err(std::io::Error::other)?;
+            self.started
+                .destroy(&mut self.logger)
+                .map_err(std::io::Error::other)?;
+            self.torn_down = true;
             return Err(timeout_error(self.started.timeout_ms));
         }
+
+        // The exit callback fired, so the process is confirmed gone and only the
+        // container object can still leak. `torn_down` therefore tracks whether
+        // teardown actually succeeded, leaving `Drop` to retry it if not.
+        self.torn_down = self.started.destroy(&mut self.logger).is_ok();
         self.exit = Some(exit_code);
         Ok(exit_code)
     }

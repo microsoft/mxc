@@ -1562,7 +1562,10 @@ impl WSLContainerRunner {
             }
         };
 
-        started.destroy(logger);
+        // The run-to-completion path reports through `ScriptResponse`, which is
+        // built from the process's own result; a teardown failure is logged by
+        // `destroy` rather than replacing that result.
+        let _ = started.destroy(logger);
 
         Self::collect_output(
             &started.io_ctx,
@@ -1659,43 +1662,107 @@ impl StartedContainer {
                 EXIT_CALLBACK_TIMEOUT.as_secs()
             );
         }
-        self.destroy(logger);
+        // Best-effort by construction: this is the last-resort path (an
+        // abandoned run, or `Drop`), so there is no caller left to hand a
+        // failure to. `destroy` logs it.
+        let _ = self.destroy(logger);
     }
 
     /// Stop and delete the container when the request asked for it. The session
     /// is terminated by `WslcSessionGuard`'s `Drop`.
-    pub(crate) fn destroy(&self, logger: &mut Logger) {
+    ///
+    /// Returns the failure rather than swallowing it: a container that would
+    /// not stop or delete still holds a VM-backed sandbox, which the streaming
+    /// path turns into a retry from `Drop` instead of a silent leak.
+    pub(crate) fn destroy(&self, logger: &mut Logger) -> Result<(), String> {
         // Teardown also runs from `Drop`, which has no error channel, and
         // leaking a live container is worse than a doomed SDK call — so a
         // failed apartment is logged and teardown attempted anyway.
         let _com = ComApartment::enter().inspect_err(|e| {
             let _ = writeln!(logger, "[WSLC] {e}; attempting teardown anyway");
         });
+        let mut failure: Option<String> = None;
         if self.destroy_on_exit {
             // SAFETY: the guards hold live handles for `self`'s lifetime and
             // `sdk`'s function pointers are valid while it is alive.
             unsafe {
                 let mut err_msg = CoTaskMemPWSTR::null();
-                let _ = self.sdk.WslcStopContainer(
+                let hr = self.sdk.WslcStopContainer(
                     self.container_guard.as_raw(),
                     WslcSignal::WSLC_SIGNAL_SIGTERM,
                     10,
                     err_msg.as_mut_ptr(),
                 );
+                if hr != S_OK {
+                    let msg = err_msg.to_string_lossy();
+                    failure = Some(format!(
+                        "WslcStopContainer failed: {msg} (HRESULT 0x{:08X})",
+                        hr as u32
+                    ));
+                }
                 drop(err_msg);
 
+                // Attempted even after a failed stop: the delete is forced, so
+                // it is the better chance of not leaking the container.
                 let mut err_msg = CoTaskMemPWSTR::null();
-                let _ = self.sdk.WslcDeleteContainer(
+                let hr = self.sdk.WslcDeleteContainer(
                     self.container_guard.as_raw(),
                     WslcDeleteContainerFlags::WSLC_DELETE_CONTAINER_FLAG_FORCE,
                     err_msg.as_mut_ptr(),
                 );
+                if hr != S_OK && failure.is_none() {
+                    let msg = err_msg.to_string_lossy();
+                    failure = Some(format!(
+                        "WslcDeleteContainer failed: {msg} (HRESULT 0x{:08X})",
+                        hr as u32
+                    ));
+                }
                 drop(err_msg);
             }
         }
 
         // Session termination is handled by WslcSessionGuard's Drop impl.
-        let _ = writeln!(logger, "[WSLC] Cleanup complete");
+        match failure {
+            Some(e) => {
+                let _ = writeln!(logger, "[WSLC] Cleanup failed: {e}");
+                Err(e)
+            }
+            None => {
+                let _ = writeln!(logger, "[WSLC] Cleanup complete");
+                Ok(())
+            }
+        }
+    }
+
+    /// Confirm the init process is really gone, escalating to `SIGKILL` when it
+    /// is not — the teardown the timeout path owes its caller.
+    ///
+    /// [`wait_for_exit`](Self::wait_for_exit)'s timeout branch only *asks* the
+    /// container to stop (`SIGTERM` with a two-second grace, HRESULT ignored),
+    /// so reaching it proves nothing about whether the sandboxed process died.
+    /// Since `SandboxProcess::wait` reporting `TimedOut` promises it was
+    /// terminated, that promise is either made true here or reported as unkept.
+    ///
+    /// The SDK's exit callback is the only positive proof, so a kill that
+    /// cannot be observed is an error rather than an assumption.
+    pub(crate) fn confirm_terminated(&self, logger: &mut Logger) -> Result<(), String> {
+        if self.has_exited() {
+            return Ok(());
+        }
+        let _ = writeln!(
+            logger,
+            "[WSLC] Container still live after the timeout stop request; escalating to SIGKILL"
+        );
+        // `0`: the graceful grace period already elapsed in `wait_for_process`.
+        self.stop(WslcSignal::WSLC_SIGNAL_SIGKILL, 0)?;
+        if !await_callbacks_quiesced(&self.io_ctx) {
+            return Err(format!(
+                "the WSL container did not report its process exiting within {}s of SIGKILL, so \
+                 the timed-out process cannot be confirmed terminated",
+                EXIT_CALLBACK_TIMEOUT.as_secs()
+            ));
+        }
+        Ok(())
     }
 
     /// Signal the container's processes, for
