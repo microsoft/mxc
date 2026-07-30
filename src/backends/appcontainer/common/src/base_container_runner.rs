@@ -48,6 +48,12 @@ use crate::launch_diagnostics::{
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
+use process_security_environment_spec::process_security_environment_layout::{
+    finish_process_security_environment_buffer, NetworkPolicy as PsecNetworkPolicy,
+    NetworkPolicyArgs as PsecNetworkPolicyArgs, ProcessSecurityEnvironment,
+    ProcessSecurityEnvironmentArgs, ProxyInfo as PsecProxyInfo, ProxyInfoArgs as PsecProxyInfoArgs,
+    SchemaVersion,
+};
 use sandbox_spec::base_container_layout::{
     finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, IntegrityLevel,
     NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
@@ -93,6 +99,21 @@ fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
     }
     block.push(0);
     block
+}
+
+fn create_string_vector<'a>(
+    builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+    values: &'a [String],
+) -> Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>>>
+{
+    if values.is_empty() {
+        return None;
+    }
+    let offsets: Vec<_> = values
+        .iter()
+        .map(|value| builder.create_string(value))
+        .collect();
+    Some(builder.create_vector(&offsets))
 }
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
@@ -206,9 +227,6 @@ const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 const SANDBOX_CAP_FS_DENY: u64 = 0x0000_0000_0000_0002;
 const CAPTURE_API_AVAILABLE_LOG: &str =
     "captureDenials: learning-mode trace API available (processmodel.dll)";
-const CAPTURE_SECURITY_ENVIRONMENT_CLEANUP_DEFERRED_REASON: &str =
-    "capture teardown failed and the process security environment may still be live";
-const CLOSE_PROCESS_SECURITY_ENVIRONMENT_API: &str = "CloseProcessSecurityEnvironment";
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
@@ -223,38 +241,11 @@ fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningMode
     match error {
         learning_mode_windows::LearningModeError::DllLoad(_)
         | learning_mode_windows::LearningModeError::ExportMissing { .. } => true,
+        learning_mode_windows::LearningModeError::HResultCall { code, .. } => *code == E_NOTIMPL.0,
         learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
-            is_api_not_implemented(*code) || *code == ERROR_NOT_SUPPORTED.0
-        }
-        learning_mode_windows::LearningModeError::CleanupFailed { primary, .. } => {
-            learning_mode_api_not_implemented(primary)
+            is_api_not_implemented(*code)
         }
         _ => false,
-    }
-}
-
-fn learning_mode_cleanup_failed(error: &learning_mode_windows::LearningModeError) -> bool {
-    match error {
-        learning_mode_windows::LearningModeError::ApiCall { function, .. } => {
-            *function == CLOSE_PROCESS_SECURITY_ENVIRONMENT_API
-        }
-        learning_mode_windows::LearningModeError::CleanupFailed { primary, cleanup } => {
-            learning_mode_cleanup_failed(primary) || learning_mode_cleanup_failed(cleanup)
-        }
-        _ => false,
-    }
-}
-
-fn combine_capture_operation_and_cleanup_errors(
-    primary: learning_mode_windows::LearningModeError,
-    cleanup: Result<(), learning_mode_windows::LearningModeError>,
-) -> learning_mode_windows::LearningModeError {
-    match cleanup {
-        Ok(()) => primary,
-        Err(cleanup) => learning_mode_windows::LearningModeError::CleanupFailed {
-            primary: Box::new(primary),
-            cleanup: Box::new(cleanup),
-        },
     }
 }
 
@@ -358,27 +349,17 @@ impl BaseContainerRunner {
 
     fn cleanup_capture_prelaunch_failure(
         &mut self,
-        cleanup_error: Option<&learning_mode_windows::LearningModeError>,
         request: &ExecutionRequest,
         sid_string: &str,
         logger: &mut Logger,
     ) {
         // This cannot be deferred to BaseContainerRunner::drop: the runner may
-        // outlive a failed spawn, and the exact error determines whether
-        // profile deletion is safe or recovery tracking must be retained.
+        // outlive a failed spawn.
         if request.lifecycle.destroy_on_exit {
-            if cleanup_error.is_some_and(learning_mode_cleanup_failed) {
-                sandbox_tracking::mark_cleanup_deferred(
-                    sid_string,
-                    CAPTURE_SECURITY_ENVIRONMENT_CLEANUP_DEFERRED_REASON,
-                    logger,
-                );
-            } else {
-                // CaptureSession::begin receives the sandbox specification,
-                // not the later process identity. Once its environment is
-                // closed, only the pre-launch tracking entry needs removal.
-                sandbox_tracking::remove_tracking_entry(sid_string, logger);
-            }
+            // CaptureSession::begin receives the sandbox specification, not
+            // the later process identity. Its infallible environment close
+            // leaves only the pre-launch tracking entry to remove.
+            sandbox_tracking::remove_tracking_entry(sid_string, logger);
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
         self.proxy_coordinator.stop(logger);
@@ -551,21 +532,7 @@ impl BaseContainerRunner {
 
         let version = builder.create_string(SANDBOX_SPEC_VERSION);
 
-        // Match legacy AppContainer behaviour: when network enforcement uses
-        // capabilities and the default policy is Allow, ensure internetClient
-        // is present so the sandboxed process has network access.
-        let mut caps = request.policy.capabilities.clone();
-        let use_caps_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        if use_caps_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
-            && !caps.iter().any(|c| c == "internetClient")
-        {
-            caps.push("internetClient".to_string());
-        }
-
+        let caps = Self::effective_capabilities(request);
         let capabilities = if caps.is_empty() {
             None
         } else {
@@ -663,6 +630,86 @@ impl BaseContainerRunner {
         );
 
         finish_sandbox_spec_buffer(&mut builder, spec);
+        builder.finished_data().to_vec()
+    }
+
+    fn effective_capabilities(request: &ExecutionRequest) -> Vec<String> {
+        // Match legacy AppContainer behaviour: when network enforcement uses
+        // capabilities and the default policy is Allow, ensure internetClient
+        // is present so the sandboxed process has network access.
+        let mut caps = request.policy.capabilities.clone();
+        let use_caps_for_network = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
+        );
+        if use_caps_for_network
+            && request.policy.default_network_policy == NetworkPolicy::Allow
+            && !caps.iter().any(|c| c == "internetClient")
+        {
+            caps.push("internetClient".to_string());
+        }
+        caps
+    }
+
+    /// Build the PSEC 1.0 FlatBuffer consumed by
+    /// `CreateProcessSecurityEnvironment`.
+    fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
+        let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
+        let version = SchemaVersion::new(1, 0);
+
+        let caps = Self::effective_capabilities(request);
+        let capabilities = if caps.is_empty() {
+            None
+        } else {
+            Some(builder.create_string(&caps.join(",")))
+        };
+
+        let fs_read_write = create_string_vector(&mut builder, &request.policy.readwrite_paths);
+        let fs_read_only = create_string_vector(&mut builder, &request.policy.readonly_paths);
+        let fs_deny = create_string_vector(&mut builder, &request.policy.denied_paths);
+
+        let network_policy = if request.policy.network_proxy.is_enabled() {
+            let proxy = request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|address| {
+                    let url = builder.create_string(&address.to_url());
+                    PsecProxyInfo::create(&mut builder, &PsecProxyInfoArgs { url: Some(url) })
+                });
+            Some(PsecNetworkPolicy::create(
+                &mut builder,
+                &PsecNetworkPolicyArgs {
+                    proxy,
+                    ..Default::default()
+                },
+            ))
+        } else {
+            None
+        };
+
+        let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
+            &wxc_common::ui_policy::resolve_ui_restrictions(
+                &request.policy.ui,
+                &request.policy.base_process_ui,
+            ),
+        ) as u64;
+
+        let spec = ProcessSecurityEnvironment::create(
+            &mut builder,
+            &ProcessSecurityEnvironmentArgs {
+                version: Some(&version),
+                capabilities,
+                disallow_win32k_system_calls: request.policy.ui.disable,
+                ui_restrictions,
+                fs_read_write,
+                fs_read_only,
+                fs_deny,
+                network_policy,
+            },
+        );
+        finish_process_security_environment_buffer(&mut builder, spec);
         builder.finished_data().to_vec()
     }
 
@@ -893,6 +940,17 @@ impl BaseContainerRunner {
         let capture_denials = request.policy.capture_denials.clone();
         if capture_denials.is_some() {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
+        }
+
+        let capture_spec_bytes = capture_denials
+            .as_ref()
+            .map(|_| Self::build_process_security_environment_spec(&request));
+        if let Some(capture_spec) = capture_spec_bytes.as_ref() {
+            let _ = writeln!(
+                logger,
+                "process security environment spec built (PSEC 1.0, {} bytes)",
+                capture_spec.len()
+            );
         }
 
         // Resolve two paths for the capture:
@@ -1232,9 +1290,12 @@ impl BaseContainerRunner {
         // discards the trace and closes the environment (no broker leak).
         let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
         if capture_denials.is_some() {
+            let capture_spec = capture_spec_bytes
+                .as_deref()
+                .expect("capture spec is initialized with captureDenials");
             match self
                 .capture_factory
-                .begin(&spec_bytes, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+                .begin(capture_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
             {
                 Ok(session) => {
                     let _ = writeln!(
@@ -1251,7 +1312,7 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    self.cleanup_capture_prelaunch_failure(Some(&e), &request, &sid_string, logger);
+                    self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1282,26 +1343,31 @@ impl BaseContainerRunner {
             ) {
                 Ok(startup) => startup,
                 Err(primary) => {
-                    let cleanup = capture_session
+                    let cleanup_error = capture_session
                         .take()
                         .map(|session| session.finish(None))
-                        .unwrap_or(Ok(()));
-                    let error = combine_capture_operation_and_cleanup_errors(primary, cleanup);
-                    let msg = format!(
-                            "captureDenials: failed to attach the process security environment: {error}"
+                        .unwrap_or(Ok(()))
+                        .err();
+                    let mut msg = format!(
+                        "captureDenials: failed to attach the process security environment: {primary}"
+                    );
+                    if let Some(cleanup_error) = &cleanup_error {
+                        let _ = write!(
+                            msg,
+                            "; additionally failed to discard the learning-mode trace: {cleanup_error}"
                         );
+                    }
                     let _ = writeln!(logger, "Error: {msg}");
-                    let failure_phase = if learning_mode_api_not_implemented(&error) {
+                    let failure_phase = if learning_mode_api_not_implemented(&primary)
+                        || cleanup_error
+                            .as_ref()
+                            .is_some_and(learning_mode_api_not_implemented)
+                    {
                         FailurePhase::BackendUnavailable
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    self.cleanup_capture_prelaunch_failure(
-                        Some(&error),
-                        &request,
-                        &sid_string,
-                        logger,
-                    );
+                    self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1369,12 +1435,7 @@ impl BaseContainerRunner {
                 .take()
                 .and_then(|session| session.finish(None).err());
             if capture_denials.is_some() {
-                self.cleanup_capture_prelaunch_failure(
-                    capture_cleanup_error.as_ref(),
-                    &request,
-                    &sid_string,
-                    logger,
-                );
+                self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
             } else if request.lifecycle.destroy_on_exit {
                 // The OS may have created the AppContainer profile before
                 // failing, so run the same cleanup logic used on normal exit.
@@ -1488,12 +1549,7 @@ impl BaseContainerRunner {
                     .take()
                     .and_then(|session| session.finish(None).err());
                 if capture_denials.is_some() {
-                    self.cleanup_capture_prelaunch_failure(
-                        capture_cleanup_error.as_ref(),
-                        &request,
-                        &sid_string,
-                        logger,
-                    );
+                    self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
                 } else if request.lifecycle.destroy_on_exit {
                     run_sandbox_cleanup(
                         &identity,
@@ -1600,6 +1656,13 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if request.policy.capture_denials.is_some() && request.policy.least_privilege_mode {
+            return Err(ScriptResponse::error(
+                "processContainer.captureDenials cannot be combined with \
+                 processContainer.leastPrivilege because the Windows process \
+                 security-environment contract does not support LPAC tokens",
+            ));
+        }
         // deniedPaths reaches the OS via the SandboxSpec `fs_deny` field, honored
         // only when the OS advertises SANDBOX_CAP_FS_DENY. The dispatcher only
         // routes deny here when supported; fail closed for direct callers.
@@ -1750,7 +1813,6 @@ impl BaseContainerSandboxProcess {
         // deliverable that consuming apps read, delete the temp, and retain
         // structured metadata for the caller. Any seal/decode/write failure is
         // returned through `wait()`.
-        let mut defer_capture_cleanup = false;
         let capture_result = if let Some(session) = self.capture_session.take() {
             let etl_path = self.capture_etl_path.take();
             let output_path = self.capture_output_path.take();
@@ -1771,18 +1833,15 @@ impl BaseContainerSandboxProcess {
                             .unwrap_or(Ok(())),
                     ),
                 },
-                Err(error) => {
-                    defer_capture_cleanup = learning_mode_cleanup_failed(&error);
-                    combine_capture_and_cleanup_results(
-                        Err(std::io::Error::other(format!(
-                            "captureDenials failed to finalize the denial capture: {error}"
-                        ))),
-                        etl_path
-                            .as_deref()
-                            .map(remove_internal_capture_file)
-                            .unwrap_or(Ok(())),
-                    )
-                }
+                Err(error) => combine_capture_and_cleanup_results(
+                    Err(std::io::Error::other(format!(
+                        "captureDenials failed to finalize the denial capture: {error}"
+                    ))),
+                    etl_path
+                        .as_deref()
+                        .map(remove_internal_capture_file)
+                        .unwrap_or(Ok(())),
+                ),
             };
             if let Ok(Some(metadata)) = &result {
                 self.output_metadata = Some(SandboxOutputMetadata {
@@ -1795,20 +1854,12 @@ impl BaseContainerSandboxProcess {
         };
 
         if self.destroy_on_exit {
-            if defer_capture_cleanup {
-                sandbox_tracking::mark_cleanup_deferred(
-                    &self.sid_string,
-                    CAPTURE_SECURITY_ENVIRONMENT_CLEANUP_DEFERRED_REASON,
-                    &mut logger,
-                );
-            } else {
-                run_sandbox_cleanup(
-                    &self.identity,
-                    &self.sid_string,
-                    self.proxy_enabled,
-                    &mut logger,
-                );
-            }
+            run_sandbox_cleanup(
+                &self.identity,
+                &self.sid_string,
+                self.proxy_enabled,
+                &mut logger,
+            );
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
         self.proxy_coordinator.stop(&mut logger);
@@ -2169,13 +2220,14 @@ mod tests {
     use learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DeniedResource, ResourceType,
     };
+    use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use sandbox_spec::base_container_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
     struct FakeCaptureSession {
-        finish_error: Option<(&'static str, u32)>,
+        finish_error: Option<(&'static str, i32)>,
         finish_calls: Arc<AtomicUsize>,
     }
 
@@ -2191,7 +2243,7 @@ mod tests {
             self.finish_calls.fetch_add(1, Ordering::SeqCst);
             match self.finish_error {
                 Some((function, code)) => {
-                    Err(learning_mode_windows::LearningModeError::ApiCall { function, code })
+                    Err(learning_mode_windows::LearningModeError::HResultCall { function, code })
                 }
                 None => Ok(()),
             }
@@ -2199,8 +2251,8 @@ mod tests {
     }
 
     struct FakeCaptureFactory {
-        begin_error: Option<(&'static str, u32)>,
-        finish_error: Option<(&'static str, u32)>,
+        begin_error: Option<(&'static str, i32)>,
+        finish_error: Option<(&'static str, i32)>,
         begin_calls: AtomicUsize,
         finish_calls: Arc<AtomicUsize>,
     }
@@ -2213,7 +2265,10 @@ mod tests {
         ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
             self.begin_calls.fetch_add(1, Ordering::SeqCst);
             if let Some((function, code)) = self.begin_error {
-                return Err(learning_mode_windows::LearningModeError::ApiCall { function, code });
+                return Err(learning_mode_windows::LearningModeError::HResultCall {
+                    function,
+                    code,
+                });
             }
             Ok(Box::new(FakeCaptureSession {
                 finish_error: self.finish_error,
@@ -2429,21 +2484,15 @@ mod tests {
     fn learning_mode_api_not_implemented_checks_primary_failure() {
         use learning_mode_windows::LearningModeError;
 
-        let disabled = LearningModeError::CleanupFailed {
-            primary: Box::new(LearningModeError::ApiCall {
-                function: "CreateProcessSecurityEnvironment",
-                code: ERROR_CALL_NOT_IMPLEMENTED.0,
-            }),
-            cleanup: Box::new(LearningModeError::ApiCall {
-                function: "CloseProcessSecurityEnvironment",
-                code: 87,
-            }),
+        let disabled = LearningModeError::HResultCall {
+            function: "StartLearningModeTrace",
+            code: E_NOTIMPL.0,
         };
         assert!(learning_mode_api_not_implemented(&disabled));
 
-        let ordinary = LearningModeError::ApiCall {
+        let ordinary = LearningModeError::HResultCall {
             function: "StartLearningModeTrace",
-            code: 87,
+            code: windows::Win32::Foundation::E_INVALIDARG.0,
         };
         assert!(!learning_mode_api_not_implemented(&ordinary));
 
@@ -2460,61 +2509,9 @@ mod tests {
     }
 
     #[test]
-    fn learning_mode_cleanup_failure_is_detected() {
-        use learning_mode_windows::LearningModeError;
-
-        let error = LearningModeError::CleanupFailed {
-            primary: Box::new(LearningModeError::ApiCall {
-                function: "StartLearningModeTrace",
-                code: 87,
-            }),
-            cleanup: Box::new(LearningModeError::ApiCall {
-                function: "CloseProcessSecurityEnvironment",
-                code: 5,
-            }),
-        };
-        assert!(learning_mode_cleanup_failed(&error));
-
-        let close_only = LearningModeError::ApiCall {
-            function: CLOSE_PROCESS_SECURITY_ENVIRONMENT_API,
-            code: 5,
-        };
-        assert!(learning_mode_cleanup_failed(&close_only));
-
-        let ordinary = LearningModeError::ApiCall {
-            function: "StartLearningModeTrace",
-            code: 87,
-        };
-        assert!(!learning_mode_cleanup_failed(&ordinary));
-    }
-
-    #[test]
-    fn prelaunch_failure_preserves_capture_cleanup_error() {
-        use learning_mode_windows::LearningModeError;
-
-        let error = combine_capture_operation_and_cleanup_errors(
-            LearningModeError::ApiCall {
-                function: "UpdateProcThreadAttribute(SecurityEnvironment)",
-                code: 87,
-            },
-            Err(LearningModeError::ApiCall {
-                function: CLOSE_PROCESS_SECURITY_ENVIRONMENT_API,
-                code: 5,
-            }),
-        );
-
-        assert!(matches!(error, LearningModeError::CleanupFailed { .. }));
-        assert!(learning_mode_cleanup_failed(&error));
-        assert!(error.to_string().contains("UpdateProcThreadAttribute"));
-        assert!(error
-            .to_string()
-            .contains(CLOSE_PROCESS_SECURITY_ENVIRONMENT_API));
-    }
-
-    #[test]
     fn capture_factory_injects_begin_failure() {
         let factory = Arc::new(FakeCaptureFactory {
-            begin_error: Some(("StartLearningModeTrace", 5)),
+            begin_error: Some(("StartLearningModeTrace", windows::Win32::Foundation::E_FAIL.0)),
             finish_error: None,
             begin_calls: AtomicUsize::new(0),
             finish_calls: Arc::new(AtomicUsize::new(0)),
@@ -2538,7 +2535,7 @@ mod tests {
     fn capture_factory_injects_finish_failure_once() {
         let factory = Arc::new(FakeCaptureFactory {
             begin_error: None,
-            finish_error: Some((CLOSE_PROCESS_SECURITY_ENVIRONMENT_API, 5)),
+            finish_error: Some(("StopLearningModeTrace", windows::Win32::Foundation::E_FAIL.0)),
             begin_calls: AtomicUsize::new(0),
             finish_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -2550,7 +2547,13 @@ mod tests {
 
         let error = session.finish(None).expect_err("fake finish must fail");
 
-        assert!(learning_mode_cleanup_failed(&error));
+        assert!(matches!(
+            error,
+            learning_mode_windows::LearningModeError::HResultCall {
+                function: "StopLearningModeTrace",
+                ..
+            }
+        ));
         assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 1);
         assert_eq!(factory.finish_calls.load(Ordering::SeqCst), 1);
     }
@@ -2635,6 +2638,46 @@ mod tests {
         assert_eq!(deny.get(0), "C:\\secret");
 
         assert!(spec.network_policy().is_none());
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_produces_valid_psec() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capabilities = vec!["internetClient".into(), "registryRead".into()];
+        request.policy.readwrite_paths = vec!["C:\\temp".into()];
+        request.policy.readonly_paths = vec!["C:\\Windows".into()];
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+
+        assert!(psec_layout::process_security_environment_buffer_has_identifier(&bytes));
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let version = spec.version();
+        assert_eq!(version.major(), 1);
+        assert_eq!(version.minor(), 0);
+        assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
+        assert_eq!(
+            spec.fs_read_write().unwrap().iter().collect::<Vec<_>>(),
+            vec!["C:\\temp"]
+        );
+        assert_eq!(
+            spec.fs_read_only().unwrap().iter().collect::<Vec<_>>(),
+            vec!["C:\\Windows"]
+        );
+        assert_eq!(
+            spec.fs_deny().unwrap().iter().collect::<Vec<_>>(),
+            vec!["C:\\secret"]
+        );
+        assert_eq!(
+            spec.network_policy()
+                .and_then(|policy| policy.proxy())
+                .and_then(|proxy| proxy.url()),
+            Some("http://127.0.0.1:8080")
+        );
     }
 
     #[test]
@@ -2861,5 +2904,19 @@ mod tests {
         if BaseContainerRunner::is_base_container_api_present().is_ok() {
             assert!(runner.validate(&request).is_ok());
         }
+    }
+
+    #[test]
+    fn validate_runner_rejects_capture_denials_with_least_privilege() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.least_privilege_mode = true;
+
+        let error = runner
+            .validate(&request)
+            .expect_err("PSEC cannot represent leastPrivilege");
+
+        assert!(error.error_message.contains("leastPrivilege"));
     }
 }

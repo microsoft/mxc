@@ -1,0 +1,62 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+
+namespace ProcessSecurityEnvironmentLayout;
+
+struct SchemaVersion {
+    major:uint16;
+    minor:uint16;
+}
+
+table ProcessSecurityEnvironment {
+    version:SchemaVersion (required);
+    capabilities:string;
+    disallow_win32k_system_calls:bool = false;
+    ui_restrictions:uint64 = 0;
+    fs_read_write:[string];
+    fs_read_only:[string];
+    fs_deny:[string];
+    network_policy:NetworkPolicy;
+}
+
+table ProxyInfo {
+    url:string;
+}
+
+enum FilterAction : byte { deny, allow }
+enum IpProtocol : byte { any, tcp, udp, icmpv4, icmpv6 }
+
+table IpSubnet {
+    address:string;
+    prefix_length:ubyte = 0;
+}
+
+table DestinationRule {
+    subnet:IpSubnet;
+    except:[IpSubnet];
+}
+
+table PortRule {
+    protocol:IpProtocol = any;
+    port:uint16 = 0;
+    end_port:uint16 = 0;
+}
+
+table EndpointRule {
+    destinations:[DestinationRule];
+    ports:[PortRule];
+}
+
+table EndpointPolicy {
+    default_action:FilterAction = deny;
+    allow:[EndpointRule];
+    deny:[EndpointRule];
+}
+
+table NetworkPolicy {
+    proxy:ProxyInfo;
+    egress:EndpointPolicy;
+    allowed_appcontainer_peer:string;
+}
+
+root_type ProcessSecurityEnvironment;
+file_identifier "PSEC";

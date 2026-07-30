@@ -14,14 +14,15 @@
 //!    `CreateProcessW` (**runner's job**; the session exposes the handle via
 //!    [`CaptureSession::environment`])
 //! 4. wait for the child to exit
-//! 5. `StopLearningModeTrace(trace, outputPath)` → sealed ETL (NULL path discards)
-//! 6. `CloseProcessSecurityEnvironment(env)` → teardown
+//! 5. `StopLearningModeTrace(trace, outputPath)` → sealed ETL (retryable delivery)
+//! 6. `CloseLearningModeTrace(trace)` → release broker state and staged ETL
+//! 7. `CloseProcessSecurityEnvironment(env)` → teardown
 //!
 //! [`CaptureSession::begin`] performs steps 1–2; the runner performs steps 3–4 with the
 //! handle from [`CaptureSession::environment`]; [`CaptureSession::finish`] performs steps
-//! 5–6 in order. If the session is dropped without `finish` (e.g. the launch failed or a
-//! `?` unwound the stack), [`Drop`] runs a best-effort teardown — discard the trace, then
-//! close the environment — so no broker-side trace or environment is leaked.
+//! 5–7 in order. If the session is dropped without `finish` (e.g. the launch failed or a
+//! `?` unwound the stack), [`Drop`] closes the trace without stopping it — the OS-supported
+//! discard path — then closes the environment.
 
 use std::path::Path;
 
@@ -36,15 +37,13 @@ use crate::LearningModeError;
 ///
 /// Construct with [`CaptureSession::begin`]; drive the child launch with the handle from
 /// [`CaptureSession::environment`]; seal and tear down with [`CaptureSession::finish`].
-/// Dropping without `finish` discards the trace and closes the environment on a
-/// best-effort basis.
+/// Dropping without `finish` closes and discards the trace, then closes the environment.
 #[derive(Debug)]
 pub struct CaptureSession {
-    secenv_api: SecurityEnvironmentApi,
     learning_mode_api: LearningModeApi,
     /// `Some` until `finish`/`Drop` closes it.
     environment: Option<ProcessSecurityEnvironment>,
-    /// `Some` until `finish`/`Drop` seals or discards it.
+    /// `Some` until `finish`/`Drop` closes it.
     trace: Option<LearningModeTraceHandle>,
 }
 
@@ -55,36 +54,28 @@ impl CaptureSession {
     /// `flags` is normally [`crate::PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
     ///
     /// # Errors
-    /// - [`LearningModeError::ApiCall`] if `CreateProcessSecurityEnvironment` fails.
-    /// - [`LearningModeError::ApiCall`] if `StartLearningModeTrace` fails — in which case
-    ///   the just-created environment is closed before returning so it is not leaked.
-    /// - [`LearningModeError::CleanupFailed`] if starting the trace fails and closing
-    ///   the just-created environment also fails.
+    /// - [`LearningModeError::HResultCall`] if `CreateProcessSecurityEnvironment` fails.
+    /// - [`LearningModeError::HResultCall`] if `StartLearningModeTrace` fails — in which
+    ///   case the just-created environment is closed before returning so it is not leaked.
     pub fn begin(
         secenv_api: SecurityEnvironmentApi,
         learning_mode_api: LearningModeApi,
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<Self, LearningModeError> {
-        let mut environment = secenv_api.create(sandbox_specification, flags)?;
+        let environment = secenv_api.create(sandbox_specification, flags)?;
 
         // SAFETY: `environment` was just created by `secenv_api.create` and is live for
         // the duration of this call; `start_trace` only reads it.
         let trace = match unsafe { learning_mode_api.start_trace(environment.raw()) } {
             Ok(trace) => trace,
             Err(start_err) => {
-                return match secenv_api.close(&mut environment) {
-                    Ok(()) => Err(start_err),
-                    Err(cleanup) => Err(LearningModeError::CleanupFailed {
-                        primary: Box::new(start_err),
-                        cleanup: Box::new(cleanup),
-                    }),
-                };
+                environment.close();
+                return Err(start_err);
             }
         };
 
         Ok(Self {
-            secenv_api,
             learning_mode_api,
             environment: Some(environment),
             trace: Some(trace),
@@ -110,97 +101,33 @@ impl CaptureSession {
         }
     }
 
-    /// Seal the trace to `output_path` (or discard it when `None`), then close the
-    /// security environment. Call **after** the child has exited.
-    ///
-    /// Both teardown steps are attempted even if the first fails. If both fail,
-    /// [`LearningModeError::CleanupFailed`] preserves both errors.
+    /// Stop the trace and deliver it to `output_path` (or skip delivery when `None`),
+    /// close the trace, then close the security environment. Call **after** the child
+    /// has exited.
     ///
     /// # Errors
-    /// - [`LearningModeError::ApiCall`] from `StopLearningModeTrace` or
-    ///   `CloseProcessSecurityEnvironment`.
-    /// - [`LearningModeError::CleanupFailed`] if both teardown calls fail.
+    /// - [`LearningModeError::HResultCall`] from `StopLearningModeTrace`.
     pub fn finish(mut self, output_path: Option<&Path>) -> Result<(), LearningModeError> {
-        let stop_result = match self.trace.take() {
+        let stop_result = match self.trace.as_ref() {
             Some(trace) => self.learning_mode_api.stop_trace(trace, output_path),
             None => Ok(()),
         };
-        let close_result = match self.environment.as_mut() {
-            Some(environment) => self.secenv_api.close(environment),
-            None => Ok(()),
-        };
-        if close_result.is_ok() {
-            self.environment.take();
+        if let Some(trace) = self.trace.take() {
+            trace.close();
         }
-        combine_teardown_results(stop_result, close_result)
-    }
-}
-
-fn combine_teardown_results(
-    stop_result: Result<(), LearningModeError>,
-    close_result: Result<(), LearningModeError>,
-) -> Result<(), LearningModeError> {
-    match (stop_result, close_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(primary), Err(cleanup)) => Err(LearningModeError::CleanupFailed {
-            primary: Box::new(primary),
-            cleanup: Box::new(cleanup),
-        }),
+        if let Some(environment) = self.environment.take() {
+            environment.close();
+        }
+        stop_result
     }
 }
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
-        // Best-effort teardown for the early-exit / unwind path: discard the trace
-        // (NULL output path) before closing the environment. Errors are unrecoverable
-        // here and are intentionally ignored — `finish` is the fallible path.
-        if let Some(trace) = self.trace.take() {
-            let _ = self.learning_mode_api.stop_trace(trace, None);
-        }
+        // Close without Stop is the OS-supported early-exit discard path.
+        drop(self.trace.take());
         if let Some(environment) = self.environment.take() {
             drop(environment);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn api_error(function: &'static str, code: u32) -> LearningModeError {
-        LearningModeError::ApiCall { function, code }
-    }
-
-    #[test]
-    fn teardown_preserves_both_failures() {
-        let result = combine_teardown_results(
-            Err(api_error("StopLearningModeTrace", 5)),
-            Err(api_error("CloseProcessSecurityEnvironment", 6)),
-        );
-
-        let LearningModeError::CleanupFailed { primary, cleanup } =
-            result.expect_err("both teardown failures must be returned")
-        else {
-            panic!("expected CleanupFailed");
-        };
-        assert!(primary.to_string().contains("StopLearningModeTrace"));
-        assert!(cleanup
-            .to_string()
-            .contains("CloseProcessSecurityEnvironment"));
-    }
-
-    #[test]
-    fn teardown_returns_single_failure_unchanged() {
-        let result =
-            combine_teardown_results(Ok(()), Err(api_error("CloseProcessSecurityEnvironment", 6)));
-
-        assert!(matches!(
-            result,
-            Err(LearningModeError::ApiCall {
-                function: "CloseProcessSecurityEnvironment",
-                code: 6
-            })
-        ));
     }
 }

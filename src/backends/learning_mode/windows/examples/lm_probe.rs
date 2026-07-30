@@ -4,9 +4,9 @@
 //! Manual validation probe for the Learning Mode trace + security-environment API.
 //!
 //! Prints whether `processmodel.dll` on this machine exposes the Learning Mode trace
-//! exports (`StartLearningModeTrace` / `StopLearningModeTrace`) and the 2-phase
-//! security-environment exports (`CreateProcessSecurityEnvironment` /
-//! `CloseProcessSecurityEnvironment`),
+//! exports (`StartLearningModeTrace` / `StopLearningModeTrace` /
+//! `CloseLearningModeTrace`) and the 2-phase security-environment exports
+//! (`CreateProcessSecurityEnvironment` / `CloseProcessSecurityEnvironment`),
 //! reporting the exact resolved name for each (plain vs `Experimental_`). Intended to
 //! be run on a feature-enabled Windows build to confirm the runtime FFI resolves
 //! against the real API.

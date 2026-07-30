@@ -121,6 +121,11 @@ ungranted access is handled while it is recorded:
 > build exposing the BaseContainer security-environment and Learning Mode APIs.
 > It is not supported by the AppContainer fallback tiers; unsupported hosts
 > return `backend_unavailable`.
+>
+> `captureDenials` cannot be combined with `processContainer.leastPrivilege`;
+> the Windows process security-environment API used for capture does not expose
+> an LPAC token option, so MXC rejects that combination rather than silently
+> weakening the requested policy.
 
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.

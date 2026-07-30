@@ -14,23 +14,22 @@
 //! 2-phase model exported by the same `processmodel.dll`:
 //!
 //! ```c
-//! BOOL CreateProcessSecurityEnvironment(
+//! HRESULT CreateProcessSecurityEnvironment(
 //!     LPCVOID sandboxSpecification, DWORD sandboxSpecificationSize,
 //!     PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
 //!     HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment);
-//! BOOL CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment);
+//! void CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT processSecurityEnvironment);
 //! ```
 //!
-//! `sandboxSpecification`/`...Size` is a compiled FlatBuffer sandbox-spec blob (the
-//! same `"SBOX"` format the BaseContainer runner already builds via `sandbox_spec`);
+//! `sandboxSpecification`/`...Size` is a `"PSEC"` process-security-environment
+//! FlatBuffer;
 //! the spec must encode the learning-mode capability. The environment handle is
 //! attached to a normal `CreateProcessW` launch through
 //! `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`; KernelBase routes that launch
 //! through the security environment internally. `Close` tears the environment down.
 //!
-//! As with the trace exports, each function is resolved at runtime and tolerates the
-//! `Experimental_`-prefixed name as a fallback for OS builds that predate the
-//! graduation out of the `Experimental_` prefix.
+//! As with the trace exports, each function is resolved at runtime. The
+//! ABI-changing create/close exports require their official plain names.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -43,7 +42,7 @@ use windows::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW, STARTUPINFOW,
 };
-use windows_core::{PCSTR, PCWSTR};
+use windows_core::{HRESULT, PCSTR, PCWSTR};
 use wxc_common::string_util;
 
 use crate::LearningModeError;
@@ -54,13 +53,12 @@ const PROCESSMODEL_DLL: &str = "processmodel.dll";
 /// No special behaviour when creating the security environment
 /// (`PROCESS_SECURITY_ENVIRONMENT_FLAGS` value `0`).
 ///
-/// A `KILL_ON_CLOSE` bit exists (tears the child down when the environment closes) but
-/// its numeric value is intentionally not declared here yet: explicit
-/// [`SecurityEnvironmentApi::close`] after the child has exited already provides
-/// deterministic teardown, so shipping code does not need to guess the flag value.
+/// A terminate-on-close bit exists, but its numeric value is intentionally not
+/// declared here: explicit [`ProcessSecurityEnvironment::close`] after the child
+/// has exited already provides deterministic teardown.
 pub const PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE: u32 = 0;
 
-/// `BOOL CreateProcessSecurityEnvironment(LPCVOID sandboxSpecification,
+/// `HRESULT CreateProcessSecurityEnvironment(LPCVOID sandboxSpecification,
 /// DWORD sandboxSpecificationSize, PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
 /// HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment)`.
 ///
@@ -70,22 +68,19 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
     sandbox_specification_size: u32,
     flags: u32,
     process_security_environment: *mut HANDLE,
-) -> i32;
+) -> HRESULT;
 
-/// `BOOL CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment)`.
-///
-/// The export nulls `*processSecurityEnvironment` on success.
+/// `void CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT processSecurityEnvironment)`.
 type PfnCloseProcessSecurityEnvironment =
-    unsafe extern "system" fn(process_security_environment: *mut HANDLE) -> i32;
+    unsafe extern "system" fn(process_security_environment: HANDLE);
 
 /// Opaque handle to a process security environment (`HPROCESS_SECURITY_ENVIRONMENT`, a
 /// `HANDLE`).
 ///
 /// Produced by [`SecurityEnvironmentApi::create`], threaded into the trace start and
-/// the in-environment launch, and torn down by [`SecurityEnvironmentApi::close`]. The
-/// wrapped [`HANDLE`] is passed by value to the launch/trace exports and by pointer to
-/// the close export (which nulls it on success). If explicit close fails, the
-/// wrapper retains ownership and retries once when dropped.
+/// the in-environment launch, and torn down by [`ProcessSecurityEnvironment::close`]. The
+/// wrapped [`HANDLE`] is passed by value to the launch, trace, and close exports.
+/// Drop guarantees the infallible close is called exactly once.
 pub struct ProcessSecurityEnvironment {
     handle: HANDLE,
     close: PfnCloseProcessSecurityEnvironment,
@@ -107,32 +102,26 @@ impl ProcessSecurityEnvironment {
         self.handle
     }
 
-    fn close_with(
-        &mut self,
-        close: PfnCloseProcessSecurityEnvironment,
-    ) -> Result<(), LearningModeError> {
+    /// Close the environment and release its server-side state.
+    pub fn close(mut self) {
+        self.close_inner();
+    }
+
+    fn close_inner(&mut self) {
         if self.handle.0.is_null() {
-            return Ok(());
+            return;
         }
 
         // SAFETY: `close` was resolved from `processmodel.dll`; `self.handle`
         // came from a successful create call and remains owned by this wrapper.
-        let ok = unsafe { close(&mut self.handle) };
-        if ok == 0 {
-            return Err(LearningModeError::ApiCall {
-                function: "CloseProcessSecurityEnvironment",
-                code: last_error(),
-            });
-        }
+        unsafe { (self.close)(self.handle) };
         self.handle = HANDLE(ptr::null_mut());
-        Ok(())
     }
 }
 
 impl Drop for ProcessSecurityEnvironment {
     fn drop(&mut self) {
-        let close = self.close;
-        let _ = self.close_with(close);
+        self.close_inner();
     }
 }
 
@@ -310,16 +299,8 @@ impl SecurityEnvironmentExportReport {
     }
 }
 
-/// Candidate names for each export: the graduated (plain) name is preferred, with the
-/// `Experimental_`-prefixed name kept as a fallback for older feature builds.
-const CREATE_NAMES: &[&core::ffi::CStr] = &[
-    c"CreateProcessSecurityEnvironment",
-    c"Experimental_CreateProcessSecurityEnvironment",
-];
-const CLOSE_NAMES: &[&core::ffi::CStr] = &[
-    c"CloseProcessSecurityEnvironment",
-    c"Experimental_CloseProcessSecurityEnvironment",
-];
+const CREATE_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment"];
+const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 
 /// Resolved process security-environment exports from `processmodel.dll`.
 #[derive(Clone, Copy)]
@@ -342,8 +323,7 @@ impl SecurityEnvironmentApi {
     ///
     /// # Errors
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
-    /// - [`LearningModeError::ExportMissing`] if any required export is absent under
-    ///   either its plain or `Experimental_`-prefixed name.
+    /// - [`LearningModeError::ExportMissing`] if any required export is absent.
     pub fn load() -> Result<Self, LearningModeError> {
         let dll = string_util::to_wide(PROCESSMODEL_DLL);
 
@@ -372,30 +352,29 @@ impl SecurityEnvironmentApi {
         }
     }
 
-    /// Create a process security environment from a compiled FlatBuffer sandbox-spec
+    /// Create a process security environment from a PSEC FlatBuffer
     /// blob. `flags` is currently always [`PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
     ///
     /// # Errors
-    /// [`LearningModeError::ApiCall`] carrying `GetLastError` if the export returns
-    /// `FALSE` (including a spec larger than `u32::MAX`, reported as
-    /// `ERROR_INVALID_PARAMETER`).
+    /// [`LearningModeError::HResultCall`] if the export returns a failing HRESULT.
     pub fn create(
         &self,
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
         let mut env = HANDLE(ptr::null_mut());
-        let spec_len =
-            u32::try_from(sandbox_specification.len()).map_err(|_| LearningModeError::ApiCall {
+        let spec_len = u32::try_from(sandbox_specification.len()).map_err(|_| {
+            LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
-                code: windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0,
-            })?;
+                code: windows::Win32::Foundation::E_INVALIDARG.0,
+            }
+        })?;
 
         // SAFETY: `self.create` was resolved from `processmodel.dll` and matches the
         // declared C signature. `sandbox_specification`/`spec_len` describe a valid,
         // contiguous byte buffer that outlives the call, and `env` is a valid
         // out-pointer.
-        let ok = unsafe {
+        let result = unsafe {
             (self.create)(
                 sandbox_specification.as_ptr().cast(),
                 spec_len,
@@ -403,10 +382,10 @@ impl SecurityEnvironmentApi {
                 &mut env,
             )
         };
-        if ok == 0 {
-            return Err(LearningModeError::ApiCall {
+        if result.is_err() {
+            return Err(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
-                code: last_error(),
+                code: result.0,
             });
         }
         Ok(ProcessSecurityEnvironment {
@@ -415,17 +394,6 @@ impl SecurityEnvironmentApi {
         })
     }
 
-    /// Close a process security environment, tearing down its server-side state and
-    /// (per the create flags) the child. The export nulls the handle on success.
-    /// On failure, `env` retains ownership so the caller can retry; its [`Drop`]
-    /// implementation also makes one best-effort retry.
-    ///
-    /// # Errors
-    /// [`LearningModeError::ApiCall`] carrying `GetLastError` if the export returns
-    /// `FALSE`.
-    pub fn close(&self, env: &mut ProcessSecurityEnvironment) -> Result<(), LearningModeError> {
-        env.close_with(self.close)
-    }
 }
 
 /// Resolve the first name in `names` that is present in `hmodule`.
@@ -519,16 +487,8 @@ mod tests {
 
     static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    unsafe extern "system" fn close_fails_then_succeeds(handle: *mut HANDLE) -> i32 {
-        if CLOSE_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
-            0
-        } else {
-            // SAFETY: the test passes a valid pointer to its owned HANDLE.
-            unsafe {
-                *handle = HANDLE(ptr::null_mut());
-            }
-            1
-        }
+    unsafe extern "system" fn fake_close(_: HANDLE) {
+        CLOSE_CALLS.fetch_add(1, Ordering::SeqCst);
     }
 
     #[test]
@@ -590,26 +550,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_close_retains_ownership_and_drop_retries() {
+    fn explicit_close_is_exactly_once() {
         CLOSE_CALLS.store(0, Ordering::SeqCst);
-        let mut environment = ProcessSecurityEnvironment {
+        let environment = ProcessSecurityEnvironment {
             handle: HANDLE(std::ptr::dangling_mut::<c_void>()),
-            close: close_fails_then_succeeds,
+            close: fake_close,
         };
 
-        let error = environment
-            .close_with(close_fails_then_succeeds)
-            .expect_err("first close must fail");
-        assert!(matches!(
-            error,
-            LearningModeError::ApiCall {
-                function: "CloseProcessSecurityEnvironment",
-                ..
-            }
-        ));
-        assert!(!environment.raw().0.is_null());
-
-        drop(environment);
-        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 2);
+        environment.close();
+        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 1);
     }
 }
