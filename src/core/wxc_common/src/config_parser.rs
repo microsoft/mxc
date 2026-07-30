@@ -294,11 +294,6 @@ const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 /// section or graduating one from experimental.
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
-/// Wire-format phase names. On a state-aware request, per-backend config nests
-/// one level deeper under one of these (`experimental.<backend>.<phase>`), which
-/// is the only shape `ParsedStateAwareRequest::deserialize_config` navigates.
-const STATE_AWARE_PHASE_KEYS: &[&str] = &["provision", "start", "exec", "stop", "deprovision"];
-
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
 fn validate_schema_version(version: &str) -> Result<(), WxcError> {
@@ -1306,7 +1301,7 @@ fn convert_wire_state_aware(
 
     // `phase` is the state-aware discriminator and is constrained by the wire
     // enum; absence here would be a logic error in the caller's discrimination.
-    let phase = match cfg.phase.take() {
+    let phase: Phase = match cfg.phase.take() {
         Some(p) => p.into(),
         None => {
             return Err(WxcError::ConfigParse(
@@ -1356,28 +1351,34 @@ fn convert_wire_state_aware(
     validate_experimental_backend_keys(experimental_scope.as_ref(), experimental_raw.as_ref())?;
 
     // Per-backend config nests under a phase name on the state-aware wire
-    // contract (design §7.2: "Inner key | A subset of `Phase`"). A non-phase
-    // inner key is a mis-slotted payload that no code path reads —
-    // `deserialize_config` navigates only `experimental.<backend>.<phase>` — so
-    // reject it rather than acting on a config the caller believes is applied.
-    // The motivating case is the one-shot spelling
-    // `experimental.isolation_session.user`: silently ignored, it provisions a
-    // local sandbox for a caller who asked for an Entra-backed one.
+    // contract (design §7.2: "Inner key | A subset of `Phase`"), and the
+    // dispatcher reads only `experimental.<backend>.<this phase>`. Any other
+    // inner key — a non-phase name, or a *different* phase's name — is a
+    // mis-slotted payload that no code path reads, so reject it rather than
+    // acting on a config the caller believes is applied.
+    //
+    // Both shapes are the same fail-open defect. The motivating case is the
+    // one-shot spelling `experimental.isolation_session.user`, which provisions
+    // a local sandbox for a caller who asked for an Entra-backed one. The
+    // cross-phase case is the same outcome by a different route: the Entra
+    // bundle must be re-presented at start, so a caller who leaves it under
+    // `provision` on the start request would otherwise get a silent local start.
     if let Some(serde_json::Value::Object(exp)) = experimental_raw.as_ref() {
+        let phase_key = phase.as_str();
         for backend_key in KNOWN_EXPERIMENTAL_BACKENDS {
             let Some(serde_json::Value::Object(backend_obj)) = exp.get(*backend_key) else {
                 continue;
             };
             let qualified: Vec<String> = backend_obj
                 .keys()
-                .filter(|k| !STATE_AWARE_PHASE_KEYS.contains(&k.as_str()))
+                .filter(|k| k.as_str() != phase_key)
                 .map(|k| format!("experimental.{backend_key}.{k}"))
                 .collect();
             if !qualified.is_empty() {
                 let msg = format!(
-                    "State-aware per-backend config nests under a phase name ({}); {} \
-                     {} not a phase. Move the value under the phase it applies to.",
-                    STATE_AWARE_PHASE_KEYS.join(" / "),
+                    "State-aware per-backend config nests under the request's own phase \
+                     ('{phase_key}'); {} {} read by no code path on this request. Move the \
+                     value under '{phase_key}', or send it on the phase it applies to.",
                     qualified.join(", "),
                     if qualified.len() == 1 { "is" } else { "are" },
                 );
@@ -4109,9 +4110,94 @@ mod tests {
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
         assert!(
-            err.contains("experimental.isolation_session.user") && err.contains("not a phase"),
+            err.contains("experimental.isolation_session.user")
+                && err.contains("read by no code path"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn state_aware_rejects_phase_key_for_a_different_phase() {
+        // A valid phase name, but not *this* request's phase. The dispatcher
+        // reads only `experimental.<backend>.<current phase>`, so this is the
+        // same fail-open drop as the flat spelling above: the Entra bundle must
+        // be re-presented at start, and a caller who leaves it under `provision`
+        // would otherwise get a silent local start.
+        let json = r#"{
+            "phase": "start",
+            "sandboxId": "iso:abc123",
+            "experimental": {
+                "isolation_session": {
+                    "provision": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}
+                }
+            }
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("experimental.isolation_session.provision"),
+            "error should name the mis-slotted key, got: {err}"
+        );
+        assert!(
+            err.contains("'start'"),
+            "error should name the expected phase, got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_rejects_extra_phase_key_alongside_the_matching_one() {
+        // Supplying every phase's block on every request would leave four of
+        // five silently dropped. Rejecting keeps the rule "a payload no code
+        // path reads is refused, not dropped" total.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {
+                "isolation_session": {
+                    "provision": {"user": {"upn": "a@b.com", "wamToken": "t"}},
+                    "start": {"user": {"upn": "a@b.com", "wamToken": "t"}}
+                }
+            }
+        }"#;
+        let err = match load_mxc(json) {
+            Err(ParseError::StateAware(e)) => e.to_string(),
+            other => panic!("expected StateAware rejection, got: {other:?}"),
+        };
+        assert!(
+            err.contains("experimental.isolation_session.start")
+                && !err.contains("experimental.isolation_session.provision"),
+            "only the non-matching key should be named, got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_aware_accepts_matching_phase_key_on_every_phase() {
+        // Positive control across the whole lifecycle: each phase accepts its
+        // own key, so the tightened rule does not over-reject.
+        for (phase, expected) in [
+            ("provision", Phase::Provision),
+            ("start", Phase::Start),
+            ("exec", Phase::Exec),
+            ("stop", Phase::Stop),
+            ("deprovision", Phase::Deprovision),
+        ] {
+            // `process` is required on exec and rejected everywhere else.
+            let process = if phase == "exec" {
+                r#""process": {"commandLine": "echo hi"},"#
+            } else {
+                ""
+            };
+            let json = format!(
+                r#"{{"phase": "{phase}", "sandboxId": "iso:abc123", {process}
+                     "experimental": {{"isolation_session": {{"{phase}": {{}}}}}}}}"#
+            );
+            match load_mxc(&json) {
+                Ok(MxcRequest::StateAware(p)) => assert_eq!(p.phase, expected),
+                other => panic!("expected {phase} to be accepted, got: {other:?}"),
+            }
+        }
     }
 
     #[test]

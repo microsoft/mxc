@@ -159,7 +159,8 @@ meaning for this backend.
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `experimental.isolation_session.user` (flat) | rejected | rejected | rejected | rejected | rejected | rejected |
-| `experimental.isolation_session.{provision,start}.user` | rejected | **honored** | **honored** | n/a | n/a | n/a |
+| `experimental.isolation_session.<this phase>.user` | rejected | **honored** | **honored** | n/a | n/a | n/a |
+| `experimental.isolation_session.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected | rejected | rejected | rejected | rejected | rejected |
 
 Notes on the rows that are not a simple accept/reject:
@@ -188,6 +189,13 @@ Notes on the rows that are not a simple accept/reject:
   bundle under the phase it applies to. It was previously dropped silently,
   which provisioned a *local* sandbox for a caller who asked for an Entra-backed
   one.
+- **A block nested under a *different* phase's name** is rejected for the same
+  reason. The dispatcher reads only `experimental.<backend>.<the request's own
+  phase>`, so `{"phase": "start", …, "isolation_session": {"provision": {…}}}`
+  names a real phase but is still read by nothing. Because the Entra bundle must
+  be re-presented at start, accepting it would produce a silent *local* start —
+  the same fail-open outcome as the flat spelling. Send one phase's block per
+  request; the SDK already does.
 
 Rejection of `policy.*` fields surfaces as `error.code = "policy_validation"`.
 A malformed `user` shape (UPN missing `@`, empty `wamToken`) likewise surfaces
