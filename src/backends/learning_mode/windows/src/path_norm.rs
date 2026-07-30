@@ -14,13 +14,14 @@
 //!
 //! The DOS-device forms are pure textual prefix strips. For the `\Device\`
 //! form we walk `A:` through `Z:` calling `QueryDosDeviceW` to discover each
-//! drive's kernel mount (`\Device\HarddiskVolumeN`), then check the input
+//! drive's kernel mount (`\Device\HarddiskVolumeN`, `\Device\CdRomN`, etc.),
+//! then check the input
 //! path for a prefix match. The device map is cached for the lifetime of
 //! the process -- the mapping is stable in practice (drive-letter changes
 //! during a single workload run are vanishingly rare).
 //!
-//! Non-file paths (registry `\REGISTRY\Machine\...`, MUP / network shares,
-//! etc.) are returned unchanged.
+//! MUP redirector paths are converted to UNC paths. Non-file paths such as
+//! registry `\REGISTRY\Machine\...` are not recognized.
 
 use std::sync::OnceLock;
 
@@ -35,10 +36,9 @@ static DRIVE_MAP: OnceLock<Vec<(String, String)>> = OnceLock::new();
 ///
 /// Returns `Some(canonical)` when the input starts with the NT
 /// DOS-devices prefix (`\??\`, `\\?\`, or `\\.\`) or a
-/// known `\Device\HarddiskVolumeN\...` prefix. Returns `None` when the path
-/// is not a filesystem path that can be canonicalized (registry, MUP,
-/// unknown device). Callers should fall back to the original input on
-/// `None`.
+/// known `\Device\HarddiskVolumeN\...` prefix, or the MUP redirector prefix.
+/// Returns `None` when the path is not a filesystem path that can be
+/// canonicalized (registry or unknown device).
 pub fn to_user_visible(kernel_path: &str) -> Option<String> {
     // DOS-device prefixes map directly to the path that follows. The UNC
     // spelling retains its network-path leading slashes.
@@ -57,12 +57,41 @@ pub fn to_user_visible(kernel_path: &str) -> Option<String> {
         return Some(rest.to_string());
     }
 
+    if let Some(rest) = kernel_path.strip_prefix(r"\Device\Mup\") {
+        let rest = if let Some(after_dfs) = rest.strip_prefix(r"DfsClient\") {
+            if after_dfs.starts_with(';') {
+                let (_, after_connection) = after_dfs.split_once('\\')?;
+                after_connection
+            } else {
+                after_dfs
+            }
+        } else if rest.starts_with(';') {
+            let (_, after_redirector) = rest.split_once('\\')?;
+            if after_redirector.starts_with(';') {
+                let (_, after_connection) = after_redirector.split_once('\\')?;
+                after_connection
+            } else {
+                after_redirector
+            }
+        } else {
+            rest
+        };
+        if !rest.is_empty() {
+            return Some(format!(r"\\{rest}"));
+        }
+        return None;
+    }
+
     if !kernel_path.starts_with(r"\Device\") {
         return None;
     }
 
     let map = DRIVE_MAP.get_or_init(load_drive_map);
 
+    map_device_path(kernel_path, map)
+}
+
+fn map_device_path(kernel_path: &str, map: &[(String, String)]) -> Option<String> {
     for (letter, prefix) in map {
         if let Some(rest) = kernel_path.strip_prefix(prefix.as_str()) {
             if rest.is_empty() || rest.starts_with('\\') {
@@ -71,6 +100,27 @@ pub fn to_user_visible(kernel_path: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Returns whether `path` is already an absolute user-visible DOS or UNC path.
+pub fn is_user_visible_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/'))
+        || (path.starts_with(r"\\")
+            && !path.starts_with(r"\\?\")
+            && !path.starts_with(r"\\.\")
+            && !is_unc_named_pipe(path))
+}
+
+fn is_unc_named_pipe(path: &str) -> bool {
+    let mut components = path.trim_start_matches('\\').split('\\');
+    let _server = components.next();
+    components
+        .next()
+        .is_some_and(|share| share.eq_ignore_ascii_case("pipe"))
 }
 
 /// Test-only: rebuilds the drive map without consulting the cache.
@@ -103,9 +153,10 @@ fn load_drive_map() -> Vec<(String, String)> {
             .unwrap_or(n as usize);
         let device = String::from_utf16_lossy(&buf[..end]);
 
-        // Common shapes: `\Device\HarddiskVolume3`, `\Device\Mup`, etc.
-        // Only canonicalize filesystem volumes; skip non-Harddisk entries.
-        if device.starts_with(r"\Device\HarddiskVolume") {
+        // QueryDosDeviceW was invoked for a DOS drive letter, so every
+        // returned target is a drive-backed namespace worth mapping (for
+        // example HarddiskVolume, CdRom, or a redirector-backed drive).
+        if !device.is_empty() {
             out.push((letter, device));
         }
     }
@@ -146,6 +197,7 @@ mod tests {
         for path in [r"\\?\C:\data\file.txt", r"\\.\C:\data\file.txt"] {
             assert_eq!(to_user_visible(path).as_deref(), Some(r"C:\data\file.txt"));
         }
+
         for path in [
             r"\\?\UNC\server\share\file.txt",
             r"\\?\unc\server\share\file.txt",
@@ -159,6 +211,39 @@ mod tests {
     }
 
     #[test]
+    fn mup_path_becomes_unc_path() {
+        assert_eq!(
+            to_user_visible(r"\Device\Mup\server\share\file.txt").as_deref(),
+            Some(r"\\server\share\file.txt")
+        );
+        assert_eq!(
+            to_user_visible(r"\Device\Mup\;LanmanRedirector\server\share\file.txt").as_deref(),
+            Some(r"\\server\share\file.txt")
+        );
+        assert_eq!(
+            to_user_visible(
+                r"\Device\Mup\;LanmanRedirector\;Z:0000000000001234\server\share\file.txt"
+            )
+            .as_deref(),
+            Some(r"\\server\share\file.txt")
+        );
+        assert_eq!(
+            to_user_visible(r"\Device\Mup\DfsClient\;N:0000000000001234\server\share\file.txt")
+                .as_deref(),
+            Some(r"\\server\share\file.txt")
+        );
+    }
+
+    #[test]
+    fn recognizes_absolute_user_visible_paths() {
+        assert!(is_user_visible_absolute(r"C:\data\file.txt"));
+        assert!(is_user_visible_absolute(r"\\server\share\file.txt"));
+        assert!(!is_user_visible_absolute(r"\\server\pipe\name"));
+        assert!(!is_user_visible_absolute(r"\Device\Unknown\file.txt"));
+        assert!(!is_user_visible_absolute(r"relative\file.txt"));
+    }
+
+    #[test]
     fn drive_map_populates() {
         // On any Windows machine running tests there is at least one volume
         // (the system drive). Verifies QueryDosDeviceW works and our parser
@@ -166,7 +251,16 @@ mod tests {
         let map = rebuild_drive_map_for_tests();
         assert!(
             !map.is_empty(),
-            "drive map should have at least one HarddiskVolume entry"
+            "drive map should have at least one DOS drive entry"
+        );
+    }
+
+    #[test]
+    fn maps_non_hard_disk_drive_devices() {
+        let map = vec![("D:".to_string(), r"\Device\CdRom0".to_string())];
+        assert_eq!(
+            map_device_path(r"\Device\CdRom0\setup.exe", &map).as_deref(),
+            Some(r"D:\setup.exe")
         );
     }
 
