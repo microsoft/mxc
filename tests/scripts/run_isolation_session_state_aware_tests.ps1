@@ -331,6 +331,34 @@ try {
         Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
     } | Out-Null
 
+    # Test 1d: provision rejects a `ui` policy. The isolation session isolates
+    # the host's UI from the contained code but does not deny it UI
+    # capabilities (window creation, GDI and the session's own clipboard all
+    # work inside it), so a UI restriction cannot be honored and is refused
+    # rather than accepted and dropped. Refused up-front, so no cleanup needed.
+    Run-StateAwareTest "provision (ui policy rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_ui.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    } | Out-Null
+
+    # Test 1e: provision rejects the flat `experimental.isolation_session.user`
+    # spelling. Per-backend config nests under a phase name, and the dispatcher
+    # reads only `experimental.<backend>.<phase>` -- so the flat form used to be
+    # silently dropped, provisioning a LOCAL sandbox for a caller who asked for
+    # an Entra-backed one. Parser-level, so the code is malformed_request.
+    Run-StateAwareTest "provision (flat user bundle rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_flat_user.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (mis-slotted config rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    } | Out-Null
+
     # Test 2: start succeeds against the provisioned sandbox. Exercises the
     # multi-invocation pattern -- provision was a separate wxc-exec process;
     # this is a fresh wxc-exec process consuming the same sandbox_id.

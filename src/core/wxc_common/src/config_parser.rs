@@ -1239,6 +1239,11 @@ enforced; access denials are recorded for diagnostics.\n",
     let seatbelt = seatbelt.map(make_seatbelt_config);
 
     // UI section
+    // UI section. Capture presence before the typed mapping consumes `ui`, for
+    // the same reason as `network_specified`: `UiPolicy::default()` is full
+    // lockdown, so an explicit lockdown `ui` is otherwise indistinguishable
+    // from an absent one.
+    policy.ui_specified = ui.is_some();
     if let Some(raw_ui) = ui {
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
@@ -4779,6 +4784,43 @@ mod tests {
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let test = req.experimental.test.unwrap();
         assert!(test.message.is_empty());
+    }
+
+    #[test]
+    fn ui_specified_true_when_ui_present() {
+        // An empty `ui: {}` still counts as "supplied" — the twin of
+        // `network_specified`. Backends with no UI primitive refuse on
+        // presence, because `UiPolicy::default()` is full lockdown and so an
+        // explicit lockdown `ui` is indistinguishable from an absent one.
+        let json = r#"{"process": {"commandLine": "echo x"}, "ui": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_false_when_ui_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_on_state_aware_requests() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "ui": {"disable": true}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
     }
 
     #[test]

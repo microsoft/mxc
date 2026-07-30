@@ -200,4 +200,65 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
     );
   });
+
+  // --- Runtime backend guard for UI policy --------------------------------
+  // `ui` is absent from every IsolationSession per-phase Config, so a
+  // TypeScript caller cannot pass it. It is a cross-cutting field though, so a
+  // plain-JS caller who supplies it still gets it lifted to the top level of
+  // the envelope. The backend must refuse: the isolation session is a separate
+  // OS session, which isolates the host's UI from the contained code but does
+  // not deny it UI capabilities (window creation, GDI and the session's own
+  // clipboard all work inside it), so a UI restriction cannot be honored.
+  // Validation runs before the OS service is touched, so nothing is
+  // provisioned and no cleanup is needed.
+  type UntypedStart = (
+    sandboxId: string,
+    config: unknown,
+    options: unknown,
+  ) => Promise<unknown>;
+  const startUntyped = startSandbox as unknown as UntypedStart;
+
+  it('backend refuses a provision that supplies a ui policy', async () => {
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        {
+          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          ui: { disable: true },
+        },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('backend refuses a lockdown-equivalent ui policy too (presence, not value)', async () => {
+    // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
+    // indistinguishable by value from an absent one — presence drives the
+    // refusal, exactly as it does for the network acknowledgment.
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        {
+          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          ui: {},
+        },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('backend refuses a ui policy on a post-provision phase', async () => {
+    // No provision needed: `validate_start` refuses before the sandbox id is
+    // ever resolved against the OS service.
+    await assert.rejects(
+      () => startUntyped(
+        'iso:not-a-real-sandbox',
+        { ui: { disable: false, clipboard: 'all', injection: true } },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
 });

@@ -1,0 +1,16 @@
+{
+    "phase": "provision",
+    "containment": "isolation_session",
+    "network": {
+        "defaultPolicy": "allow",
+        "allowLocalNetwork": true
+    },
+    "experimental": {
+        "isolation_session": {
+            "user": {
+                "upn": "alice@contoso.com",
+                "wamToken": "tok"
+            }
+        }
+    }
+}

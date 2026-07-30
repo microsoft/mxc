@@ -530,6 +530,16 @@ pub struct ContainerPolicy {
     pub network_specified: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
+    /// Whether the caller supplied a `ui` block on the wire (any field
+    /// present), captured at parse time. The twin of `network_specified`, and
+    /// necessary for the same reason: `UiPolicy::default()` is full lockdown,
+    /// so an absent `ui` and an explicitly-supplied lockdown `ui` are
+    /// indistinguishable from the other fields here. Used by backends (e.g.
+    /// IsolationSession) that have no UI-restriction primitive and must refuse
+    /// a UI policy rather than accept and drop it. Parse-derived, never on the
+    /// wire.
+    #[serde(skip)]
+    pub ui_specified: bool,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
     /// Windows denial capture (from `processContainer.captureDenials`). When
