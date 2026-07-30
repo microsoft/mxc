@@ -497,7 +497,7 @@ mod tests {
         let out = dedup_to_resources(denials).denials;
 
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].path, r"\\server\share\file.txt");
+        assert_eq!(out[0].resource, r"\\server\share\file.txt");
     }
 
     #[test]
