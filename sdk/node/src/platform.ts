@@ -273,7 +273,7 @@ function computeSupport(): PlatformSupport {
     // are installed; callers pick via the containment field.
     const methods: ContainmentBackend[] = [];
     if (isLxcAvailable()) methods.push('lxc');
-    const bubblewrap = probeBubblewrap();
+    const bubblewrap = _probeBubblewrap();
     if (bubblewrap.available) {
       methods.push('bubblewrap');
     } else if (methods.length === 0) {
@@ -333,26 +333,82 @@ const MIN_BWRAP_VERSION: readonly [number, number, number] = [0, 5, 0];
 type BubblewrapProbe = { available: true } | { available: false; reason: string };
 
 /**
+ * Raw result of running `bwrap --version`, normalized across the ways the call
+ * can fail. Mirrors the cases the Rust `probe_bwrap` distinguishes.
+ */
+type BwrapVersionResult =
+  | { kind: 'output'; stdout: string }
+  | { kind: 'notFound' }
+  | { kind: 'failed'; status: number | null; detail: string };
+
+/**
+ * Default runner for `bwrap --version`. Uses `execFileSync` rather than a
+ * shell so a missing binary surfaces as `ENOENT` instead of the shell's
+ * indistinguishable exit code 127 — that separation is what lets us report
+ * "not installed" and "installed but broken" differently.
+ *
+ * Replaceable in unit tests via {@link _setBwrapVersionRunner}.
+ */
+function defaultBwrapVersionRunner(): BwrapVersionResult {
+  try {
+    return {
+      kind: 'output',
+      stdout: execFileSync('bwrap', ['--version'], { encoding: 'utf-8', stdio: 'pipe' }),
+    };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: Buffer | string };
+    if (e.code === 'ENOENT') {
+      return { kind: 'notFound' };
+    }
+    const stderr = typeof e.stderr === 'string' ? e.stderr : (e.stderr?.toString() ?? '');
+    return {
+      kind: 'failed',
+      status: e.status ?? null,
+      detail: stderr.trim() || e.message,
+    };
+  }
+}
+
+let bwrapVersionRunner: () => BwrapVersionResult = defaultBwrapVersionRunner;
+
+/** @internal Test-only: override the `bwrap --version` runner. */
+export function _setBwrapVersionRunner(fn: (() => BwrapVersionResult) | null): void {
+  bwrapVersionRunner = fn ?? defaultBwrapVersionRunner;
+}
+
+/**
  * Parse the version out of a `bwrap --version` line such as
  * `"bubblewrap 0.11.2"`.
  *
- * Deliberately lenient about what surrounds the number so distro-patched
- * version strings (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still
- * resolve: the first whitespace-separated token starting with a digit is
- * taken, split on `.`, and each of the (up to three) components contributes
- * its leading digits.
+ * Lenient about what *surrounds* each number so distro-patched version strings
+ * (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the first
+ * whitespace-separated token starting with a digit is taken, split on `.`, and
+ * each of the (up to three) components contributes its leading digits.
+ *
+ * Strict about components that are *present but not numeric*: only a component
+ * that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
+ * rather than silently read as `0.6.0`.
  *
  * @internal Exported for unit tests.
- * @returns `[major, minor, patch]`, or `null` when no version token is present.
+ * @returns `[major, minor, patch]`, or `null` when the version cannot be determined.
  */
 export function _parseBwrapVersion(output: string): [number, number, number] | null {
   const token = output.split(/\s+/).find((t) => /^\d/.test(t));
   if (!token) return null;
-  const components = token.split('.').map((component) => {
-    const digits = /^\d+/.exec(component);
-    return digits ? parseInt(digits[0], 10) : 0;
-  });
-  return [components[0], components[1] ?? 0, components[2] ?? 0];
+  const parts = token.split('.');
+  const components: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    if (i >= parts.length) {
+      // Genuinely absent component (e.g. a two-component "0.6") defaults to 0.
+      components.push(0);
+      continue;
+    }
+    const digits = /^\d+/.exec(parts[i]);
+    // Present but non-numeric: fail closed rather than guessing 0.
+    if (!digits) return null;
+    components.push(parseInt(digits[0], 10));
+  }
+  return [components[0], components[1], components[2]];
 }
 
 /** Compare two `[major, minor, patch]` tuples lexicographically. */
@@ -373,24 +429,39 @@ function compareVersions(
  * {@link MIN_BWRAP_VERSION} would reject flags the backend always emits and
  * fail at spawn time with an opaque "unknown option" error. Unparsable output
  * fails closed — without a version we cannot assert the required flags exist.
+ *
+ * Mirrors `probe_bwrap` in
+ * `src/backends/bubblewrap/common/src/bwrap_version.rs`, including the
+ * distinction between a missing binary and a present-but-broken one.
+ *
+ * @internal Exported for unit tests.
  */
-function probeBubblewrap(): BubblewrapProbe {
+export function _probeBubblewrap(): BubblewrapProbe {
   const minVersion = MIN_BWRAP_VERSION.join('.');
-  let output: string;
-  try {
-    output = execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
-  } catch {
+  const result = bwrapVersionRunner();
+
+  if (result.kind === 'notFound') {
     return {
       available: false,
       reason: `Bubblewrap (bwrap) is not installed or not on PATH; version ${minVersion} or newer is required`,
     };
   }
+  if (result.kind === 'failed') {
+    // Present but broken: do not send the user to their package manager for a
+    // package they already have.
+    const where = result.status === null ? 'could not be executed' : `exited with status ${result.status}`;
+    const detail = result.detail ? `: ${result.detail}` : '';
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) is present but \`bwrap --version\` ${where}${detail}; version ${minVersion} or newer is required`,
+    };
+  }
 
-  const version = _parseBwrapVersion(output);
+  const version = _parseBwrapVersion(result.stdout);
   if (!version) {
     return {
       available: false,
-      reason: `could not determine the Bubblewrap (bwrap) version from ${JSON.stringify(output.trim())}; version ${minVersion} or newer is required`,
+      reason: `could not determine the Bubblewrap (bwrap) version from ${JSON.stringify(result.stdout.trim())}; version ${minVersion} or newer is required`,
     };
   }
   if (compareVersions(version, MIN_BWRAP_VERSION) < 0) {

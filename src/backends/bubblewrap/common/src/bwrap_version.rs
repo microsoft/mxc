@@ -80,8 +80,20 @@ impl fmt::Display for BwrapVersion {
 /// `validate` and the engine's platform probe) share one message source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BwrapUnavailable {
-    /// `bwrap --version` could not be executed, or exited non-zero.
+    /// `bwrap` could not be found — the spawn failed with
+    /// [`std::io::ErrorKind::NotFound`].
     NotFound,
+    /// `bwrap` was found but `bwrap --version` did not complete successfully
+    /// (e.g. a permissions problem, a dynamic-loader failure, or a non-zero
+    /// exit). Distinct from [`Self::NotFound`] so the reported remediation is
+    /// not the misleading "install the package", and so the underlying cause is
+    /// preserved rather than discarded.
+    ProbeFailed {
+        /// Exit status of `bwrap --version`, when the process ran at all.
+        status: Option<i32>,
+        /// Captured stderr, or the OS error when the process could not start.
+        detail: String,
+    },
     /// `bwrap --version` ran but printed something we could not parse. We fail
     /// closed here: without a version we cannot assert the required flags exist.
     UnrecognizedVersion(String),
@@ -98,6 +110,21 @@ impl fmt::Display for BwrapUnavailable {
                  Install it via your package manager (e.g., apt install bubblewrap). \
                  Version {MIN_BWRAP_VERSION} or newer is required."
             ),
+            Self::ProbeFailed { status, detail } => {
+                write!(f, "Bubblewrap (bwrap) is present but `bwrap --version` ")?;
+                match status {
+                    Some(code) => write!(f, "exited with status {code}")?,
+                    None => write!(f, "could not be executed")?,
+                }
+                if !detail.is_empty() {
+                    write!(f, ": {detail}")?;
+                }
+                write!(
+                    f,
+                    ". Version {MIN_BWRAP_VERSION} or newer is required; fix the \
+                     installation before using the Bubblewrap backend."
+                )
+            }
             Self::UnrecognizedVersion(output) => write!(
                 f,
                 "Could not determine the Bubblewrap (bwrap) version: \
@@ -125,10 +152,21 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
         .arg("--version")
         .stdin(Stdio::null())
         .output()
-        .map_err(|_| BwrapUnavailable::NotFound)?;
+        .map_err(|err| match err.kind() {
+            // Only a genuinely missing binary is "not installed"; anything else
+            // (permissions, loader errors) is a broken install, not a missing one.
+            std::io::ErrorKind::NotFound => BwrapUnavailable::NotFound,
+            _ => BwrapUnavailable::ProbeFailed {
+                status: None,
+                detail: err.to_string(),
+            },
+        })?;
 
     if !output.status.success() {
-        return Err(BwrapUnavailable::NotFound);
+        return Err(BwrapUnavailable::ProbeFailed {
+            status: output.status.code(),
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
     }
 
     // bwrap prints its autotools/meson `PACKAGE_STRING` (e.g. "bubblewrap
@@ -153,21 +191,35 @@ pub fn check_version_output(output: &str) -> Result<BwrapVersion, BwrapUnavailab
 /// Parse the version out of a `bwrap --version` line such as
 /// `"bubblewrap 0.11.2"`.
 ///
-/// Deliberately lenient about what surrounds the number so distro-patched
-/// version strings (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still
-/// resolve: the first whitespace-separated token starting with a digit is
-/// taken, split on `.`, and each of the (up to three) components contributes
-/// its leading digits. Returns `None` when no such token exists.
+/// Lenient about what *surrounds* each number so distro-patched version strings
+/// (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the first
+/// whitespace-separated token starting with a digit is taken, split on `.`, and
+/// each of the (up to three) components contributes its leading digits.
+///
+/// Strict about components that are *present but not numeric*: only a component
+/// that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
+/// rather than silently read as `0.6.0`. Returns `None` whenever the version
+/// cannot be determined, which callers treat as fail-closed.
 pub fn parse_version(output: &str) -> Option<BwrapVersion> {
     let token = output
         .split_whitespace()
         .find(|token| token.starts_with(|c: char| c.is_ascii_digit()))?;
 
-    let mut components = token.split('.').map(leading_number);
-    let major = components.next().flatten()?;
-    let minor = components.next().flatten().unwrap_or(0);
-    let patch = components.next().flatten().unwrap_or(0);
+    let mut components = token.split('.');
+    let major = leading_number(components.next()?)?;
+    let minor = next_component(&mut components)?;
+    let patch = next_component(&mut components)?;
     Some(BwrapVersion::new(major, minor, patch))
+}
+
+/// Take the next version component: `0` when the iterator is exhausted (a
+/// two-component version such as `0.6` is fine), `None` when a component is
+/// present but has no leading digits (fail closed).
+fn next_component<'a>(components: &mut impl Iterator<Item = &'a str>) -> Option<u32> {
+    match components.next() {
+        Some(component) => leading_number(component),
+        None => Some(0),
+    }
 }
 
 /// Parse the leading run of ASCII digits of `component`, ignoring any suffix
@@ -215,6 +267,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_present_but_nonnumeric_components() {
+        // A component that exists but has no leading digit must fail closed
+        // rather than silently defaulting to 0 — "0.6.invalid" is not 0.6.0.
+        assert_eq!(parse_version("bubblewrap 0.6.invalid"), None);
+        assert_eq!(parse_version("bubblewrap 0.beta.1"), None);
+        assert_eq!(parse_version("bubblewrap 0.6."), None);
+        // ...but a genuinely absent component still defaults to 0.
+        assert_eq!(
+            parse_version("bubblewrap 1"),
+            Some(BwrapVersion::new(1, 0, 0))
+        );
+    }
+
+    #[test]
     fn ordering_is_semantic() {
         assert!(BwrapVersion::new(0, 4, 9) < BwrapVersion::new(0, 5, 0));
         assert!(BwrapVersion::new(0, 11, 0) > BwrapVersion::new(0, 9, 9));
@@ -256,6 +322,10 @@ mod tests {
     fn messages_name_the_required_version() {
         for err in [
             BwrapUnavailable::NotFound,
+            BwrapUnavailable::ProbeFailed {
+                status: Some(126),
+                detail: "permission denied".to_string(),
+            },
             BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
             BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)),
         ] {
@@ -265,5 +335,45 @@ mod tests {
                 "message should name the minimum version: {message}"
             );
         }
+    }
+
+    #[test]
+    fn probe_failure_message_preserves_status_and_stderr() {
+        // A broken-but-present bwrap must not be reported as "not installed":
+        // that remediation would send the user to their package manager for a
+        // package they already have.
+        let message = BwrapUnavailable::ProbeFailed {
+            status: Some(126),
+            detail: "bwrap: permission denied".to_string(),
+        }
+        .to_string();
+        assert!(message.contains("126"), "status should survive: {message}");
+        assert!(
+            message.contains("bwrap: permission denied"),
+            "stderr should survive: {message}"
+        );
+        assert!(
+            !message.contains("not installed"),
+            "must not claim the package is missing: {message}"
+        );
+    }
+
+    #[test]
+    fn probe_failure_message_handles_a_missing_status() {
+        // Spawn failures that are not `NotFound` (permissions, loader errors)
+        // have no exit status, only an OS error string.
+        let message = BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: "Permission denied (os error 13)".to_string(),
+        }
+        .to_string();
+        assert!(
+            message.contains("could not be executed"),
+            "should describe the spawn failure: {message}"
+        );
+        assert!(
+            message.contains("os error 13"),
+            "OS error should survive: {message}"
+        );
     }
 }
