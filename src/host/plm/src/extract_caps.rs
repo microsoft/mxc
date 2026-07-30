@@ -633,6 +633,16 @@ pub(crate) fn invoke_ace_walk_with_index(
 /// Walk every ACE in `buf`, inserting matched capability names into
 /// `found`. This is the shared implementation every other entry point
 /// funnels through.
+///
+/// **Partial results on error.** The walk inserts as it goes, so a
+/// buffer that decodes cleanly up to a corrupt tail leaves the
+/// already-matched names in `found` and still returns `Err`. This is
+/// deliberate: those earlier ACEs parsed correctly, and discarding them
+/// would lose real capability evidence because of an unrelated trailing
+/// byte. Callers must therefore treat `Err` as "this blob was truncated,
+/// count it as data loss" rather than "nothing was written" — see
+/// `access_failure::consume_access_failure`, which counts the failure
+/// into `parse_failures` while keeping the partial set.
 pub fn invoke_ace_walk_with_index_into(
     buf: &[u8],
     index: &CapabilityIndex,
@@ -1018,6 +1028,27 @@ mod tests {
         let mut buf = build_ace(GRANT, &sid);
         buf.extend_from_slice(&[0u8; 6]); // too short for another ACE
         assert!(invoke_ace_walk_with_index(&buf, &idx, false).is_err());
+    }
+
+    #[test]
+    fn truncated_tail_keeps_capabilities_matched_before_the_failure() {
+        // Pins the documented partial-result contract: the walk inserts
+        // as it goes, so names matched before a corrupt tail survive the
+        // Err. Callers rely on this (they count the failure rather than
+        // discarding the set), so a change here is a behavior change.
+        let sid = well_world_sid();
+        let idx = cap_index_for(&sid, "internetClient");
+        let mut buf = build_ace(GRANT, &sid);
+        buf.extend_from_slice(&[0u8; 6]);
+
+        let mut found = HashSet::new();
+        let err = invoke_ace_walk_with_index_into(&buf, &idx, false, &mut found);
+
+        assert!(err.is_err(), "truncated tail must still report an error");
+        assert!(
+            found.contains("internetClient"),
+            "capabilities matched before the truncation must be retained"
+        );
     }
 
     #[test]
