@@ -214,6 +214,14 @@ fn parse_version(output: &str) -> Option<BwrapVersion> {
     let major = leading_number(components.next()?)?;
     let minor = components.next().map_or(Some(0), leading_number)?;
     let patch = components.next().map_or(Some(0), leading_number)?;
+
+    // Components past the patch are not significant, but they must still look
+    // like a version: `0.5.0.invalid` is an unrecognized banner, not 0.5.0.
+    // Checking them (rather than rejecting on count) keeps a distro four-part
+    // build such as `0.6.0.1` working.
+    if !components.all(|extra| leading_number(extra).is_some()) {
+        return None;
+    }
     Some(BwrapVersion::new(major, minor, patch))
 }
 
@@ -304,6 +312,24 @@ mod tests {
         assert_eq!(
             parse_version("bubblewrap 1"),
             Some(BwrapVersion::new(1, 0, 0))
+        );
+    }
+
+    #[test]
+    fn rejects_junk_after_the_patch_component() {
+        // Regression: components past the patch were dropped unchecked, so
+        // "0.5.0.invalid" cleared the gate as 0.5.0.
+        assert_eq!(parse_version("bubblewrap 0.5.0.invalid"), None);
+        assert_eq!(
+            check_version_output("bubblewrap 0.5.0.invalid"),
+            Err(BwrapUnavailable::UnrecognizedVersion(
+                "bubblewrap 0.5.0.invalid".to_string()
+            ))
+        );
+        // A numeric fourth component is a plausible distro build, not junk.
+        assert_eq!(
+            parse_version("bubblewrap 0.6.0.1"),
+            Some(BwrapVersion::new(0, 6, 0))
         );
     }
 

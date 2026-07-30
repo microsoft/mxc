@@ -417,6 +417,14 @@ describe('bwrap version parsing', () => {
     assert.strictEqual(_parseBwrapVersion('bwrap 0.11.2'), null);
   });
 
+  it('rejects junk after the patch component', () => {
+    // Regression: components past the patch were dropped unchecked, so
+    // "0.5.0.invalid" cleared the gate as 0.5.0.
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 0.5.0.invalid'), null);
+    // A numeric fourth component is a plausible distro build, not junk.
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.6.0.1'), [0, 6, 0]);
+  });
+
   it('fails closed on a present but non-numeric component', () => {
     // "0.6.invalid" must not be read as 0.6.0 — only an absent component
     // defaults to 0.

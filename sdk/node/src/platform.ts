@@ -427,7 +427,11 @@ export function _parseBwrapVersion(output: string): [number, number, number] | n
   const marker = tokens[1].lastIndexOf('+really');
   const token = marker === -1 ? tokens[1] : tokens[1].slice(marker + '+really'.length);
   const components: number[] = [];
-  for (const part of token.split('.').slice(0, 3)) {
+  // Every component must be numeric, including ones past the patch: they are
+  // not significant, but `0.5.0.invalid` is an unrecognized banner rather than
+  // 0.5.0. Validating (rather than rejecting on count) keeps a distro
+  // four-part build such as `0.6.0.1` working.
+  for (const part of token.split('.')) {
     const digits = /^\d+/.exec(part);
     // Present but non-numeric: fail closed rather than guessing 0.
     if (!digits) return null;
