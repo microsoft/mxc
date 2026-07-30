@@ -482,8 +482,12 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         // by many clients, which fails open under WSLc's defaultPolicy=allow.
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
+            // Redact any embedded userinfo (`user:password@`) before it reaches
+            // the diagnostic/log stream — a proxy URL commonly carries basic-auth
+            // credentials, and the scheme alone diagnoses the failure.
+            let redacted = crate::proxy_env::redact_proxy_url(&url_str);
             return Err(WxcError::ConfigParse(format!(
-                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {url_str}"
+                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
             )));
         }
 
@@ -3678,6 +3682,33 @@ mod tests {
                 "expected scheme rejection for {url}, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn proxy_scheme_error_redacts_credentials() {
+        // A rejected proxy URL must not echo embedded `user:password@`
+        // userinfo into the error (which reaches the diagnostic/log stream).
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "processcontainer",
+            "network": {"proxy": {"url": "socks5://alice:s3cr3t@proxy.example:1080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must use the 'http' or 'https' scheme"),
+            "expected scheme rejection, got: {msg}"
+        );
+        assert!(
+            !msg.contains("s3cr3t") && !msg.contains("alice:s3cr3t"),
+            "credentials leaked into error: {msg}"
+        );
+        assert!(
+            msg.contains("***@proxy.example"),
+            "expected redacted userinfo in error: {msg}"
+        );
     }
 
     #[test]
