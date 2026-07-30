@@ -1178,11 +1178,11 @@ impl WSLContainerRunner {
             {
                 Some(url) => url,
                 None => {
-                    return ScriptResponse::error(
+                    return Err(ScriptResponse::error(
                         "WSLC: network.proxy requires the 'url' form (a routable proxy URL); \
                          the localhost and builtinTestServer forms are not supported because a \
                          WSLc container runs in its own network namespace.",
-                    );
+                    ));
                 }
             };
             let _ = writeln!(
