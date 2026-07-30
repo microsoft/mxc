@@ -407,10 +407,30 @@ pub fn build_capability_table() -> Vec<CapabilityEntry> {
     build_capability_table_with_diagnostics().entries
 }
 
+/// Encoded length of the SID at the front of `bytes`, or `None` when
+/// `bytes` is too short to hold the fixed header or the sub-authority
+/// array that header declares.
+///
+/// This is the bounds check that must run *before* any raw pointer to
+/// `bytes` reaches Win32: the SID APIs read `8 + 4 * SubAuthorityCount`
+/// bytes through the pointer, and these blobs come from
+/// attacker-influenceable trace data.
+#[cfg(any(target_os = "windows", test))]
+fn encoded_sid_len(bytes: &[u8]) -> Option<usize> {
+    let sub_authority_count = *bytes.get(SID_SUB_AUTHORITY_COUNT_OFFSET)? as usize;
+    let len = SID_FIXED_HEADER_SIZE + SID_SUB_AUTHORITY_SIZE * sub_authority_count;
+    (bytes.len() >= len).then_some(len)
+}
+
 /// Best-effort string form of a SID for diagnostics. Returns `None` if the
 /// bytes aren't a valid SID.
 #[cfg(target_os = "windows")]
 pub fn sid_to_string(sid_bytes: &[u8]) -> Option<String> {
+    // `IsValidSid` dereferences the pointer to read the fixed header and
+    // the declared sub-authority array, so prove the slice is large
+    // enough first. Without this, callers passing a short slice (e.g.
+    // `&[]` or `&[1]`) make Win32 read past the end of the allocation.
+    encoded_sid_len(sid_bytes)?;
     let psid = PSID(sid_bytes.as_ptr() as *mut _);
     unsafe {
         if !IsValidSid(psid).as_bool() {
@@ -843,6 +863,53 @@ mod tests {
         sid.extend_from_slice(&[0, 0, 0, 0]); // only one sub_authority
         let buf = build_ace(0, &sid);
         assert!(read_ace_at_offset(&buf, 0).is_err());
+    }
+
+    // ---- SID bounds checking (no raw pointer reaches Win32 unproven) -----
+
+    #[test]
+    fn encoded_sid_len_accepts_a_well_formed_sid() {
+        // S-1-1-0: 8-byte fixed header + one 4-byte sub-authority.
+        assert_eq!(encoded_sid_len(&well_world_sid()), Some(12));
+    }
+
+    #[test]
+    fn encoded_sid_len_rejects_slices_shorter_than_the_fixed_header() {
+        // Nothing at all, and a slice too short to even hold the
+        // SubAuthorityCount byte, let alone the identifier authority.
+        assert_eq!(encoded_sid_len(&[]), None);
+        assert_eq!(encoded_sid_len(&[1]), None);
+        // Declares zero sub-authorities but is still one byte short of
+        // the 8-byte fixed header.
+        assert_eq!(encoded_sid_len(&[1, 0, 0, 0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn encoded_sid_len_rejects_subauthority_count_beyond_the_slice() {
+        // Declares 5 sub-authorities (needs 28 bytes) but carries one.
+        let mut sid = vec![1u8, 5, 0, 0, 0, 0, 0, 1];
+        sid.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(encoded_sid_len(&sid), None);
+        // A count of 255 must not overflow into a small length.
+        let sid = vec![1u8, 255, 0, 0, 0, 0, 0, 1];
+        assert_eq!(encoded_sid_len(&sid), None);
+    }
+
+    #[test]
+    fn sid_to_string_rejects_undersized_slices_without_reading_out_of_bounds() {
+        // These are the inputs that previously handed an unproven
+        // pointer to `IsValidSid`. Each must be rejected by the Rust-side
+        // bounds check before Win32 sees the slice; a regression here is
+        // an out-of-bounds read rather than a failed assertion, so this
+        // is most valuable under a sanitizer.
+        assert_eq!(sid_to_string(&[]), None);
+        assert_eq!(sid_to_string(&[1]), None);
+        assert_eq!(sid_to_string(&[1, 0, 0, 0, 0, 0, 0]), None);
+
+        // Header claims more sub-authorities than the buffer holds.
+        let mut truncated = vec![1u8, 5, 0, 0, 0, 0, 0, 1];
+        truncated.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(sid_to_string(&truncated), None);
     }
 
     // ---- CapabilityIndex -------------------------------------------------
