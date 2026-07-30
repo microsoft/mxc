@@ -99,7 +99,9 @@ impl fmt::Display for BwrapUnavailable {
                 write!(f, "Bubblewrap (bwrap) is present but `bwrap --version` ")?;
                 match status {
                     Some(code) => write!(f, "exited with status {code}")?,
-                    None => write!(f, "could not be executed")?,
+                    // Covers both a spawn failure and termination by a signal,
+                    // neither of which yields an exit code.
+                    None => write!(f, "failed without an exit status")?,
                 }
                 if !detail.is_empty() {
                     write!(f, ": {detail}")?;
@@ -154,8 +156,7 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
         });
     }
 
-    // bwrap prints its autotools/meson `PACKAGE_STRING` (e.g. "bubblewrap
-    // 0.11.2") on stdout; the leading name has been stable since 0.1.0.
+    // The version banner goes to stdout; `parse_version` owns its format.
     let stdout = String::from_utf8_lossy(&output.stdout);
     check_version_output(&stdout)
 }
@@ -176,23 +177,31 @@ fn check_version_output(output: &str) -> Result<BwrapVersion, BwrapUnavailable> 
 /// Parse the version out of a `bwrap --version` line such as
 /// `"bubblewrap 0.11.2"`.
 ///
+/// Anchored on the `bubblewrap` package name, which is what makes unrecognized
+/// output fail closed: without it any numeric token in arbitrary output (say
+/// `"some other tool 999"`) would be read as a version and clear the
+/// minimum-version gate.
+///
 /// Lenient about what *surrounds* each number so distro-patched version strings
-/// (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the first
-/// whitespace-separated token starting with a digit is taken, split on `.`, and
-/// each of the (up to three) components contributes its leading digits.
+/// (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the version
+/// token is split on `.` and each of the (up to three) components contributes
+/// its leading digits.
 ///
 /// Strict about components that are *present but not numeric*: only a component
 /// that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
 /// rather than silently read as `0.6.0`. Returns `None` whenever the version
 /// cannot be determined, which callers treat as fail-closed.
 fn parse_version(output: &str) -> Option<BwrapVersion> {
-    let token = output
-        .split_whitespace()
-        .find(|token| token.starts_with(|c: char| c.is_ascii_digit()))?;
+    // bwrap prints its autotools/meson `PACKAGE_STRING` — "bubblewrap <version>"
+    // — and that leading name has been stable since 0.1.0.
+    let mut tokens = output.split_whitespace();
+    if !tokens.next()?.eq_ignore_ascii_case("bubblewrap") {
+        return None;
+    }
 
     // `map_or(Some(0), ..)` is the absent-vs-unreadable split: an exhausted
     // iterator yields 0, a component `leading_number` rejects fails the parse.
-    let mut components = token.split('.');
+    let mut components = tokens.next()?.split('.');
     let major = leading_number(components.next()?)?;
     let minor = components.next().map_or(Some(0), leading_number)?;
     let patch = components.next().map_or(Some(0), leading_number)?;
@@ -298,6 +307,21 @@ mod tests {
     }
 
     #[test]
+    fn fails_closed_on_a_stray_number_in_unrelated_output() {
+        // Regression: searching for any numeric token let unrelated output
+        // clear the gate — "some other tool 999" parsed as 999.0.0. Anchoring
+        // on the `bubblewrap` package name is what keeps this fail-closed.
+        assert_eq!(parse_version("some other tool 999"), None);
+        assert_eq!(parse_version("bwrap 0.11.2"), None);
+        assert_eq!(
+            check_version_output("some other tool 999"),
+            Err(BwrapUnavailable::UnrecognizedVersion(
+                "some other tool 999".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn messages_name_the_required_version() {
         for err in [
             BwrapUnavailable::NotFound,
@@ -340,15 +364,16 @@ mod tests {
     #[test]
     fn probe_failure_message_handles_a_missing_status() {
         // Spawn failures that are not `NotFound` (permissions, loader errors)
-        // have no exit status, only an OS error string.
+        // and signal-terminated runs both lack an exit status, so the wording
+        // must not claim the process never ran.
         let message = BwrapUnavailable::ProbeFailed {
             status: None,
             detail: "Permission denied (os error 13)".to_string(),
         }
         .to_string();
         assert!(
-            message.contains("could not be executed"),
-            "should describe the spawn failure: {message}"
+            message.contains("failed without an exit status"),
+            "should describe the missing status: {message}"
         );
         assert!(
             message.contains("os error 13"),

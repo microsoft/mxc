@@ -404,6 +404,14 @@ describe('bwrap version parsing', () => {
     assert.strictEqual(_parseBwrapVersion('bwrap: command not found'), null);
   });
 
+  it('fails closed on a stray number in unrelated output', () => {
+    // Regression: searching for any numeric token let unrelated output clear
+    // the gate — "some other tool 999" parsed as 999.0.0. Anchoring on the
+    // `bubblewrap` package name is what keeps this fail-closed.
+    assert.strictEqual(_parseBwrapVersion('some other tool 999'), null);
+    assert.strictEqual(_parseBwrapVersion('bwrap 0.11.2'), null);
+  });
+
   it('fails closed on a present but non-numeric component', () => {
     // "0.6.invalid" must not be read as 0.6.0 — only an absent component
     // defaults to 0.
@@ -457,6 +465,13 @@ describe('bwrap minimum-version gate', () => {
     assert.match(probe.reason, /could not determine/);
   });
 
+  it('fails closed when unrelated output contains a number', () => {
+    withVersion('some other tool 999\n');
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /could not determine/);
+  });
+
   it('reports a missing binary as not installed', () => {
     _setBwrapVersionRunner(() => ({ kind: 'notFound' }));
     const probe = _probeBubblewrap();
@@ -480,7 +495,9 @@ describe('bwrap minimum-version gate', () => {
     assert.doesNotMatch(probe.reason, /not installed/);
   });
 
-  it('describes a spawn failure that has no exit status', () => {
+  it('describes a failure that has no exit status without claiming it never ran', () => {
+    // A signal-terminated run also has a null status, so the wording must not
+    // assert the process could not be executed.
     _setBwrapVersionRunner(() => ({
       kind: 'failed',
       status: null,
@@ -488,7 +505,7 @@ describe('bwrap minimum-version gate', () => {
     }));
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /could not be executed/);
+    assert.match(probe.reason, /failed without an exit status/);
   });
 
   it('omits bubblewrap from getPlatformSupport below the floor', { skip: os.platform() !== 'linux' }, () => {

@@ -379,10 +379,15 @@ export function _setBwrapVersionRunner(fn: (() => BwrapVersionResult) | null): v
  * Parse the version out of a `bwrap --version` line such as
  * `"bubblewrap 0.11.2"`.
  *
+ * Anchored on the `bubblewrap` package name, which is what makes unrecognized
+ * output fail closed: without it any numeric token in arbitrary output (say
+ * `"some other tool 999"`) would be read as a version and clear the
+ * minimum-version gate.
+ *
  * Lenient about what *surrounds* each number so distro-patched version strings
- * (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the first
- * whitespace-separated token starting with a digit is taken, split on `.`, and
- * each of the (up to three) components contributes its leading digits.
+ * (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still resolve: the version
+ * token is split on `.` and each of the (up to three) components contributes
+ * its leading digits.
  *
  * Strict about components that are *present but not numeric*: only a component
  * that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
@@ -392,10 +397,12 @@ export function _setBwrapVersionRunner(fn: (() => BwrapVersionResult) | null): v
  * @returns `[major, minor, patch]`, or `null` when the version cannot be determined.
  */
 export function _parseBwrapVersion(output: string): [number, number, number] | null {
-  const token = output.split(/\s+/).find((t) => /^\d/.test(t));
-  if (!token) return null;
+  // bwrap prints its PACKAGE_STRING, "bubblewrap <version>"; that leading name
+  // has been stable since 0.1.0.
+  const tokens = output.trim().split(/\s+/);
+  if (tokens[0]?.toLowerCase() !== 'bubblewrap' || !tokens[1]) return null;
   const components: number[] = [];
-  for (const part of token.split('.').slice(0, 3)) {
+  for (const part of tokens[1].split('.').slice(0, 3)) {
     const digits = /^\d+/.exec(part);
     // Present but non-numeric: fail closed rather than guessing 0.
     if (!digits) return null;
@@ -443,8 +450,10 @@ export function _probeBubblewrap(): BubblewrapProbe {
   if (result.kind === 'failed') {
     // Present but broken: do not send the user to their package manager for a
     // package they already have.
+    // Covers both a spawn failure and termination by a signal, neither of
+    // which yields an exit code.
     const where =
-      result.status === null ? 'could not be executed' : `exited with status ${result.status}`;
+      result.status === null ? 'failed without an exit status' : `exited with status ${result.status}`;
     const detail = result.detail ? `: ${result.detail}` : '';
     return {
       available: false,
