@@ -35,7 +35,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(title = "MXC Configuration"))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    expecting = "a configuration object"
+)]
 pub struct MxcConfig {
     /// Optional JSON Schema reference for editor validation. Accepted but
     /// ignored by the parser.
@@ -189,9 +193,18 @@ pub struct Lifecycle {
 pub struct ProcessContainer {
     /// Enforce least-privilege mode.
     pub least_privilege: Option<bool>,
-    /// AppContainer permissive learning mode.
+    /// AppContainer learning mode (deny-and-record): failed access checks are
+    /// logged for diagnostics while the accesses stay denied; containment is
+    /// unchanged. Distinct from the allow-all `permissiveLearningMode`
+    /// capability, which is injected internally by the `--audit` CLI flag or
+    /// dedicated denial-capture configuration.
     pub learning_mode: Option<bool>,
     /// AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+    /// Each array entry must contain exactly one capability name; commas are
+    /// rejected because BaseContainer uses commas as its wire delimiter.
+    /// `learningModeLogging` and `permissiveLearningMode` are reserved and
+    /// rejected here; use `learningMode`, `--audit`, or the dedicated denial
+    /// capture configuration instead.
     pub capabilities: Option<Vec<String>>,
     /// Windows denial capture. When present, the runner records the sandboxed
     /// process's access attempts to a learning-mode ETL trace for later
@@ -422,6 +435,8 @@ pub enum LaunchMethod {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 pub struct Experimental {
+    // Keep every direct field optional: state-aware parsing temporarily
+    // substitutes `{}` while validating cross-cutting fields from source text.
     /// Placeholder feature for testing experimental infrastructure.
     pub test: Option<TestFeature>,
     /// Windows Sandbox backend config.

@@ -548,6 +548,10 @@ struct DaclGuardedProcess {
 }
 
 impl SandboxProcess for DaclGuardedProcess {
+    fn warnings(&self) -> &[String] {
+        self.inner.warnings()
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         self.inner.take_stdin()
     }
