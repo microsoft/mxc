@@ -14,6 +14,15 @@
 //! [`EtlDenialAnalyzer`] implements the cross-platform
 //! [`learning_mode_core::DenialAnalyzer`] trait so the runner and tests can
 //! depend on the abstraction rather than this Windows-specific decoder.
+//!
+//! The diagnostic console has a separate real-time, display-oriented ETW
+//! consumer in `tools/mxc_diagnostic_console`. It is a binary-private module
+//! that owns trace sessions and channels arbitrary provider events to a UI.
+//! This backend instead reads sealed files synchronously, filters a fixed
+//! provider/event vocabulary, bounds results, and propagates target decode
+//! failures. Depending on the tool would invert the workspace dependency
+//! direction; shared generic TDH primitives can be extracted later if another
+//! runtime consumer needs them.
 
 use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;

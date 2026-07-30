@@ -4,6 +4,10 @@
 //! Decode a sealed learning-mode `.etl` into the captureDenials RFC 7464
 //! JSON text sequence, or dump its raw ETW events for schema discovery.
 //!
+//! This is a developer diagnostic for inspecting captured traces manually.
+//! End users and SDK agents do not invoke it: the BaseContainer runner seals
+//! and consumes the trace automatically during normal `captureDenials` use.
+//!
 //! Usage:
 //!
 //! ```text

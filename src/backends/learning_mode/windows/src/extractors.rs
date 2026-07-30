@@ -10,6 +10,12 @@
 //! de-duplicates them into the public
 //! [`learning_mode_core::DeniedResource`].
 //!
+//! These policy-oriented extractors intentionally do not reuse the diagnostic
+//! console's display mapping. The console accepts broad real-time provider
+//! traffic and formats it for humans; this module accepts only the
+//! learning-mode providers and produces the stable cross-platform denial
+//! model used for policy generation.
+//!
 //! ## Event vocabulary
 //!
 //! The learning-mode ETL carries a set of event IDs that map onto the
