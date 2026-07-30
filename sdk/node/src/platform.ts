@@ -360,11 +360,10 @@ function defaultBwrapVersionRunner(): BwrapVersionResult {
     if (e.code === 'ENOENT') {
       return { kind: 'notFound' };
     }
-    const stderr = typeof e.stderr === 'string' ? e.stderr : (e.stderr?.toString() ?? '');
     return {
       kind: 'failed',
       status: e.status ?? null,
-      detail: stderr.trim() || e.message,
+      detail: e.stderr?.toString().trim() || e.message,
     };
   }
 }
@@ -395,20 +394,15 @@ export function _setBwrapVersionRunner(fn: (() => BwrapVersionResult) | null): v
 export function _parseBwrapVersion(output: string): [number, number, number] | null {
   const token = output.split(/\s+/).find((t) => /^\d/.test(t));
   if (!token) return null;
-  const parts = token.split('.');
   const components: number[] = [];
-  for (let i = 0; i < 3; i++) {
-    if (i >= parts.length) {
-      // Genuinely absent component (e.g. a two-component "0.6") defaults to 0.
-      components.push(0);
-      continue;
-    }
-    const digits = /^\d+/.exec(parts[i]);
+  for (const part of token.split('.').slice(0, 3)) {
+    const digits = /^\d+/.exec(part);
     // Present but non-numeric: fail closed rather than guessing 0.
     if (!digits) return null;
     components.push(parseInt(digits[0], 10));
   }
-  return [components[0], components[1], components[2]];
+  // Only a genuinely absent component defaults to 0, so "0.6" is 0.6.0.
+  return [components[0], components[1] ?? 0, components[2] ?? 0];
 }
 
 /** Compare two `[major, minor, patch]` tuples lexicographically. */
@@ -449,7 +443,8 @@ export function _probeBubblewrap(): BubblewrapProbe {
   if (result.kind === 'failed') {
     // Present but broken: do not send the user to their package manager for a
     // package they already have.
-    const where = result.status === null ? 'could not be executed' : `exited with status ${result.status}`;
+    const where =
+      result.status === null ? 'could not be executed' : `exited with status ${result.status}`;
     const detail = result.detail ? `: ${result.detail}` : '';
     return {
       available: false,

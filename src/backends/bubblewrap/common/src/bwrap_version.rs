@@ -35,7 +35,7 @@ pub const MIN_BWRAP_VERSION: BwrapVersion = BwrapVersion::new(0, 5, 0);
 ///
 /// Ordering is the derived field order (major, then minor, then patch), which
 /// is exactly the semantic precedence bwrap releases use.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BwrapVersion {
     major: u32,
     minor: u32,
@@ -50,21 +50,6 @@ impl BwrapVersion {
             minor,
             patch,
         }
-    }
-
-    /// The major component.
-    pub const fn major(&self) -> u32 {
-        self.major
-    }
-
-    /// The minor component.
-    pub const fn minor(&self) -> u32 {
-        self.minor
-    }
-
-    /// The patch component.
-    pub const fn patch(&self) -> u32 {
-        self.patch
     }
 }
 
@@ -178,7 +163,7 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
 /// Validate a raw `bwrap --version` output string against
 /// [`MIN_BWRAP_VERSION`]. Split out from [`probe_bwrap`] so the decision logic
 /// is testable without a `bwrap` binary on the host.
-pub fn check_version_output(output: &str) -> Result<BwrapVersion, BwrapUnavailable> {
+fn check_version_output(output: &str) -> Result<BwrapVersion, BwrapUnavailable> {
     let version = parse_version(output)
         .ok_or_else(|| BwrapUnavailable::UnrecognizedVersion(output.trim().to_string()))?;
 
@@ -200,34 +185,28 @@ pub fn check_version_output(output: &str) -> Result<BwrapVersion, BwrapUnavailab
 /// that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
 /// rather than silently read as `0.6.0`. Returns `None` whenever the version
 /// cannot be determined, which callers treat as fail-closed.
-pub fn parse_version(output: &str) -> Option<BwrapVersion> {
+fn parse_version(output: &str) -> Option<BwrapVersion> {
     let token = output
         .split_whitespace()
         .find(|token| token.starts_with(|c: char| c.is_ascii_digit()))?;
 
+    // `map_or(Some(0), ..)` is the absent-vs-unreadable split: an exhausted
+    // iterator yields 0, a component `leading_number` rejects fails the parse.
     let mut components = token.split('.');
     let major = leading_number(components.next()?)?;
-    let minor = next_component(&mut components)?;
-    let patch = next_component(&mut components)?;
+    let minor = components.next().map_or(Some(0), leading_number)?;
+    let patch = components.next().map_or(Some(0), leading_number)?;
     Some(BwrapVersion::new(major, minor, patch))
-}
-
-/// Take the next version component: `0` when the iterator is exhausted (a
-/// two-component version such as `0.6` is fine), `None` when a component is
-/// present but has no leading digits (fail closed).
-fn next_component<'a>(components: &mut impl Iterator<Item = &'a str>) -> Option<u32> {
-    match components.next() {
-        Some(component) => leading_number(component),
-        None => Some(0),
-    }
 }
 
 /// Parse the leading run of ASCII digits of `component`, ignoring any suffix
 /// (so `"1-1"` yields `1`). Returns `None` when there is no leading digit or
 /// the number overflows.
 fn leading_number(component: &str) -> Option<u32> {
-    let digits: String = component.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
+    let end = component
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(component.len());
+    component[..end].parse().ok()
 }
 
 #[cfg(test)]
