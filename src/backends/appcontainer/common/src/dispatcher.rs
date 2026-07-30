@@ -329,7 +329,19 @@ fn select_backend_with_fallback(
     ),
     DispatchError,
 > {
-    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
+    // `--wait-for-debugger` needs a suspend point the Win32 `CreateProcess`
+    // contract actually guarantees. BaseContainer's
+    // `Experimental_CreateProcessInSandbox` may silently ignore
+    // CREATE_SUSPENDED on some OS builds (see `base_container_runner`'s
+    // creation-flags comment) -- which would let the sandboxed process start
+    // running before a debugger attaches, violating the feature's core
+    // guarantee. Skip Tier 1 whenever `wait_for_debugger` is requested so
+    // selection falls through to an AppContainer tier (2/3), whose
+    // `CreateProcess*` calls always honor CREATE_SUSPENDED per the documented
+    // Win32 contract. `BaseContainerRunner::validate` also rejects the flag
+    // directly, as defense-in-depth for callers that bypass this dispatcher.
+    let prefer_base_container = !request.wait_for_debugger;
+    let decision = fallback_detector::detect(&request.policy, prefer_base_container)?;
 
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
@@ -827,6 +839,29 @@ mod tests {
         let req = test_request(empty_policy());
         let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
+    }
+
+    #[test]
+    fn wait_for_debugger_skips_base_container_even_when_usable() {
+        // `--wait-for-debugger` must never land on BaseContainer:
+        // `Experimental_CreateProcessInSandbox` cannot guarantee
+        // CREATE_SUSPENDED is honored on every OS build, which would violate
+        // the flag's core "no code has run yet" guarantee. Force
+        // BaseContainer *usable* (bypassing real host capability) so this
+        // exercises the `prefer_base_container` gate itself, not host
+        // variance -- without the guard, Tier 1 would be selected (see
+        // `dispatch_t1_naturally_selected_when_bc_usable` /
+        // `select_backend_t1_builds_base_container_no_dacl`).
+        let _g = BcUsableGuard::set(true);
+        let mut req = test_request(empty_policy());
+        req.wait_for_debugger = true;
+        let (backend, _dacl, tier, _warnings) =
+            select_backend_with_fallback(&req).expect("selection should succeed");
+        assert!(
+            !matches!(tier, IsolationTier::BaseContainer),
+            "wait_for_debugger must never select BaseContainer, got {tier:?}"
+        );
+        assert!(matches!(backend, SelectedBackend::AppContainer(_)));
     }
 
     // -------------------------------------------------------------------

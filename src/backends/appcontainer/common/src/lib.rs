@@ -16,6 +16,8 @@ pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
 #[cfg(target_os = "windows")]
+pub mod debugger_wait;
+#[cfg(target_os = "windows")]
 pub mod dispatcher;
 #[cfg(target_os = "windows")]
 pub mod fallback_detector;
