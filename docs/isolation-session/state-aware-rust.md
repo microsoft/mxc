@@ -123,17 +123,71 @@ unrestricted-network acknowledgment — `defaultPolicy=allow` +
 enforcement — and refuse anything else, including an absent policy (which
 defaults to the unenforceable `block`). On the **post-provision** phases the
 network posture is fixed at provision, so any supplied network policy is
-rejected and an absent one is inherited. The only other caller-supplied knob
-it accepts is the optional Entra `user` bundle, at provision and start.
+rejected and an absent one is inherited.
 
-| Field | provision | start | exec | stop | deprovision |
-|---|---|---|---|---|---|
-| `policy.filesystem.{readwritePaths,readonlyPaths}` | rejected | rejected | rejected | rejected | rejected |
-| `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected |
-| `policy.network` — canonical `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** | rejected | rejected | rejected | rejected |
-| `policy.network` — any other value (incl. absent → `block`, host rules, proxy) | rejected | rejected | rejected | rejected | rejected |
-| `policy.ui` — see the known gap below | ignored | ignored | ignored | ignored | ignored |
-| `experimental.isolation_session.{provision,start}.user` | **honored** | **honored** | n/a | n/a | n/a |
+UI policy is rejected at every phase, on both surfaces. The backend has no
+UI-restriction primitive: the isolation session is a *separate OS session*,
+which isolates the host's UI from the contained code but does not deny the
+contained code UI capabilities. Measured inside a live session, window creation,
+GDI, and the session's own clipboard all work; only input injection is blocked.
+A `ui` policy therefore cannot be honored, and accepting it would assert
+guarantees — most importantly the Win32k attack-surface reduction that
+`disable: true` implies — that the backend does not provide. The refusal is
+presence-based: `UiPolicy`'s defaults are full lockdown, so an explicitly
+supplied lockdown `ui` is indistinguishable by value from an absent one.
+
+The only caller-supplied knob the backend accepts beyond the network
+acknowledgment is the optional Entra `user` bundle, at provision and start.
+
+The matrix covers the full surface a caller can express, on both the one-shot
+and state-aware paths. Dispositions come from the closed set in §10.3 of the
+[state-aware design](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md),
+plus `required` for the network acknowledgment and `n/a` where a field has no
+meaning for this backend.
+
+| Field | one-shot | provision | start | exec | stop | deprovision |
+|---|---|---|---|---|---|---|
+| `policy.filesystem.{readwritePaths,readonlyPaths}` | rejected | rejected | rejected | rejected | rejected | rejected |
+| `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected | rejected |
+| `policy.network` — canonical `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** | **required** | rejected | rejected | rejected | rejected |
+| `policy.network` — any other value (incl. absent → `block`, host rules, proxy) | rejected | rejected | rejected | rejected | rejected | rejected |
+| `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
+| `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
+| `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
+| `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
+| `containerId` | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
+| `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
+| `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
+| `experimental.isolation_session.user` (flat) | rejected | rejected | rejected | rejected | rejected | rejected |
+| `experimental.isolation_session.{provision,start}.user` | rejected | **honored** | **honored** | n/a | n/a | n/a |
+| `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected | rejected | rejected | rejected | rejected | rejected |
+
+Notes on the rows that are not a simple accept/reject:
+
+- **`lifecycle`** is refused by *value* on one-shot and by *section* on
+  state-aware. The in-proc API exposes no session-lifetime knob: one-shot always
+  stops the session and removes the agent user before returning, which is
+  exactly what `destroyOnExit: true` (the default) asks for — so the default is
+  honest and accepted. `destroyOnExit: false` asks the session to outlive the
+  call and cannot be delivered; `preservePolicy: true` is meaningless because
+  filesystem and network policy are rejected outright, leaving nothing to
+  preserve. On the state-aware path the parser rejects the whole `lifecycle`
+  section for every backend, so no per-value handling applies.
+- **`fallback`** is `n/a` rather than `rejected`. `allowDaclMutation` gates an
+  AppContainer-only DACL fallback this backend never performs, so either value
+  is vacuously satisfied and neither asserts anything untrue. Bringing it under
+  the single-backend-section check uniformly across backends is tracked
+  separately.
+- **`containerId`** is a caller-supplied label, not a restriction. This backend
+  addresses sandboxes by the OS-assigned agent user name, so the field has no
+  effect and ignoring it asserts nothing.
+- **`process` on non-exec state-aware phases** is rejected by the parser
+  (`process` is exec-only on the state-aware wire contract), not by the backend.
+- **The flat `experimental.isolation_session.user`** is rejected on both
+  surfaces: one-shot has no Entra mode, and a state-aware request must nest the
+  bundle under the phase it applies to. It was previously dropped silently,
+  which provisioned a *local* sandbox for a caller who asked for an Entra-backed
+  one.
 
 Rejection of `policy.*` fields surfaces as `error.code = "policy_validation"`.
 A malformed `user` shape (UPN missing `@`, empty `wamToken`) likewise surfaces
@@ -147,8 +201,8 @@ user it assigned at provision.
 ### Fields valid in both modes
 
 - `process.commandLine` — required for one-shot and for state-aware exec;
-  ignored at non-exec state-aware phases (the parser allows `process` to be
-  absent for non-exec phases).
+  rejected at non-exec state-aware phases (the parser refuses a `process`
+  section on any phase other than exec).
 - `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
   honoured per-process (each exec receives its own block).
 
@@ -156,19 +210,16 @@ user it assigned at provision.
 
 Both modes share the same policy matrix above. Every `policy.filesystem`
 field (`readwritePaths`, `readonlyPaths`, `deniedPaths`) is rejected at every
-phase (no host-folder-sharing primitive). The network policy is honesty-gated
+phase (no host-folder-sharing primitive). `policy.ui` is likewise rejected at
+every phase (no UI-restriction primitive). The network policy is honesty-gated
 per the matrix — provision requires the canonical unrestricted-network
 acknowledgment and post-provision rejects any supplied network policy
-(inheriting an absent one). One-shot enforces this via `validate_runner`;
+(inheriting an absent one). One-shot enforces all of this via `validate_runner`;
 state-aware enforces it via the `validate_<phase>` hooks.
 
-**Known gap — `policy.ui` is silently ignored.** The backend has no
-UI-restriction primitive, and it does not validate `policy.ui`, so a supplied
-UI policy is accepted and then dropped rather than refused. That is the same
-false-guarantee shape the network honesty gate closes: a caller asking for a
-UI restriction gets no error and no enforcement. Rejecting `policy.ui` is the
-intended end state, not a deliberate exemption — the matrix records `ignored`
-because that is the current behavior, not the desired one.
+The one asymmetry is `lifecycle`: one-shot refuses it by value (the defaults
+match what the backend actually does), while the state-aware parser refuses the
+whole section for every backend. See the matrix notes above.
 
 ### Fields valid in state-aware only
 

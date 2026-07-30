@@ -219,15 +219,41 @@ versions and stating that the bindings must be regenerated.
   enforcement).
 - Stdout / stderr capture and exit code propagation into `ScriptResponse`.
 
-**Not honored (accepted today, refused in a later change):**
+**Not honored (refused, not silently dropped):**
 
-- `lifecycle.destroyOnExit` / `lifecycle.preservePolicy`. The in-proc API
-  exposes no session-lifetime knob, so the backend cannot vary teardown: the
-  one-shot path always stops the session and deprovisions the agent user
-  before returning. `destroyOnExit: true` (the default) therefore matches the
-  actual behavior, but `destroyOnExit: false` cannot be honored.
-- `ui`. The backend has no UI-restriction primitive — see the honor matrix in
-  [state-aware-rust.md](state-aware-rust.md).
+- `lifecycle.destroyOnExit: false` and `lifecycle.preservePolicy: true`. The
+  in-proc API exposes no session-lifetime knob, so the backend cannot vary
+  teardown: the one-shot path always stops the session and removes the agent
+  user before returning. `destroyOnExit: true` (the default) is therefore
+  accepted because it matches actual behavior; `false` is refused. There is no
+  filesystem or network policy to preserve (both are rejected outright), so
+  `preservePolicy: true` is refused as meaningless here.
+- `ui` (any value). The backend has no UI-restriction primitive — see the
+  cross-cutting policy honor matrix below.
+
+## Cross-cutting policy honor matrix (one-shot)
+
+The full one-shot column of the backend's honor matrix. The state-aware columns,
+the rationale for each disposition, and the error mapping live in
+[state-aware-rust.md](state-aware-rust.md).
+
+| Field | one-shot disposition |
+|---|---|
+| `process.commandLine` | **honored** (required) |
+| `process.cwd` / `process.env` / `process.timeout` | **honored** |
+| `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
+| `network` — canonical unrestricted acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** |
+| `network` — anything else, including absent (defaults to the unenforceable `block`) | rejected |
+| `ui` | rejected — the session isolates the host's UI from the contained code but does not deny it UI capabilities, so a UI restriction cannot be honored |
+| `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
+| `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
+| `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
+| `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
+| `experimental.isolation_session.user` | rejected — Entra is state-aware-only |
+| `experimental.isolation_session.{provision,start}` | rejected — per-phase config is state-aware-only |
+| `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
+
+Refusals surface as a non-zero exit with the reason on stderr.
 
 **Deferred to follow-up work:**
 
