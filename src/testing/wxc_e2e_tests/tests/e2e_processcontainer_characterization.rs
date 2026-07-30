@@ -15,12 +15,22 @@
 //! been built or the host is missing process prerequisites. They therefore
 //! never red-fail on incapable CI, but lock in behavior on a prepared box.
 //!
-//! Scope note: env/cwd inheritance is intentionally not characterized here —
-//! the AppContainer "clean environment" model differs from the Unix backends,
-//! and the PR's env/cwd regressions were Seatbelt-specific. These tests cover
-//! the universally-meaningful contracts: exit-code propagation, stdout capture,
-//! and timeout enforcement.
+//! Scope note: env inheritance is intentionally not characterized here — the
+//! AppContainer "clean environment" model differs from the Unix backends. cwd
+//! *is* characterized (see the two `*_process_cwd*` tests below), because both
+//! Windows runners resolve an empty `process.cwd` to a policy-granted path
+//! rather than passing `NULL` to the launch API.
+//!
+//! Tier note: the ProcessContainer tier (BaseContainer vs AppContainer+DACL) is
+//! **not** independently selectable from a config — the dispatcher derives it
+//! purely from host capability, and the `MXC_FORCE_TIER` seam is `cfg(test)`-only
+//! so it has no effect on the production `wxc-exec.exe`. These tests therefore
+//! exercise whichever tier the prepared lane resolves to; running them on both a
+//! BaseContainer-capable and a downlevel host covers both tiers.
 #![cfg(target_os = "windows")]
+
+use std::fs;
+use std::path::PathBuf;
 
 use serde_json::json;
 use wxc_e2e_tests::{
@@ -42,6 +52,17 @@ fn config(label: &str, command_line: &str) -> serde_json::Value {
         "containerId": format!("char-pc-{label}"),
         "process": { "commandLine": command_line }
     })
+}
+
+/// Create a unique temporary directory for cwd characterization.
+fn unique_tempdir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("mxc-char-pc-{tag}-{nanos}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
 }
 
 /// Skip (rather than fail) when the local host cannot launch a sandboxed
@@ -132,5 +153,98 @@ fn processcontainer_timeout_kills_before_completion() {
         result.wall_time_ms < 6000,
         "timeout should fire well before the workload finishes; took {}ms",
         result.wall_time_ms
+    );
+}
+
+/// REGRESSION GUARD (both Windows runners).
+///
+/// With an empty `process.cwd`, neither ProcessContainer runner may pass a
+/// `NULL` current directory to the launch API: the child would then inherit the
+/// launcher's cwd, and when the sandbox token can't open it the kernel silently
+/// resets the child to the drive root (`C:\`). Instead the runners resolve the
+/// cwd via `ExecutionRequest::resolved_working_directory()` — the first
+/// `readwritePaths` entry.
+///
+/// The unit tests on that resolver only cover path *selection*; they would still
+/// pass if a runner ignored it and passed `NULL`. This test observes the child's
+/// actual cwd by having it create a file through a *relative* path and checking
+/// which directory it lands in.
+///
+/// `launch_dir` is the launcher's cwd and is *also* a granted readwrite path, so
+/// a `NULL`-cwd regression would be openable by the token and the probe would
+/// land there — making the two outcomes distinguishable.
+#[test]
+fn processcontainer_runs_in_first_readwrite_path_when_process_cwd_empty() {
+    if !ready() {
+        return;
+    }
+    let write_dir = unique_tempdir("cwd-write");
+    let launch_dir = unique_tempdir("cwd-launch");
+    let probe = "char_cwd_default_probe.txt";
+    let mut cfg = config("cwd-default", &format!("cmd /c echo CHAR_OK> {probe}"));
+    cfg["filesystem"] = json!({
+        "readwritePaths": [write_dir.to_string_lossy(), launch_dir.to_string_lossy()]
+    });
+    let result =
+        run_platform_config_value("processcontainer cwd default", &cfg, &[], Some(&launch_dir));
+    let in_launch = launch_dir.join(probe).exists();
+    let in_write = write_dir.join(probe).exists();
+    let _ = fs::remove_dir_all(&launch_dir);
+    let _ = fs::remove_dir_all(&write_dir);
+    if skip_if_missing_prereq(&result) {
+        return;
+    }
+    assert_eq!(
+        result.code,
+        Some(0),
+        "run failed:\n{}",
+        result.combined_output()
+    );
+    assert!(
+        in_write && !in_launch,
+        "expected the probe in the first readwrite policy path {} (resolved cwd \
+         with empty process.cwd); in_write={in_write} in_launch={in_launch}\n{}",
+        write_dir.display(),
+        result.combined_output()
+    );
+}
+
+/// Locks in that an explicit `process.cwd` still wins over the policy-path
+/// fallback introduced by `resolved_working_directory()`.
+#[test]
+fn processcontainer_honors_explicit_process_cwd() {
+    if !ready() {
+        return;
+    }
+    let explicit_dir = unique_tempdir("cwd-explicit");
+    let other_dir = unique_tempdir("cwd-other");
+    let probe = "char_cwd_explicit_probe.txt";
+    let mut cfg = config("cwd-explicit", &format!("cmd /c echo CHAR_OK> {probe}"));
+    cfg["process"]["cwd"] = json!(explicit_dir.to_string_lossy());
+    // `other_dir` is listed first so the fallback would resolve to it; the
+    // explicit cwd must take precedence.
+    cfg["filesystem"] = json!({
+        "readwritePaths": [other_dir.to_string_lossy(), explicit_dir.to_string_lossy()]
+    });
+    let result = run_platform_config_value("processcontainer cwd explicit", &cfg, &[], None);
+    let in_explicit = explicit_dir.join(probe).exists();
+    let in_other = other_dir.join(probe).exists();
+    let _ = fs::remove_dir_all(&explicit_dir);
+    let _ = fs::remove_dir_all(&other_dir);
+    if skip_if_missing_prereq(&result) {
+        return;
+    }
+    assert_eq!(
+        result.code,
+        Some(0),
+        "run failed:\n{}",
+        result.combined_output()
+    );
+    assert!(
+        in_explicit && !in_other,
+        "expected the probe file in the explicit process.cwd {}; \
+         in_explicit={in_explicit} in_other={in_other}\n{}",
+        explicit_dir.display(),
+        result.combined_output()
     );
 }
