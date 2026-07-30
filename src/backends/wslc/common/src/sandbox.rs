@@ -79,10 +79,16 @@ struct WslcSandboxProcess {
     /// Exit code cached by the first successful wait, so repeat waits are
     /// idempotent (and don't re-run teardown).
     exit: Option<i32>,
-    /// Set once the first wait's deadline elapsed, so repeat waits keep
-    /// reporting the timeout instead of blocking for another full deadline (or
-    /// re-waiting on an already-destroyed container).
+    /// Set once the wait deadline elapsed *and* the kill was confirmed, so
+    /// `TimedOut` is reported stickily rather than a later-observed exit code.
+    /// Deliberately narrower than [`deadline_elapsed`](Self::deadline_elapsed):
+    /// this flag is what promises the process was terminated, so it must never
+    /// be set on an unconfirmed kill.
     timed_out: bool,
+    /// Set once the wait deadline elapsed, whether or not the kill that follows
+    /// could be confirmed. Records only that the deadline is spent, so a repeat
+    /// `wait` resumes at confirmation instead of blocking out another full one.
+    deadline_elapsed: bool,
     /// Set once the container has been *confirmed* torn down, so `Drop` doesn't
     /// repeat it — and, just as importantly, still retries when teardown failed
     /// or could not be confirmed. Tracked separately from `exit`: a caller that
@@ -129,9 +135,31 @@ impl WslcSandboxProcess {
             started,
             exit: None,
             timed_out: false,
+            deadline_elapsed: false,
             torn_down: false,
             logger: Logger::new(Mode::Buffer),
         }
+    }
+
+    /// Complete the timeout path: confirm the sandboxed process is really gone,
+    /// tear the container down, and only then make `TimedOut` sticky.
+    ///
+    /// `wait_for_exit`'s timeout branch only *asks* the container to stop
+    /// (`SIGTERM`, short grace, HRESULT ignored), so reaching it proves nothing
+    /// about whether the process died — while returning `TimedOut` promises it
+    /// was terminated. Every failure here therefore leaves both `timed_out` and
+    /// `torn_down` unset, so the promise is never made on an unconfirmed kill
+    /// and a later `wait` (or `Drop`) retries instead.
+    fn finish_timed_out(&mut self) -> std::io::Result<i32> {
+        self.started
+            .confirm_terminated(&mut self.logger)
+            .map_err(std::io::Error::other)?;
+        self.started
+            .destroy(&mut self.logger)
+            .map_err(std::io::Error::other)?;
+        self.torn_down = true;
+        self.timed_out = true;
+        Err(timeout_error(self.started.timeout_ms))
     }
 }
 
@@ -186,13 +214,20 @@ impl SandboxProcess for WslcSandboxProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
-        // A prior timeout is checked first so it stays sticky: `wait` must keep
-        // reporting `TimedOut` rather than a later-observed exit code.
+        // A *confirmed* timeout is checked first so it stays sticky: `wait` must
+        // keep reporting `TimedOut` rather than a later-observed exit code.
         if self.timed_out {
             return Err(timeout_error(self.started.timeout_ms));
         }
         if let Some(code) = self.exit {
             return Ok(code);
+        }
+        // An earlier call already burned the deadline but could not confirm the
+        // kill. Resume at the confirmation step: re-entering `wait_for_exit`
+        // would block for another full deadline, while reporting `TimedOut`
+        // outright would promise a kill that never happened.
+        if self.deadline_elapsed {
+            return self.finish_timed_out();
         }
 
         // Drain the streams the caller did not take, concurrently with the
@@ -232,23 +267,9 @@ impl SandboxProcess for WslcSandboxProcess {
         self.started.close_streams();
 
         if timed_out {
-            // The deadline elapsing is a fact, so record it before teardown:
-            // whatever happens below, a repeat `wait` must report the timeout
-            // rather than block for another full deadline.
-            self.timed_out = true;
-            // Nothing so far proves the sandboxed process actually died —
-            // `wait_for_exit`'s timeout branch only *asks* the container to stop
-            // and ignores the result. Returning `TimedOut` promises it was
-            // terminated, so confirm that before making the promise, and before
-            // `torn_down` waives `Drop`'s retry.
-            self.started
-                .confirm_terminated(&mut self.logger)
-                .map_err(std::io::Error::other)?;
-            self.started
-                .destroy(&mut self.logger)
-                .map_err(std::io::Error::other)?;
-            self.torn_down = true;
-            return Err(timeout_error(self.started.timeout_ms));
+            // Only that the deadline elapsed — not that anything was killed.
+            self.deadline_elapsed = true;
+            return self.finish_timed_out();
         }
 
         // The exit callback fired, so the process is confirmed gone and only the
