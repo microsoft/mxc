@@ -330,6 +330,21 @@ fn select_backend_with_fallback(
     DispatchError,
 > {
     let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
+    if request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer {
+        let filesystem_mode = match decision.tier {
+            IsolationTier::AppContainerBfs => FilesystemMode::Bfs,
+            IsolationTier::AppContainerDacl => FilesystemMode::Dacl,
+            IsolationTier::BaseContainer => unreachable!(),
+        };
+        return Ok((
+            SelectedBackend::AppContainer(AppContainerScriptRunner::with_filesystem_mode(
+                filesystem_mode,
+            )),
+            None,
+            decision.tier,
+            decision.warnings,
+        ));
+    }
 
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
@@ -671,6 +686,21 @@ mod tests {
         assert!(
             d.has_dacl_guard(),
             "T3 always requires DaclManager (grants applied)"
+        );
+    }
+
+    #[test]
+    fn capture_denials_defers_fallback_rejection_without_dacl_setup() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _tmp) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+
+        let dispatched = dispatch_with_fallback(&req).expect("validation should own the rejection");
+        assert!(matches!(dispatched.tier, IsolationTier::AppContainerDacl));
+        assert!(
+            !dispatched.has_dacl_guard(),
+            "capture fallback must not apply host DACLs before validation"
         );
     }
     #[test]
