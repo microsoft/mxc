@@ -5,6 +5,8 @@
   "description": "Repository tooling: version-sync and config schema validation gates. Not published.",
   "scripts": {
     "check-schema-versions": "node check-schema-versions.js",
+    "check-wire-mapping-coverage": "node check-wire-mapping-coverage.js",
+    "test": "node --test check-wire-mapping-coverage.test.js",
     "validate-configs": "node validate-configs.js"
   },
   "dependencies": {

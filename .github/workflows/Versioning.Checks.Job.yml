@@ -39,5 +39,8 @@ jobs:
       - name: Check every wire field is consumed by the parser (no silent drops)
         run: node scripts/versioning/check-wire-mapping-coverage.js
 
+      - name: Self-test the wire-mapping gate (its exclusions must keep working)
+        run: node --test scripts/versioning/check-wire-mapping-coverage.test.js
+
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js
