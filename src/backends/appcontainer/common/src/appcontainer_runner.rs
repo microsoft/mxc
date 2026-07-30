@@ -1346,7 +1346,23 @@ impl SandboxBackend for AppContainerScriptRunner {
                 return Err(ScriptResponse::error(&e.to_string()));
             }
         };
-        if let Err(e) = child.resume() {
+
+        // `--wait-for-debugger`: block (no timeout) until an external
+        // debugger attaches to the real sandboxed PID, then clear only
+        // wxc-exec's own CREATE_SUSPENDED hold — see `debugger_wait` module
+        // docs for why this leaves the debugger's own attach-time freeze in
+        // place (so a plain `g` is enough, no `~0 m` needed).
+        if request.wait_for_debugger {
+            if let Err(e) = crate::debugger_wait::wait_for_debugger_then_resume(
+                child.process.get(),
+                child.thread.get(),
+                child.pid,
+                logger,
+            ) {
+                self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
+                return Err(ScriptResponse::error(&e.to_string()));
+            }
+        } else if let Err(e) = child.resume() {
             self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
             return Err(ScriptResponse::error(&e.to_string()));
         }

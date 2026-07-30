@@ -1327,6 +1327,7 @@ fn convert_wire_config(
         testing_features_enabled: false,
         experimental,
         dry_run: false,
+        wait_for_debugger: false,
     })
 }
 

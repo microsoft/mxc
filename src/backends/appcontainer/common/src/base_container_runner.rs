@@ -1967,14 +1967,69 @@ impl BaseContainerRunner {
             }
         };
 
-        // The child was created suspended; now that it is in the job object (so
-        // every descendant it spawns is captured), resume its main thread. If the
-        // create API ignored CREATE_SUSPENDED the thread is already running and
-        // this is a harmless no-op.
-        // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
-        // handle; `ResumeThread` only adjusts its suspend count.
-        unsafe {
-            ResumeThread(pi.hThread);
+        // `--wait-for-debugger`: block (no timeout) until an external
+        // debugger attaches to the real sandboxed PID, then clear only
+        // wxc-exec's own CREATE_SUSPENDED hold — see `debugger_wait` module
+        // docs for why this leaves the debugger's own attach-time freeze in
+        // place (so a plain `g` is enough, no `~0 m` needed). Unreachable in
+        // practice: `validate()` rejects `--wait-for-debugger` for this
+        // backend before `spawn_base` runs (BaseContainer cannot guarantee
+        // CREATE_SUSPENDED is honored on every OS build). Handled here
+        // anyway so a direct/test caller that bypasses `validate()` still
+        // fails closed instead of silently violating the suspend guarantee.
+        if request.wait_for_debugger {
+            if let Err(e) = crate::debugger_wait::wait_for_debugger_then_resume(
+                pi.hProcess,
+                pi.hThread,
+                pi.dwProcessId,
+                logger,
+            ) {
+                let _ = writeln!(
+                    logger,
+                    "Error: --wait-for-debugger failed ({e}); the sandboxed child has \
+                     been terminated."
+                );
+                // `wait_for_debugger_then_resume` already terminated the
+                // child on failure; reap it and tear down the same
+                // sandbox/proxy state the job-setup-failure path above does.
+                unsafe {
+                    let _ = WaitForSingleObject(pi.hProcess, u32::MAX);
+                    let _ = CloseHandle(pi.hProcess);
+                    let _ = CloseHandle(pi.hThread);
+                }
+                if request.lifecycle.destroy_on_exit {
+                    run_sandbox_cleanup(
+                        &identity,
+                        &sid_string,
+                        request.policy.network_proxy.is_enabled(),
+                        logger,
+                    );
+                    sandbox_tracking::unregister_ctrl_c_cleanup();
+                }
+                self.proxy_coordinator.stop(logger);
+
+                const WAIT_FOR_DEBUGGER_FAILED_MSG: &str =
+                    "--wait-for-debugger failed while waiting for a debugger to attach; \
+                     the sandboxed child was terminated.";
+                return Err(ScriptResponse {
+                    exit_code: -1,
+                    error_message: WAIT_FOR_DEBUGGER_FAILED_MSG.to_string(),
+                    standard_err: WAIT_FOR_DEBUGGER_FAILED_MSG.to_string(),
+                    extended_error: format!("wait_for_debugger_then_resume failed: {e}"),
+                    failure_phase: FailurePhase::LaunchFailed,
+                    ..Default::default()
+                });
+            }
+        } else {
+            // The child was created suspended; now that it is in the job object (so
+            // every descendant it spawns is captured), resume its main thread. If the
+            // create API ignored CREATE_SUSPENDED the thread is already running and
+            // this is a harmless no-op.
+            // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
+            // handle; `ResumeThread` only adjusts its suspend count.
+            unsafe {
+                ResumeThread(pi.hThread);
+            }
         }
 
         // Hand ownership to the caller via `BaseChild`, which performs
@@ -2042,6 +2097,25 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        // `Experimental_CreateProcessInSandbox` is not guaranteed to honor
+        // CREATE_SUSPENDED on every OS build (see the creation-flags comment
+        // above), so this backend cannot guarantee the sandboxed process has
+        // run no code before a debugger attaches -- the core contract
+        // `--wait-for-debugger` promises. The dispatcher already routes
+        // `--wait-for-debugger` requests to an AppContainer tier
+        // automatically (its `CreateProcess*` contract always honors
+        // CREATE_SUSPENDED); this only fails closed for direct callers of
+        // this backend.
+        if request.wait_for_debugger {
+            return Err(ScriptResponse::error(
+                "--wait-for-debugger is not supported by the BaseContainer backend: \
+                 Experimental_CreateProcessInSandbox is not guaranteed to honor \
+                 CREATE_SUSPENDED on every OS build, so it cannot guarantee the \
+                 sandboxed process has run no code before a debugger attaches. Use \
+                 the AppContainer tier instead (the dispatcher does this \
+                 automatically for --wait-for-debugger).",
+            ));
+        }
         let capture_denials = request.policy.capture_denials.is_some();
         let use_process_security_environment = self.uses_process_security_environment(request);
         if capture_denials && !use_process_security_environment {
@@ -3588,6 +3662,27 @@ mod tests {
             "expected the capability-gate message, got: {}",
             err.error_message
         );
+    }
+
+    #[test]
+    fn validate_runner_rejects_wait_for_debugger() {
+        // BaseContainer's `Experimental_CreateProcessInSandbox` cannot
+        // guarantee CREATE_SUSPENDED is honored on every OS build, so this
+        // backend must fail closed for `--wait-for-debugger` rather than
+        // silently risk running code before a debugger attaches. The
+        // dispatcher already routes this flag to an AppContainer tier (see
+        // `dispatcher::tests::wait_for_debugger_skips_base_container_even_when_usable`);
+        // this covers a direct/test caller that bypasses the dispatcher.
+        let runner = BaseContainerRunner::new();
+        let request = ExecutionRequest {
+            wait_for_debugger: true,
+            ..ExecutionRequest::default()
+        };
+
+        let err = runner
+            .validate(&request)
+            .expect_err("--wait-for-debugger must be rejected by the BaseContainer backend");
+        assert!(err.error_message.contains("wait-for-debugger"));
     }
 
     #[test]
