@@ -117,6 +117,11 @@ Windows-only `captureDenials` config switch drives collecting those events and
 surfacing the resulting denials to the caller. Its `mode` selects how each
 ungranted access is handled while it is recorded:
 
+> **Host requirement.** `captureDenials` requires a feature-enabled Windows
+> build exposing the BaseContainer security-environment and Learning Mode APIs.
+> It is not supported by the AppContainer fallback tiers; unsupported hosts
+> return `backend_unavailable`.
+
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.
 - `mode: "allow"` maps onto `permissiveLearningMode` (allow-and-record)

@@ -36,8 +36,6 @@ use wxc_common::string_util;
 
 /// Registry base path for sandbox tracking entries.
 const TRACKING_BASE: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\ProcessSandboxes\\Mappings";
-const CAPTURE_PROFILE_CLEANUP_DEFERRED_REASON: &str =
-    "capture initialization failed and the AppContainer profile could not be deleted";
 
 /// Generate a unique sandbox identity string: `sandbox-{16 lowercase hex chars}`.
 ///
@@ -139,6 +137,13 @@ pub fn write_tracking_entry(entry: &TrackingEntry, logger: &mut Logger) -> Resul
 ///
 /// Adds a `CleanupDeferred` REG_SZ value to the existing tracking key.
 pub fn mark_cleanup_deferred(sid_string: &str, reason: &str, logger: &mut Logger) {
+    if sid_string.is_empty() {
+        let _ = writeln!(
+            logger,
+            "warning: cleanup could not be tracked because no AppContainer SID was derived"
+        );
+        return;
+    }
     let key_path = format!("{}\\{}", TRACKING_BASE, sid_string);
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -195,21 +200,20 @@ pub fn cleanup_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
     delete_tracking_key(sid_string, logger);
 }
 
-/// Cleans up a sandbox whose process was never launched.
-///
-/// The tracking entry is removed only after profile deletion succeeds. If
-/// deletion fails, the entry is retained and marked deferred so a later
-/// maintenance pass still has the identity and SID needed for recovery.
-pub fn cleanup_unlaunched_sandbox(identity: &str, sid_string: &str, logger: &mut Logger) {
-    if crate::appcontainer_runner::delete_app_container_profile(identity, logger) {
-        delete_tracking_key(sid_string, logger);
-    } else {
-        mark_cleanup_deferred(sid_string, CAPTURE_PROFILE_CLEANUP_DEFERRED_REASON, logger);
-    }
+/// Removes the tracking entry for a sandbox that never launched.
+pub fn remove_tracking_entry(sid_string: &str, logger: &mut Logger) {
+    delete_tracking_key(sid_string, logger);
 }
 
 /// Remove the registry tracking key and all its subkeys (including Active).
 fn delete_tracking_key(sid_string: &str, logger: &mut Logger) {
+    if sid_string.is_empty() {
+        let _ = writeln!(
+            logger,
+            "warning: refusing to delete sandbox tracking without an AppContainer SID"
+        );
+        return;
+    }
     let key_path = format!("{}\\{}", TRACKING_BASE, sid_string);
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     match hkcu.delete_subkey_all(&key_path) {
@@ -365,5 +369,17 @@ mod tests {
             sid_str.starts_with("S-1-15-2-"),
             "unexpected SID: {sid_str}"
         );
+    }
+
+    #[test]
+    fn empty_sid_never_targets_shared_tracking_root() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        mark_cleanup_deferred("", "test", &mut logger);
+        remove_tracking_entry("", &mut logger);
+
+        let output = logger.get_buffer();
+        assert!(output.contains("no AppContainer SID was derived"));
+        assert!(output.contains("refusing to delete sandbox tracking"));
     }
 }

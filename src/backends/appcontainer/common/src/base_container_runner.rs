@@ -204,6 +204,9 @@ const CAPTURE_API_UNAVAILABLE_REQUIREMENT: &str =
     "This feature requires a feature-enabled Windows build that exports the learning-mode trace APIs from processmodel.dll.";
 const CAPTURE_SECURITY_ENVIRONMENT_CLEANUP_DEFERRED_REASON: &str =
     "capture initialization failed and the process security environment could not be closed";
+const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
+const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
+    "CreateProcessAsUserInsideSecurityEnvironment";
 
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
@@ -266,7 +269,6 @@ impl BaseContainerRunner {
         &mut self,
         error: &learning_mode_windows::LearningModeError,
         request: &ExecutionRequest,
-        identity: &str,
         sid_string: &str,
         logger: &mut Logger,
     ) {
@@ -281,7 +283,10 @@ impl BaseContainerRunner {
                     logger,
                 );
             } else {
-                sandbox_tracking::cleanup_unlaunched_sandbox(identity, sid_string, logger);
+                // CaptureSession::begin receives the sandbox specification,
+                // not the later process identity. Once its environment is
+                // closed, only the pre-launch tracking entry needs removal.
+                sandbox_tracking::remove_tracking_entry(sid_string, logger);
             }
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
@@ -1176,13 +1181,7 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    self.cleanup_capture_begin_failure(
-                        &e,
-                        &request,
-                        &identity,
-                        &sid_string,
-                        logger,
-                    );
+                    self.cleanup_capture_begin_failure(&e, &request, &sid_string, logger);
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1195,7 +1194,7 @@ impl BaseContainerRunner {
         }
 
         // The launch yields (api_return_code, last_win32_error_on_failure).
-        let (success, last_error) = if let (Some(session), Some(se_api)) =
+        let (success, last_error, launch_api_name) = if let (Some(session), Some(se_api)) =
             (capture_session.as_ref(), capture_se_api.as_ref())
         {
             // Single-attempt in-environment launch. The learning-mode security
@@ -1224,12 +1223,16 @@ impl BaseContainerRunner {
                 )
             };
             if ok != 0 {
-                (ok, None)
+                (ok, None, CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API)
             } else {
-                (0, Some(unsafe { GetLastError() }))
+                (
+                    0,
+                    Some(unsafe { GetLastError() }),
+                    CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API,
+                )
             }
         } else {
-            SandboxLaunchArgs {
+            let (success, error) = SandboxLaunchArgs {
                 api: create_process_in_sandbox,
                 command_line: &mut cmd_wide,
                 current_directory: cwd_ptr,
@@ -1243,7 +1246,8 @@ impl BaseContainerRunner {
                 current_env_ptr,
                 &mut pi,
                 logger,
-            )
+            );
+            (success, error, CREATE_PROCESS_IN_SANDBOX_API)
         };
 
         if success == 0 {
@@ -1277,7 +1281,7 @@ impl BaseContainerRunner {
                 &request.policy.readonly_paths,
             );
 
-            let extended_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let extended_error = format!("{launch_api_name} failed: {err:?}");
             let _ = writeln!(logger, "Error: {extended_error}");
 
             let _ = writeln!(
@@ -1603,7 +1607,7 @@ impl BaseContainerSandboxProcess {
                     Ok(())
                 }
                 Err(error) => Err(std::io::Error::other(format!(
-                    "captureDenials failed to seal the denial trace: {error}"
+                    "captureDenials failed to finalize the denial capture: {error}"
                 ))),
             }
         } else {
