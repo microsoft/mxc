@@ -90,8 +90,18 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     fn add_raw_denial(&mut self, raw: RawDenial) {
-        let path =
-            path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone());
+        let path = if raw.resource_type == learning_mode_core::ResourceType::File {
+            match path_norm::to_user_visible(&raw.object_name) {
+                Some(path) if path_norm::is_user_visible_absolute(&path) => path,
+                Some(_) => return,
+                None if path_norm::is_user_visible_absolute(&raw.object_name) => {
+                    raw.object_name.clone()
+                }
+                None => return,
+            }
+        } else {
+            path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone())
+        };
         let dedup_path = match raw.resource_type {
             learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
                 path.to_ascii_lowercase()
@@ -372,6 +382,34 @@ mod tests {
         let out = dedup_to_resources(denials).denials;
         assert_eq!(out[0].path, r"C:\z");
         assert_eq!(out[1].path, r"C:\a");
+    }
+
+    #[test]
+    fn file_denials_require_a_canonical_user_visible_path() {
+        let denials = vec![
+            raw(
+                r"\Device\Mup\server\share\file.txt",
+                AccessType::Read,
+                ResourceType::File,
+            ),
+            raw(
+                r"\Device\UnknownVolume\file.txt",
+                AccessType::Read,
+                ResourceType::File,
+            ),
+            raw(r"\??\C:relative.txt", AccessType::Read, ResourceType::File),
+            raw(r"\??\PIPE\name", AccessType::Read, ResourceType::File),
+            raw(
+                r"\Device\Mup\server\pipe\name",
+                AccessType::Read,
+                ResourceType::File,
+            ),
+        ];
+
+        let out = dedup_to_resources(denials).denials;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, r"\\server\share\file.txt");
     }
 
     #[test]
