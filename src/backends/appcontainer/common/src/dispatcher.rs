@@ -338,13 +338,18 @@ fn select_backend_with_fallback(
     ),
     DispatchError,
 > {
-    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
-    if request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer {
-        return Err(DispatchError::CaptureDenialsUnsupported {
-            tier: decision.tier,
-        });
+    // captureDenials uses the official V2 process-security-environment API,
+    // independently of the legacy SBOX tier probe/fallback chain.
+    if request.policy.capture_denials.is_some() {
+        return Ok((
+            SelectedBackend::BaseContainer(BaseContainerRunner::new()),
+            None,
+            IsolationTier::BaseContainer,
+            Vec::new(),
+        ));
     }
 
+    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
             // Tier 1 delegates filesystem-policy enforcement to
@@ -689,22 +694,18 @@ mod tests {
     }
 
     #[test]
-    fn capture_denials_rejects_fallback_before_backend_or_dacl_setup() {
+    fn capture_denials_selects_v2_backend_without_legacy_fallback() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
         let req = test_request(policy);
 
-        let error = match dispatch_with_fallback(&req) {
-            Ok(_) => panic!("capture fallback must be rejected"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            DispatchError::CaptureDenialsUnsupported {
-                tier: IsolationTier::AppContainerDacl
-            }
-        ));
+        let dispatched = dispatch_with_fallback(&req).expect("V2 backend should be selected");
+        assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
+        assert!(
+            !dispatched.has_dacl_guard(),
+            "V2 capture must never apply legacy host DACLs"
+        );
     }
     #[test]
     fn dispatch_fallback_disabled_errors() {

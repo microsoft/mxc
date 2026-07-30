@@ -25,8 +25,8 @@ use learning_mode_windows::{
 };
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED,
-    ERROR_NOT_SUPPORTED, E_NOTIMPL, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
+    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -49,10 +49,9 @@ use crate::launch_diagnostics::{
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use process_security_environment_spec::process_security_environment_layout::{
-    finish_process_security_environment_buffer, NetworkPolicy as PsecNetworkPolicy,
-    NetworkPolicyArgs as PsecNetworkPolicyArgs, ProcessSecurityEnvironment,
-    ProcessSecurityEnvironmentArgs, ProxyInfo as PsecProxyInfo, ProxyInfoArgs as PsecProxyInfoArgs,
-    SchemaVersion,
+    finish_process_security_environment_buffer, EndpointPolicy, EndpointPolicyArgs, FilterAction,
+    NetworkPolicy as PsecNetworkPolicy, NetworkPolicyArgs as PsecNetworkPolicyArgs,
+    ProcessSecurityEnvironment, ProcessSecurityEnvironmentArgs, SchemaVersion,
 };
 use sandbox_spec::base_container_layout::{
     finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, IntegrityLevel,
@@ -347,21 +346,9 @@ impl BaseContainerRunner {
         }
     }
 
-    fn cleanup_capture_prelaunch_failure(
-        &mut self,
-        request: &ExecutionRequest,
-        sid_string: &str,
-        logger: &mut Logger,
-    ) {
-        // This cannot be deferred to BaseContainerRunner::drop: the runner may
-        // outlive a failed spawn.
-        if request.lifecycle.destroy_on_exit {
-            // CaptureSession::begin receives the sandbox specification, not
-            // the later process identity. Its infallible environment close
-            // leaves only the pre-launch tracking entry to remove.
-            sandbox_tracking::remove_tracking_entry(sid_string, logger);
-            sandbox_tracking::unregister_ctrl_c_cleanup();
-        }
+    fn cleanup_capture_begin_failure(&mut self, logger: &mut Logger) {
+        // CaptureSession owns and closes the PSEC environment. No legacy
+        // identity/tracking state is created for this path.
         self.proxy_coordinator.stop(logger);
     }
 
@@ -668,26 +655,24 @@ impl BaseContainerRunner {
         let fs_read_only = create_string_vector(&mut builder, &request.policy.readonly_paths);
         let fs_deny = create_string_vector(&mut builder, &request.policy.denied_paths);
 
-        let network_policy = if request.policy.network_proxy.is_enabled() {
-            let proxy = request
-                .policy
-                .network_proxy
-                .address
-                .as_ref()
-                .map(|address| {
-                    let url = builder.create_string(&address.to_url());
-                    PsecProxyInfo::create(&mut builder, &PsecProxyInfoArgs { url: Some(url) })
-                });
-            Some(PsecNetworkPolicy::create(
-                &mut builder,
-                &PsecNetworkPolicyArgs {
-                    proxy,
-                    ..Default::default()
-                },
-            ))
-        } else {
-            None
+        let default_action = match request.policy.default_network_policy {
+            NetworkPolicy::Allow => FilterAction::allow,
+            NetworkPolicy::Block => FilterAction::deny,
         };
+        let egress = EndpointPolicy::create(
+            &mut builder,
+            &EndpointPolicyArgs {
+                default_action,
+                ..Default::default()
+            },
+        );
+        let network_policy = Some(PsecNetworkPolicy::create(
+            &mut builder,
+            &PsecNetworkPolicyArgs {
+                egress: Some(egress),
+                ..Default::default()
+            },
+        ));
 
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
             &wxc_common::ui_policy::resolve_ui_restrictions(
@@ -932,12 +917,14 @@ impl BaseContainerRunner {
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
 
-        // 1. Build the FlatBuffer sandbox spec from the request policy.
-        let spec_bytes = Self::build_sandbox_spec(&request);
-
-        Self::log_sandbox_spec(&spec_bytes, logger);
-
         let capture_denials = request.policy.capture_denials.clone();
+        let spec_bytes = if capture_denials.is_none() {
+            let bytes = Self::build_sandbox_spec(&request);
+            Self::log_sandbox_spec(&bytes, logger);
+            Some(bytes)
+        } else {
+            None
+        };
         if capture_denials.is_some() {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
@@ -974,15 +961,21 @@ impl BaseContainerRunner {
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
-        // 2. Dynamically load the API from processmodel.dll.
-        let create_process_in_sandbox = match Self::load_api() {
-            Ok(f) => f,
-            Err(e) => return Err(ScriptResponse::error(&e)),
+        // The normal BaseContainer path uses the SBOX one-shot API. The V2
+        // capture path uses only the process-security-environment APIs.
+        let create_process_in_sandbox = if capture_denials.is_none() {
+            let api = match Self::load_api() {
+                Ok(f) => f,
+                Err(e) => return Err(ScriptResponse::error(&e)),
+            };
+            let _ = writeln!(
+                logger,
+                "loaded Experimental_CreateProcessInSandbox from processmodel.dll"
+            );
+            Some(api)
+        } else {
+            None
         };
-        let _ = writeln!(
-            logger,
-            "loaded Experimental_CreateProcessInSandbox from processmodel.dll"
-        );
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Launch process");
 
@@ -998,10 +991,15 @@ impl BaseContainerRunner {
             cwd_wide.as_ptr()
         };
 
-        // Identity: when destroy_on_exit is true we generate a random ephemeral
+        let legacy_destroy_on_exit = capture_denials.is_none() && request.lifecycle.destroy_on_exit;
+
+        // Identity applies only to the SBOX one-shot API. PSEC creates and owns
+        // its own AppContainer identity and profile.
         // identity so each sandbox gets a unique, cleanable AppContainer profile.
         // Otherwise we honour whatever the caller passed in (or the default).
-        let (identity, sid_string) = if request.lifecycle.destroy_on_exit {
+        let (identity, sid_string) = if capture_denials.is_some() {
+            ("<process-security-environment>".to_string(), String::new())
+        } else if legacy_destroy_on_exit {
             let ephemeral = sandbox_tracking::generate_sandbox_identity();
             let _ = writeln!(
                 logger,
@@ -1053,7 +1051,7 @@ impl BaseContainerRunner {
 
         // Register Ctrl+C handler early so cleanup runs if wxc-exec is interrupted
         // during or after the create call.
-        if request.lifecycle.destroy_on_exit {
+        if legacy_destroy_on_exit {
             sandbox_tracking::register_ctrl_c_cleanup(
                 &identity,
                 &sid_string,
@@ -1312,7 +1310,7 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
+                    self.cleanup_capture_begin_failure(logger);
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1367,7 +1365,7 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
+                    self.cleanup_capture_begin_failure(logger);
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1402,13 +1400,29 @@ impl BaseContainerRunner {
                 )
             }
         } else {
+            let create_process_in_sandbox = match create_process_in_sandbox {
+                Some(api) => api,
+                None => {
+                    return Err(ScriptResponse::error(
+                        "internal error: SBOX launch API was not initialized",
+                    ))
+                }
+            };
+            let spec_bytes = match spec_bytes.as_deref() {
+                Some(bytes) => bytes,
+                None => {
+                    return Err(ScriptResponse::error(
+                        "internal error: SBOX specification was not initialized",
+                    ))
+                }
+            };
             let (success, error) = SandboxLaunchArgs {
                 api: create_process_in_sandbox,
                 command_line: &mut cmd_wide,
                 current_directory: cwd_ptr,
                 startup_info: &si,
                 identity: &identity_wide,
-                sandbox_specification: &spec_bytes,
+                sandbox_specification: spec_bytes,
                 no_window_flag,
             }
             .launch_with_environment_fallback(
@@ -1435,8 +1449,8 @@ impl BaseContainerRunner {
                 .take()
                 .and_then(|session| session.finish(None).err());
             if capture_denials.is_some() {
-                self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
-            } else if request.lifecycle.destroy_on_exit {
+                self.cleanup_capture_begin_failure(logger);
+            } else if legacy_destroy_on_exit {
                 // The OS may have created the AppContainer profile before
                 // failing, so run the same cleanup logic used on normal exit.
                 run_sandbox_cleanup(
@@ -1549,8 +1563,8 @@ impl BaseContainerRunner {
                     .take()
                     .and_then(|session| session.finish(None).err());
                 if capture_denials.is_some() {
-                    self.cleanup_capture_prelaunch_failure(&request, &sid_string, logger);
-                } else if request.lifecycle.destroy_on_exit {
+                    self.cleanup_capture_begin_failure(logger);
+                } else if legacy_destroy_on_exit {
                     run_sandbox_cleanup(
                         &identity,
                         &sid_string,
@@ -1608,7 +1622,7 @@ impl BaseContainerRunner {
             stdout_read,
             stderr_read,
             timeout_ms: get_timeout_milliseconds(request.script_timeout),
-            destroy_on_exit: request.lifecycle.destroy_on_exit,
+            destroy_on_exit: legacy_destroy_on_exit,
             proxy_enabled: request.policy.network_proxy.is_enabled(),
             identity,
             sid_string,
@@ -1656,28 +1670,71 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if request.policy.capture_denials.is_some() && request.policy.least_privilege_mode {
+        let capture_denials = request.policy.capture_denials.is_some();
+        if capture_denials && request.policy.least_privilege_mode {
             return Err(ScriptResponse::error(
                 "processContainer.captureDenials cannot be combined with \
                  processContainer.leastPrivilege because the Windows process \
                  security-environment contract does not support LPAC tokens",
             ));
         }
+        if capture_denials && request.policy.network_proxy.is_enabled() {
+            return Err(ScriptResponse::error(
+                "processContainer.captureDenials cannot be combined with network.proxy \
+                 until the V2 process-security-environment path can supply the required \
+                 proxy AppContainer peer identity",
+            ));
+        }
         // deniedPaths reaches the OS via the SandboxSpec `fs_deny` field, honored
         // only when the OS advertises SANDBOX_CAP_FS_DENY. The dispatcher only
         // routes deny here when supported; fail closed for direct callers.
-        if !request.policy.denied_paths.is_empty()
-            && !crate::fallback_detector::base_container_supports_deny_paths()
-        {
-            return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG,
-            ));
+        if !request.policy.denied_paths.is_empty() {
+            let deny_supported = if capture_denials {
+                let api = SecurityEnvironmentApi::load().map_err(|error| ScriptResponse {
+                    failure_phase: FailurePhase::BackendUnavailable,
+                    ..ScriptResponse::error(&format!(
+                        "process security-environment API unavailable: {error}"
+                    ))
+                })?;
+                api.supports_deny_paths().map_err(|error| ScriptResponse {
+                    failure_phase: FailurePhase::BackendUnavailable,
+                    ..ScriptResponse::error(&format!(
+                        "could not query process security-environment support: {error}"
+                    ))
+                })?
+            } else {
+                crate::fallback_detector::base_container_supports_deny_paths()
+            };
+            if !deny_supported {
+                return Err(ScriptResponse::error(
+                    wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG,
+                ));
+            }
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
+        if capture_denials {
+            return match (SecurityEnvironmentApi::load(), LearningModeApi::load()) {
+                (Ok(_), Ok(_)) => Ok(()),
+                (security_environment_api, learning_mode_api) => {
+                    let detail = match (&security_environment_api, &learning_mode_api) {
+                        (Err(error), _) => format!("security-environment API: {error}"),
+                        (_, Err(error)) => format!("learning-mode trace API: {error}"),
+                        _ => "unknown".to_string(),
+                    };
+                    Err(ScriptResponse {
+                        failure_phase: FailurePhase::BackendUnavailable,
+                        ..ScriptResponse::error(&format!(
+                            "captureDenials requires the official V2 APIs ({detail})"
+                        ))
+                    })
+                }
+            };
+        }
+
         Self::is_base_container_api_present().map_err(|e| {
             let hint = format!(
                 "BaseContainer API unavailable: {e}\n\
@@ -2511,7 +2568,10 @@ mod tests {
     #[test]
     fn capture_factory_injects_begin_failure() {
         let factory = Arc::new(FakeCaptureFactory {
-            begin_error: Some(("StartLearningModeTrace", windows::Win32::Foundation::E_FAIL.0)),
+            begin_error: Some((
+                "StartLearningModeTrace",
+                windows::Win32::Foundation::E_FAIL.0,
+            )),
             finish_error: None,
             begin_calls: AtomicUsize::new(0),
             finish_calls: Arc::new(AtomicUsize::new(0)),
@@ -2535,7 +2595,10 @@ mod tests {
     fn capture_factory_injects_finish_failure_once() {
         let factory = Arc::new(FakeCaptureFactory {
             begin_error: None,
-            finish_error: Some(("StopLearningModeTrace", windows::Win32::Foundation::E_FAIL.0)),
+            finish_error: Some((
+                "StopLearningModeTrace",
+                windows::Win32::Foundation::E_FAIL.0,
+            )),
             begin_calls: AtomicUsize::new(0),
             finish_calls: Arc::new(AtomicUsize::new(0)),
         });
@@ -2647,10 +2710,6 @@ mod tests {
         request.policy.readwrite_paths = vec!["C:\\temp".into()];
         request.policy.readonly_paths = vec!["C:\\Windows".into()];
         request.policy.denied_paths = vec!["C:\\secret".into()];
-        request.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
-        };
 
         let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
 
@@ -2672,12 +2731,29 @@ mod tests {
             spec.fs_deny().unwrap().iter().collect::<Vec<_>>(),
             vec!["C:\\secret"]
         );
-        assert_eq!(
-            spec.network_policy()
-                .and_then(|policy| policy.proxy())
-                .and_then(|proxy| proxy.url()),
-            Some("http://127.0.0.1:8080")
-        );
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("PSEC must carry an explicit egress default");
+        assert_eq!(egress.default_action(), FilterAction::deny);
+        assert!(egress.allow().is_none());
+        assert!(egress.deny().is_none());
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_preserves_allow_egress() {
+        let mut request = ExecutionRequest::default();
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("PSEC must carry an explicit egress default");
+
+        assert_eq!(egress.default_action(), FilterAction::allow);
+        assert_eq!(spec.capabilities(), Some("internetClient"));
     }
 
     #[test]
@@ -2918,5 +2994,22 @@ mod tests {
             .expect_err("PSEC cannot represent leastPrivilege");
 
         assert!(error.error_message.contains("leastPrivilege"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_capture_denials_with_proxy() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        let error = runner
+            .validate(&request)
+            .expect_err("V2 capture proxy requires peer identity plumbing");
+
+        assert!(error.error_message.contains("network.proxy"));
     }
 }

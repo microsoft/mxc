@@ -5,8 +5,7 @@
 //! **Learning Mode trace API** exported by `processmodel.dll`.
 //!
 //! Supported Windows builds expose a privileged, per-client learning-mode
-//! ETW trace behind three flat C exports in `processmodel.dll` — the same system DLL
-//! the BaseContainer backend already loads for `Experimental_CreateProcessInSandbox`:
+//! ETW trace behind three official flat C exports in `processmodel.dll`:
 //!
 //! ```c
 //! HRESULT StartLearningModeTrace(HPROCESS_SECURITY_ENVIRONMENT environment, HLEARNINGMODE_TRACE* trace);
@@ -23,8 +22,7 @@
 //!
 //! Because the exports only exist on feature-enabled OS builds, this crate resolves
 //! them at runtime via `LoadLibrary`/`GetProcAddress` behind the [`is_learning_mode_api_available`]
-//! capability probe, mirroring the existing `Experimental_CreateProcessInSandbox`
-//! adapter. The crate compiles on every platform: the capability probe returns
+//! capability probe. The crate compiles on every platform: the capability probe returns
 //! `false` on non-Windows targets, while the loader and capture lifecycle types are
 //! exported only on Windows.
 

@@ -70,6 +70,10 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
     process_security_environment: *mut HANDLE,
 ) -> HRESULT;
 
+/// `HRESULT QueryProcessSecurityEnvironmentSupport(UINT64* supportFlags)`.
+type PfnQueryProcessSecurityEnvironmentSupport =
+    unsafe extern "system" fn(support_flags: *mut u64) -> HRESULT;
+
 /// `void CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT processSecurityEnvironment)`.
 type PfnCloseProcessSecurityEnvironment =
     unsafe extern "system" fn(process_security_environment: HANDLE);
@@ -287,6 +291,8 @@ impl Drop for SecurityEnvironmentStartupInfo {
 pub struct SecurityEnvironmentExportReport {
     /// Resolved name of the create export, if present.
     pub create: Option<&'static str>,
+    /// Resolved name of the support-query export, if present.
+    pub query_support: Option<&'static str>,
     /// Resolved name of the close export, if present.
     pub close: Option<&'static str>,
 }
@@ -295,17 +301,19 @@ impl SecurityEnvironmentExportReport {
     /// `true` only when every export required for the 2-phase launch resolved.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.create.is_some() && self.close.is_some()
+        self.create.is_some() && self.query_support.is_some() && self.close.is_some()
     }
 }
 
 const CREATE_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment"];
+const QUERY_SUPPORT_NAMES: &[&core::ffi::CStr] = &[c"QueryProcessSecurityEnvironmentSupport"];
 const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 
 /// Resolved process security-environment exports from `processmodel.dll`.
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
+    query_support: PfnQueryProcessSecurityEnvironmentSupport,
     close: PfnCloseProcessSecurityEnvironment,
 }
 
@@ -313,6 +321,7 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityEnvironmentApi")
             .field("create", &(self.create as *const ()))
+            .field("query_support", &(self.query_support as *const ()))
             .field("close", &(self.close as *const ()))
             .finish()
     }
@@ -337,6 +346,7 @@ impl SecurityEnvironmentApi {
                 .map_err(|e| LearningModeError::DllLoad(e.to_string()))?;
 
             let create_proc = resolve_any(hmodule, CREATE_NAMES)?;
+            let query_support_proc = resolve_any(hmodule, QUERY_SUPPORT_NAMES)?;
             let close_proc = resolve_any(hmodule, CLOSE_NAMES)?;
 
             Ok(Self {
@@ -344,12 +354,32 @@ impl SecurityEnvironmentApi {
                     unsafe extern "system" fn() -> isize,
                     PfnCreateProcessSecurityEnvironment,
                 >(create_proc),
+                query_support: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    PfnQueryProcessSecurityEnvironmentSupport,
+                >(query_support_proc),
                 close: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     PfnCloseProcessSecurityEnvironment,
                 >(close_proc),
             })
         }
+    }
+
+    /// Whether the official V2 API supports native deny paths.
+    pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
+        const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+        let mut support_flags = 0u64;
+        // SAFETY: `query_support` matches the official V2 declaration and
+        // `support_flags` is a valid out-pointer.
+        let result = unsafe { (self.query_support)(&mut support_flags) };
+        if result.is_err() {
+            return Err(LearningModeError::HResultCall {
+                function: "QueryProcessSecurityEnvironmentSupport",
+                code: result.0,
+            });
+        }
+        Ok(support_flags & PSE_SUPPORT_FS_DENY != 0)
     }
 
     /// Create a process security environment from a PSEC FlatBuffer
@@ -388,12 +418,17 @@ impl SecurityEnvironmentApi {
                 code: result.0,
             });
         }
+        if env.0.is_null() {
+            return Err(LearningModeError::HResultCall {
+                function: "CreateProcessSecurityEnvironment",
+                code: windows::Win32::Foundation::E_UNEXPECTED.0,
+            });
+        }
         Ok(ProcessSecurityEnvironment {
             handle: env,
             close: self.close,
         })
     }
-
 }
 
 /// Resolve the first name in `names` that is present in `hmodule`.
@@ -451,6 +486,7 @@ pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
     unsafe {
         SecurityEnvironmentExportReport {
             create: first_present(hmodule, CREATE_NAMES),
+            query_support: first_present(hmodule, QUERY_SUPPORT_NAMES),
             close: first_present(hmodule, CLOSE_NAMES),
         }
     }

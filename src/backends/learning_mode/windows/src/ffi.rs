@@ -3,9 +3,9 @@
 
 //! Windows runtime FFI for the `processmodel.dll` Learning Mode trace exports.
 //!
-//! The three exports are resolved once via `LoadLibraryExW(LOAD_LIBRARY_SEARCH_SYSTEM32)`
-//! and `GetProcAddress`. As with the sibling `Experimental_CreateProcessInSandbox`
-//! adapter, `processmodel.dll` is intentionally never freed: it is a system DLL that
+//! The three official V2 exports are resolved via
+//! `LoadLibraryExW(LOAD_LIBRARY_SEARCH_SYSTEM32)` and `GetProcAddress`.
+//! `processmodel.dll` is intentionally never freed: it is a system DLL that
 //! stays resident for the process lifetime, so the module handle is used only to
 //! resolve exports and then dropped without `FreeLibrary`.
 
@@ -166,6 +166,12 @@ impl LearningModeApi {
             return Err(LearningModeError::HResultCall {
                 function: "StartLearningModeTrace",
                 code: result.0,
+            });
+        }
+        if trace.0.is_null() {
+            return Err(LearningModeError::HResultCall {
+                function: "StartLearningModeTrace",
+                code: windows::Win32::Foundation::E_UNEXPECTED.0,
             });
         }
         Ok(LearningModeTraceHandle::new(trace, self.close))

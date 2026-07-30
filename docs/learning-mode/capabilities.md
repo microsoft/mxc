@@ -126,6 +126,11 @@ ungranted access is handled while it is recorded:
 > the Windows process security-environment API used for capture does not expose
 > an LPAC token option, so MXC rejects that combination rather than silently
 > weakening the requested policy.
+>
+> `captureDenials` also cannot currently be combined with `network.proxy`.
+> The V2 process security-environment proxy contract requires a separate proxy
+> AppContainer peer identity; MXC rejects the combination until that peer is
+> provisioned by the capture launch path.
 
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.
