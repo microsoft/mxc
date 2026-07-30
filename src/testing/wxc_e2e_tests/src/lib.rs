@@ -540,19 +540,28 @@ pub fn has_platform_exec() -> bool {
     }
 }
 
-/// Whether `bwrap` (Bubblewrap) is installed and runnable on this Linux host.
-/// Bubblewrap characterization tests skip cleanly when it is absent (e.g. a CI
-/// runner without `bubblewrap` installed).
+/// Whether `bwrap` (Bubblewrap) is installed, runnable, and new enough on this
+/// Linux host. Bubblewrap characterization tests skip cleanly otherwise (e.g. a
+/// CI runner without `bubblewrap` installed, or one shipping a release older
+/// than [`bwrap_common::bwrap_version::MIN_BWRAP_VERSION`]) — the backend
+/// rejects such hosts up front, so the tests would have nothing to exercise.
 pub fn has_bwrap() -> bool {
-    let available = Command::new("bwrap")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !available {
-        println!("SKIPPED: bwrap not found on PATH — install `bubblewrap` to run these tests");
+    #[cfg(target_os = "linux")]
+    {
+        match bwrap_common::bwrap_version::probe_bwrap() {
+            Ok(_) => true,
+            Err(err) => {
+                println!("SKIPPED: {err}");
+                false
+            }
+        }
     }
-    available
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        println!("SKIPPED: Bubblewrap is only available on Linux");
+        false
+    }
 }
 
 /// Opt-in switch for the Windows ProcessContainer characterization tests.

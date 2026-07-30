@@ -273,12 +273,15 @@ function computeSupport(): PlatformSupport {
     // are installed; callers pick via the containment field.
     const methods: ContainmentBackend[] = [];
     if (isLxcAvailable()) methods.push('lxc');
-    if (isBubblewrapAvailable()) methods.push('bubblewrap');
+    const bubblewrap = probeBubblewrap();
+    if (bubblewrap.available) {
+      methods.push('bubblewrap');
+    } else if (methods.length === 0) {
+      support.reason = `Neither LXC nor Bubblewrap is available on this system (${bubblewrap.reason})`;
+    }
     if (methods.length > 0) {
       support.isSupported = true;
       support.availableMethods = methods;
-    } else {
-      support.reason = 'Neither LXC nor Bubblewrap is available on this system';
     }
     return support;
   }
@@ -313,15 +316,90 @@ function isLxcAvailable(): boolean {
 }
 
 /**
- * Check if Bubblewrap (bwrap) is available on the system
+ * Minimum `bwrap` version the Bubblewrap backend supports, as
+ * `[major, minor, patch]`.
+ *
+ * This is the oldest release that has **every** flag the Rust argument builder
+ * emits. `--ro-bind-try` (deny-by-default baseline mounts) landed in bwrap
+ * 0.3.1 and `--clearenv` (minimal sandbox environment) in 0.5.0, so
+ * `--clearenv` sets the floor.
+ *
+ * Mirrors `MIN_BWRAP_VERSION` in
+ * `src/backends/bubblewrap/common/src/bwrap_version.rs` — keep both in sync.
  */
-function isBubblewrapAvailable(): boolean {
-  try {
-    execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
+const MIN_BWRAP_VERSION: readonly [number, number, number] = [0, 5, 0];
+
+/** Outcome of the Bubblewrap probe: available, or unavailable with a reason. */
+type BubblewrapProbe = { available: true } | { available: false; reason: string };
+
+/**
+ * Parse the version out of a `bwrap --version` line such as
+ * `"bubblewrap 0.11.2"`.
+ *
+ * Deliberately lenient about what surrounds the number so distro-patched
+ * version strings (`0.4.1-1`, `0.11.0+really0.10.0`, a bare `0.6`) still
+ * resolve: the first whitespace-separated token starting with a digit is
+ * taken, split on `.`, and each of the (up to three) components contributes
+ * its leading digits.
+ *
+ * @internal Exported for unit tests.
+ * @returns `[major, minor, patch]`, or `null` when no version token is present.
+ */
+export function _parseBwrapVersion(output: string): [number, number, number] | null {
+  const token = output.split(/\s+/).find((t) => /^\d/.test(t));
+  if (!token) return null;
+  const components = token.split('.').map((component) => {
+    const digits = /^\d+/.exec(component);
+    return digits ? parseInt(digits[0], 10) : 0;
+  });
+  return [components[0], components[1] ?? 0, components[2] ?? 0];
+}
+
+/** Compare two `[major, minor, patch]` tuples lexicographically. */
+function compareVersions(
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
   }
+  return 0;
+}
+
+/**
+ * Check whether Bubblewrap (bwrap) is installed *and* new enough.
+ *
+ * Presence on PATH is not sufficient: a `bwrap` older than
+ * {@link MIN_BWRAP_VERSION} would reject flags the backend always emits and
+ * fail at spawn time with an opaque "unknown option" error. Unparsable output
+ * fails closed — without a version we cannot assert the required flags exist.
+ */
+function probeBubblewrap(): BubblewrapProbe {
+  const minVersion = MIN_BWRAP_VERSION.join('.');
+  let output: string;
+  try {
+    output = execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
+  } catch {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) is not installed or not on PATH; version ${minVersion} or newer is required`,
+    };
+  }
+
+  const version = _parseBwrapVersion(output);
+  if (!version) {
+    return {
+      available: false,
+      reason: `could not determine the Bubblewrap (bwrap) version from ${JSON.stringify(output.trim())}; version ${minVersion} or newer is required`,
+    };
+  }
+  if (compareVersions(version, MIN_BWRAP_VERSION) < 0) {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) ${version.join('.')} is too old; version ${minVersion} or newer is required`,
+    };
+  }
+  return { available: true };
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   _resetPlatformSupportCache,
   _setProbeRunner,
   _setWindowsBuildQuery,
+  _parseBwrapVersion,
   findWxcExecutable,
 } from '../../src/platform.js';
 
@@ -378,5 +379,26 @@ describe('isolation_session availability gate', () => {
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
     assert.strictEqual(support.availableMethods[0], 'processcontainer');
+  });
+});
+
+// The Bubblewrap probe gates on version, not just presence: `--clearenv`
+// (emitted unconditionally by the Rust argument builder) only exists in
+// bwrap 0.5.0+. Mirrors the Rust tests in
+// `src/backends/bubblewrap/common/src/bwrap_version.rs`.
+describe('bwrap version parsing', () => {
+  it('parses the standard `bwrap --version` output', () => {
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.2\n'), [0, 11, 2]);
+  });
+
+  it('parses distro-patched and short version strings', () => {
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.4.1-1'), [0, 4, 1]);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.0+really0.10.0'), [0, 11, 0]);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.6'), [0, 6, 0]);
+  });
+
+  it('returns null when no version token is present', () => {
+    assert.strictEqual(_parseBwrapVersion(''), null);
+    assert.strictEqual(_parseBwrapVersion('bwrap: command not found'), null);
   });
 });
