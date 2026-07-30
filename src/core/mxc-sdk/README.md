@@ -93,6 +93,8 @@ The handle is modelled on [`std::process::Child`]:
 - `id()` returns the child's OS process id, for external monitoring or a
   caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
+- `warnings()` returns policy security warnings detected while spawning the
+  sandbox, such as `permissiveLearningMode` weakening deny-by-default.
 - `kill()` terminates the sandboxed process **and its descendants** (a
   process-tree kill): on Unix the child leads its own process group and the
   whole group is signalled (an immediate `SIGKILL`, no graceful `SIGTERM`);
@@ -103,9 +105,10 @@ The handle is modelled on [`std::process::Child`]:
   `Exited(code)` or `TimedOut` if the timeout elapses (`Err` is reserved for an
   actual OS/wait failure).
 - `wait_with_output()` consumes the handle and returns an `Output` with the
-  `WaitOutcome` plus the captured `stdout`/`stderr` — it drains both streams
-  concurrently for you, the safe alternative to `take_stdout()` + `take_stderr()`
-  (reading one to EOF before the other can deadlock an output-heavy child).
+  `WaitOutcome`, policy security `warnings`, and captured `stdout`/`stderr` — it
+  drains both streams concurrently for you, the safe alternative to
+  `take_stdout()` + `take_stderr()` (reading one to EOF before the other can
+  deadlock an output-heavy child).
 - `stdout_closer()` / `stderr_closer()` → `Option<StreamCloser>`: a
   closer that makes an in-flight or subsequent read on the taken stream return
   EOF promptly **without** killing the child — for abandoning a stream a

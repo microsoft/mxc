@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use crate::config::{
-    deny_file_set, initialize_filesystem, load_config, update_from_access_events,
-    write_added_paths_summary,
+    deny_file_set, initialize_filesystem, load_config, merge_capabilities,
+    resolve_adjusted_config_path, save_adjusted_config, update_from_access_events,
+    write_added_paths_summary, write_detection_summary, write_requested_capabilities_summary,
 };
 use crate::event_parser::parse_events;
 use crate::wpr_path::wpr_command;
@@ -20,7 +21,6 @@ pub struct StopOptions {
     pub log_dir: Option<PathBuf>,
     pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
-    pub adjusted_config_path: Option<PathBuf>,
     /// When set, skip `wpr -stop` and treat the supplied .etl as the
     /// captured trace. Useful for re-processing a previously captured
     /// trace without an active WPR session.
@@ -142,6 +142,9 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
 
     let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
 
+    write_detection_summary(&parse.valid_access_events, &parse.requested_capabilities);
+    write_requested_capabilities_summary(&parse.requested_capabilities, opts.verbose);
+
     let config_path = match opts.config_path.as_ref() {
         Some(p) => p,
         None => return Ok(()),
@@ -193,16 +196,57 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         opts.verbose,
     )?;
 
-    write_added_paths_summary(&added, opts.verbose);
-
-    // `adjusted_config_path` is accepted today so the wxc-exec --audit
-    // harness can pass it through; the Adjusted_*.json writer arrives
-    // in the next PR (config-generation).
-    if let Some(p) = opts.adjusted_config_path.as_ref() {
-        let _ = p;
+    if !parse.requested_capabilities.is_empty() {
+        merge_capabilities(&mut config, &parse.requested_capabilities)?;
     }
 
+    let adjusted = resolve_adjusted_config_path(&dest_config)?;
+
+    // Enforce the invariant that the comment above `dest_config` relies
+    // on: the adjusted output must never clobber the operator's input
+    // snapshot. The derived `Adjusted_<leaf>` name can't collide today,
+    // but check canonically so any future spelling (`.`/`..`, 8.3, or a
+    // symlinked alias of the same file) is caught rather than assumed
+    // impossible.
+    if same_config_target(&adjusted, &dest_config) {
+        anyhow::bail!(
+            "adjusted config path {} would overwrite the input snapshot {}",
+            adjusted.display(),
+            dest_config.display()
+        );
+    }
+
+    // Create the parent directory here — propagating any error — rather
+    // than silently inside the (now pure) resolver. A missing parent is
+    // surfaced instead of swallowed.
+    if let Some(parent) = adjusted.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create parent directory {} for adjusted config",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    save_adjusted_config(&config, &adjusted)?;
+
+    write_added_paths_summary(&added, opts.verbose);
     Ok(())
+}
+
+/// True iff `a` and `b` denote the same file. Compares canonically when
+/// both already exist (resolving `.`/`..`, 8.3, and symlink aliases);
+/// falls back to a lexical comparison when either side doesn't exist
+/// yet (the adjusted output typically doesn't). `dest_config` always
+/// exists at the call site, so the canonical arm fires whenever the
+/// adjusted path also resolves to an existing file.
+fn same_config_target(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]
@@ -306,5 +350,26 @@ mod tests {
             msg.contains("simulated spawn failure"),
             "error must surface the underlying io::Error context: {msg}",
         );
+    }
+
+    #[test]
+    fn same_config_target_matches_identical_existing_path() {
+        // Two spellings of the same existing file must be detected as
+        // the same target so the snapshot-clobber guard fires.
+        let dir = std::env::temp_dir().join(format!("plm_same_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("config.json");
+        std::fs::write(&a, b"{}").unwrap();
+        let b = dir.join(".").join("config.json");
+        assert!(
+            same_config_target(&a, &b),
+            "same file via different spelling"
+        );
+        let other = dir.join("Adjusted_config.json");
+        assert!(
+            !same_config_target(&a, &other),
+            "distinct files must not collide"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "learning_mode_windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wxc_common = { workspace = true }
+windows = { workspace = true }
+windows-core = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+sandbox_spec = { workspace = true }
+flatbuffers = { workspace = true }

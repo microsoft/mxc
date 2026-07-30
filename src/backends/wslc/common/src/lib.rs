@@ -9,3 +9,4 @@
 pub mod policy_mapping;
 pub mod wsl_container_runner;
 pub mod wslc_bindings;
+pub mod wslcsdk_sys;

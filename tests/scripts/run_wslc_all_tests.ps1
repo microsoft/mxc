@@ -234,6 +234,22 @@ $null = $results.Add(@{
     Reason  = $(if ($objPass) { "" } else { "object-validation test failed" })
 })
 
+# Denied-path `..`-through-junction pre-flight validation (comment 1): a deny
+# that only lands inside a mounted tree after following a junction AND folding
+# `..` across not-yet-created components must be rejected at pre-flight. Owns its
+# own directory+junction fixture, like the object test above.
+$ddtScript = Join-Path $PSScriptRoot "run_wslc_dotdot_alias_test.ps1"
+$ddtArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $ddtArgs.Debug = $true }
+& $ddtScript @ddtArgs
+$ddtPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_denied_dotdot_alias.json"
+    Pass    = $ddtPass
+    Skipped = $false
+    Reason  = $(if ($ddtPass) { "" } else { "dotdot-alias validation test failed" })
+})
+
 Write-Host "`n--- Denied Masking / Most-Specific Tests ---" -ForegroundColor Cyan
 # Denied-path masking and most-specific-path-wins on WSLC. Each is delegated to
 # a standalone script that owns its on-disk fixture (a read-write mount plus
@@ -265,6 +281,20 @@ $null = $results.Add(@{
 
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
+# Delegate the cooperative proxy fixture to its owning script, which asserts
+# HTTP_PROXY injection/scrub, NO_PROXY neutralization, and attacker-value
+# removal -- assertions the marker-only Run-WslcTest path cannot make.
+$proxyScript = Join-Path $PSScriptRoot "run_wslc_proxy_test.ps1"
+$proxyArgs = @{ WxcExecPath = $WxcExec }
+if ($Debug) { $proxyArgs.Debug = $true }
+& $proxyScript @proxyArgs
+$proxyPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "wslc_network_proxy.json"
+    Pass    = $proxyPass
+    Skipped = $false
+    Reason  = $(if ($proxyPass) { "" } else { "cooperative proxy test failed" })
+})
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_tcp.json" -OutputContains "PORT_MAPPING_TCP_OK"))
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_multiple.json" -OutputContains "PORT_MAPPING_MULTI_OK"))
 

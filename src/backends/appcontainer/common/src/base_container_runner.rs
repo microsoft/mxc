@@ -609,6 +609,14 @@ impl BaseContainerRunner {
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
         );
 
+        // --- Learning-mode capabilities (parity with AppContainerScriptRunner) ---
+        // Emit per-capability diagnostics (informational for `learningModeLogging`,
+        // a security warning for `permissiveLearningMode`).
+        crate::appcontainer_runner::log_learning_mode_capability_diagnostics(
+            &request.policy.capabilities,
+            logger,
+        );
+
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
         if request.policy.network_proxy.builtin_test_server {
