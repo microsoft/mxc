@@ -634,15 +634,14 @@ pub(crate) fn invoke_ace_walk_with_index(
 /// `found`. This is the shared implementation every other entry point
 /// funnels through.
 ///
-/// **Partial results on error.** The walk inserts as it goes, so a
+/// **Partial writes on error.** The walk inserts as it goes, so a
 /// buffer that decodes cleanly up to a corrupt tail leaves the
-/// already-matched names in `found` and still returns `Err`. This is
-/// deliberate: those earlier ACEs parsed correctly, and discarding them
-/// would lose real capability evidence because of an unrelated trailing
-/// byte. Callers must therefore treat `Err` as "this blob was truncated,
-/// count it as data loss" rather than "nothing was written" — see
-/// `access_failure::consume_access_failure`, which counts the failure
-/// into `parse_failures` while keeping the partial set.
+/// already-matched names in `found` *and* returns `Err`. Callers that
+/// feed a security policy must therefore treat `Err` as fail-closed:
+/// pass a per-blob scratch set and discard it on error rather than
+/// pointing this at their accumulated set. See
+/// `access_failure::consume_access_failure`, which stages into
+/// `ParseAccumulator::ace_matches` and only promotes on `Ok`.
 pub fn invoke_ace_walk_with_index_into(
     buf: &[u8],
     index: &CapabilityIndex,
@@ -1031,11 +1030,11 @@ mod tests {
     }
 
     #[test]
-    fn truncated_tail_keeps_capabilities_matched_before_the_failure() {
-        // Pins the documented partial-result contract: the walk inserts
-        // as it goes, so names matched before a corrupt tail survive the
-        // Err. Callers rely on this (they count the failure rather than
-        // discarding the set), so a change here is a behavior change.
+    fn truncated_tail_writes_partially_so_callers_must_stage() {
+        // Pins the low-level contract that motivates fail-closed
+        // staging in `consume_access_failure`: the walker DOES leave
+        // matches behind on error, which is exactly why a caller must
+        // not point it at an accumulated policy set.
         let sid = well_world_sid();
         let idx = cap_index_for(&sid, "internetClient");
         let mut buf = build_ace(GRANT, &sid);
@@ -1047,7 +1046,7 @@ mod tests {
         assert!(err.is_err(), "truncated tail must still report an error");
         assert!(
             found.contains("internetClient"),
-            "capabilities matched before the truncation must be retained"
+            "walker writes as it goes; callers must stage and discard on Err"
         );
     }
 

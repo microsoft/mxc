@@ -36,28 +36,40 @@ pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedE
         if let Some(blob) = ev.event_data.get(idx) {
             let blob_str = blob.as_str();
             if !blob_str.trim().is_empty() {
-                // A structurally invalid ACE blob must not vanish: the
-                // file-path half of this event still succeeds, so
-                // dropping the error here would silently lose every
-                // capability the event carried with nothing in the
-                // output to show for it. Count it like any other parse
-                // failure so the end-of-parse total stays honest.
-                //
-                // The walk inserts as it goes, so a blob that is valid
-                // up to a corrupt tail leaves its already-matched
-                // capabilities in `requested_capabilities` and is still
-                // counted here. That is intended — see
-                // `extract_caps::invoke_ace_walk_with_index_into`.
-                if let Err(err) = crate::extract_caps::extract_caps_with_index_into(
+                // Fail closed. The walker inserts matches as it goes, so
+                // a blob that is valid up to a corrupt tail would
+                // otherwise contribute capabilities from a record we
+                // know is malformed. Since the blob is
+                // attacker-influenceable and the output is a security
+                // policy, stage matches in a scratch set and promote
+                // them only if the entire walk succeeds; on failure the
+                // staged matches are dropped and the record is counted
+                // as data loss.
+                acc.ace_matches.clear();
+                let outcome = crate::extract_caps::extract_caps_with_index_into(
                     blob_str,
                     &acc.capability_index,
                     acc.verbose,
                     &mut acc.ace_scratch,
-                    &mut acc.requested_capabilities,
-                ) {
-                    acc.parse_failures += 1;
-                    if acc.verbose {
-                        eprintln!("Failed to decode DACL ACE blob for an EventID=14 event: {err}");
+                    &mut acc.ace_matches,
+                );
+                match outcome {
+                    Ok(()) => {
+                        // Move the staged names across; `drain` reuses
+                        // the scratch set's capacity for the next event.
+                        for name in acc.ace_matches.drain() {
+                            acc.requested_capabilities.insert(name);
+                        }
+                    }
+                    Err(err) => {
+                        acc.ace_matches.clear();
+                        acc.parse_failures += 1;
+                        if acc.verbose {
+                            eprintln!(
+                                "Failed to decode DACL ACE blob for an EventID=14 event; \
+                                 discarding its capabilities: {err}"
+                            );
+                        }
                     }
                 }
             }

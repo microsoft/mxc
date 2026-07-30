@@ -676,6 +676,16 @@ pub(crate) struct ParseAccumulator {
     /// so the per-event decode reuses one allocation for the whole
     /// trace instead of allocating a multi-KB `Vec` per record.
     pub(crate) ace_scratch: Vec<u8>,
+    /// Per-event staging set for capability matches.
+    ///
+    /// The ACE walk inserts as it goes, so a blob that is valid up to a
+    /// corrupt tail would otherwise contribute its already-matched
+    /// capabilities even though the record is malformed. These blobs are
+    /// attacker-influenceable, and the output is a security policy, so
+    /// the merge is fail-closed: matches land here first and are only
+    /// promoted into `requested_capabilities` once the whole blob walks
+    /// cleanly. Reused across events to keep the hot path allocation-free.
+    pub(crate) ace_matches: HashSet<String>,
 }
 
 impl ParseAccumulator {
@@ -718,6 +728,7 @@ impl ParseAccumulator {
             parse_failures: 0,
             capability_index,
             ace_scratch: Vec::new(),
+            ace_matches: HashSet::new(),
         }
     }
 
@@ -1061,6 +1072,54 @@ mod tests {
             result.parse_failures, 1,
             "a malformed ACE blob should be counted"
         );
+    }
+
+    #[test]
+    fn valid_ace_with_truncated_tail_contributes_no_capabilities() {
+        // Fail-closed: the blob is attacker-influenceable and the output
+        // is a security policy, so a record that walks partway and then
+        // hits a corrupt trailer must contribute nothing at all — not
+        // the capability it managed to match before failing.
+        let sid = e2e_sid();
+        let mut bytes = e2e_ace(0x0012_0089, &sid);
+        bytes.extend_from_slice(&[0u8; 6]); // truncated trailing ACE
+        let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, &e2e_hex(&bytes));
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_table("internetClient", &sid));
+
+        assert!(
+            result.requested_capabilities.is_empty(),
+            "a partially-valid blob must not leak capabilities into policy, got {:?}",
+            result.requested_capabilities
+        );
+        assert_eq!(result.parse_failures, 1);
+    }
+
+    #[test]
+    fn staging_set_does_not_leak_between_events() {
+        // The staging set is reused across events; a failed record must
+        // not poison the next one, and a good record after a bad one
+        // must still be collected.
+        let sid = e2e_sid();
+        let good = e2e_hex(&e2e_ace(0x0012_0089, &sid));
+        let mut bad_bytes = e2e_ace(0x0012_0089, &sid);
+        bad_bytes.extend_from_slice(&[0u8; 6]);
+        let bad = e2e_hex(&bad_bytes);
+
+        let xmls = vec![
+            event_xml_with_complex_data("C:\\app\\bad.txt", "0x1", 5, &bad),
+            event_xml_with_complex_data("C:\\app\\good.txt", "0x1", 5, &good),
+        ];
+
+        let result = parse_events_from_xml(xmls, None, false, e2e_table("internetClient", &sid));
+
+        assert_eq!(result.parse_failures, 1);
+        assert!(
+            result.requested_capabilities.contains("internetClient"),
+            "the following good event must still contribute"
+        );
+        assert_eq!(result.requested_capabilities.len(), 1);
     }
 
     #[test]
