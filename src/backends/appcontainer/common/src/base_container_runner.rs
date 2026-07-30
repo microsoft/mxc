@@ -112,6 +112,83 @@ type PfnCreateProcessInSandbox = unsafe extern "system" fn(
 /// ambiguous and must not be read as "sandbox unsupported".
 type PfnQuerySandboxSupport = unsafe extern "system" fn(capabilities: *mut u64) -> i32;
 
+struct SandboxLaunchArgs<'a> {
+    api: PfnCreateProcessInSandbox,
+    command_line: &'a mut [u16],
+    current_directory: *const u16,
+    startup_info: &'a STARTUPINFOW,
+    identity: &'a [u16],
+    sandbox_specification: &'a [u8],
+    no_window_flag: u32,
+}
+
+impl SandboxLaunchArgs<'_> {
+    /// Launches through the one-shot API, retrying once without the
+    /// environment block on downlevel systems that reject that parameter.
+    fn launch_with_environment_fallback(
+        &mut self,
+        creation_flags: u32,
+        environment: *const c_void,
+        process_information: &mut PROCESS_INFORMATION,
+        logger: &mut Logger,
+    ) -> (i32, Option<windows::Win32::Foundation::WIN32_ERROR>) {
+        let mut current_creation_flags = creation_flags;
+        let mut current_environment = environment;
+        let mut retries_remaining = 1;
+
+        loop {
+            *process_information = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                (self.api)(
+                    ptr::null(),
+                    self.command_line.as_mut_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    i32::from(false),
+                    current_creation_flags,
+                    current_environment,
+                    self.current_directory,
+                    self.startup_info,
+                    self.identity.as_ptr(),
+                    self.sandbox_specification.as_ptr(),
+                    self.sandbox_specification.len() as u32,
+                    process_information,
+                )
+            };
+            if result != 0 {
+                return (result, None);
+            }
+
+            let error = unsafe { GetLastError() };
+            if retries_remaining == 0
+                || !is_environment_not_supported(error.0, !current_environment.is_null())
+            {
+                return (result, Some(error));
+            }
+            retries_remaining -= 1;
+
+            unsafe {
+                if !process_information.hProcess.is_invalid() {
+                    let _ = CloseHandle(process_information.hProcess);
+                }
+                if !process_information.hThread.is_invalid() {
+                    let _ = CloseHandle(process_information.hThread);
+                }
+            }
+
+            let diagnostic = diagnose_environment_not_supported();
+            let _ = writeln!(
+                logger,
+                "{EMOJI_WARNING} Launch diagnostic [{}]: {}",
+                diagnostic.kind, diagnostic.message
+            );
+
+            current_environment = ptr::null();
+            current_creation_flags = CREATE_SUSPENDED.0 | self.no_window_flag;
+        }
+    }
+}
+
 /// `SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX`: when clear, Tier 1 is unusable.
 const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 
@@ -121,6 +198,12 @@ const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 /// assumed bit 1). When clear, `deniedPaths` is rejected at launch and callers
 /// must rely on default-deny plus explicit `readwrite`/`readonly` grants.
 const SANDBOX_CAP_FS_DENY: u64 = 0x0000_0000_0000_0002;
+const CAPTURE_API_AVAILABLE_LOG: &str =
+    "captureDenials: learning-mode trace API available (processmodel.dll)";
+const CAPTURE_API_UNAVAILABLE_REQUIREMENT: &str =
+    "This feature requires a feature-enabled Windows build that exports the learning-mode trace APIs from processmodel.dll.";
+const CAPTURE_SECURITY_ENVIRONMENT_CLEANUP_DEFERRED_REASON: &str =
+    "capture initialization failed and the process security environment could not be closed";
 
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
@@ -177,6 +260,32 @@ fn run_sandbox_cleanup(
 impl BaseContainerRunner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn cleanup_capture_begin_failure(
+        &mut self,
+        error: &learning_mode_windows::LearningModeError,
+        request: &ExecutionRequest,
+        identity: &str,
+        sid_string: &str,
+        logger: &mut Logger,
+    ) {
+        // This cannot be deferred to BaseContainerRunner::drop: the runner may
+        // outlive a failed spawn, and the exact error determines whether
+        // profile deletion is safe or recovery tracking must be retained.
+        if request.lifecycle.destroy_on_exit {
+            if learning_mode_cleanup_failed(error) {
+                sandbox_tracking::mark_cleanup_deferred(
+                    sid_string,
+                    CAPTURE_SECURITY_ENVIRONMENT_CLEANUP_DEFERRED_REASON,
+                    logger,
+                );
+            } else {
+                sandbox_tracking::cleanup_unlaunched_sandbox(identity, sid_string, logger);
+            }
+            sandbox_tracking::unregister_ctrl_c_cleanup();
+        }
+        self.proxy_coordinator.stop(logger);
     }
 
     /// Pre-flight probe: check whether the current OS build exports the
@@ -685,37 +794,26 @@ impl BaseContainerRunner {
 
         Self::log_sandbox_spec(&spec_bytes, logger);
 
-        // Resolve the learning-mode capture APIs when captureDenials is
-        // configured. The mode-mapped learning-mode capability was already
-        // injected into policy.capabilities (and hence the spec) by the config
-        // parser; here we obtain the OS handles that drive the ETL trace. Both
-        // exports live in the same processmodel.dll the BaseContainer launch API
-        // is loaded from, and only exist on supported feature-enabled Windows
-        // builds, so a failed load is a clean, actionable "backend unavailable"
-        // degrade.
+        // Load the security-environment and trace APIs used by captureDenials.
+        // Both are feature-gated exports from processmodel.dll.
         let capture_denials = request.policy.capture_denials.clone();
         let mut capture_apis: Option<(SecurityEnvironmentApi, LearningModeApi)> = None;
         if capture_denials.is_some() {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
             match (SecurityEnvironmentApi::load(), LearningModeApi::load()) {
-                (Ok(se), Ok(lm)) => {
-                    let _ = writeln!(
-                        logger,
-                        "captureDenials: learning-mode trace API available (processmodel.dll)"
-                    );
-                    capture_apis = Some((se, lm));
+                (Ok(security_environment_api), Ok(learning_mode_api)) => {
+                    let _ = writeln!(logger, "{CAPTURE_API_AVAILABLE_LOG}");
+                    capture_apis = Some((security_environment_api, learning_mode_api));
                 }
-                (se, lm) => {
-                    let detail = match (&se, &lm) {
+                (security_environment_api, learning_mode_api) => {
+                    let detail = match (&security_environment_api, &learning_mode_api) {
                         (Err(e), _) => format!("security-environment API: {e}"),
                         (_, Err(e)) => format!("learning-mode trace API: {e}"),
                         _ => "unknown".to_string(),
                     };
                     let msg = format!(
                         "captureDenials was requested but the learning-mode trace API is not \
-                         available on this OS build ({detail}). This feature requires a \
-                         feature-enabled Windows build that exports the learning-mode trace \
-                         APIs from processmodel.dll."
+                         available on this OS build ({detail}). {CAPTURE_API_UNAVAILABLE_REQUIREMENT}"
                     );
                     let _ = writeln!(logger, "Error: {msg}");
                     return Err(ScriptResponse {
@@ -1039,9 +1137,8 @@ impl BaseContainerRunner {
         //    If the OS returns ERROR_NOT_SUPPORTED (0x32) and we passed a non-null
         //    environment block, this is a downlevel build that doesn't support the
         //    `environment` parameter. Retry once without it.
-        let mut current_env_ptr = env_ptr;
-        let mut current_creation_flags = creation_flags;
-        let mut retries_remaining: u32 = 1;
+        let current_env_ptr = env_ptr;
+        let current_creation_flags = creation_flags;
 
         // When captureDenials is active, launch inside a process security
         // environment that already has a learning-mode trace started against it,
@@ -1079,26 +1176,13 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    if request.lifecycle.destroy_on_exit {
-                        if learning_mode_cleanup_failed(&e) {
-                            sandbox_tracking::mark_cleanup_deferred(
-                                &sid_string,
-                                "capture initialization failed and the process security environment could not be closed",
-                                logger,
-                            );
-                        } else {
-                            // No process was launched and the security
-                            // environment is closed, so real profile/tracking
-                            // cleanup is safe.
-                            sandbox_tracking::cleanup_unlaunched_sandbox(
-                                &identity,
-                                &sid_string,
-                                logger,
-                            );
-                        }
-                        sandbox_tracking::unregister_ctrl_c_cleanup();
-                    }
-                    self.proxy_coordinator.stop(logger);
+                    self.cleanup_capture_begin_failure(
+                        &e,
+                        &request,
+                        &identity,
+                        &sid_string,
+                        logger,
+                    );
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1145,71 +1229,21 @@ impl BaseContainerRunner {
                 (0, Some(unsafe { GetLastError() }))
             }
         } else {
-            loop {
-                pi = unsafe { std::mem::zeroed() };
-
-                let result = unsafe {
-                    create_process_in_sandbox(
-                        ptr::null(),           // applicationName (resolved from commandLine)
-                        cmd_wide.as_mut_ptr(), // commandLine
-                        ptr::null(),           // processAttributes (must be NULL)
-                        ptr::null(),           // threadAttributes  (must be NULL)
-                        // inheritHandles: must be FALSE per the OS sandbox API contract.
-                        // Unlike regular CreateProcess, CreateProcessInSandbox treats the
-                        // explicit STDIO handles in STARTUPINFO (hStdInput/hStdOutput/hStdError)
-                        // as inheritable when STARTF_USESTDHANDLES is set, but does not support
-                        // general handle inheritance.
-                        i32::from(false),        // inheritHandles
-                        current_creation_flags,  // creationFlags
-                        current_env_ptr,         // environment
-                        cwd_ptr,                 // currentDirectory
-                        &si,                     // startupInfo
-                        identity_wide.as_ptr(),  // identity
-                        spec_bytes.as_ptr(),     // sandboxSpecification
-                        spec_bytes.len() as u32, // sandboxSpecificationSize
-                        &mut pi,                 // processInformation
-                    )
-                };
-
-                if result != 0 {
-                    break (result, None);
-                }
-
-                // Call failed -- capture the error before any handle cleanup.
-                let err = unsafe { GetLastError() };
-
-                if retries_remaining > 0
-                    && is_environment_not_supported(err.0, !current_env_ptr.is_null())
-                {
-                    retries_remaining -= 1;
-
-                    // Clean up handles from the failed attempt.
-                    unsafe {
-                        if !pi.hProcess.is_invalid() {
-                            let _ = CloseHandle(pi.hProcess);
-                        }
-                        if !pi.hThread.is_invalid() {
-                            let _ = CloseHandle(pi.hThread);
-                        }
-                    }
-
-                    let diag = diagnose_environment_not_supported();
-                    let _ = writeln!(
-                        logger,
-                        "{EMOJI_WARNING} Launch diagnostic [{}]: {}",
-                        diag.kind, diag.message
-                    );
-
-                    // Retry without the environment block, but keep the child
-                    // suspended (resumed after job assignment).
-                    current_env_ptr = ptr::null();
-                    current_creation_flags = CREATE_SUSPENDED.0 | no_window_flag;
-                    continue;
-                }
-
-                // Non-retryable failure.
-                break (result, Some(err));
+            SandboxLaunchArgs {
+                api: create_process_in_sandbox,
+                command_line: &mut cmd_wide,
+                current_directory: cwd_ptr,
+                startup_info: &si,
+                identity: &identity_wide,
+                sandbox_specification: &spec_bytes,
+                no_window_flag,
             }
+            .launch_with_environment_fallback(
+                current_creation_flags,
+                current_env_ptr,
+                &mut pi,
+                logger,
+            )
         };
 
         if success == 0 {

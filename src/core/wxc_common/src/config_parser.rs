@@ -869,6 +869,9 @@ fn convert_wire_config(
             // `permissiveLearningMode` (the runner surfaces the security warning).
             let capture_capability = match mode {
                 CaptureDenialsMode::Block => {
+                    // Capability entries are exact names. Comma-packed entries
+                    // were rejected above, so substring matching here would
+                    // incorrectly remove unrelated custom capabilities.
                     policy.capabilities.retain(|capability| {
                         !capability.eq_ignore_ascii_case("permissiveLearningMode")
                     });

@@ -48,6 +48,9 @@ use wxc_common::sandbox_process::{
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
 
+pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
+    "captureDenials requires the BaseContainer learning-mode APIs and is not supported by the AppContainer fallback tier";
+
 /// `UpdateProcThreadAttribute` value for
 /// `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` that opts the
 /// process out of inheriting `ALL APPLICATION PACKAGES` grants. This
@@ -1306,11 +1309,9 @@ impl AppContainerScriptRunner {
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         if request.policy.capture_denials.is_some() {
-            let msg = "captureDenials requires the BaseContainer learning-mode APIs and is not \
-                       supported by the AppContainer fallback tier";
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(msg)
+                ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
             });
         }
         if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
@@ -1833,7 +1834,9 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
-    use super::{AppContainerScriptRunner, FilesystemMode};
+    use super::{
+        AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
+    };
     use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
 
@@ -1906,6 +1909,9 @@ mod tests {
             .validate(&request)
             .expect_err("AppContainer fallback must not silently ignore captureDenials");
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert!(error.error_message.contains("requires the BaseContainer"));
+        assert_eq!(
+            error.error_message,
+            CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG
+        );
     }
 }

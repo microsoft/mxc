@@ -36,6 +36,8 @@ use wxc_common::string_util;
 
 /// Registry base path for sandbox tracking entries.
 const TRACKING_BASE: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\ProcessSandboxes\\Mappings";
+const CAPTURE_PROFILE_CLEANUP_DEFERRED_REASON: &str =
+    "capture initialization failed and the AppContainer profile could not be deleted";
 
 /// Generate a unique sandbox identity string: `sandbox-{16 lowercase hex chars}`.
 ///
@@ -202,11 +204,7 @@ pub fn cleanup_unlaunched_sandbox(identity: &str, sid_string: &str, logger: &mut
     if crate::appcontainer_runner::delete_app_container_profile(identity, logger) {
         delete_tracking_key(sid_string, logger);
     } else {
-        mark_cleanup_deferred(
-            sid_string,
-            "capture initialization failed and the AppContainer profile could not be deleted",
-            logger,
-        );
+        mark_cleanup_deferred(sid_string, CAPTURE_PROFILE_CLEANUP_DEFERRED_REASON, logger);
     }
 }
 

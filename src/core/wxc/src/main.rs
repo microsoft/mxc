@@ -200,6 +200,9 @@ fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
     }
 }
 
+const AUDIT_CAPTURE_DENIALS_CONFLICT_MSG: &str =
+    "--audit cannot be combined with processContainer.captureDenials; use captureDenials.mode: \"allow\" for permissive capture";
+
 fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
     if request.containment != ContainmentBackend::ProcessContainer {
         return Err(format!(
@@ -209,11 +212,7 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
         ));
     }
     if request.policy.capture_denials.is_some() {
-        return Err(
-            "--audit cannot be combined with processContainer.captureDenials; \
-             use captureDenials.mode: \"allow\" for permissive capture"
-                .to_string(),
-        );
+        return Err(AUDIT_CAPTURE_DENIALS_CONFLICT_MSG.to_string());
     }
     Ok(())
 }
@@ -1476,7 +1475,7 @@ mod tests {
 
             let error = validate_audit_request(&request)
                 .expect_err("--audit and captureDenials must be mutually exclusive");
-            assert!(error.contains("cannot be combined"));
+            assert_eq!(error, AUDIT_CAPTURE_DENIALS_CONFLICT_MSG);
             assert!(error.contains(r#"mode: "allow""#));
         }
     }
