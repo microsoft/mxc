@@ -17,6 +17,7 @@ to choose a backend without attempting an execution.
 
 ```rust
 // One host-available backend, plus its effective isolation tier (if any).
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AvailableBackend {
     /// Canonical wire name, e.g. "processcontainer", "seatbelt".
     pub backend: String,
@@ -30,8 +31,8 @@ pub struct AvailableBackend {
 
 /// Probe the host and return only the backends it can currently run.
 /// An empty `Vec` means "no backend this API can currently affirm on this host"
-/// (e.g. an unsupported platform, Linux without `bwrap`, or macOS without
-/// `sandbox-exec`) — it is a normal result, not an error.
+/// (e.g. an unsupported platform, Linux with neither `bwrap` nor `lxc`, or
+/// macOS without `sandbox-exec`) — it is a normal result, not an error.
 pub fn available_backends() -> Vec<AvailableBackend>;
 ```
 
@@ -91,7 +92,7 @@ for them **cannot be built just yet**.
 | --- | --- | --- | --- |
 | `windows_sandbox` | DISM/registry check of the *Containers-DisposableClientVM* optional feature | only a private "is the `.exe` on disk" check | reports available when the feature is off → launch fails |
 | `isolation_session` | build ≥ 26300.8553 **and** `IsoSessionApp.dll` resolvable **and** feature compiled | build gate lives **only in the TypeScript SDK** | wrong OS builds falsely pass |
-| `microvm` | hypervisor (WHP) present | nothing | a naive check could **boot a VM** just to test |
+| `microvm` | feature compiled, NanVix runtime files staged, and WHP usable on Windows or `/dev/kvm` readable/writable on Linux | nothing | checking only a hypervisor can report availability when required runtime files are missing |
 | `hyperlight` | hypervisor present + feature compiled | nothing | same VM-boot risk |
 
 ### 4.2 The parity rule: detect once, project into TS
@@ -117,11 +118,11 @@ See §7.9 for why the canonical probe stays in Rust rather than moving into the 
 - On Windows the result contains `processcontainer` with a `tier` of one of the three known strings;
 `appcontainer-dacl` is the floor when nothing higher is reachable.
 - On non-Windows, `processcontainer` never appears.
-- On macOS, `seatbelt` appears with `tier: None` when `/usr/bin/sandbox-exec `exists.
-- A serde snapshot pinning the camelCase JSON shape
-(`{"backend":"…","tier":"…"}`), with `tier` **omitted** when `None`
-(`#[serde(skip_serializing_if = "Option::is_none")]`)  never serialized as `null`.
-- Every non-`None` `tier` is one of the canonical `IsolationTier::as_str() `strings,
+- On macOS, `seatbelt` appears with `tier: None` when `/usr/bin/sandbox-exec` exists.
+- A serde snapshot pins the camelCase JSON shape
+(`{"backend":"…","tier":"…"}`) and verifies that `tier` is **omitted** when `None`
+(`#[serde(skip_serializing_if = "Option::is_none")]`), never serialized as `null`.
+- Every non-`None` `tier` is one of the canonical `IsolationTier::as_str()` strings,
 guarding against drift between this API and the tier ladder.
 - On Linux, `bubblewrap` and `lxc` each appear when their check passes (`bwrap --version` / `lxc-ls --version`).
 - `wslc` appears when `WslcSdk::load()` resolves `wslcsdk.dll`; the remaining VM group
