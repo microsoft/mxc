@@ -9,11 +9,9 @@ Licensed under the MIT License.
 
 ## 1. Purpose
 
-Provide a read-only Rust API that reports **which containment backends the
-current host can actually run**. Callers can read at startup
-to choose a backend without attempting an execution. For the Windows
-process-container backend it also reports the **effective isolation tier** the
-host supports.
+Provide a read-only Rust API that reports which containment backends the
+current host can actually run. Callers can read at startup
+to choose a backend without attempting an execution. 
 
 
 
@@ -45,11 +43,12 @@ Example results:
 | macOS | `[{ backend: "seatbelt", tier: None }]` |
 | Linux w/ bwrap + lxc | `[{ backend: "bubblewrap", tier: None }, { backend: "lxc", tier: None }]` |
 ## 2. Guiding principle
-This API answers **"what can I use here?"**, not **"what is the full capability
-matrix of this machine?"**. 
+This API answers **"what can I use here?"**, not "what is the full capability
+matrix of this machine?". 
 - We return **only** host-available backends. Nothing is reported as `false`.
 - A backend's **absence** means "not currently usable, **for any reason**"
 - For per-backend **diagnostics and reasons**, the tool is `wxc-exec --probe`
+- Each capability is **detected once, in Rust**, and the TypeScript SDK projects that result rather than re-checking.
 ## 3. Detection & isolation tiers
 
 ### 3.1 Detection methods used today (and their risks)
@@ -61,10 +60,10 @@ ones.
 
 | Backend | How presence is detected today | Where | Risk with this method |
 | --- | --- | --- | --- |
-| `base-container` (process-container tier) | `fallback_detector::is_base_container_usable()` loads `processmodel.dll` and calls an OS capability/create API — no process or VM launch; result cached in a `OnceLock`. | Rust | A cached result (`true` **or** `false`) can go stale if BaseContainer enablement changes mid-process, and the probe is not perfectly pure since it loads a DLL. |
-| `windows_sandbox` | `isWindowsSandboxAvailable()` runs `dism /online /get-featureinfo /featurename:Containers-DisposableClientVM` and looks for `State : Enabled`; if DISM throws (usually non-elevated) it falls back to `fs.existsSync(%SystemRoot%\System32\WindowsSandbox.exe)`; result cached. | TypeScript SDK | `dism /online` needs elevation, so a non-elevated caller can't tell *disabled* from *no permission* and drops to the exe-existence check — which proves the feature is installed, not that a sandbox VM can boot. Rust callers get nothing. |
-| `lxc` | `isLxcAvailable()` runs `lxc-ls --version`; a clean exit means available. | TypeScript SDK | Only proves the `lxc-ls` CLI is on `PATH` — not that liblxc is loadable or that the caller has the namespaces/cgroup/privileges to actually start a container, so it can report available on a host where a real run fails. Rust callers get nothing. |
-| `wslc` | `WslcSdk::load()` loads `wslcsdk.dll` from the executable's own directory (anti-hijack) and validates that every required export resolves. | Rust (execute path) | Runs on the *execute* path, not as a cheap standalone probe: it actually loads the DLL and resolves symbols. Proves the SDK runtime loads, not that a WSL distro/runtime is functional. Feature-gated. |
+| `base-container` | `fallback_detector::is_base_container_usable()` loads `processmodel.dll`<br>and calls an OS capability/create API.<br>No process or VM launch; result cached in a `OnceLock`. | Rust | A cached result (`true` **or** `false`) can go stale if BaseContainer enablement<br>changes mid-process, and the probe is not perfectly pure since it loads a DLL. |
+| `windows_sandbox` | `isWindowsSandboxAvailable()` runs `dism /online /get-featureinfo `<br>`/featurename:Containers-DisposableClientVM ` and looks for `State : Enabled`<br>if DISM throws (usually non-elevated) it falls back to<br>`fs.existsSync(%SystemRoot%\\System32\\WindowsSandbox.exe)`; result cached. | TypeScript SDK | `dism /online` needs elevation, so a non-elevated caller can't tell *disabled* from<br>*no permission* and drops to the exe-existence checkwhich proves the feature is installed,<br>not that a sandbox VM can boot. (Will move to Rust) |
+| `lxc` | `isLxcAvailable()` runs `lxc-ls --version`; a clean exit means available. | TypeScript SDK | Only proves the `lxc-ls` CLI is on `PATH`, not that liblxc is loadable or that the caller has<br>the privileges to actually start a container, so it can report available on a host where a real run fails.<br>(Will move to Rust) |
+| `wslc` | `WslcSdk::load()` loads `wslcsdk.dll` from the executable's own directory;<br>validates that every required export resolves. | Rust (execute path) | Runs on the *execute* path, not as a cheap standalone probe:<br>it actually loads the DLL and resolves symbols. Proves the SDK runtime loads,<br>not that a WSL distro/runtime is functional. Feature-gated. |
 
 ### 3.2 Isolation tiers (process-container only)
 
@@ -81,10 +80,12 @@ reachable, already exist in `appcontainer_common`:
 
 
 ## 4. The probe gap today
+
+### 4.1 Backends still missing a Rust detector
+
 Four backends have no *probe-suitable* (cheap, no persistent host mutation, no
 process/VM launch) host detector in Rust today, so a truthful availability signal
-for them **cannot be built just yet**. (`lxc` and `wslc` are handled separately —
-their checks are documented in §3.1 and accepted as good enough.)
+for them **cannot be built just yet**.
 
 | Backend | What a real probe needs | What exists today | Risk if faked |
 | --- | --- | --- | --- |
@@ -92,6 +93,21 @@ their checks are documented in §3.1 and accepted as good enough.)
 | `isolation_session` | build ≥ 26300.8553 **and** `IsoSessionApp.dll` resolvable **and** feature compiled | build gate lives **only in the TypeScript SDK** | wrong OS builds falsely pass |
 | `microvm` | hypervisor (WHP) present | nothing | a naive check could **boot a VM** just to test |
 | `hyperlight` | hypervisor present + feature compiled | nothing | same VM-boot risk |
+
+### 4.2 The parity rule: detect once, project into TS
+
+Detection is split by layer today : `base-container`/`wslc` are Rust-only, while
+`windows_sandbox`/`lxc` are TypeScript-only, so the two layers can and already
+do disagree. The fix is: detect each capability in exactly one place (Rust), and
+have TypeScript read that result rather than compute its own.
+
+| Step | What | Why it gives parity |
+| --- | --- | --- |
+| 1. Consolidate detectors in Rust | Port the two TypeScript-only checks (`windows_sandbox` DISM/feature check, `lxc-ls`) into Rust<br>so `available_backends()` covers every backend. | Each backend has exactly one detector. |
+| 2. TypeScript stops probing itself | `getPlatformSupport()` reads the native probe instead of running its own `dism`/`lxc-ls`.<br>It already does this for the Windows tier via `populateIsolationFromProbe()` → `wxc-exec --probe`;<br>extend that JSON to carry the backend list. | TypeScript becomes a pure projection of the Rust result. |
+| 3. Names flow from serde | Backend names (`Containment`) and tier strings (`IsolationTier::as_str()`) are already Rust-serialized;<br>TypeScript consumes them as-is instead of hand-re-encoding. | Removes the wire-name drift class structurally. |
+
+See §7.9 for why the canonical probe stays in Rust rather than moving into the TypeScript layer.
 
 
 
@@ -109,15 +125,20 @@ their checks are documented in §3.1 and accepted as good enough.)
 guarding against drift between this API and the tier ladder.
 - On Linux, `bubblewrap` and `lxc` each appear when their check passes (`bwrap --version` / `lxc-ls --version`).
 - `wslc` appears when `WslcSdk::load()` resolves `wslcsdk.dll`; the remaining VM group
-(`windows_sandbox`, `isolation_session`, `microvm`, `hyperlight`) never appears until its
-detector lands.
+(`windows_sandbox`, `isolation_session`, `microvm`, `hyperlight`) never appears until its detector lands.
+- The TypeScript `getPlatformSupport()` output matches the native probe (parity by projection, §4.2),
+ guarding against the two layers drifting.
 
 ## 6. Follow-up work items
 
-Writing the missing detectors, one issue per backend:
+Writing the missing detectors and wiring the TypeScript projection, one issue each:
 1. `windows_sandbox` - optional-feature (DISM/registry) detector.
 2. `isolation_session` - port the build-number + `IsoSessionApp.dll` gate from TypeScript to Rust.
 3. `microvm` / `hyperlight` - hypervisor-presence probe.
+4. `lxc` - port the `lxc-ls` presence check from TypeScript to Rust,
+so the probe (not just the SDK) can report it (§4.2, step 1).
+5. TypeScript projection - make `getPlatformSupport()` read the native probe (`wxc-exec --probe` / `mxc_ffi`)
+instead of running its own `dism`/`lxc-ls`, so the two layers can't drift (§4.2, step 2).
 ---
 
 ## 7. Appendix - Decisions & Notes
@@ -174,3 +195,25 @@ worked around.
 Results are returned in a stable order, but callers
 should **match by `backend` name, not by position**, so the order is free to
 change without breaking anyone.
+
+### 7.9 Why Rust, not the TS layer
+
+The decision to keep the probe in Rust comes down to one asymmetry: 
+the *easy* checks are equally easy in Rust, while the *hard* Windows check
+is Rust-only either way.
+
+| Aspect | TS layer | Rust core |
+| --- | --- | --- |
+| Cheap CLI/feature checks (`lxc-ls`, `bwrap`, `dism`, build number) | Already present; ergonomic `execSync` | Equally cheap as `platform_support()` already<br>shells `bwrap --version` |
+| Windows isolation **tier** | Cannot compute it:<br>`populateIsolationFromProbe()` shells out to `wxc-exec --probe`<br>and parses its JSON `tier` | Native — `is_base_container_usable()` loads<br>`processmodel.dll` and calls the OS API directly |
+| Non-Node consumers (`mxc-sdk`, `mxc_ffi` → C# SDK, executor/CLI) | Must shell out to Node or duplicate the logic | First-class; call the API directly |
+| Source of truth for wire names / tier strings | Hand-re-encoded from Rust → drift | Owns `Containment` and `IsolationTier::as_str()` |
+| Existing drift | Widens it since TS reports `[lxc, bubblewrap]`, Rust reports `[bubblewrap]` | A single probe eliminates the disagreement |
+| Stated architectural goal | Reverses the `platform.rs` goal of *"stop depending on the*<br>*TypeScript SDK for platform discovery"* | Advances it |
+
+
+
+Decision: keep the canonical probe in Rust (single source of truth,
+reused by `mxc-sdk` / `mxc_ffi` / CLI), and let the TS `getPlatformSupport()`
+become a thin wrapper over the native probe instead of re-implementing the
+checks.
