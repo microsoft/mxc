@@ -145,6 +145,9 @@ pub enum DispatchError {
     },
     /// AppContainer SID derivation failed.
     Sid(WxcError),
+    /// captureDenials requires the native BaseContainer tier and cannot
+    /// proceed through an AppContainer fallback.
+    CaptureDenialsUnsupported { tier: IsolationTier },
 }
 
 impl std::fmt::Display for DispatchError {
@@ -171,6 +174,12 @@ impl std::fmt::Display for DispatchError {
             ),
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
+            DispatchError::CaptureDenialsUnsupported { tier } => write!(
+                f,
+                "captureDenials requires the native BaseContainer backend; \
+                 the selected fallback tier '{}' does not support denial capture.",
+                tier.as_str()
+            ),
         }
     }
 }
@@ -331,19 +340,9 @@ fn select_backend_with_fallback(
 > {
     let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
     if request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer {
-        let filesystem_mode = match decision.tier {
-            IsolationTier::AppContainerBfs => FilesystemMode::Bfs,
-            IsolationTier::AppContainerDacl => FilesystemMode::Dacl,
-            IsolationTier::BaseContainer => unreachable!(),
-        };
-        return Ok((
-            SelectedBackend::AppContainer(AppContainerScriptRunner::with_filesystem_mode(
-                filesystem_mode,
-            )),
-            None,
-            decision.tier,
-            decision.warnings,
-        ));
+        return Err(DispatchError::CaptureDenialsUnsupported {
+            tier: decision.tier,
+        });
     }
 
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
@@ -690,18 +689,22 @@ mod tests {
     }
 
     #[test]
-    fn capture_denials_defers_fallback_rejection_without_dacl_setup() {
+    fn capture_denials_rejects_fallback_before_backend_or_dacl_setup() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
         let req = test_request(policy);
 
-        let dispatched = dispatch_with_fallback(&req).expect("validation should own the rejection");
-        assert!(matches!(dispatched.tier, IsolationTier::AppContainerDacl));
-        assert!(
-            !dispatched.has_dacl_guard(),
-            "capture fallback must not apply host DACLs before validation"
-        );
+        let error = match dispatch_with_fallback(&req) {
+            Ok(_) => panic!("capture fallback must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            DispatchError::CaptureDenialsUnsupported {
+                tier: IsolationTier::AppContainerDacl
+            }
+        ));
     }
     #[test]
     fn dispatch_fallback_disabled_errors() {

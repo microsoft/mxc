@@ -228,7 +228,11 @@ public sealed class MxcSandboxProcess : IDisposable
             }
             if (running == 0)
             {
-                return new SandboxWaitResult { ExitCode = exit, TimedOut = false };
+                // try_wait is intentionally a non-blocking root-process poll.
+                // Complete the native wait so descendant termination and any
+                // backend finalization (including captureDenials) finish before
+                // the managed Wait/WaitAsync contract returns.
+                return WaitBlocking();
             }
 
             // try_wait only reports exited / still-running, never a timeout, and
