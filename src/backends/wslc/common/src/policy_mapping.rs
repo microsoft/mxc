@@ -419,10 +419,11 @@ fn is_valid_host(host: &str) -> bool {
 
 /// Build iptables commands for per-host network filtering.
 ///
-/// These rules are exec'd inside the container after start via
-/// `WslcCreateContainerProcess`. The container must have the `Privileged`
-/// flag set (grants root + NET_ADMIN capability) for iptables to work.
-/// Images without iptables installed will not support per-host filtering.
+/// **Note: per-host filtering is not supported in WSLC and configs that request
+/// it are rejected at config-parse time.** WSLC containers do not receive
+/// `CAP_NET_ADMIN` — `WSLC_CONTAINER_FLAG_PRIVILEGED` grants root but does not
+/// grant `NET_ADMIN`, so iptables rules cannot be applied. This function is
+/// retained for reference but is unreachable under normal operation.
 ///
 /// When `defaultPolicy` is `Block` + `allowedHosts`:
 ///   - Default DROP all outbound
