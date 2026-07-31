@@ -1,0 +1,189 @@
+name: Test Matrix
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: Test plan to resolve.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve ${{ inputs.plan }} matrix
+    runs-on: ubuntu-latest
+    outputs:
+      windows: ${{ steps.matrix.outputs.windows }}
+      linux: ${{ steps.matrix.outputs.linux }}
+      macos: ${{ steps.matrix.outputs.macos }}
+      has_windows: ${{ steps.matrix.outputs.has_windows }}
+      has_linux: ${{ steps.matrix.outputs.has_linux }}
+      has_macos: ${{ steps.matrix.outputs.has_macos }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve test combinations
+        id: matrix
+        run: node scripts/ci/resolve-test-matrix.mjs --plan "${{ inputs.plan }}"
+
+  windows:
+    name: ${{ matrix.os_name }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
+    needs: resolve
+    if: needs.resolve.outputs.has_windows == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.windows) }}
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=${{ matrix.pool }}"
+      - "JobId=mxc-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ${{ matrix.target }} artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/bin
+
+      - name: Prepare Process Container host
+        if: matrix.command == 'process-container'
+        shell: pwsh
+        run: |
+          $hostPrep = Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin\wxc-host-prep.exe'
+          & $hostPrep prepare-system-drive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $hostPrep prepare-null-device --no-sacl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run backend tests
+        shell: pwsh
+        run: |
+          $arguments = @{
+            Backend = '${{ matrix.command }}'
+            BinaryDirectory = (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin')
+            Architecture = '${{ matrix.architecture }}'
+          }
+          if ('${{ matrix.backend }}' -eq 'process-t1') {
+            $arguments.ExpectedTier = 'T1'
+          } elseif ('${{ matrix.backend }}' -eq 'process-t3') {
+            $arguments.ExpectedTier = 'T3'
+          }
+          & ./tests/scripts/run_ci_backend_tests.ps1 @arguments *>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log')
+
+      - name: Upload failure logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mxc-ci.log
+            ${{ runner.temp }}/mxc-wpc-tests/logs
+            ${{ runner.temp }}/WinProcessContainer-Tests.results.*
+            ${{ runner.temp }}/mxc_concurrent_oneshot
+          if-no-files-found: ignore
+          retention-days: 7
+
+  linux:
+    name: ${{ matrix.os_name }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
+    needs: resolve
+    if: needs.resolve.outputs.has_linux == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.linux) }}
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=${{ matrix.pool }}"
+      - "JobId=mxc-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ${{ matrix.target }} artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/bin
+
+      - name: Verify backend prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x artifacts/bin/lxc-exec
+          case '${{ matrix.command }}' in
+            bubblewrap)
+              command -v bwrap
+              if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+                sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+              fi
+              ;;
+            lxc)
+              command -v lxc-start
+              sudo -n true
+              ;;
+          esac
+
+      - name: Run backend tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ '${{ matrix.command }}' == 'lxc' ]]; then
+            sudo --preserve-env=RUNNER_TEMP bash tests/scripts/run_ci_backend_tests.sh \
+              '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+              tee "$RUNNER_TEMP/mxc-ci.log"
+          else
+            bash tests/scripts/run_ci_backend_tests.sh \
+              '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+              tee "$RUNNER_TEMP/mxc-ci.log"
+          fi
+
+      - name: Upload failure logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mxc-ci.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos:
+    name: ${{ matrix.os_name }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
+    needs: resolve
+    if: needs.resolve.outputs.has_macos == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.macos) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ${{ matrix.target }} artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/bin
+
+      - name: Run backend tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x artifacts/bin/mxc-exec-mac artifacts/bin/unix-test-proxy
+          bash tests/scripts/run_ci_backend_tests.sh \
+            '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee "$RUNNER_TEMP/mxc-ci.log"
+
+      - name: Upload failure logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mxc-ci.log
+          if-no-files-found: ignore
+          retention-days: 7

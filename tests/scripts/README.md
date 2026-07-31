@@ -1,7 +1,7 @@
 # Test Scripts
 
-This directory contains PowerShell convenience scripts for running MXC end-to-end
-tests locally on Windows. The primary Rust executor E2E path is
+This directory contains convenience scripts for running MXC end-to-end tests
+locally and in CI. The primary Rust executor E2E path is
 `cargo test -p wxc_e2e_tests`, which invokes the MXC binaries directly instead
 of shelling through these scripts.
 
@@ -36,6 +36,36 @@ All scripts accept a `-Release` switch to use the release build (default: debug)
 These scripts are local helpers. Not every script is run by CI because several
 depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
 test duration.
+
+## CI test matrix
+
+[`run_ci_backend_tests.ps1`](run_ci_backend_tests.ps1) and
+[`run_ci_backend_tests.sh`](run_ci_backend_tests.sh) are thin dispatchers used
+by the reusable test workflow. They consume downloaded target artifacts and
+delegate to the existing backend test scripts.
+
+The capability map and PR, nightly, and weekly triggers are defined in
+[`../../scripts/ci/test-matrix.json`](../../scripts/ci/test-matrix.json).
+[`../../scripts/ci/resolve-test-matrix.mjs`](../../scripts/ci/resolve-test-matrix.mjs)
+validates that catalog and emits one matrix per OS family. Weekly resolution
+includes both nightly coverage and weekly additions.
+
+The initial rollout enables six combinations:
+
+- PR: Windows x64 Process Container and Ubuntu 26.04 x64 Bubblewrap.
+- Nightly: Windows Pre-release Isolation Session x64 and Ubuntu 26.04 x64 LXC.
+- Weekly additions: Windows 24H2 x64 Windows Sandbox and Debian 13 x64
+  Bubblewrap.
+
+Other requested combinations remain in the catalog as disabled entries.
+Backends without an artifact-only test entry point are explicit placeholders;
+the resolver rejects any attempt to enable one. The standalone MicroVM and
+Hyperlight workflows remain active until this matrix provides equivalent
+coverage.
+
+PR matrix tests run for non-documentation changes targeting `main`. Nightly runs
+start at 08:00 UTC Monday through Saturday. The Sunday 08:00 UTC run resolves
+the weekly plan, which includes the nightly set.
 
 ### Manual smoke tests
 

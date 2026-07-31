@@ -1,0 +1,565 @@
+{
+  "schemaVersion": 1,
+  "platforms": [
+    {
+      "id": "windows-private-a",
+      "displayName": "Windows Pre-release A",
+      "family": "windows",
+      "private": true,
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t1",
+            "isolation-session",
+            "wslc",
+            "windows-sandbox",
+            "microvm",
+            "hyperlight"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t1",
+            "isolation-session",
+            "wslc",
+            "windows-sandbox"
+          ]
+        }
+      }
+    },
+    {
+      "id": "windows-private-b",
+      "displayName": "Windows Pre-release Isolation Session",
+      "family": "windows",
+      "private": true,
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t1",
+            "isolation-session",
+            "wslc",
+            "windows-sandbox",
+            "microvm",
+            "hyperlight"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t1",
+            "isolation-session",
+            "wslc",
+            "windows-sandbox"
+          ]
+        }
+      }
+    },
+    {
+      "id": "windows-canary",
+      "displayName": "Windows canary",
+      "family": "windows",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t1",
+            "isolation-session"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t1",
+            "isolation-session"
+          ]
+        }
+      }
+    },
+    {
+      "id": "windows-25h2",
+      "displayName": "Windows 25H2",
+      "family": "windows",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t3",
+            "wslc",
+            "windows-sandbox",
+            "microvm",
+            "hyperlight"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t3",
+            "wslc",
+            "windows-sandbox"
+          ]
+        }
+      }
+    },
+    {
+      "id": "windows-24h2",
+      "displayName": "Windows 24H2",
+      "family": "windows",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t3",
+            "wslc",
+            "windows-sandbox",
+            "microvm",
+            "hyperlight"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t3",
+            "wslc",
+            "windows-sandbox"
+          ]
+        }
+      }
+    },
+    {
+      "id": "windows-23h2",
+      "displayName": "Windows 23H2",
+      "family": "windows",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t3",
+            "wslc",
+            "windows-sandbox",
+            "microvm",
+            "hyperlight"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "placeholder",
+          "backends": [
+            "process-t3",
+            "wslc",
+            "windows-sandbox"
+          ]
+        }
+      }
+    },
+    {
+      "id": "ubuntu-26.04",
+      "displayName": "Ubuntu 26.04",
+      "family": "linux",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "hyperlight",
+            "lxc"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "lxc"
+          ]
+        }
+      }
+    },
+    {
+      "id": "ubuntu-24.04",
+      "displayName": "Ubuntu 24.04",
+      "family": "linux",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "microvm",
+            "hyperlight",
+            "lxc"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "lxc"
+          ]
+        }
+      }
+    },
+    {
+      "id": "rhel-10.2",
+      "displayName": "RHEL 10.2",
+      "family": "linux",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "hyperlight",
+            "lxc"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "lxc"
+          ]
+        }
+      }
+    },
+    {
+      "id": "debian-13",
+      "displayName": "Debian 13",
+      "family": "linux",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "hyperlight",
+            "lxc"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-unknown-linux-gnu",
+          "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
+          "pool": "placeholder",
+          "backends": [
+            "bubblewrap",
+            "lxc"
+          ]
+        }
+      }
+    },
+    {
+      "id": "macos-26",
+      "displayName": "macOS 26",
+      "family": "macos",
+      "architectures": {
+        "arm64": {
+          "target": "aarch64-apple-darwin",
+          "artifact": "mxc-binaries-aarch64-apple-darwin",
+          "runner": "macos-26-xlarge",
+          "backends": [
+            "seatbelt"
+          ]
+        }
+      }
+    },
+    {
+      "id": "macos-15",
+      "displayName": "macOS 15",
+      "family": "macos",
+      "architectures": {
+        "arm64": {
+          "target": "aarch64-apple-darwin",
+          "artifact": "mxc-binaries-aarch64-apple-darwin",
+          "runner": "macos-15-xlarge",
+          "backends": [
+            "seatbelt"
+          ]
+        }
+      }
+    }
+  ],
+  "handlers": {
+    "windows": {
+      "process-t1": {
+        "command": "process-container",
+        "status": "wired"
+      },
+      "process-t3": {
+        "command": "process-container",
+        "status": "wired"
+      },
+      "isolation-session": {
+        "command": "isolation-session",
+        "status": "wired"
+      },
+      "wslc": {
+        "command": "wslc",
+        "status": "wired",
+        "architectures": [
+          "x64"
+        ]
+      },
+      "windows-sandbox": {
+        "command": "windows-sandbox",
+        "status": "wired"
+      },
+      "microvm": {
+        "command": "microvm",
+        "status": "wired"
+      },
+      "hyperlight": {
+        "status": "placeholder"
+      }
+    },
+    "linux": {
+      "bubblewrap": {
+        "command": "bubblewrap",
+        "status": "wired"
+      },
+      "lxc": {
+        "command": "lxc",
+        "status": "wired"
+      },
+      "microvm": {
+        "status": "placeholder"
+      },
+      "hyperlight": {
+        "status": "placeholder"
+      }
+    },
+    "macos": {
+      "seatbelt": {
+        "status": "placeholder"
+      }
+    }
+  },
+  "triggers": {
+    "pr": [
+      {
+        "os": "windows-canary",
+        "backends": [
+          "process-t1"
+        ]
+      },
+      {
+        "os": "windows-25h2",
+        "backends": [
+          "process-t3"
+        ]
+      },
+      {
+        "os": "macos-26",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "ubuntu-26.04",
+        "backends": [
+          "bubblewrap"
+        ]
+      }
+    ],
+    "nightly": [
+      {
+        "os": "windows-private-b",
+        "backends": [
+          "isolation-session"
+        ]
+      },
+      {
+        "os": "windows-private-a",
+        "backends": [
+          "process-t1",
+          "isolation-session",
+          "wslc",
+          "windows-sandbox",
+          "microvm",
+          "hyperlight"
+        ]
+      },
+      {
+        "os": "windows-canary",
+        "backends": [
+          "process-t1"
+        ]
+      },
+      {
+        "os": "windows-25h2",
+        "backends": [
+          "process-t3",
+          "wslc",
+          "windows-sandbox",
+          "microvm",
+          "hyperlight"
+        ]
+      },
+      {
+        "os": "windows-24h2",
+        "backends": [
+          "process-t3"
+        ]
+      },
+      {
+        "os": "windows-23h2",
+        "backends": [
+          "process-t3"
+        ]
+      },
+      {
+        "os": "macos-26",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "ubuntu-26.04",
+        "backends": [
+          "bubblewrap",
+          "hyperlight",
+          "lxc"
+        ]
+      },
+      {
+        "os": "ubuntu-24.04",
+        "backends": [
+          "microvm"
+        ]
+      },
+      {
+        "os": "rhel-10.2",
+        "backends": [
+          "bubblewrap"
+        ]
+      }
+    ],
+    "weekly": [
+      {
+        "os": "windows-canary",
+        "backends": [
+          "isolation-session"
+        ]
+      },
+      {
+        "os": "windows-24h2",
+        "backends": [
+          "wslc",
+          "windows-sandbox",
+          "microvm",
+          "hyperlight"
+        ]
+      },
+      {
+        "os": "windows-23h2",
+        "backends": [
+          "wslc",
+          "windows-sandbox",
+          "microvm",
+          "hyperlight"
+        ]
+      },
+      {
+        "os": "macos-15",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "ubuntu-24.04",
+        "backends": [
+          "bubblewrap",
+          "hyperlight",
+          "lxc"
+        ]
+      },
+      {
+        "os": "rhel-10.2",
+        "backends": [
+          "hyperlight",
+          "lxc"
+        ]
+      },
+      {
+        "os": "debian-13",
+        "backends": [
+          "bubblewrap",
+          "hyperlight",
+          "lxc"
+        ]
+      }
+    ]
+  },
+  "enabled": [
+    {
+      "plan": "pr",
+      "os": "windows-canary",
+      "architecture": "x64",
+      "backend": "process-t1"
+    },
+    {
+      "plan": "pr",
+      "os": "ubuntu-26.04",
+      "architecture": "x64",
+      "backend": "bubblewrap"
+    },
+    {
+      "plan": "nightly",
+      "os": "windows-private-b",
+      "architecture": "x64",
+      "backend": "isolation-session"
+    },
+    {
+      "plan": "nightly",
+      "os": "ubuntu-26.04",
+      "architecture": "x64",
+      "backend": "lxc"
+    },
+    {
+      "plan": "weekly",
+      "os": "windows-24h2",
+      "architecture": "x64",
+      "backend": "windows-sandbox"
+    },
+    {
+      "plan": "weekly",
+      "os": "debian-13",
+      "architecture": "x64",
+      "backend": "bubblewrap"
+    }
+  ]
+}

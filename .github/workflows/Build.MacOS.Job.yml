@@ -55,6 +55,18 @@ jobs:
         run: cargo test --locked --release --target aarch64-apple-darwin
              -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
 
+      - name: Verify artifact payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin_dir="target/aarch64-apple-darwin/release"
+          for file in mxc-exec-mac unix-test-proxy; do
+            if [[ ! -f "$bin_dir/$file" ]]; then
+              echo "Missing artifact file: $file" >&2
+              exit 1
+            fi
+          done
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
