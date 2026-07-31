@@ -1138,13 +1138,22 @@ impl BaseContainerRunner {
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
         // Environment block for the sandboxed child.
-        // If the caller specified explicit env vars, use only those.
-        // Otherwise, pass NULL to let the OS provide the default environment
-        // for the sandbox (CreateProcessInSandbox handles this internally).
+        // Explicit variables are always isolated from the parent environment.
+        // The one-shot API supplies its own default when this is NULL, but the
+        // attribute-based CreateProcessW capture path must receive an explicit
+        // clean block or it would inherit all wxc-exec process variables.
         let env_block: Option<Vec<u16>> = if request.env.is_empty() {
-            // TODO: consider calling CreateEnvironmentBlock(NULL, FALSE) here
-            // for a cleansed default env if the OS API doesn't do it for us.
-            None
+            if capture_denials.is_some() {
+                let entries =
+                    crate::appcontainer_runner::create_default_env_entries().map_err(|error| {
+                        ScriptResponse::error(&format!(
+                            "captureDenials failed to create a clean child environment: {error}"
+                        ))
+                    })?;
+                Some(crate::appcontainer_runner::encode_env_block(&entries))
+            } else {
+                None
+            }
         } else {
             Some(encode_env_block(&request.env))
         };

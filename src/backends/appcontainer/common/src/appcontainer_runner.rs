@@ -64,7 +64,7 @@ const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
 /// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
-fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
+pub(crate) fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
     let mut sorted: Vec<&(String, String)> = entries.iter().collect();
     sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
 
@@ -85,7 +85,7 @@ fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
 /// Calls `CreateEnvironmentBlock` with `bInherit = FALSE` so that only the
 /// system/user profile variables are included (no process-level vars leak in).
 /// Returns the entries as `(key, value)` pairs.
-fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
+pub(crate) fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
