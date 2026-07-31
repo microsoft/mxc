@@ -527,9 +527,9 @@
   "enabled": [
     {
       "plan": "pr",
-      "os": "windows-canary",
+      "os": "windows-25h2",
       "architecture": "x64",
-      "backend": "process-t1"
+      "backend": "process-t3"
     },
     {
       "plan": "pr",
