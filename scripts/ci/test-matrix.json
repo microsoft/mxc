@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "platforms": [
     {
-      "id": "windows-private-a",
+      "id": "windows-prerelease-a",
       "displayName": "Windows Pre-release A",
       "family": "windows",
-      "private": true,
+      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
@@ -34,10 +34,10 @@
       }
     },
     {
-      "id": "windows-private-b",
+      "id": "windows-prerelease-isolation-session",
       "displayName": "Windows Pre-release Isolation Session",
       "family": "windows",
-      "private": true,
+      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
@@ -397,13 +397,13 @@
     ],
     "nightly": [
       {
-        "os": "windows-private-b",
+        "os": "windows-prerelease-isolation-session",
         "backends": [
           "isolation-session"
         ]
       },
       {
-        "os": "windows-private-a",
+        "os": "windows-prerelease-a",
         "backends": [
           "process-t1",
           "isolation-session",
@@ -539,7 +539,7 @@
     },
     {
       "plan": "nightly",
-      "os": "windows-private-b",
+      "os": "windows-prerelease-isolation-session",
       "architecture": "x64",
       "backend": "isolation-session"
     },

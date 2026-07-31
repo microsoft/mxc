@@ -117,8 +117,8 @@ test('duplicate enabled combinations are rejected', () => {
   );
 });
 
-test('private platforms use neutral public aliases', () => {
-  for (const platform of catalog().platforms.filter(entry => entry.private === true)) {
-    assert.match(platform.id, /^windows-private-[a-z]$/);
+test('prerelease platforms use neutral public aliases', () => {
+  for (const platform of catalog().platforms.filter(entry => entry.prerelease === true)) {
+    assert.match(platform.id, /^windows-prerelease-[a-z-]+$/);
   }
 });
