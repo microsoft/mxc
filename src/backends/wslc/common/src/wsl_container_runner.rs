@@ -1070,12 +1070,20 @@ impl WSLContainerRunner {
         }
 
         let mut timed_out = false;
+        // Whether the *event* said the process ended. Tracked apart from the
+        // callback confirmation below because they are separate pieces of
+        // evidence, and reporting an exit requires at least one of them: with
+        // neither, `WslcGetProcessExitCode` happily returns `STILL_ACTIVE` for a
+        // container that is very much still running.
+        let mut exit_signalled = false;
         if !exit_event.is_null() {
             let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
                 windows::Win32::Foundation::HANDLE(exit_event),
                 wait_ms,
             );
-            if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
+            if wait_result == windows::Win32::Foundation::WAIT_OBJECT_0 {
+                exit_signalled = true;
+            } else if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
                 timed_out = true;
                 let _ = writeln!(
                     logger,
@@ -1090,6 +1098,16 @@ impl WSLContainerRunner {
                     err_msg.as_mut_ptr(),
                 );
                 drop(err_msg);
+            } else {
+                // `WAIT_FAILED`, `WAIT_ABANDONED`, or anything else: the wait
+                // told us nothing about the process, so neither "exited" nor
+                // "timed out" can be claimed. Fail rather than guess.
+                let last_error = windows::Win32::Foundation::GetLastError();
+                return Err(ScriptResponse::error(&format!(
+                    "waiting on the WSLC process exit event failed: WaitForSingleObject returned \
+                     0x{:08X} (GetLastError 0x{:08X})",
+                    wait_result.0, last_error.0
+                )));
             }
         }
 
@@ -1142,9 +1160,18 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
         }
         let outcome = match (timed_out, confirmed) {
-            (false, _) => {
+            // Reported only on positive evidence the process ended: the exit
+            // event signalling, or the SDK's exit callback. Without either --
+            // a null exit event and no callback -- `exit_code` is meaningless.
+            (false, _) if exit_signalled || confirmed => {
                 let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
                 WaitOutcome::Exited
+            }
+            (false, _) => {
+                return Err(ScriptResponse::error(
+                    "the WSLC process never reported an exit: no exit event was available and the \
+                     SDK's exit callback did not fire, so the container may still be running",
+                ));
             }
             (true, true) => {
                 let _ = writeln!(logger, "[WSLC] Process killed after timeout");
