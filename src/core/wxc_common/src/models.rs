@@ -534,10 +534,15 @@ pub struct ContainerPolicy {
     /// present), captured at parse time. The twin of `network_specified`, and
     /// necessary for the same reason: `UiPolicy::default()` is full lockdown,
     /// so an absent `ui` and an explicitly-supplied lockdown `ui` are
-    /// indistinguishable from the other fields here. Used by backends (e.g.
-    /// IsolationSession) that have no UI-restriction primitive and must refuse
-    /// a UI policy rather than accept and drop it. Parse-derived, never on the
-    /// wire.
+    /// indistinguishable from the other fields here. Parse-derived, never on
+    /// the wire.
+    ///
+    /// Consumed only by IsolationSession today, which has no UI-restriction
+    /// primitive and refuses a supplied UI policy rather than accepting and
+    /// dropping it. The other backends that do not enforce `policy.ui` — LXC
+    /// and Bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox — still
+    /// accept and ignore it, so this flag being set does not mean a UI policy
+    /// was honored anywhere; it means only that the caller supplied one.
     #[serde(skip)]
     pub ui_specified: bool,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
