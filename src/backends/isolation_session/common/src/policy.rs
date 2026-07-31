@@ -34,8 +34,9 @@ const ERR_FILESYSTEM_POLICY: &str =
 const ERR_UI_POLICY: &str = "UI policy is not supported by the isolation session backend; the \
     session isolates the host's UI from the contained code but does not deny it UI \
     capabilities (window creation, GDI, and the session's own clipboard all work inside \
-    it), so a UI restriction cannot be honored; remove the ui policy, or use a backend \
-    that enforces one";
+    it), so no ui posture is truthful here. Omitting the ui section is accepted but \
+    applies no restriction — it is not the lockdown the schema's default implies. Use a \
+    backend that enforces UI policy if you need one";
 const ERR_NETWORK_POLICY: &str = "the network is unrestricted and cannot be filtered or denied; \
     set network.defaultPolicy=allow and network.allowLocalNetwork=true with no allowed/blocked \
     hosts, no proxy, and default enforcement to acknowledge the container is fully \

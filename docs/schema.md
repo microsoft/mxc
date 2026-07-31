@@ -151,7 +151,11 @@ containment tier selected at runtime:
 ### UI Policy
 
 The `ui` section is the cross-platform UI-restriction policy. Every field is
-default-deny — an omitted `ui` section is equivalent to full lockdown.
+default-deny, so on a backend that enforces the section an omitted `ui` is
+equivalent to full lockdown. **That equivalence is per-backend**: a backend that
+does not enforce UI policy applies no restriction whether the section is omitted
+or supplied, so an omitted `ui` there is not lockdown. Check the backend's own
+documentation before relying on the default.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -164,7 +168,11 @@ backend (via job-object UI restrictions plus the Win32k mitigation — see
 [`process-container/UIPolicy_Schema.md`](process-container/UIPolicy_Schema.md))
 and by the macOS Seatbelt backend (via the generated sandbox profile). Other
 backends do not implement UI restrictions; each backend's documentation states
-whether it applies, rejects, or ignores the section. The Windows
+whether it applies, rejects, or ignores the section. **IsolationSession refuses
+any supplied `ui` at every phase on both surfaces** — no `ui` posture is truthful
+for a session-isolated sandbox (see
+[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)) —
+and accepts an omitted one without applying any UI restriction. The Windows
 `processContainer.ui` sub-block carries additional ProcessContainer-only fields
 (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
 when `containment` is `processcontainer`.

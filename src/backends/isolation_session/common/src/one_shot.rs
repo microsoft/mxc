@@ -27,8 +27,10 @@ use super::IsolationSessionRunner;
 ///
 /// * `destroyOnExit: false` asks the session to outlive the call. It cannot.
 /// * `preservePolicy: true` asks for filesystem/network policy to be retained
-///   past the run. Both are rejected outright by this backend, so there is no
-///   policy to preserve and the request is meaningless here.
+///   past the run. This backend installs no persistent filesystem or network
+///   enforcement — filesystem policy is refused outright, and the accepted
+///   network policy is an acknowledgment of an unrestricted posture rather than
+///   anything applied — so there is nothing to retain.
 fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if !request.lifecycle.destroy_on_exit {
         return Err(ScriptResponse::error(
@@ -39,7 +41,8 @@ fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), Script
     if request.lifecycle.preserve_policy {
         return Err(ScriptResponse::error(
             "lifecycle.preservePolicy=true is not supported by the isolation session backend; \
-             it rejects filesystem and network policy outright, so there is none to preserve",
+             it installs no persistent filesystem or network enforcement, so there is none \
+             to preserve",
         ));
     }
     Ok(())

@@ -131,6 +131,10 @@ interface.
         "env": ["MYVAR=hello"],
         "timeout": 30000
     },
+    "network": {
+        "defaultPolicy": "allow",
+        "allowLocalNetwork": true
+    },
     "experimental": {
         "isolation_session": {}
     }
@@ -244,7 +248,7 @@ the rationale for each disposition, and the error mapping live in
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
 | `network` — canonical unrestricted acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** |
 | `network` — anything else, including absent (defaults to the unenforceable `block`) | rejected |
-| `ui` | rejected — the session isolates the host's UI from the contained code but does not deny it UI capabilities, so a UI restriction cannot be honored |
+| `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
@@ -253,7 +257,26 @@ the rationale for each disposition, and the error mapping live in
 | `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only, and the one-shot mapping reads only the flat `user` |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
-Refusals surface as a non-zero exit with the reason on stderr.
+Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
+typed policy error code: the envelope carries `error.code = "backend_error"` with
+the reason in the message, unlike the state-aware surface which emits
+`policy_validation`.
+
+**Why every supplied `ui` is refused.** The `ui` section states intent about the
+contained code's relationship to the *user's* environment, and was modelled on a
+process/job boundary where "the clipboard" and "the desktop" are the user's. An
+isolation session is a separate OS session, so the contained code keeps its UI
+capabilities but cannot reach the host's. That makes every posture untrue here —
+`disable` either denies capabilities the session grants or promises a GUI the
+user can never see; `clipboard` describes a relationship to a clipboard the
+sandbox cannot touch. Only `injection: false` is honest (`SendInput` returns
+`ERROR_ACCESS_DENIED`), and it cannot be supplied alone because the other fields
+materialize to defaults that are false. With nothing truthful to accept, there is
+no acknowledgment-style gate as there is for `network`. An omitted `ui` is
+accepted because absence is not a caller statement of intent — but note it
+applies no restriction, so the schema's default-deny reading does not hold here.
+The full field-by-field table is in
+[`state-aware-rust.md`](state-aware-rust.md).
 
 **Deferred to follow-up work:**
 
@@ -378,6 +401,10 @@ wxc-exec.exe --experimental hello.json
   "process": {
     "commandLine": "whoami",
     "timeout": 30000
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
   },
   "experimental": {
     "isolation_session": {}

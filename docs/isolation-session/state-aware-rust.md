@@ -125,16 +125,49 @@ defaults to the unenforceable `block`). On the **post-provision** phases the
 network posture is fixed at provision, so any supplied network policy is
 rejected and an absent one is inherited.
 
-UI policy is rejected at every phase, on both surfaces. The backend has no
-UI-restriction primitive: the isolation session is a *separate OS session*,
-which isolates the host's UI from the contained code but does not deny the
-contained code UI capabilities. Measured inside a live session, window creation,
-GDI, and the session's own clipboard all work; only input injection is blocked.
-A `ui` policy therefore cannot be honored, and accepting it would assert
-guarantees — most importantly the Win32k attack-surface reduction that
-`disable: true` implies — that the backend does not provide. The refusal is
-presence-based: `UiPolicy`'s defaults are full lockdown, so an explicitly
-supplied lockdown `ui` is indistinguishable by value from an absent one.
+UI policy is rejected at every phase, on both surfaces, and **no `ui` posture is
+truthful for this backend** — there is no value combination that could be
+accepted instead.
+
+The section states *intent about the contained code's relationship to the user's
+environment*, and it was modelled on a process/job boundary, where "the
+clipboard" and "the desktop" are the user's. An isolation session is a *separate
+OS session*: it isolates the host's UI from the contained code, but does not deny
+the contained code UI capabilities within its own session. Measured inside a live
+session, window creation, GDI, and the session's own clipboard all work; only
+input injection is blocked. Field by field:
+
+| Field | What it asserts | In an isolation session |
+|---|---|---|
+| `disable: true` | no window creation, no GDI, no `NtUser*`/`NtGdi*` | false — all of it works |
+| `disable: false` | may drive a GUI the user can see | false — windows are unreachable and invisible |
+| `clipboard: none` / `read` / `write` | a specific relationship to the user's clipboard | false — reaches only the session's own, in both directions |
+| `clipboard: all` | may read and write the user's clipboard | false — same reason |
+| `injection: false` | no synthetic input | **true** — `SendInput` returns `ERROR_ACCESS_DENIED` |
+| `injection: true` | may inject synthetic input | false — injection is blocked regardless |
+
+Only `injection: false` is honest, and it cannot be expressed on its own: the
+other two fields materialize to defaults that are both false here. So there is
+nothing to accept, and no acknowledgment-style gate is possible — unlike
+`network`, where the canonical unrestricted acknowledgment *is* a true statement
+about the container.
+
+Accepting a `ui` block would also assert the Win32k attack-surface reduction that
+`disable: true` implies. That one is not a boundary property at all: a Win32k
+kernel exploit escapes a session exactly as it escapes a job, and session
+isolation does nothing for it.
+
+**An omitted `ui` is accepted, and applies no restriction.** The schema's
+default-deny reading ("an omitted `ui` is equivalent to full lockdown") does
+**not** hold on this backend. The asymmetry with the network gate — which
+*requires* a positive acknowledgment and refuses an absent policy — is
+deliberate, and rests on how the two defaults fail. An absent `network` defaults
+to `block` while the container's network is genuinely open to the outside world,
+so the caller is exposed and must acknowledge it. An absent `ui` defaults to
+lockdown while the contained code's UI reach never leaves its own session, so
+nothing is exposed to acknowledge. Absence is also not a caller statement of
+intent; refusing it would fail every request that omits the section, which is
+ceremony rather than a control.
 
 The only caller-supplied knob the backend accepts beyond the network
 acknowledgment is the optional Entra `user` bundle, at provision and start.
@@ -150,7 +183,8 @@ meaning for this backend.
 | `policy.filesystem.{readwritePaths,readonlyPaths}` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.filesystem.deniedPaths` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `policy.network` — canonical `allow` acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** | **required** | rejected | rejected | rejected | rejected |
-| `policy.network` — any other value (incl. absent → `block`, host rules, proxy) | rejected | rejected | rejected | rejected | rejected | rejected |
+| `policy.network` — any other **supplied** value (host rules, proxy, `defaultPolicy=block`) | rejected | rejected | rejected | rejected | rejected | rejected |
+| `policy.network` — **absent** | rejected (defaults to the unenforceable `block`) | rejected (same) | inherited from provision | inherited | inherited | inherited |
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
@@ -161,7 +195,8 @@ meaning for this backend.
 | `experimental.isolation_session.user` (flat) | rejected | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
 | `experimental.isolation_session.<this phase>.user` | accepted, ignored | **honored** | **honored** | n/a | n/a | n/a |
 | `experimental.isolation_session.<another phase>.*` | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
-| `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected | rejected | rejected | rejected | rejected | rejected |
+| `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
+| another backend's `experimental.<backend>` section | rejected | rejected | accepted, ignored if it is the only one | accepted, ignored if the only one | accepted, ignored if the only one | accepted, ignored if the only one |
 
 Notes on the rows that are not a simple accept/reject:
 
@@ -179,6 +214,14 @@ Notes on the rows that are not a simple accept/reject:
   is vacuously satisfied and neither asserts anything untrue. Bringing it under
   the single-backend-section check uniformly across backends is tracked
   separately.
+- **A lone foreign `experimental.<backend>` section on a non-provision phase** is
+  accepted and ignored, not rejected. Those requests carry no `containment`, so
+  `validate_experimental_backend_keys` has no resolved backend to compare
+  against; it rejects two or more foreign keys as unambiguously wrong but
+  tolerates exactly one. The *stable* sections (`processContainer`, `lxc`,
+  `seatbelt`) are rejected on every phase by the separate stray-section check.
+  Closing the lone-foreign-key case requires resolving the backend from the
+  `sandboxId` prefix, which is cross-backend work tracked separately.
 - **`containerId`** is a caller-supplied label, not a restriction. This backend
   addresses sandboxes by the OS-assigned agent user name, so the field has no
   effect and ignoring it asserts nothing.
@@ -205,12 +248,15 @@ Notes on the rows that are not a simple accept/reject:
   payloads generically is a cross-backend concern and is deliberately not solved
   here. Nest the bundle under the request's own phase; the SDK already does.
 
-Rejection of `policy.*` fields surfaces as `error.code = "policy_validation"`.
-A malformed `user` shape (UPN missing `@`, empty `wamToken`) likewise surfaces
-as `policy_validation`. Start does not cross-check the `user` bundle against
-the `sandboxId` tail — the tail is opaque — so there is no identity-mismatch
-`malformed_request` path; the OS validates the WAM token against the agent
-user it assigned at provision.
+Rejection of `policy.*` fields surfaces on the **state-aware** surface as
+`error.code = "policy_validation"`. On the **one-shot** surface the typed variant
+is discarded (`ScriptResponse::error`) and the envelope carries
+`error.code = "backend_error"` with the reason in the message; one-shot has no
+typed policy code today. A malformed `user` shape (UPN missing `@`, empty
+`wamToken`) likewise surfaces as `policy_validation`. Start does not cross-check
+the `user` bundle against the `sandboxId` tail — the tail is opaque — so there is
+no identity-mismatch `malformed_request` path; the OS validates the WAM token
+against the agent user it assigned at provision.
 
 ## Mode-specific fields
 
