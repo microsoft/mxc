@@ -997,27 +997,21 @@ enforced; access denials are recorded for diagnostics.\n",
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
-        // WSLc cannot enforce per-host egress filtering: the runner would run
-        // iptables inside the container, but its Privileged flag does not grant
-        // CAP_NET_ADMIN, so the run aborts at exec. Reject up front instead.
-        // Mirrors the runner's `needs_host_filtering` (a 'block' default with an
-        // allowlist, or an 'allow' default with a blocklist); bare defaults with
-        // no host lists (full cutoff / full NAT) are enforceable and left as-is.
+        // WSLc cannot enforce per-host egress filtering: containers lack
+        // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
+        // cannot expose VM-level enforcement without breaking other security
+        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
+        // enforces the same for requests that bypass this parser. Bare defaults
+        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
         if containment == ContainmentBackend::Wslc {
-            let is_default_block = policy.default_network_policy == NetworkPolicy::Block;
-            let needs_host_filtering = if is_default_block {
-                !policy.allowed_hosts.is_empty()
-            } else {
-                !policy.blocked_hosts.is_empty()
-            };
-            if needs_host_filtering {
+            if policy.needs_host_filtering() {
                 let msg = "WSLc: per-host egress filtering (allowedHosts with \
                            defaultPolicy='block', or blockedHosts with \
-                           defaultPolicy='allow') is not supported. A WSLc container runs \
-                           in its own network namespace without CAP_NET_ADMIN, so \
-                           in-container iptables enforcement cannot be applied. Use \
-                           network.proxy (defaultPolicy='allow') for cooperative host \
-                           filtering, or remove the host lists.";
+                           defaultPolicy='allow') is not supported. A WSLc container has \
+                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
+                           enforcement is not available without breaking other security \
+                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
+                           for cooperative host filtering, or remove the host lists.";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }

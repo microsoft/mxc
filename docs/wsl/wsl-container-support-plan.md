@@ -306,7 +306,7 @@ Network mapping:
 |---|---|
 | `defaultPolicy: "block"` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_NONE)` |
 | `defaultPolicy: "allow"` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_BRIDGED)` |
-| `allowedHosts / blockedHosts` | Post-start iptables rules via `WslcContainerExec()` (run iptables commands inside container). **Prerequisite:** the container image must include iptables, and the container must run with `WSLC_CONTAINER_FLAG_PRIVILEGED` or `NET_ADMIN` capability to modify network rules. Images without iptables will not support per-host filtering — only the all-or-nothing `defaultPolicy` applies. |
+| `allowedHosts / blockedHosts` | **Not supported — rejected at config-parse time** (and by the backend's `validate_runner`). Per-host filtering would need in-container iptables, but the container has no `CAP_NET_ADMIN` (the `Privileged` flag does not grant it) and MXC has no VM-level enforcement hook (WSLc cannot expose one without breaking other security promises such as MDE). Only the all-or-nothing `defaultPolicy` applies. |
 
 Port mapping (new capability enabled by WSLC SDK):
 | Config field | WSLC SDK equivalent |

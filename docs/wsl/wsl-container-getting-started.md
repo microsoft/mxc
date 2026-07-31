@@ -230,10 +230,11 @@ no separate `--setup-wslc` step is required.
 ### Network proxy (cooperative, unprivileged)
 
 WSLC supports a **cooperative HTTP/HTTPS proxy**: setting `network.proxy`
-routes a container's egress through a proxy you provide. WSLC's kernel has
-**no in-kernel `iptables`**, so — exactly like the Bubblewrap backend — there
-is no netfilter drop-floor; enforcement is *cooperative*, applied by handing
-the workload proxy environment variables that well-behaved clients honor.
+routes a container's egress through a proxy you provide. WSLC cannot apply an
+`iptables` drop-floor — the container has no `CAP_NET_ADMIN` and MXC has no
+VM-level enforcement hook — so, exactly like the Bubblewrap backend,
+enforcement is *cooperative*, applied by handing the workload proxy environment
+variables that well-behaved clients honor.
 
 **How it works**
 
@@ -280,10 +281,11 @@ that combine the proxy with a `block` default or host lists are **rejected**.
 WSLC **cannot** enforce per-host egress filtering. `allowedHosts` with
 `defaultPolicy: "block"` (an allowlist) or `blockedHosts` with
 `defaultPolicy: "allow"` (a blocklist) would require in-container `iptables`
-rules, but a WSLC container runs in its own network namespace **without**
-`CAP_NET_ADMIN` (the SDK's `Privileged` flag does not grant it), so those rules
-cannot be applied. Rather than fail the run at exec time, such configs are
-**rejected at config-parse time**:
+rules, but a WSLC container runs **without** `CAP_NET_ADMIN` (the SDK's
+`Privileged` flag does not grant it), so those rules cannot be applied — and MXC
+has no VM-level enforcement hook either (WSLC cannot expose one without breaking
+other security promises such as MDE). Rather than fail the run at exec time,
+such configs are **rejected at config-parse time**:
 
 ```
 WSLc: per-host egress filtering (allowedHosts with defaultPolicy='block', or
@@ -311,9 +313,9 @@ default, is a no-op and is accepted.)
 - **Cooperative model, not enforcement.** Only clients that honor the proxy
   env vars are routed through the proxy. Tools that bypass them (raw sockets,
   custom HTTP clients, statically-linked binaries that ignore the env) are
-  **not** contained. WSLC cannot provide a hard network floor because its
-  kernel lacks `iptables`. For strict network isolation, use
-  `"allowOutbound": false` (no networking) instead.
+  **not** contained. WSLC cannot provide a hard network floor — the container
+  has no `CAP_NET_ADMIN` and MXC has no VM-level enforcement hook. For strict
+  network isolation, use `"allowOutbound": false` (no networking) instead.
 - **Consumer-provided proxy.** MXC does not start a proxy for WSLC; you supply
   a reachable one via `url`. Any host filtering is the proxy's responsibility —
   the runner does not forward `allowedHosts` / `blockedHosts` to it.
