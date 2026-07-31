@@ -888,6 +888,12 @@ fn object_key_ignore_ascii_case(config: &Value, wanted: &str) -> Option<String> 
 /// Backends that have no capability array (anything that is not a
 /// process container) cannot express capabilities, so the discovered set
 /// is reported on stderr and left unmerged rather than silently dropped.
+///
+/// A malformed `capabilities` value — not an array, or an array holding
+/// a non-string entry — is reported and left exactly as authored. The
+/// adjusted config is an operator-facing artifact, so rewriting invalid
+/// input into something that merely looks valid is worse than declining
+/// to merge.
 pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Result<()> {
     if requested.is_empty() {
         return Ok(());
@@ -953,17 +959,25 @@ pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Re
         return Ok(());
     };
 
-    // Preserve existing entries verbatim (including any non-string
-    // values, which validation elsewhere owns) and append only the
-    // discovered names that are not already present under a
-    // case-insensitive comparison.
-    let mut merged: Vec<String> = existing
-        .iter()
-        .map(|v| match v.as_str() {
-            Some(s) => s.to_string(),
-            None => v.to_string(),
-        })
-        .collect();
+    // Every entry must already be a string. Coercing anything else with
+    // `Value::to_string()` would rewrite the authored policy: `true`
+    // becomes the capability name "true", `null` becomes "null", and an
+    // object becomes escaped JSON text. That turns input the MXC typed
+    // parser would reject into a valid-looking array with different
+    // semantics, so decline the merge and leave the slot untouched —
+    // the same way the non-array case above is handled.
+    let mut merged: Vec<String> = Vec::with_capacity(existing.len());
+    for value in existing {
+        let Some(name) = value.as_str() else {
+            eprintln!(
+                "warning: \"{pc_key}.{caps_slot}\" contains a non-string entry ({value}); {} \
+                 discovered capability/capabilities not merged",
+                mergeable.len()
+            );
+            return Ok(());
+        };
+        merged.push(name.to_string());
+    }
 
     for name in mergeable {
         if !merged.iter().any(|e| e.eq_ignore_ascii_case(name)) {
@@ -1813,6 +1827,37 @@ mod tests {
             cfg, before,
             "must not clobber a malformed capabilities slot"
         );
+    }
+
+    #[test]
+    fn merge_capabilities_leaves_non_string_entries_alone() {
+        // Coercing these with `Value::to_string()` would rewrite the
+        // authored policy into capability names like "true" and "null",
+        // turning input the typed parser rejects into a valid-looking
+        // array with different semantics.
+        for bad in [
+            json!(["internetClient", true]),
+            json!(["internetClient", null]),
+            json!(["internetClient", 42]),
+            json!(["internetClient", {"name": "documentsLibrary"}]),
+            json!(["internetClient", ["documentsLibrary"]]),
+        ] {
+            let mut cfg = json!({ "processContainer": { "capabilities": bad } });
+            let before = cfg.clone();
+            merge_capabilities(&mut cfg, &requested(&["documentsLibrary"])).unwrap();
+            assert_eq!(
+                cfg, before,
+                "a non-string entry must leave the array exactly as authored"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_capabilities_still_merges_when_every_entry_is_a_string() {
+        // The rejection above must not fire on a well-formed array.
+        let mut cfg = json!({"processContainer": {"capabilities": ["internetClient"]}});
+        merge_capabilities(&mut cfg, &requested(&["documentsLibrary"])).unwrap();
+        assert_eq!(caps_of(&cfg), vec!["documentsLibrary", "internetClient"]);
     }
 
     #[test]

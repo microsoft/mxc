@@ -69,6 +69,12 @@ const SID_SUB_AUTHORITY_SIZE: usize = 4;
 /// `ACCESS_ALLOWED_ACE_TYPE` — grants the access in the mask.
 const ACE_TYPE_ACCESS_ALLOWED: u8 = 0x00;
 /// `ACCESS_ALLOWED_CALLBACK_ACE_TYPE` — same grant, callback variant.
+///
+/// Recognized so the walker can reject it explicitly. A callback ACE
+/// carries a conditional-expression `OpaqueData` blob after the SID, and
+/// the only field that describes its length is `AceSize` — which this
+/// header layout does not carry. Its framing is therefore unresolvable
+/// here; see [`read_ace_at_offset`].
 const ACE_TYPE_ACCESS_ALLOWED_CALLBACK: u8 = 0x09;
 
 /// Capability names we want to recognize when their SID appears in an
@@ -586,6 +592,23 @@ fn read_ace_at_offset(buf: &[u8], cursor: usize) -> Result<AceSlice<'_>> {
         ));
     }
     let ace_type = buf[cursor + ACE_TYPE_OFFSET];
+    // A callback ACE is followed by a conditional-expression
+    // `OpaqueData` blob whose length lives in `AceSize` — a field this
+    // header layout does not carry. Advancing past the SID alone would
+    // read that opaque data as the next ACE header, so every ACE after
+    // it (and the capabilities they grant) would be decoded from
+    // attacker-influenced offsets. Refuse the blob instead: the caller
+    // stages matches and drops them on `Err`, so this is fail-closed.
+    // Lift this once a captured EventID=14 payload establishes the
+    // framing.
+    if ace_type == ACE_TYPE_ACCESS_ALLOWED_CALLBACK {
+        return Err(anyhow!(
+            "Unsupported callback ACE (type 0x{:02X}) at byte offset {}: its trailing OpaqueData \
+             has no length field in this header layout, so the rest of the blob cannot be framed.",
+            ACE_TYPE_ACCESS_ALLOWED_CALLBACK,
+            cursor
+        ));
+    }
     let ace_flags = buf[cursor + ACE_FLAGS_OFFSET];
     let access_mask = u32::from_le_bytes([
         buf[cursor + ACE_ACCESS_MASK_OFFSET],
@@ -673,10 +696,9 @@ pub fn invoke_ace_walk_with_index_into(
 
     while cursor < buf.len() {
         let ace = read_ace_at_offset(buf, cursor)?;
-        let is_allow_ace = matches!(
-            ace.ace_type,
-            ACE_TYPE_ACCESS_ALLOWED | ACE_TYPE_ACCESS_ALLOWED_CALLBACK
-        );
+        // Callback ACEs are rejected in `read_ace_at_offset`, so only the
+        // plain allow type can reach here.
+        let is_allow_ace = ace.ace_type == ACE_TYPE_ACCESS_ALLOWED;
         // An allow ACE that grants nothing is not evidence that the
         // workload needs the capability. Accepting zero-mask ACEs lets a
         // crafted DACL inject arbitrary capability names into the
@@ -973,10 +995,50 @@ mod tests {
         let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
         assert!(caps.is_empty(), "deny ACE must not produce capability");
 
-        // Allow-callback ACE (0x09) should still grant.
+        // A callback ACE (0x09) is followed by conditional OpaqueData
+        // with no length field in this header layout, so the walk cannot
+        // be framed past it. It must fail closed rather than grant.
         let buf = build_ace_typed(ACE_TYPE_ACCESS_ALLOWED_CALLBACK, GRANT, &sid);
-        let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
-        assert!(caps.contains("internetClient"));
+        let err = invoke_ace_walk_with_index(&buf, &idx, false)
+            .expect_err("callback ACE framing is unresolvable and must be rejected");
+        assert!(
+            err.to_string().contains("callback ACE"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn callback_ace_aborts_the_walk_so_later_aces_are_never_misframed() {
+        // The bytes trailing a callback ACE are its OpaqueData, not the
+        // next ACE header. Decoding onward would resolve capabilities
+        // from attacker-chosen offsets, so the whole blob is refused.
+        let sid = well_world_sid();
+        let idx = cap_index_for(&sid, "internetClient");
+
+        let mut buf = build_ace(GRANT, &sid);
+        buf.extend_from_slice(&build_ace_typed(
+            ACE_TYPE_ACCESS_ALLOWED_CALLBACK,
+            GRANT,
+            &sid,
+        ));
+
+        let mut found = HashSet::new();
+        let err = invoke_ace_walk_with_index_into(&buf, &idx, false, &mut found)
+            .expect_err("a callback ACE must abort the walk");
+        assert!(
+            err.to_string().contains("callback ACE"),
+            "unexpected error: {err}"
+        );
+        // The walk stages as it goes, so the leading ACE is already in
+        // `found` when the error fires. That is the documented
+        // partial-write contract which obliges callers to pass a
+        // per-blob scratch set and discard it on `Err` — asserted here so
+        // the fail-closed duty stays visible if this test is revisited.
+        assert_eq!(
+            found.len(),
+            1,
+            "partial write expected; callers must discard this set on Err"
+        );
     }
 
     // ---- public entry points: extract_caps* ------------------------------
