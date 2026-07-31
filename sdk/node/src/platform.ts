@@ -4,6 +4,7 @@ import * as path from 'path';
 import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
 import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
+import { diagLog } from './diagnostic.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -276,8 +277,15 @@ function computeSupport(): PlatformSupport {
     const bubblewrap = _probeBubblewrap();
     if (bubblewrap.available) {
       methods.push('bubblewrap');
-    } else if (methods.length === 0) {
-      support.reason = `Neither LXC nor Bubblewrap is available on this system (${bubblewrap.reason})`;
+    } else {
+      // Always surface why bwrap is unavailable. When LXC is present the
+      // platform is still supported, so `reason` — documented as why the
+      // platform is *not* supported — must stay unset, and the detail would
+      // otherwise be dropped with no way to diagnose the missing backend.
+      diagLog(`getPlatformSupport: bubblewrap unavailable — ${bubblewrap.reason}`);
+      if (methods.length === 0) {
+        support.reason = `Neither LXC nor Bubblewrap is available on this system (${bubblewrap.reason})`;
+      }
     }
     if (methods.length > 0) {
       support.isSupported = true;
@@ -359,6 +367,16 @@ function bwrapExistsOnPath(): boolean {
 }
 
 /**
+ * How long to wait for `bwrap --version` before giving up.
+ *
+ * `getPlatformSupport()` is synchronous, so without a bound a `bwrap` that
+ * hangs — a wrapper script on PATH, a binary on a stalled network mount —
+ * would block the caller indefinitely. Printing a version string is
+ * near-instant, so this is generous.
+ */
+const BWRAP_VERSION_TIMEOUT_MS = 5000;
+
+/**
  * Default runner for `bwrap --version`. Uses `execFileSync` rather than a
  * shell so a missing binary surfaces as `ENOENT` instead of the shell's
  * indistinguishable exit code 127 — that separation is what lets us report
@@ -370,15 +388,31 @@ function defaultBwrapVersionRunner(): BwrapVersionResult {
   try {
     return {
       kind: 'output',
-      stdout: execFileSync('bwrap', ['--version'], { encoding: 'utf-8', stdio: 'pipe' }),
+      stdout: execFileSync('bwrap', ['--version'], {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: BWRAP_VERSION_TIMEOUT_MS,
+      }),
     };
   } catch (err) {
-    const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: Buffer | string };
+    const e = err as NodeJS.ErrnoException & {
+      status?: number | null;
+      stderr?: Buffer | string;
+      killed?: boolean;
+    };
     // `ENOENT` covers both an absent binary and a present-but-unusable one
     // (missing ELF interpreter / shebang target), so confirm the binary is
     // really absent before blaming the package manager.
     if (e.code === 'ENOENT' && !bwrapExistsOnPath()) {
       return { kind: 'notFound' };
+    }
+    // Timed out: the child was killed, so there is no meaningful exit status.
+    if (e.code === 'ETIMEDOUT' || e.killed) {
+      return {
+        kind: 'failed',
+        status: null,
+        detail: `timed out after ${BWRAP_VERSION_TIMEOUT_MS}ms`,
+      };
     }
     return {
       kind: 'failed',

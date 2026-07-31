@@ -526,6 +526,19 @@ describe('bwrap minimum-version gate', () => {
     assert.doesNotMatch(probe.reason, /not installed/);
   });
 
+  it('reports a timed-out probe as a failure rather than hanging', () => {
+    // `getPlatformSupport()` is synchronous, so a hung `bwrap --version` must
+    // surface as a bounded failure with the timeout named.
+    _setBwrapVersionRunner(() => ({
+      kind: 'failed',
+      status: null,
+      detail: 'timed out after 5000ms',
+    }));
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /timed out after 5000ms/);
+  });
+
   it('describes a failure that has no exit status without claiming it never ran', () => {
     // A signal-terminated run also has a null status, so the wording must not
     // assert the process could not be executed.
