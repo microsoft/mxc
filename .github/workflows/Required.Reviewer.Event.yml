@@ -23,8 +23,7 @@ jobs:
             > "${RUNNER_TEMP}/required-reviewer-event/pull-request-number"
 
       - name: Upload review event context
-        # Pin the action to an immutable commit; v7.0.1 is noted for readability.
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: required-reviewer-event
           path: ${{ runner.temp }}/required-reviewer-event/pull-request-number
