@@ -28,11 +28,12 @@
 // The heuristic matches over *code only*: comments and string literals are
 // stripped first, `..foo` range syntax is not a read of `foo`, and `.foo(` is a
 // method call rather than a field access. Without those exclusions the check is
-// far weaker than it looks -- see the self-test in
-// tests/check-wire-mapping-coverage.test.js, which pins the two false-positive
+// far weaker than it looks -- see the self-test in the sibling
+// check-wire-mapping-coverage.test.js, which pins the two false-positive
 // classes that once let a real dropped field through.
 //
 //   node scripts/versioning/check-wire-mapping-coverage.js
+//   node --test scripts/versioning/check-wire-mapping-coverage.test.js
 
 const { readFileSync } = require("fs");
 const { join } = require("path");
