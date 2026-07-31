@@ -271,6 +271,33 @@ fn await_callbacks_quiesced(io_ctx: &Arc<IoContext>) -> bool {
     false
 }
 
+/// How a wait ended — and, when the deadline fired, whether the SDK could be
+/// made to *prove* the process is gone.
+///
+/// A timeout stop is only ever a request: `WslcStopContainer`'s HRESULT says
+/// the call was accepted, not that the process died. The SDK's exit callback is
+/// the only positive proof, so "timed out" and "timed out and was terminated"
+/// are deliberately different answers — reporting the second when only the
+/// first holds is how a caller ends up believing sandboxed code was killed
+/// while it is still running.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum WaitOutcome {
+    /// The process exited on its own, within the deadline.
+    Exited,
+    /// The deadline elapsed and the exit callback confirmed the process is gone.
+    TimedOutTerminated,
+    /// The deadline elapsed and the exit callback never arrived, even after the
+    /// `SIGKILL` escalation: the container may still be running.
+    TimedOutUnconfirmed,
+}
+
+impl WaitOutcome {
+    /// Whether the deadline fired, however it ended.
+    pub(crate) fn timed_out(self) -> bool {
+        !matches!(self, WaitOutcome::Exited)
+    }
+}
+
 /// The caller-side read ends of a [`StdioMode::Pipes`] context.
 pub(crate) struct StreamPipes {
     pub(crate) stdout: StreamReader,
@@ -1006,7 +1033,7 @@ impl WSLContainerRunner {
         io_ctx: &Arc<IoContext>,
         wait_ms: u32,
         logger: &mut Logger,
-    ) -> Result<(i32, bool), ScriptResponse> {
+    ) -> Result<(i32, WaitOutcome), ScriptResponse> {
         let mut exit_event: HANDLE = ptr::null_mut();
         let hr = sdk.WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
         if hr != S_OK {
@@ -1037,8 +1064,10 @@ impl WSLContainerRunner {
             }
         }
 
-        // Wait for exit callback to fire — guarantees all I/O is flushed.
-        if !await_callbacks_quiesced(io_ctx) {
+        // Wait for exit callback to fire — guarantees all I/O is flushed, and
+        // is the only proof the process is actually gone.
+        let mut confirmed = await_callbacks_quiesced(io_ctx);
+        if !confirmed {
             if timed_out {
                 // The `SIGTERM` above was only a request, and it plainly did not
                 // land: the process is still running and still producing output.
@@ -1060,7 +1089,8 @@ impl WSLContainerRunner {
             }
             // Re-checked after the escalation: only a callback that still has
             // not fired forces the context leak.
-            if !await_callbacks_quiesced(io_ctx) {
+            confirmed = await_callbacks_quiesced(io_ctx);
+            if !confirmed {
                 let _ = writeln!(
                     logger,
                     "[WSLC] Warning: exit callback did not fire within {}s; leaking the callback \
@@ -1082,20 +1112,36 @@ impl WSLContainerRunner {
         if hr != S_OK && !timed_out {
             return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
         }
-        if timed_out {
-            let _ = writeln!(logger, "[WSLC] Process killed after timeout");
-        } else {
-            let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
-        }
+        let outcome = match (timed_out, confirmed) {
+            (false, _) => {
+                let _ = writeln!(logger, "[WSLC] Process exited with code {}", exit_code);
+                WaitOutcome::Exited
+            }
+            (true, true) => {
+                let _ = writeln!(logger, "[WSLC] Process killed after timeout");
+                WaitOutcome::TimedOutTerminated
+            }
+            // Neither the SIGTERM nor the SIGKILL above produced an exit
+            // callback, so nothing here shows the process died. Callers must
+            // not claim it was terminated.
+            (true, false) => {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Warning: the container could not be confirmed terminated after the \
+                     timeout"
+                );
+                WaitOutcome::TimedOutUnconfirmed
+            }
+        };
 
-        Ok((exit_code, timed_out))
+        Ok((exit_code, outcome))
     }
 
     /// Collect captured I/O and build the final ScriptResponse.
     fn collect_output(
         io_ctx: &IoContext,
         exit_code: i32,
-        timed_out: bool,
+        outcome: WaitOutcome,
         wait_ms: u32,
         logger: &mut Logger,
     ) -> ScriptResponse {
@@ -1110,13 +1156,22 @@ impl WSLContainerRunner {
         }
 
         ScriptResponse {
-            exit_code: if timed_out { -1 } else { exit_code },
+            exit_code: if outcome.timed_out() { -1 } else { exit_code },
             standard_out: stdout,
             standard_err: stderr,
-            error_message: if timed_out {
-                format!("Process timed out after {}ms and was terminated", wait_ms)
-            } else {
-                String::new()
+            // The unconfirmed wording is not pedantry: the stop is only ever a
+            // request, so claiming a termination the SDK never confirmed can
+            // tell a caller their sandboxed code is dead while it is running.
+            error_message: match outcome {
+                WaitOutcome::Exited => String::new(),
+                WaitOutcome::TimedOutTerminated => {
+                    format!("Process timed out after {}ms and was terminated", wait_ms)
+                }
+                WaitOutcome::TimedOutUnconfirmed => format!(
+                    "Process timed out after {}ms; the container could not be confirmed \
+                     terminated and may still be running",
+                    wait_ms
+                ),
             },
             ..Default::default()
         }
@@ -1648,7 +1703,7 @@ impl WSLContainerRunner {
         };
 
         // -- Wait for exit --
-        let (exit_code, timed_out) = match started.wait_for_exit(logger) {
+        let (exit_code, outcome) = match started.wait_for_exit(logger) {
             Ok(r) => r,
             Err(e) => {
                 // `wait_for_exit` can fail while the container is still running
@@ -1669,7 +1724,7 @@ impl WSLContainerRunner {
         Self::collect_output(
             &started.io_ctx,
             exit_code,
-            timed_out,
+            outcome,
             started.timeout_ms,
             logger,
         )
@@ -1747,7 +1802,10 @@ impl Drop for StartedContainer {
 impl StartedContainer {
     /// Wait for the init process to exit, enforcing the request's timeout
     /// (stopping the container when it fires). Returns `(exit_code, timed_out)`.
-    pub(crate) fn wait_for_exit(&self, logger: &mut Logger) -> Result<(i32, bool), ScriptResponse> {
+    pub(crate) fn wait_for_exit(
+        &self,
+        logger: &mut Logger,
+    ) -> Result<(i32, WaitOutcome), ScriptResponse> {
         // The handle is `Send`, so this may run on a thread that never entered
         // the apartment `init_and_load_sdk` established; join it for the call.
         let _com = ComApartment::enter().map_err(|e| ScriptResponse::error(&e))?;
@@ -2292,6 +2350,62 @@ mod tests {
         let (_ctx, pipes) = IoContext::new(OutputMode::Stream(StdioMode::Pipes));
         assert!(pipes.pipes.is_some(), "pipes hands the caller its readers");
         assert!(pipes.pumps.is_empty(), "pipes has no host pumps");
+    }
+
+    // -- Timeout reporting ------------------------------------------------
+
+    /// The run-to-completion path must not claim a termination the SDK never
+    /// confirmed: a stop is only a request, so an unconfirmed timeout leaves
+    /// sandboxed code possibly still running and the message has to say so.
+    #[test]
+    fn an_unconfirmed_timeout_does_not_claim_the_process_was_terminated() {
+        let (ctx, _) = IoContext::new(OutputMode::Capture);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let confirmed = WSLContainerRunner::collect_output(
+            &ctx,
+            0,
+            WaitOutcome::TimedOutTerminated,
+            1500,
+            &mut logger,
+        );
+        let unconfirmed = WSLContainerRunner::collect_output(
+            &ctx,
+            0,
+            WaitOutcome::TimedOutUnconfirmed,
+            1500,
+            &mut logger,
+        );
+
+        assert!(confirmed.error_message.contains("was terminated"));
+        assert!(
+            !unconfirmed.error_message.contains("was terminated"),
+            "an unconfirmed timeout must not claim a termination, got: {}",
+            unconfirmed.error_message
+        );
+        assert!(
+            unconfirmed.error_message.contains("may still be running"),
+            "an unconfirmed timeout must say the container may still be running, got: {}",
+            unconfirmed.error_message
+        );
+        // Both are still timeouts, so both fail the run.
+        assert_eq!(confirmed.exit_code, -1);
+        assert_eq!(unconfirmed.exit_code, -1);
+    }
+
+    #[test]
+    fn a_normal_exit_reports_its_code_and_no_error() {
+        let (ctx, _) = IoContext::new(OutputMode::Capture);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response =
+            WSLContainerRunner::collect_output(&ctx, 42, WaitOutcome::Exited, 1500, &mut logger);
+
+        assert_eq!(response.exit_code, 42);
+        assert!(response.error_message.is_empty());
+        assert!(!WaitOutcome::Exited.timed_out());
+        assert!(WaitOutcome::TimedOutTerminated.timed_out());
+        assert!(WaitOutcome::TimedOutUnconfirmed.timed_out());
     }
 
     /// `Capture` keeps the bytes for the `ScriptResponse`; the streaming sink

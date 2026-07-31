@@ -324,7 +324,7 @@ impl SandboxProcess for WslcSandboxProcess {
         // `WslcGetProcessExitEvent`), and closing the SDK-side writers then
         // would EOF a caller-taken reader and discard every later callback for
         // a process that is still producing output.
-        let (exit_code, timed_out) = waited.map_err(|response| {
+        let (exit_code, outcome) = waited.map_err(|response| {
             std::io::Error::other(if response.error_message.is_empty() {
                 "waiting for the WSL container process failed".to_string()
             } else {
@@ -337,8 +337,12 @@ impl SandboxProcess for WslcSandboxProcess {
         // what was already buffered.
         self.started.close_streams();
 
-        if timed_out {
-            // Only that the deadline elapsed — not that anything was killed.
+        if outcome.timed_out() {
+            // Records only that the deadline elapsed. Even
+            // `WaitOutcome::TimedOutTerminated` goes through `finish_timed_out`,
+            // whose `confirm_terminated` short-circuits on an already-confirmed
+            // exit — so the confirmed case costs nothing and the unconfirmed one
+            // gets the retry it needs.
             self.deadline_elapsed = true;
             return self.finish_timed_out();
         }
