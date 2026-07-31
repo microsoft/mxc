@@ -1031,7 +1031,7 @@ enforced; access denials are recorded for diagnostics.\n",
                 let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
                            container runs in the NAT'd WSL2 VM and MXC does not honor a \
                            blanket inbound-listen grant; expose specific ports with \
-                           experimental.wslc portMappings instead.";
+                           experimental.wslc.portMappings instead.";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
