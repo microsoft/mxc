@@ -69,20 +69,20 @@ fn timeout_error(timeout_ms: u32) -> std::io::Error {
     )
 }
 
-/// The `ErrorKind::TimedOut` error reported when the deadline elapsed but the
-/// kill could **not** be confirmed.
+/// The error reported when the deadline elapsed but the kill could **not** be
+/// confirmed.
 ///
-/// Still a timeout — the deadline is spent either way, so reporting an exit
-/// code would be wrong — but deliberately worded not to claim the termination
-/// [`timeout_error`] promises, since that is exactly what could not be shown.
-fn unconfirmed_timeout_error(timeout_ms: u32) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        format!(
-            "Process timed out after {timeout_ms}ms; the container could not be confirmed \
-             terminated (call wait() to retry the teardown)"
-        ),
-    )
+/// Deliberately *not* `ErrorKind::TimedOut`: the public
+/// [`mxc_sdk::Sandbox::wait`] maps that kind onto `WaitOutcome::TimedOut`, a
+/// success value whose contract is that the process tree *was* killed — which
+/// would silently restore the very claim this case exists to avoid, discarding
+/// the message with it. Being unable to establish the sandbox's state is a
+/// genuine failure, so it surfaces as one and reaches the caller as `Err`.
+fn unconfirmed_termination_error(timeout_ms: u32) -> std::io::Error {
+    std::io::Error::other(format!(
+        "Process timed out after {timeout_ms}ms; the container could not be confirmed terminated \
+         and may still be running (call wait() to retry the teardown)"
+    ))
 }
 
 /// A running WSL container's init process.
@@ -250,7 +250,7 @@ impl SandboxProcess for WslcSandboxProcess {
             // here the way `wait` retries it — but an exit code would still be
             // the wrong answer for a spent deadline.
             Settled::DeadlineUnconfirmed => {
-                return Err(unconfirmed_timeout_error(self.started.timeout_ms))
+                return Err(unconfirmed_termination_error(self.started.timeout_ms))
             }
             // A cached code means `wait` already ran the full teardown.
             Settled::Exited(code) => return Ok(Some(code)),
@@ -447,15 +447,23 @@ mod tests {
         }
     }
 
-    /// The two timeout errors must both surface as `TimedOut` — callers match
-    /// on the kind — while saying different things about the termination.
+    /// Only a *confirmed* kill may carry `ErrorKind::TimedOut`.
+    ///
+    /// `mxc_sdk::Sandbox::wait` turns that kind into `WaitOutcome::TimedOut`, a
+    /// success value promising the process tree was killed — and drops the
+    /// message doing it. An unconfirmed kill must therefore not use that kind,
+    /// or the distinction would be erased at the public API boundary.
     #[test]
-    fn both_timeout_errors_report_the_timedout_kind() {
+    fn only_a_confirmed_kill_uses_the_timedout_error_kind() {
         let confirmed = timeout_error(1500);
-        let unconfirmed = unconfirmed_timeout_error(1500);
+        let unconfirmed = unconfirmed_termination_error(1500);
 
         assert_eq!(confirmed.kind(), std::io::ErrorKind::TimedOut);
-        assert_eq!(unconfirmed.kind(), std::io::ErrorKind::TimedOut);
+        assert_ne!(
+            unconfirmed.kind(),
+            std::io::ErrorKind::TimedOut,
+            "an unconfirmed kill must not be convertible into WaitOutcome::TimedOut"
+        );
 
         assert!(confirmed.to_string().contains("1500ms"));
         assert!(unconfirmed.to_string().contains("1500ms"));
@@ -466,6 +474,10 @@ mod tests {
         assert!(
             !unconfirmed.to_string().contains("was terminated"),
             "the unconfirmed message must not claim a termination it did not prove"
+        );
+        assert!(
+            unconfirmed.to_string().contains("may still be running"),
+            "the unconfirmed message must say the container may still be running"
         );
     }
 }
