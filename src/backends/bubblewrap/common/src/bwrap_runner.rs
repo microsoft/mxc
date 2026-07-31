@@ -44,7 +44,7 @@ use wxc_common::sandbox_process::{
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::validate_common;
 
-use crate::bwrap_command;
+use crate::{bwrap_command, bwrap_version};
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -54,17 +54,6 @@ pub struct BubblewrapScriptRunner;
 impl BubblewrapScriptRunner {
     pub fn new() -> Self {
         Self
-    }
-
-    /// Check whether `bwrap` is available on PATH.
-    fn is_bwrap_available() -> bool {
-        Command::new("bwrap")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
     }
 }
 
@@ -83,11 +72,11 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // `validate_common` (ahead of every `ScriptRunner::run`), so no
         // backend-local check is needed here.
 
-        if !Self::is_bwrap_available() {
-            return Err(ScriptResponse::error(
-                "Bubblewrap (bwrap) is not installed or not on PATH. \
-                 Install it via your package manager (e.g., apt install bubblewrap).",
-            ));
+        // `bwrap` must be present *and* new enough for every flag the argument
+        // builder emits — an old binary would otherwise fail at spawn time with
+        // an opaque "unknown option" error.
+        if let Err(err) = bwrap_version::probe_bwrap() {
+            return Err(ScriptResponse::error(&err.to_string()));
         }
 
         Ok(())

@@ -3152,6 +3152,7 @@ name = "wxc_e2e_tests"
 version = "0.7.0"
 dependencies = [
  "base64",
+ "bwrap_common",
  "serde",
  "serde_json",
 ]
