@@ -68,7 +68,7 @@ production configs and the dev schema when working on experimental features:
 
     "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
-        "capabilities": ["internetClient"],
+        "capabilities": ["internetClient"],
         "captureDenials": {                // Windows-only: record the process's access
             "mode": "block",               // "block" (default): access stays denied and
                                            // is logged (deny-by-default preserved). "allow":

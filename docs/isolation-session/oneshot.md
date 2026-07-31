@@ -250,7 +250,7 @@ the rationale for each disposition, and the error mapping live in
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
 | `experimental.isolation_session.user` | rejected — Entra is state-aware-only |
-| `experimental.isolation_session.{provision,start}` | rejected — per-phase config is state-aware-only |
+| `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only, and the one-shot mapping reads only the flat `user` |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr.

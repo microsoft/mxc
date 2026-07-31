@@ -217,8 +217,8 @@ user it assigned at provision.
 ### Fields valid in both modes
 
 - `process.commandLine` — required for one-shot and for state-aware exec;
-  rejected at non-exec state-aware phases (the parser refuses a `process`
-  section on any phase other than exec).
+  accepted and ignored at non-exec state-aware phases (the dispatcher reads
+  `process` only on `exec`, and nothing runs at the other phases).
 - `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
   honoured per-process (each exec receives its own block).
 
