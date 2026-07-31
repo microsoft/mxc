@@ -1248,6 +1248,7 @@ enforced; access denials are recorded for diagnostics.\n",
         testing_features_enabled: false,
         experimental,
         dry_run: false,
+        wait_for_debugger: false,
     })
 }
 

@@ -136,6 +136,31 @@ struct Cli {
     #[arg(long)]
     audit_verbose: bool,
 
+    /// Hold the sandboxed child suspended after creation — before it has
+    /// run any code, including its own loader initialization — instead of
+    /// resuming it immediately, so an external debugger can attach to the
+    /// *real* sandboxed process from outside the sandbox by PID, at its own
+    /// pace (no timeout: nothing races it, since nothing can run until a
+    /// debugger attaches). Unlike Image File Execution Options (IFEO),
+    /// which substitutes the debugger itself into the sandbox (so the
+    /// debugger process ends up sandboxed too and can fail for the same
+    /// reasons the target does), the target here stays the real process;
+    /// only the debugger you attach runs unsandboxed.
+    ///
+    /// Attaching a debugger adds its own +1 to the suspend count; the
+    /// instant wxc-exec detects the attach, it automatically clears its own
+    /// original CREATE_SUSPENDED increment (a single ResumeThread call), so
+    /// after setting breakpoints (necessarily deferred/pending ones, since
+    /// no dependent DLL past the main image has loaded yet), a plain `g` is
+    /// all you need — no `~0 m` ("Resume Thread") required. Windows-only;
+    /// only the AppContainer tier of the `processcontainer` backend
+    /// implements the suspend point (BaseContainer is skipped
+    /// automatically, since it cannot guarantee CREATE_SUSPENDED is honored
+    /// on every OS build).
+    #[cfg(target_os = "windows")]
+    #[arg(long = "wait-for-debugger")]
+    wait_for_debugger: bool,
+
     /// Command to run inside the container, overriding `process.commandLine`
     /// from the policy. The command must follow a `--` separator so normal
     /// CLI flags remain usable after the config path. Examples:
@@ -1019,6 +1044,10 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
+    #[cfg(target_os = "windows")]
+    {
+        request.wait_for_debugger = cli.wait_for_debugger;
+    }
 
     // ── Telemetry init (experimental) ───────────────────────────────
     let telemetry_active = if request.experimental_enabled {

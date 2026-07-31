@@ -737,6 +737,23 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
+    /// Set by `--wait-for-debugger`: hold the sandboxed child's main thread
+    /// suspended after creation (it stays at its `CREATE_SUSPENDED` suspend
+    /// count, having run no code at all, including its own loader
+    /// initialization) until an external, unsandboxed debugger attaches to
+    /// the real PID. The instant `wxc-exec` detects the attach it
+    /// automatically clears its own suspend increment (a single
+    /// `ResumeThread` call), leaving only the debugger's own attach-time
+    /// freeze in place — so after setting breakpoints (necessarily
+    /// deferred/pending ones, since no dependent DLL past the main image
+    /// has loaded), a plain `g` in the debugger is all that's needed; no
+    /// `~0 m` ("Resume Thread") required. `wxc-exec` then falls into its
+    /// normal (already-unbounded-by-default) wait for the child to exit.
+    /// `false` (default) is the unchanged, immediate-resume behavior.
+    /// Consumed by the AppContainer runner; the dispatcher never routes a
+    /// `wait_for_debugger` request to the BaseContainer runner, which
+    /// cannot guarantee `CREATE_SUSPENDED` is honored on every OS build.
+    pub wait_for_debugger: bool,
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)
