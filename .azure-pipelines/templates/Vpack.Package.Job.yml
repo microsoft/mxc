@@ -89,6 +89,10 @@ extends:
             ob_createvpack_prereleaseVer: $(VersionDate).$(VersionCounter)
             ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
 
+            # MXC Vpack only used for testing purposes.
+            ob_sdl_codeSignValidation_excludes: -|**\*.exe;-|**\*.dll;-|**\*.js
+            ob_symbolsPublishing_enabled: false     
+
           steps:
             - task: PowerShell@2
               displayName: Set vpack version
