@@ -65,6 +65,11 @@ pub struct ParseResult {
     /// partial data loss on a long trace is observable rather than
     /// silent.
     pub parse_failures: usize,
+    /// Allow ACEs that named a known capability but granted nothing, so
+    /// were not treated as capability requests. Reported once per trace
+    /// and surfaced here so the condition is assertable in tests rather
+    /// than depending on process-global warning state.
+    pub zero_mask_capabilities: usize,
 }
 
 impl ParseResult {
@@ -672,29 +677,28 @@ pub(crate) struct ParseAccumulator {
     /// at the end of a parse so silent data loss is observable.
     pub(crate) parse_failures: usize,
     pub(crate) capability_index: extract_caps::CapabilityIndex,
-    /// Reusable decode buffer for `EventID=14` ACE hex blobs. Held here
-    /// so the per-event decode reuses one allocation for the whole
-    /// trace instead of allocating a multi-KB `Vec` per record.
-    pub(crate) ace_scratch: Vec<u8>,
-    /// Per-event staging set for capability matches.
+    /// Per-trace scratch and diagnostics for the ACE walk.
     ///
-    /// The ACE walk inserts as it goes, so a blob that is valid up to a
-    /// corrupt tail would otherwise contribute its already-matched
-    /// capabilities even though the record is malformed. These blobs are
-    /// attacker-influenceable, and the output is a security policy, so
-    /// the merge is fail-closed: matches land here first and are only
-    /// promoted into `requested_capabilities` once the whole blob walks
-    /// cleanly. Reused across events to keep the hot path allocation-free.
-    pub(crate) ace_matches: HashSet<String>,
+    /// Holds the reusable hex-decode buffer, the per-event staging set,
+    /// and the zero-mask counter. Staged matches are borrowed
+    /// `&'static str`, so a repeated capability costs nothing until it
+    /// is first promoted into `requested_capabilities`.
+    ///
+    /// The staging set is the fail-closed boundary: the ACE walk inserts
+    /// as it goes, so a blob that is valid up to a corrupt tail would
+    /// otherwise contribute its already-matched capabilities even though
+    /// the record is malformed. These blobs are attacker-influenceable
+    /// and the output is a security policy, so matches land here first
+    /// and are promoted only once the whole blob walks cleanly.
+    pub(crate) ace_walk: extract_caps::AceWalkState,
 }
 
 impl ParseAccumulator {
     pub(crate) fn new(
         current_directory: Option<&str>,
         verbose: bool,
-        capability_table: Vec<extract_caps::CapabilityEntry>,
+        capability_index: extract_caps::CapabilityIndex,
     ) -> Self {
-        let capability_index = extract_caps::CapabilityIndex::from_table(&capability_table);
         let (cwd_lc_trimmed, cwd_lc_prefix) = match current_directory {
             Some(cwd) => {
                 let trimmed = cwd.trim_end_matches('\\');
@@ -727,8 +731,7 @@ impl ParseAccumulator {
             requested_capabilities: HashSet::new(),
             parse_failures: 0,
             capability_index,
-            ace_scratch: Vec::new(),
-            ace_matches: HashSet::new(),
+            ace_walk: extract_caps::AceWalkState::new(),
         }
     }
 
@@ -803,17 +806,37 @@ impl ParseAccumulator {
         }
     }
 
-    fn into_result(self) -> ParseResult {
+    /// Write the end-of-parse diagnostics.
+    ///
+    /// Takes a writer rather than calling `eprintln!` directly so the
+    /// operator-visible text and its counts are assertable in a test and
+    /// cannot go silent in a later refactor.
+    fn write_parse_diagnostics(&self, out: &mut dyn std::io::Write) {
         if self.parse_failures > 0 {
-            eprintln!(
+            let _ = writeln!(
+                out,
                 "Warning: skipped {} malformed event record(s) that could not be parsed",
                 self.parse_failures
             );
         }
+        let zero_mask = self.ace_walk.zero_mask_capabilities();
+        if zero_mask > 0 {
+            let _ = writeln!(
+                out,
+                "warning: {zero_mask} allow ACE(s) named a known capability with a zero access \
+                 mask and were not treated as capability requests. If capabilities are missing \
+                 from the generated config, this filter is the first thing to check."
+            );
+        }
+    }
+
+    fn into_result(self) -> ParseResult {
+        self.write_parse_diagnostics(&mut std::io::stderr());
         ParseResult {
             valid_access_events: self.valid_access_events,
             requested_capabilities: self.requested_capabilities,
             parse_failures: self.parse_failures,
+            zero_mask_capabilities: self.ace_walk.zero_mask_capabilities(),
         }
     }
 }
@@ -823,32 +846,9 @@ pub fn parse_events(
     trace_file: &Path,
     current_directory: Option<&str>,
     verbose: bool,
+    capability_index: extract_caps::CapabilityIndex,
 ) -> Result<ParseResult> {
-    // Build the capability table once. Each entry requires a
-    // `DeriveCapabilitySidsFromName` syscall + LocalAlloc/LocalFree
-    // pair; the table is process-static so doing this per-event would
-    // dominate wall-time on large traces.
-    let built = extract_caps::build_capability_table_with_diagnostics();
-    // An empty table silently resolves every ACE to "no capability",
-    // which is indistinguishable in the output from a workload that
-    // genuinely needed none. Say so rather than emitting a quietly
-    // capability-free config.
-    if built.entries.is_empty() {
-        eprintln!(
-            "warning: no AppContainer capability SIDs could be derived on this host \
-             ({} of {} known names rejected); no capabilities will be detected.",
-            built.derive_failures,
-            extract_caps::known_capability_count()
-        );
-    } else if built.derive_failures > 0 && verbose {
-        println!(
-            "Note: {} of {} known capability names were rejected by this OS and will not be \
-             matched.",
-            built.derive_failures,
-            extract_caps::known_capability_count()
-        );
-    }
-    let mut acc = ParseAccumulator::new(current_directory, verbose, built.entries);
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_index);
     for_each_event_xml(trace_file, verbose, |xml| {
         acc.consume(xml);
         Ok(())
@@ -858,19 +858,19 @@ pub fn parse_events(
 
 /// Fixture-test seam: drive the same per-event accumulator
 /// `parse_events` uses, but pull XML strings from an iterator rather
-/// than a live ETW session. Pass an empty `capability_table` when ACE
-/// matching isn't under test.
+/// than a live ETW session. Pass `CapabilityIndex::for_test(&[])` when
+/// ACE matching isn't under test.
 pub fn parse_events_from_xml<I, S>(
     xmls: I,
     current_directory: Option<&str>,
     verbose: bool,
-    capability_table: Vec<extract_caps::CapabilityEntry>,
+    capability_index: extract_caps::CapabilityIndex,
 ) -> ParseResult
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_table);
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_index);
     for xml in xmls {
         acc.consume(xml.as_ref());
     }
@@ -921,7 +921,12 @@ mod tests {
         // Single fs-only event; ensure the dispatcher runs and the
         // event is collected.
         let xml = make_event_xml("C:\\app\\foo.txt", "0x1");
-        let result = parse_events_from_xml(vec![xml], None, false, Vec::new());
+        let result = parse_events_from_xml(
+            vec![xml],
+            None,
+            false,
+            extract_caps::CapabilityIndex::for_test(&[]),
+        );
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\app\\foo.txt");
     }
@@ -955,12 +960,8 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02X}")).collect()
     }
 
-    fn e2e_table(name: &str, sid: &[u8]) -> Vec<extract_caps::CapabilityEntry> {
-        vec![extract_caps::CapabilityEntry {
-            name: name.into(),
-            app_package_sid: Some(sid.to_vec()),
-            group_sid: None,
-        }]
+    fn e2e_index(name: &'static str, sid: &[u8]) -> extract_caps::CapabilityIndex {
+        extract_caps::CapabilityIndex::for_test(&[(name, Some(sid), None)])
     }
 
     /// `EventID=14` XML carrying `complex_count` `<ComplexData>`
@@ -1007,7 +1008,7 @@ mod tests {
         let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, &hex);
 
         let result =
-            parse_events_from_xml(vec![xml], None, false, e2e_table("internetClient", &sid));
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
 
         assert!(
             result.requested_capabilities.contains("internetClient"),
@@ -1029,7 +1030,7 @@ mod tests {
         let xml = event_xml_with_complex_data("", "0x1", 5, &hex);
 
         let result =
-            parse_events_from_xml(vec![xml], None, false, e2e_table("internetClient", &sid));
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
 
         assert!(result.requested_capabilities.contains("internetClient"));
         assert!(result.valid_access_events.is_empty());
@@ -1045,7 +1046,7 @@ mod tests {
         let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 4, &hex);
 
         let result =
-            parse_events_from_xml(vec![xml], None, false, e2e_table("internetClient", &sid));
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
 
         assert!(
             result.requested_capabilities.is_empty(),
@@ -1064,7 +1065,7 @@ mod tests {
         let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, "ZZZZ");
 
         let result =
-            parse_events_from_xml(vec![xml], None, false, e2e_table("internetClient", &sid));
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
 
         assert!(result.requested_capabilities.is_empty());
         assert_eq!(result.valid_access_events.len(), 1);
@@ -1086,7 +1087,7 @@ mod tests {
         let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, &e2e_hex(&bytes));
 
         let result =
-            parse_events_from_xml(vec![xml], None, false, e2e_table("internetClient", &sid));
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
 
         assert!(
             result.requested_capabilities.is_empty(),
@@ -1112,7 +1113,7 @@ mod tests {
             event_xml_with_complex_data("C:\\app\\good.txt", "0x1", 5, &good),
         ];
 
-        let result = parse_events_from_xml(xmls, None, false, e2e_table("internetClient", &sid));
+        let result = parse_events_from_xml(xmls, None, false, e2e_index("internetClient", &sid));
 
         assert_eq!(result.parse_failures, 1);
         assert!(
@@ -1130,10 +1131,96 @@ mod tests {
             .map(|i| event_xml_with_complex_data(&format!("C:\\app\\f{i}.txt"), "0x1", 5, &hex))
             .collect();
 
-        let result = parse_events_from_xml(xmls, None, false, e2e_table("internetClient", &sid));
+        let result = parse_events_from_xml(xmls, None, false, e2e_index("internetClient", &sid));
 
         assert_eq!(result.requested_capabilities.len(), 1);
         assert_eq!(result.valid_access_events.len(), 3);
+    }
+
+    #[test]
+    fn every_record_malformed_yields_an_empty_result_and_no_config_output() {
+        // A trace where nothing decodes must be loudly empty, not
+        // quietly partial: `stop` keys its "skip writing Adjusted_*.json"
+        // decision off `is_empty()`, so a regression that let junk
+        // through here would emit a config derived from garbage.
+        let xmls = vec![
+            "not xml".to_string(),
+            "<not-an-event/>".to_string(),
+            // Well-formed XML, but no <System> element — the one hard
+            // requirement `parse_event_xml` enforces.
+            "<Event><EventData><Data>x</Data></EventData></Event>".to_string(),
+            String::new(),
+        ];
+        let expected_failures = xmls.len();
+
+        let result = parse_events_from_xml(
+            xmls,
+            None,
+            false,
+            extract_caps::CapabilityIndex::for_test(&[]),
+        );
+
+        assert_eq!(
+            result.parse_failures, expected_failures,
+            "every malformed record must be counted"
+        );
+        assert!(result.valid_access_events.is_empty());
+        assert!(result.requested_capabilities.is_empty());
+        assert!(
+            result.is_empty(),
+            "is_empty() gates whether stop writes an Adjusted_*.json at all"
+        );
+    }
+
+    #[test]
+    fn parse_diagnostics_report_failures_and_zero_mask_counts() {
+        // The counters are covered elsewhere; this pins the
+        // operator-visible text so a refactor cannot make parse failures
+        // silent. Written through a captured writer rather than stderr.
+        let mut acc =
+            ParseAccumulator::new(None, false, extract_caps::CapabilityIndex::for_test(&[]));
+        acc.parse_failures = 3;
+
+        let mut out = Vec::new();
+        acc.write_parse_diagnostics(&mut out);
+        let text = String::from_utf8(out).expect("diagnostics must be UTF-8");
+
+        assert!(
+            text.contains("skipped 3 malformed event record(s)"),
+            "parse-failure count must be reported verbatim: {text}"
+        );
+    }
+
+    #[test]
+    fn parse_diagnostics_are_silent_on_a_clean_trace() {
+        let acc = ParseAccumulator::new(None, false, extract_caps::CapabilityIndex::for_test(&[]));
+        let mut out = Vec::new();
+        acc.write_parse_diagnostics(&mut out);
+        assert!(
+            out.is_empty(),
+            "a clean parse must not emit warning noise: {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    #[test]
+    fn zero_mask_capabilities_are_reported_and_surfaced_on_the_result() {
+        // A zero-mask allow ACE is filtered out, but silently dropping
+        // it would look identical to "this capability was never
+        // requested" — so the count reaches both the operator and the
+        // caller.
+        let sid = e2e_sid();
+        let hex = e2e_hex(&e2e_ace(0, &sid));
+        let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, &hex);
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
+
+        assert!(result.requested_capabilities.is_empty());
+        assert_eq!(
+            result.zero_mask_capabilities, 1,
+            "the filtered ACE must be counted on the result"
+        );
     }
 }
 

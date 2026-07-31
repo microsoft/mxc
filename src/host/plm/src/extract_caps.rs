@@ -225,13 +225,6 @@ const KNOWN_CAPABILITIES: &[&str] = &[
     "cortanaSpeechAccessory",
 ];
 
-#[derive(Debug, Clone)]
-pub struct CapabilityEntry {
-    pub name: String,
-    pub app_package_sid: Option<Vec<u8>>,
-    pub group_sid: Option<Vec<u8>>,
-}
-
 #[cfg(target_os = "windows")]
 fn to_wide_z(s: &str) -> Vec<u16> {
     wxc_common::string_util::to_wide(s)
@@ -316,9 +309,14 @@ pub(crate) fn ascii_ci_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// Capability names in stable display order.
 ///
 /// Extracted from the `plm extract-caps` CLI arm so the ordering is
-/// testable without spawning the binary.
-pub fn sorted_capability_names(caps: &HashSet<String>) -> Vec<&str> {
-    let mut out: Vec<&str> = caps.iter().map(String::as_str).collect();
+/// testable without spawning the binary. Generic over the element type
+/// so it serves both the borrowed set the extractor produces and the
+/// owned set carried in a `ParseResult`.
+pub fn sorted_capability_names<S>(caps: &HashSet<S>) -> Vec<&str>
+where
+    S: std::borrow::Borrow<str> + Eq + std::hash::Hash,
+{
+    let mut out: Vec<&str> = caps.iter().map(|s| s.borrow()).collect();
     out.sort_by(|a, b| ascii_ci_cmp(a, b));
     out
 }
@@ -329,26 +327,20 @@ pub fn known_capability_count() -> usize {
     KNOWN_CAPABILITIES.len()
 }
 
-/// Outcome of building the capability table, including how many known
-/// capability names the OS refused to resolve.
+/// Build the SID → capability index by calling
+/// `DeriveCapabilitySidsFromName` for each known capability.
 ///
-/// A silently-empty table is indistinguishable from "this workload
-/// needed no capabilities": every subsequent lookup misses and the
-/// generated config omits capabilities entirely. Callers use
-/// `derive_failures` / an empty `entries` to warn instead.
-pub struct CapabilityTable {
-    pub entries: Vec<CapabilityEntry>,
-    pub derive_failures: usize,
-}
-
-/// Build the table of (capability name, AppPackage SID, Group SID) tuples
-/// by calling `DeriveCapabilitySidsFromName` for each known capability.
-/// Capabilities the OS rejects are counted in `derive_failures` rather
-/// than silently dropped.
+/// The index is built directly rather than through an intermediate
+/// table: the OS is its only producer and every consumer wants the map,
+/// so the extra vector was pure conversion cost. Capabilities the OS
+/// rejects are counted in [`CapabilityIndex::derive_failures`] rather
+/// than silently dropped — an index that resolved nothing is
+/// indistinguishable from "this workload needed no capabilities",
+/// because every lookup misses and the generated config omits
+/// capabilities entirely.
 #[cfg(target_os = "windows")]
-pub fn build_capability_table_with_diagnostics() -> CapabilityTable {
-    let mut out = Vec::with_capacity(KNOWN_CAPABILITIES.len());
-    let mut derive_failures = 0usize;
+pub fn build_capability_index() -> CapabilityIndex {
+    let mut index = CapabilityIndex::with_capacity(KNOWN_CAPABILITIES.len() * 2);
 
     for &name in KNOWN_CAPABILITIES {
         let wide = to_wide_z(name);
@@ -367,22 +359,21 @@ pub fn build_capability_table_with_diagnostics() -> CapabilityTable {
             )
         };
         if ok.is_err() {
-            derive_failures += 1;
+            index.derive_failures += 1;
             continue;
         }
+        index.resolved_capabilities += 1;
 
         // First entry of each array is the canonical SID; alternate
         // encodings (when present) are not currently matched. Each is read
         // through a bounded slice (see `first_sid_bytes`) so the access is
         // tied to the count the OS reported rather than a raw dereference.
-        let app_package_sid = unsafe { first_sid_bytes(cap_sids, cap_count) };
-        let group_sid = unsafe { first_sid_bytes(group_sids, group_count) };
-
-        out.push(CapabilityEntry {
-            name: name.to_string(),
-            app_package_sid,
-            group_sid,
-        });
+        if let Some(sid) = unsafe { first_sid_bytes(cap_sids, cap_count) } {
+            index.insert_package_sid(sid, name);
+        }
+        if let Some(sid) = unsafe { first_sid_bytes(group_sids, group_count) } {
+            index.insert_group_sid(sid, name);
+        }
 
         unsafe {
             free_sid_array(cap_sids, cap_count);
@@ -390,27 +381,44 @@ pub fn build_capability_table_with_diagnostics() -> CapabilityTable {
         }
     }
 
-    CapabilityTable {
-        entries: out,
-        derive_failures,
-    }
+    index
 }
 
 /// Non-Windows stub: there is no equivalent to
 /// `DeriveCapabilitySidsFromName` on Linux/macOS. Returning an empty
-/// table keeps the pure parts of this module (parse_hex_string, ACE
+/// index keeps the pure parts of this module (parse_hex_string, ACE
 /// byte walker, CapabilityIndex) callable in cross-platform tests.
 #[cfg(not(target_os = "windows"))]
-pub fn build_capability_table_with_diagnostics() -> CapabilityTable {
-    CapabilityTable {
-        entries: Vec::new(),
-        derive_failures: 0,
-    }
+pub fn build_capability_index() -> CapabilityIndex {
+    CapabilityIndex::with_capacity(0)
 }
 
-/// Convenience wrapper that discards the build diagnostics.
-pub fn build_capability_table() -> Vec<CapabilityEntry> {
-    build_capability_table_with_diagnostics().entries
+/// Build the capability index and report what this OS refused to
+/// resolve.
+///
+/// Discovery belongs at the CLI boundary rather than inside
+/// `parse_events`: querying the live OS mid-parse makes a fixed `.etl`
+/// fixture yield different results across Windows versions and
+/// impossible to exercise on non-Windows CI. Callers build the index
+/// here and inject it, so the parser itself is deterministic.
+pub fn discover_capabilities(verbose: bool) -> CapabilityIndex {
+    let index = build_capability_index();
+    if index.resolved_capabilities() == 0 {
+        eprintln!(
+            "warning: no AppContainer capability SIDs could be derived on this host \
+             ({} of {} known names rejected); no capabilities will be detected.",
+            index.derive_failures(),
+            known_capability_count()
+        );
+    } else if index.derive_failures() > 0 && verbose {
+        println!(
+            "Note: {} of {} known capability names were rejected by this OS and will not be \
+             matched.",
+            index.derive_failures(),
+            known_capability_count()
+        );
+    }
+    index
 }
 
 /// Encoded length of the SID at the front of `bytes`, or `None` when
@@ -464,57 +472,130 @@ pub fn sid_to_string(_sid_bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Result of resolving a SID against the capability table.
-pub enum SidResolution<'a> {
-    Capability(&'a str),
-    GroupCapability(&'a str),
-    Unknown,
-}
-
-/// Indexed view of a capability table for O(1) SID lookup. A linear
+/// Indexed view of the OS capability SIDs for O(1) lookup. A linear
 /// scan over ~150 entries per ACE dominates CPU time on traces with
 /// thousands of ACEs.
 ///
 /// The map keys are SID byte sequences; the value pairs the matched
 /// capability name with a flag distinguishing the package-SID variant
-/// (`false`) from the group-SID variant (`true`). Owns its keys so it
-/// can be carried alongside the table inside `ParseAccumulator` without
-/// the self-referential lifetime headaches that the previous
-/// borrowing form imposed on callers.
+/// (`false`) from the group-SID variant (`true`). It owns its keys so
+/// it can be carried inside `ParseAccumulator` without the
+/// self-referential lifetime headaches that a borrowing form imposes on
+/// callers.
+///
+/// Names are `&'static str` borrowed straight out of
+/// [`KNOWN_CAPABILITIES`], so resolving and staging a match allocates
+/// nothing — a `String` is materialized only when a capability is first
+/// promoted into a trace-wide result set.
 pub struct CapabilityIndex {
-    by_sid: HashMap<Vec<u8>, (String, bool)>,
+    by_sid: HashMap<Vec<u8>, (&'static str, bool)>,
+    resolved_capabilities: usize,
+    derive_failures: usize,
 }
+
+/// A `(capability name, package SID, group SID)` triple, as
+/// [`CapabilityIndex::for_test`] accepts them.
+#[cfg(test)]
+pub(crate) type TestCapabilityEntry<'a> = (&'static str, Option<&'a [u8]>, Option<&'a [u8]>);
 
 impl CapabilityIndex {
-    pub fn from_table(table: &[CapabilityEntry]) -> Self {
-        let mut by_sid: HashMap<Vec<u8>, (String, bool)> = HashMap::with_capacity(table.len() * 2);
-        for entry in table {
-            if let Some(s) = &entry.app_package_sid {
-                by_sid.insert(s.clone(), (entry.name.clone(), false));
-            }
-            if let Some(s) = &entry.group_sid {
-                // App-package SID wins on conflict (it's the canonical
-                // form); only insert the group SID when no entry exists.
-                by_sid
-                    .entry(s.clone())
-                    .or_insert((entry.name.clone(), true));
-            }
+    fn with_capacity(sids: usize) -> Self {
+        Self {
+            by_sid: HashMap::with_capacity(sids),
+            resolved_capabilities: 0,
+            derive_failures: 0,
         }
-        Self { by_sid }
     }
 
-    pub fn resolve<'a>(&'a self, sid_bytes: &[u8]) -> SidResolution<'a> {
-        if let Some((name, is_group)) = self.by_sid.get(sid_bytes) {
-            return if *is_group {
-                SidResolution::GroupCapability(name.as_str())
-            } else {
-                SidResolution::Capability(name.as_str())
-            };
+    fn insert_package_sid(&mut self, sid: Vec<u8>, name: &'static str) {
+        self.by_sid.insert(sid, (name, false));
+    }
+
+    fn insert_group_sid(&mut self, sid: Vec<u8>, name: &'static str) {
+        // App-package SID wins on conflict (it's the canonical form);
+        // only insert the group SID when no entry exists.
+        self.by_sid.entry(sid).or_insert((name, true));
+    }
+
+    /// Known capability names this OS resolved.
+    pub fn resolved_capabilities(&self) -> usize {
+        self.resolved_capabilities
+    }
+
+    /// Known capability names this OS refused to resolve.
+    pub fn derive_failures(&self) -> usize {
+        self.derive_failures
+    }
+
+    /// Resolve a SID to `(capability name, matched via the group SID)`.
+    ///
+    /// The `is_group` flag only distinguishes verbose diagnostic text;
+    /// both variants are equally strong evidence of a request, which is
+    /// why this is a flag rather than a dedicated enum.
+    pub fn resolve(&self, sid_bytes: &[u8]) -> Option<(&'static str, bool)> {
+        self.by_sid.get(sid_bytes).copied()
+    }
+
+    /// Test seam: iterate the indexed `(SID bytes, capability name,
+    /// matched via group SID)` triples. Lets the Windows FFI tests
+    /// validate what the OS actually handed back without reintroducing
+    /// an intermediate table on the production path.
+    #[cfg(test)]
+    pub(crate) fn iter_sids(&self) -> impl Iterator<Item = (&[u8], &'static str, bool)> {
+        self.by_sid
+            .iter()
+            .map(|(sid, (name, is_group))| (sid.as_slice(), *name, *is_group))
+    }
+
+    /// Test seam: build an index without touching the OS. Mirrors the
+    /// insertion order `build_capability_index` uses, so package SIDs
+    /// win over group SIDs exactly as they do in production.
+    #[cfg(test)]
+    pub(crate) fn for_test(entries: &[TestCapabilityEntry<'_>]) -> Self {
+        let mut index = Self::with_capacity(entries.len() * 2);
+        for &(name, package_sid, group_sid) in entries {
+            index.resolved_capabilities += 1;
+            if let Some(sid) = package_sid {
+                index.insert_package_sid(sid.to_vec(), name);
+            }
+            if let Some(sid) = group_sid {
+                index.insert_group_sid(sid.to_vec(), name);
+            }
         }
-        SidResolution::Unknown
+        index
     }
 }
 
+/// Per-trace scratch and diagnostics for the ACE walk.
+///
+/// Owned by the caller so one trace reuses a single hex-decode buffer
+/// and a single staging set, and so the zero-mask condition is counted
+/// per parse rather than once per process.
+#[derive(Default)]
+pub struct AceWalkState {
+    /// Reusable hex-decode buffer for the per-event ACE blob.
+    scratch: Vec<u8>,
+    /// Per-blob staging set. Entries are borrowed, so staging a match
+    /// costs no allocation no matter how many events repeat it.
+    pub(crate) matches: HashSet<&'static str>,
+    zero_mask_capabilities: usize,
+}
+
+impl AceWalkState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Allow ACEs that named a known capability but granted nothing, and
+    /// so were not treated as capability requests.
+    pub fn zero_mask_capabilities(&self) -> usize {
+        self.zero_mask_capabilities
+    }
+}
+
+/// Decode a hex string into a fresh buffer. Test-only: production paths
+/// decode through [`AceWalkState`]'s reusable scratch buffer.
+#[cfg(test)]
 pub(crate) fn parse_hex_string(hex_input: &str) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     parse_hex_string_into(hex_input, &mut out)?;
@@ -639,57 +720,23 @@ fn read_ace_at_offset(buf: &[u8], cursor: usize) -> Result<AceSlice<'_>> {
     })
 }
 
-/// Walk every ACE in `buf` and return the case-insensitively-deduped set
-/// of capability names matched along the way. When `verbose` is true, a
-/// per-ACE diagnostic line is emitted to stdout.
+/// Walk every ACE in `buf`, staging matched capability names in
+/// `found` and counting zero-mask hits in `zero_mask_capabilities`.
+/// When `verbose` is true a per-ACE diagnostic line goes to stdout.
 ///
-/// Emit a one-shot warning when a capability SID is recognized on an
-/// allow ACE that grants nothing.
-///
-/// Fires at most once per process so a long trace cannot spam the
-/// console. See the call site for why this is worth reporting.
-fn warn_zero_mask_capability_once(name: &str) {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        eprintln!(
-            "warning: allow ACE for capability \"{name}\" has a zero access mask and was not \
-             treated as a capability request. If capabilities are missing from the generated \
-             config, this filter is the first thing to check."
-        );
-    });
-}
-
-/// Walk every ACE in `buf`, returning the matched capability names.
-/// Allocates a `HashSet` per call — hot-loop callers should prefer
-/// [`invoke_ace_walk_with_index_into`].
-#[cfg(test)]
-pub(crate) fn invoke_ace_walk_with_index(
+/// **Partial writes on error.** The walk stages as it goes, so a buffer
+/// that decodes cleanly up to a corrupt tail leaves the already-matched
+/// names in `found` *and* returns `Err`. Callers that feed a security
+/// policy must therefore treat `Err` as fail-closed: stage per blob and
+/// discard on error rather than pointing this at an accumulated set.
+/// See `access_failure::consume_access_failure`, which stages into
+/// `AceWalkState::matches` and only promotes on `Ok`.
+fn walk_aces(
     buf: &[u8],
     index: &CapabilityIndex,
     verbose: bool,
-) -> Result<HashSet<String>> {
-    let mut found: HashSet<String> = HashSet::new();
-    invoke_ace_walk_with_index_into(buf, index, verbose, &mut found)?;
-    Ok(found)
-}
-
-/// Walk every ACE in `buf`, inserting matched capability names into
-/// `found`. This is the shared implementation every other entry point
-/// funnels through.
-///
-/// **Partial writes on error.** The walk inserts as it goes, so a
-/// buffer that decodes cleanly up to a corrupt tail leaves the
-/// already-matched names in `found` *and* returns `Err`. Callers that
-/// feed a security policy must therefore treat `Err` as fail-closed:
-/// pass a per-blob scratch set and discard it on error rather than
-/// pointing this at their accumulated set. See
-/// `access_failure::consume_access_failure`, which stages into
-/// `ParseAccumulator::ace_matches` and only promotes on `Ok`.
-pub fn invoke_ace_walk_with_index_into(
-    buf: &[u8],
-    index: &CapabilityIndex,
-    verbose: bool,
-    found: &mut HashSet<String>,
+    found: &mut HashSet<&'static str>,
+    zero_mask_capabilities: &mut usize,
 ) -> Result<()> {
     let mut cursor = 0usize;
     let mut ace_index = 0usize;
@@ -707,43 +754,29 @@ pub fn invoke_ace_walk_with_index_into(
         let resolution = index.resolve(ace.sid_bytes);
 
         if is_allow_ace {
-            let matched = match &resolution {
-                SidResolution::Capability(name) | SidResolution::GroupCapability(name) => {
-                    Some(*name)
-                }
-                SidResolution::Unknown => None,
-            };
-            if let Some(name) = matched {
+            if let Some((name, _is_group)) = resolution {
                 if grants_access {
-                    // Only allocate when the name is genuinely new. The
-                    // set saturates at the handful of known capabilities
-                    // within the first few events, so an unconditional
-                    // `to_string()` would allocate-hash-drop on
-                    // essentially every remaining ACE in the trace.
-                    if !found.contains(name) {
-                        found.insert(name.to_string());
-                    }
+                    // Staging a borrowed name never allocates, so there
+                    // is no reason to test membership first.
+                    found.insert(name);
                 } else {
                     // The zero-mask filter above is a hardening measure
                     // derived from what a grant *should* look like, not
                     // from a captured trace. If this provider really does
                     // emit capability ACEs with an empty mask, the filter
-                    // would silently disable extraction entirely — so say
-                    // so once rather than failing quietly.
-                    warn_zero_mask_capability_once(name);
+                    // would silently disable extraction entirely — so
+                    // count it and let the caller report it once per
+                    // trace rather than failing quietly.
+                    *zero_mask_capabilities += 1;
                 }
             }
         }
 
         if verbose {
-            let resolved_str = match &resolution {
-                SidResolution::Capability(name) => format!("capability \"{name}\""),
-                SidResolution::GroupCapability(name) => {
-                    format!("capability \"{name}\" (group SID)")
-                }
-                SidResolution::Unknown => {
-                    "<no known capability/account matches this SID>".to_string()
-                }
+            let resolved_str = match resolution {
+                Some((name, false)) => format!("capability \"{name}\""),
+                Some((name, true)) => format!("capability \"{name}\" (group SID)"),
+                None => "<no known capability/account matches this SID>".to_string(),
             };
             let sid_str =
                 sid_to_string(ace.sid_bytes).unwrap_or_else(|| "<invalid SID>".to_string());
@@ -763,50 +796,40 @@ pub fn invoke_ace_walk_with_index_into(
     Ok(())
 }
 
-/// Convenience wrapper that builds a fresh capability table per call.
-/// Used by the one-shot `plm extract-caps` CLI path; any loop should
-/// build a [`CapabilityIndex`] once and use
-/// [`invoke_ace_walk_with_index_into`].
-pub fn invoke_ace_walk(buf: &[u8], verbose: bool) -> Result<HashSet<String>> {
-    let table = build_capability_table();
-    let index = CapabilityIndex::from_table(&table);
-    let mut found: HashSet<String> = HashSet::new();
-    invoke_ace_walk_with_index_into(buf, &index, verbose, &mut found)?;
-    Ok(found)
+/// One-shot entry point for the `plm extract-caps` CLI: decode a hex
+/// blob against a freshly built index and return what it matched.
+///
+/// Builds an index per call, so any loop should build a
+/// [`CapabilityIndex`] once and use [`extract_caps_into`] instead.
+pub fn extract_caps(hex_bytes: &str, verbose: bool) -> Result<HashSet<&'static str>> {
+    let index = build_capability_index();
+    let mut state = AceWalkState::new();
+    extract_caps_into(hex_bytes, &index, verbose, &mut state)?;
+    Ok(state.matches)
 }
 
-/// Top-level entry point matching the script's `-HexBytes` invocation.
-pub fn extract_caps(hex_bytes: &str, verbose: bool) -> Result<HashSet<String>> {
-    let bytes = parse_hex_string(hex_bytes)?;
-    invoke_ace_walk(&bytes, verbose)
-}
-
-/// Per-event variant that takes a pre-built `CapabilityIndex` so the
-/// O(table_size) build cost is paid once per parse, not per ACE blob.
-/// Allocates a fresh `HashSet` and decode buffer per call; the
-/// production hot loop uses [`extract_caps_with_index_into`] instead.
-#[cfg(test)]
-pub(crate) fn extract_caps_with_index(
+/// Hot-path entry point: decode `hex_bytes` through `state`'s scratch
+/// buffer and stage matches in `state.matches`, so a steady-state event
+/// costs no allocation at all.
+///
+/// `state.matches` is deliberately **not** cleared here — the staging
+/// set is the caller's fail-closed boundary, so the caller clears
+/// before each blob and promotes only on `Ok`.
+pub fn extract_caps_into(
     hex_bytes: &str,
     index: &CapabilityIndex,
     verbose: bool,
-) -> Result<HashSet<String>> {
-    let bytes = parse_hex_string(hex_bytes)?;
-    invoke_ace_walk_with_index(&bytes, index, verbose)
-}
-
-/// Hot-path variant: writes matches into a caller-provided
-/// `&mut HashSet<String>` and decodes through a caller-provided scratch
-/// buffer, so a steady-state event costs no allocation at all.
-pub fn extract_caps_with_index_into(
-    hex_bytes: &str,
-    index: &CapabilityIndex,
-    verbose: bool,
-    scratch: &mut Vec<u8>,
-    found: &mut HashSet<String>,
+    state: &mut AceWalkState,
 ) -> Result<()> {
+    // Destructured so the scratch buffer and the staging set are
+    // borrowed disjointly.
+    let AceWalkState {
+        scratch,
+        matches,
+        zero_mask_capabilities,
+    } = state;
     parse_hex_string_into(hex_bytes, scratch)?;
-    invoke_ace_walk_with_index_into(scratch, index, verbose, found)
+    walk_aces(scratch, index, verbose, matches, zero_mask_capabilities)
 }
 
 #[cfg(test)]
@@ -938,16 +961,31 @@ mod tests {
 
     #[test]
     fn capability_index_resolves_app_package_and_group_sids() {
-        let table = vec![CapabilityEntry {
-            name: "internetClient".into(),
-            app_package_sid: Some(well_world_sid()),
-            group_sid: None,
-        }];
-        let idx = CapabilityIndex::from_table(&table);
-        match idx.resolve(&well_world_sid()) {
-            SidResolution::Capability(n) => assert_eq!(n, "internetClient"),
-            _ => panic!("expected Capability"),
-        }
+        let sid = well_world_sid();
+        let idx = CapabilityIndex::for_test(&[("internetClient", Some(&sid), None)]);
+        assert_eq!(idx.resolve(&sid), Some(("internetClient", false)));
+
+        // The group SID resolves to the same name, flagged as a group
+        // match; an unknown SID resolves to nothing.
+        let group = vec![1u8, 1, 0, 0, 0, 0, 0, 5, 7, 0, 0, 0];
+        let idx = CapabilityIndex::for_test(&[("documentsLibrary", None, Some(&group))]);
+        assert_eq!(idx.resolve(&group), Some(("documentsLibrary", true)));
+        assert_eq!(idx.resolve(&sid), None);
+    }
+
+    #[test]
+    fn capability_index_prefers_the_package_sid_on_conflict() {
+        // Both names claim the same SID; the package variant is the
+        // canonical form and must win, exactly as it does when the OS
+        // builder inserts them.
+        let sid = well_world_sid();
+        let idx = CapabilityIndex::for_test(&[
+            ("internetClient", Some(&sid), None),
+            ("documentsLibrary", None, Some(&sid)),
+        ]);
+        assert_eq!(idx.resolve(&sid), Some(("internetClient", false)));
+        assert_eq!(idx.resolved_capabilities(), 2);
+        assert_eq!(idx.derive_failures(), 0);
     }
 
     fn build_ace_typed(ace_type: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
@@ -960,46 +998,63 @@ mod tests {
         v
     }
 
+    /// Explicit walk setup. Production stages through an
+    /// [`AceWalkState`], so tests that only care about matched names
+    /// assemble the pieces here rather than keeping a wrapper on the
+    /// module's public surface that production never calls.
+    fn walk_with_zero_mask(
+        buf: &[u8],
+        index: &CapabilityIndex,
+    ) -> (Result<()>, HashSet<&'static str>, usize) {
+        let mut found = HashSet::new();
+        let mut zero_mask = 0usize;
+        let outcome = walk_aces(buf, index, false, &mut found, &mut zero_mask);
+        (outcome, found, zero_mask)
+    }
+
+    fn walk(buf: &[u8], index: &CapabilityIndex) -> Result<HashSet<&'static str>> {
+        let (outcome, found, _) = walk_with_zero_mask(buf, index);
+        outcome.map(|()| found)
+    }
+
+    /// Explicit hex-path setup, mirroring how the parser hot loop calls
+    /// [`extract_caps_into`].
+    fn extract(hex: &str, index: &CapabilityIndex) -> Result<HashSet<&'static str>> {
+        let mut state = AceWalkState::new();
+        extract_caps_into(hex, index, false, &mut state)?;
+        Ok(state.matches)
+    }
+
     #[test]
-    fn invoke_ace_walk_with_index_collects_matched_caps() {
+    fn ace_walk_collects_matched_caps() {
         let sid = well_world_sid();
-        let table = vec![CapabilityEntry {
-            name: "internetClient".into(),
-            app_package_sid: Some(sid.clone()),
-            group_sid: None,
-        }];
-        let idx = CapabilityIndex::from_table(&table);
+        let idx = cap_index_for(&sid, "internetClient");
 
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_ace(GRANT, &sid));
         buf.extend_from_slice(&build_ace(GRANT, &sid));
 
-        let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
+        let caps = walk(&buf, &idx).unwrap();
         assert!(caps.contains("internetClient"));
         assert_eq!(caps.len(), 1);
     }
 
     #[test]
-    fn invoke_ace_walk_skips_access_denied_ace() {
+    fn ace_walk_skips_access_denied_ace() {
         // R5-6: an ACCESS_DENIED ACE (type 0x01) for a capability SID
         // does NOT grant the capability and must not be promoted.
         let sid = well_world_sid();
-        let table = vec![CapabilityEntry {
-            name: "internetClient".into(),
-            app_package_sid: Some(sid.clone()),
-            group_sid: None,
-        }];
-        let idx = CapabilityIndex::from_table(&table);
+        let idx = cap_index_for(&sid, "internetClient");
 
         let buf = build_ace_typed(0x01, GRANT, &sid);
-        let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
+        let caps = walk(&buf, &idx).unwrap();
         assert!(caps.is_empty(), "deny ACE must not produce capability");
 
         // A callback ACE (0x09) is followed by conditional OpaqueData
         // with no length field in this header layout, so the walk cannot
         // be framed past it. It must fail closed rather than grant.
         let buf = build_ace_typed(ACE_TYPE_ACCESS_ALLOWED_CALLBACK, GRANT, &sid);
-        let err = invoke_ace_walk_with_index(&buf, &idx, false)
+        let err = walk(&buf, &idx)
             .expect_err("callback ACE framing is unresolvable and must be rejected");
         assert!(
             err.to_string().contains("callback ACE"),
@@ -1022,9 +1077,8 @@ mod tests {
             &sid,
         ));
 
-        let mut found = HashSet::new();
-        let err = invoke_ace_walk_with_index_into(&buf, &idx, false, &mut found)
-            .expect_err("a callback ACE must abort the walk");
+        let (outcome, found, _) = walk_with_zero_mask(&buf, &idx);
+        let err = outcome.expect_err("a callback ACE must abort the walk");
         assert!(
             err.to_string().contains("callback ACE"),
             "unexpected error: {err}"
@@ -1032,7 +1086,7 @@ mod tests {
         // The walk stages as it goes, so the leading ACE is already in
         // `found` when the error fires. That is the documented
         // partial-write contract which obliges callers to pass a
-        // per-blob scratch set and discard it on `Err` — asserted here so
+        // per-blob staging set and discard it on `Err` — asserted here so
         // the fail-closed duty stays visible if this test is revisited.
         assert_eq!(
             found.len(),
@@ -1041,13 +1095,11 @@ mod tests {
         );
     }
 
-    // ---- public entry points: extract_caps* ------------------------------
+    // ---- public entry points: extract_caps_into --------------------------
     //
-    // the public surface (`extract_caps`,
-    // `extract_caps_with_index`, `extract_caps_with_index_into`) had
-    // no direct tests. Pin the hex-decode → ACE walk → resolve glue
-    // here so a regression in any of those layers fails fast rather
-    // than surfacing only via the WPR-driven integration harness.
+    // Pin the hex-decode → ACE walk → resolve glue so a regression in
+    // any of those layers fails fast rather than surfacing only via the
+    // WPR-driven integration harness.
 
     fn hex_for_bytes(bytes: &[u8]) -> String {
         use std::fmt::Write;
@@ -1059,61 +1111,49 @@ mod tests {
     }
 
     #[test]
-    fn extract_caps_with_index_decodes_hex_and_matches_capability() {
+    fn extract_caps_into_decodes_hex_and_matches_capability() {
         let sid = well_world_sid();
-        let table = vec![CapabilityEntry {
-            name: "documentsLibrary".into(),
-            app_package_sid: Some(sid.clone()),
-            group_sid: None,
-        }];
-        let idx = CapabilityIndex::from_table(&table);
+        let idx = cap_index_for(&sid, "documentsLibrary");
         let hex = hex_for_bytes(&build_ace(GRANT, &sid));
 
-        let caps = extract_caps_with_index(&hex, &idx, false).unwrap();
+        let caps = extract(&hex, &idx).unwrap();
         assert!(caps.contains("documentsLibrary"));
         assert_eq!(caps.len(), 1);
     }
 
     #[test]
-    fn extract_caps_with_index_into_writes_into_caller_set() {
+    fn extract_caps_into_preserves_existing_staged_entries() {
         let sid = well_world_sid();
-        let table = vec![CapabilityEntry {
-            name: "internetClient".into(),
-            app_package_sid: Some(sid.clone()),
-            group_sid: None,
-        }];
-        let idx = CapabilityIndex::from_table(&table);
+        let idx = cap_index_for(&sid, "internetClient");
         let mut buf = Vec::new();
         buf.extend_from_slice(&build_ace(GRANT, &sid));
         buf.extend_from_slice(&build_ace(GRANT, &sid));
         let hex = hex_for_bytes(&buf);
 
-        // Pre-seed with an unrelated entry — extract_caps must
-        // PRESERVE existing members, not overwrite them.
-        let mut found: HashSet<String> = HashSet::new();
-        found.insert("preexisting".into());
-        let mut scratch = Vec::new();
-        extract_caps_with_index_into(&hex, &idx, false, &mut scratch, &mut found).unwrap();
-        assert!(found.contains("preexisting"));
-        assert!(found.contains("internetClient"));
+        // Pre-seed the staging set — `extract_caps_into` deliberately
+        // does not clear it, because clearing is the caller's
+        // fail-closed boundary.
+        let mut state = AceWalkState::new();
+        state.matches.insert("preexisting");
+        extract_caps_into(&hex, &idx, false, &mut state).unwrap();
+        assert!(state.matches.contains("preexisting"));
+        assert!(state.matches.contains("internetClient"));
     }
 
     #[test]
-    fn extract_caps_with_index_rejects_malformed_hex() {
-        let table: Vec<CapabilityEntry> = Vec::new();
-        let idx = CapabilityIndex::from_table(&table);
-        assert!(extract_caps_with_index("not-hex", &idx, false).is_err());
-        assert!(extract_caps_with_index("ABC", &idx, false).is_err());
+    fn extract_caps_into_rejects_malformed_hex() {
+        let idx = CapabilityIndex::for_test(&[]);
+        assert!(extract("not-hex", &idx).is_err());
+        assert!(extract("ABC", &idx).is_err());
     }
 
     #[test]
-    fn extract_caps_with_index_returns_empty_for_no_match() {
-        // SID doesn't match any capability entry in the table.
+    fn extract_caps_into_returns_empty_for_no_match() {
+        // SID doesn't match any capability entry in the index.
         let sid = well_world_sid();
-        let table: Vec<CapabilityEntry> = Vec::new();
-        let idx = CapabilityIndex::from_table(&table);
+        let idx = CapabilityIndex::for_test(&[]);
         let hex = hex_for_bytes(&build_ace(GRANT, &sid));
-        let caps = extract_caps_with_index(&hex, &idx, false).unwrap();
+        let caps = extract(&hex, &idx).unwrap();
         assert!(caps.is_empty());
     }
 
@@ -1124,12 +1164,8 @@ mod tests {
     // pin "errors, never panics, never over-reads" on the shapes a
     // hostile or truncated buffer can take.
 
-    fn cap_index_for(sid: &[u8], name: &str) -> CapabilityIndex {
-        CapabilityIndex::from_table(&[CapabilityEntry {
-            name: name.into(),
-            app_package_sid: Some(sid.to_vec()),
-            group_sid: None,
-        }])
+    fn cap_index_for(sid: &[u8], name: &'static str) -> CapabilityIndex {
+        CapabilityIndex::for_test(&[(name, Some(sid), None)])
     }
 
     #[test]
@@ -1139,11 +1175,29 @@ mod tests {
         // inject capability names into the generated policy.
         let sid = well_world_sid();
         let idx = cap_index_for(&sid, "internetClient");
-        let caps = invoke_ace_walk_with_index(&build_ace(0, &sid), &idx, false).unwrap();
+        let (outcome, caps, zero_mask) = walk_with_zero_mask(&build_ace(0, &sid), &idx);
+        outcome.unwrap();
         assert!(
             caps.is_empty(),
             "zero-mask allow ACE must not produce a capability"
         );
+        // Counted rather than warned inline, so the condition is
+        // reported once per trace and is assertable here.
+        assert_eq!(zero_mask, 1);
+    }
+
+    #[test]
+    fn zero_mask_counter_is_per_walk_not_per_process() {
+        // Regression guard for the process-global `Once` this replaced:
+        // two independent walks must each observe the condition, in any
+        // order, so test outcomes never depend on execution sequence.
+        let sid = well_world_sid();
+        let idx = cap_index_for(&sid, "internetClient");
+        for _ in 0..2 {
+            let (outcome, _, zero_mask) = walk_with_zero_mask(&build_ace(0, &sid), &idx);
+            outcome.unwrap();
+            assert_eq!(zero_mask, 1, "each walk counts independently");
+        }
     }
 
     #[test]
@@ -1155,7 +1209,7 @@ mod tests {
         let idx = cap_index_for(&sid, "internetClient");
         let mut buf = build_ace(GRANT, &sid);
         buf.extend_from_slice(&[0u8; 6]); // too short for another ACE
-        assert!(invoke_ace_walk_with_index(&buf, &idx, false).is_err());
+        assert!(walk(&buf, &idx).is_err());
     }
 
     #[test]
@@ -1169,10 +1223,12 @@ mod tests {
         let mut buf = build_ace(GRANT, &sid);
         buf.extend_from_slice(&[0u8; 6]);
 
-        let mut found = HashSet::new();
-        let err = invoke_ace_walk_with_index_into(&buf, &idx, false, &mut found);
+        let (outcome, found, _) = walk_with_zero_mask(&buf, &idx);
 
-        assert!(err.is_err(), "truncated tail must still report an error");
+        assert!(
+            outcome.is_err(),
+            "truncated tail must still report an error"
+        );
         assert!(
             found.contains("internetClient"),
             "walker writes as it goes; callers must stage and discard on Err"
@@ -1199,7 +1255,7 @@ mod tests {
         let buf = build_ace(GRANT, &sid);
         let ace = read_ace_at_offset(&buf, 0).expect("exact-fit ACE should decode");
         assert_eq!(ace.next_cursor, buf.len());
-        let caps = invoke_ace_walk_with_index(&buf, &idx, false).unwrap();
+        let caps = walk(&buf, &idx).unwrap();
         assert!(caps.contains("internetClient"));
     }
 
@@ -1209,21 +1265,20 @@ mod tests {
         let idx = cap_index_for(&sid, "internetClient");
         let mut buf = build_ace(GRANT, &sid);
         buf.push(0xFF);
-        assert!(invoke_ace_walk_with_index(&buf, &idx, false).is_err());
+        assert!(walk(&buf, &idx).is_err());
     }
 
     #[test]
     fn malformed_hex_shapes_are_rejected_without_panic() {
-        let idx = CapabilityIndex::from_table(&[]);
+        let idx = CapabilityIndex::for_test(&[]);
         for bad in ["ABC", "not-hex", "", "   \n", "AB CD E"] {
-            let mut scratch = Vec::new();
-            let mut found = HashSet::new();
+            let mut state = AceWalkState::new();
             assert!(
-                extract_caps_with_index_into(bad, &idx, false, &mut scratch, &mut found).is_err(),
+                extract_caps_into(bad, &idx, false, &mut state).is_err(),
                 "expected {bad:?} to be rejected"
             );
             assert!(
-                scratch.is_empty(),
+                state.scratch.is_empty(),
                 "scratch must be left clean after a failed decode"
             );
         }
@@ -1237,19 +1292,18 @@ mod tests {
         let sid = well_world_sid();
         let idx = cap_index_for(&sid, "internetClient");
         let hex = hex_for_bytes(&build_ace(GRANT, &sid));
-        let mut scratch = Vec::new();
-        let mut found = HashSet::new();
+        let mut state = AceWalkState::new();
 
-        extract_caps_with_index_into(&hex, &idx, false, &mut scratch, &mut found).unwrap();
-        let after_first = scratch.len();
-        extract_caps_with_index_into(&hex, &idx, false, &mut scratch, &mut found).unwrap();
+        extract_caps_into(&hex, &idx, false, &mut state).unwrap();
+        let after_first = state.scratch.len();
+        extract_caps_into(&hex, &idx, false, &mut state).unwrap();
 
         assert_eq!(
-            scratch.len(),
+            state.scratch.len(),
             after_first,
             "reused scratch must not accumulate across decodes"
         );
-        assert_eq!(found.len(), 1);
+        assert_eq!(state.matches.len(), 1);
     }
 
     #[test]
@@ -1296,44 +1350,33 @@ mod windows_ffi_tests {
     use super::*;
 
     #[test]
-    fn build_capability_table_derives_real_sids() {
-        let built = build_capability_table_with_diagnostics();
+    fn build_capability_index_derives_real_sids() {
+        let index = build_capability_index();
 
-        // Every known name is either derived or counted as a failure —
-        // entries must never silently disappear.
+        // Every known name is either resolved or counted as a failure —
+        // capabilities must never silently disappear.
         assert_eq!(
-            built.entries.len() + built.derive_failures,
+            index.resolved_capabilities() + index.derive_failures(),
             KNOWN_CAPABILITIES.len(),
             "every known capability must be either derived or counted as a failure"
         );
 
         // A stock Windows host resolves at least the common capabilities.
         // If this host resolves none, the diagnostics must say so rather
-        // than reporting a clean empty table.
-        if built.entries.is_empty() {
-            assert_eq!(built.derive_failures, KNOWN_CAPABILITIES.len());
+        // than reporting a clean empty index.
+        if index.resolved_capabilities() == 0 {
+            assert_eq!(index.derive_failures(), KNOWN_CAPABILITIES.len());
             return;
         }
 
-        for entry in &built.entries {
-            assert!(!entry.name.is_empty());
-            assert!(
-                entry.app_package_sid.is_some() || entry.group_sid.is_some(),
-                "derived entry {} carried no SID",
-                entry.name
-            );
+        for (sid, name, _is_group) in index.iter_sids() {
+            assert!(!name.is_empty());
             // Any SID the OS handed back must be structurally valid —
             // this is what proves the copy-out length arithmetic is right.
-            for sid in [&entry.app_package_sid, &entry.group_sid]
-                .into_iter()
-                .flatten()
-            {
-                assert!(
-                    sid_to_string(sid).is_some(),
-                    "derived SID for {} did not round-trip through ConvertSidToStringSid",
-                    entry.name
-                );
-            }
+            assert!(
+                sid_to_string(sid).is_some(),
+                "derived SID for {name} did not round-trip through ConvertSidToStringSid"
+            );
         }
     }
 
@@ -1341,18 +1384,11 @@ mod windows_ffi_tests {
     fn real_derived_sid_resolves_through_the_index() {
         // End-to-end on real OS data: derive a capability SID, build an
         // ACE around it, and confirm the walker recovers the name.
-        let built = build_capability_table_with_diagnostics();
-        let Some(entry) = built
-            .entries
-            .iter()
-            .find(|e| e.app_package_sid.is_some())
-            .cloned()
-        else {
+        let index = build_capability_index();
+        let Some((sid, name)) = index.iter_sids().next().map(|(s, n, _)| (s.to_vec(), n)) else {
             // Host derived nothing; covered by the assertion above.
             return;
         };
-        let sid = entry.app_package_sid.clone().unwrap();
-        let index = CapabilityIndex::from_table(&built.entries);
 
         let mut ace = vec![ACE_TYPE_ACCESS_ALLOWED, 0, 0, 0];
         ace.extend_from_slice(&[0, 0, 0, 0]);
@@ -1360,26 +1396,29 @@ mod windows_ffi_tests {
         ace.extend_from_slice(&sid);
 
         let mut found = HashSet::new();
-        invoke_ace_walk_with_index_into(&ace, &index, false, &mut found).unwrap();
+        let mut zero_mask = 0usize;
+        walk_aces(&ace, &index, false, &mut found, &mut zero_mask).unwrap();
         assert!(
-            found.contains(&entry.name),
-            "walker did not recover {} from a real derived SID",
-            entry.name
+            found.contains(name),
+            "walker did not recover {name} from a real derived SID"
         );
     }
 
     #[test]
-    fn repeated_table_builds_are_stable_and_do_not_leak_handles() {
+    fn repeated_index_builds_are_stable_and_do_not_leak_handles() {
         // Each build does a LocalAlloc/LocalFree round-trip per name;
         // repeating it must produce identical output.
-        let a = build_capability_table_with_diagnostics();
-        let b = build_capability_table_with_diagnostics();
-        assert_eq!(a.entries.len(), b.entries.len());
-        assert_eq!(a.derive_failures, b.derive_failures);
-        for (x, y) in a.entries.iter().zip(b.entries.iter()) {
-            assert_eq!(x.name, y.name);
-            assert_eq!(x.app_package_sid, y.app_package_sid);
-            assert_eq!(x.group_sid, y.group_sid);
-        }
+        let a = build_capability_index();
+        let b = build_capability_index();
+        assert_eq!(a.resolved_capabilities(), b.resolved_capabilities());
+        assert_eq!(a.derive_failures(), b.derive_failures());
+
+        let mut a_pairs: Vec<(Vec<u8>, &str, bool)> =
+            a.iter_sids().map(|(s, n, g)| (s.to_vec(), n, g)).collect();
+        let mut b_pairs: Vec<(Vec<u8>, &str, bool)> =
+            b.iter_sids().map(|(s, n, g)| (s.to_vec(), n, g)).collect();
+        a_pairs.sort();
+        b_pairs.sort();
+        assert_eq!(a_pairs, b_pairs);
     }
 }

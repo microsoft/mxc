@@ -45,24 +45,28 @@ pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedE
                 // them only if the entire walk succeeds; on failure the
                 // staged matches are dropped and the record is counted
                 // as data loss.
-                acc.ace_matches.clear();
-                let outcome = crate::extract_caps::extract_caps_with_index_into(
+                acc.ace_walk.matches.clear();
+                let outcome = crate::extract_caps::extract_caps_into(
                     blob_str,
                     &acc.capability_index,
                     acc.verbose,
-                    &mut acc.ace_scratch,
-                    &mut acc.ace_matches,
+                    &mut acc.ace_walk,
                 );
                 match outcome {
                     Ok(()) => {
-                        // Move the staged names across; `drain` reuses
-                        // the scratch set's capacity for the next event.
-                        for name in acc.ace_matches.drain() {
-                            acc.requested_capabilities.insert(name);
+                        // Promote the staged names. `drain` reuses the
+                        // staging set's capacity for the next event, and
+                        // the membership test means a `String` is
+                        // allocated only the first time the trace sees a
+                        // given capability.
+                        for name in acc.ace_walk.matches.drain() {
+                            if !acc.requested_capabilities.contains(name) {
+                                acc.requested_capabilities.insert(name.to_string());
+                            }
                         }
                     }
                     Err(err) => {
-                        acc.ace_matches.clear();
+                        acc.ace_walk.matches.clear();
                         acc.parse_failures += 1;
                         if acc.verbose {
                             eprintln!(
@@ -271,10 +275,14 @@ pub(crate) fn is_skippable(
     current_directory: Option<&str>,
     verbose: bool,
 ) -> bool {
-    // An empty capability table is fine: `is_skippable` only consults the
+    // An empty capability index is fine: `is_skippable` only consults the
     // cached CWD / drive-letter state, not the capability index.
-    crate::event_parser::ParseAccumulator::new(current_directory, verbose, Vec::new())
-        .is_skippable(file_path)
+    crate::event_parser::ParseAccumulator::new(
+        current_directory,
+        verbose,
+        crate::extract_caps::CapabilityIndex::for_test(&[]),
+    )
+    .is_skippable(file_path)
 }
 
 /// Shared `EventID=14` XML fixture used by tests in this module and
@@ -304,6 +312,13 @@ pub(crate) fn make_event_xml(file_path: &str, mask_hex: &str) -> String {
 mod tests {
     use super::*;
     use crate::event_parser::parse_events_from_xml;
+    use crate::extract_caps::CapabilityIndex;
+
+    /// These tests exercise path handling, not ACE matching, so they
+    /// inject an index that resolves nothing.
+    fn no_caps() -> CapabilityIndex {
+        CapabilityIndex::for_test(&[])
+    }
 
     #[test]
     fn normalize_file_path_strips_nt_object_prefix() {
@@ -387,7 +402,7 @@ mod tests {
             make_event_xml("C:\\Users\\test\\foo.txt", "0x1"),
             make_event_xml("C:\\Users\\test\\bar.txt", "0x2"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(result.valid_access_events.len(), 2);
         assert_eq!(
             result.valid_access_events[0].file_path,
@@ -412,7 +427,7 @@ mod tests {
             "<not-an-event/>".to_string(),
             valid_b,
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(
             result.valid_access_events.len(),
             2,
@@ -456,7 +471,7 @@ mod tests {
     #[test]
     fn consume_drops_mount_point_manager() {
         let xmls = [make_event_xml("\\Device\\MountPointManager", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -468,7 +483,7 @@ mod tests {
             make_event_xml("C:\\repo\\src\\main.rs", "0x1"),
             make_event_xml("C:\\other\\x.txt", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), Some("C:\\repo"), false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), Some("C:\\repo"), false, no_caps());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\other\\x.txt");
     }
@@ -481,7 +496,7 @@ mod tests {
             make_event_xml("abc", "0x1"),
             make_event_xml("\\\\server\\share\\x", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -490,7 +505,7 @@ mod tests {
     #[test]
     fn consume_drops_invalid_filename_chars() {
         let xmls = [make_event_xml("C:\\foo*bar.txt", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -504,18 +519,16 @@ mod tests {
             "\\Device\\HarddiskVolume3\\Tools\\app.exe",
             "0x1",
         )];
-        assert!(
-            parse_events_from_xml(device.iter(), None, false, Vec::new())
-                .valid_access_events
-                .is_empty()
-        );
+        assert!(parse_events_from_xml(device.iter(), None, false, no_caps())
+            .valid_access_events
+            .is_empty());
 
         let dos = [make_event_xml_with_app(
             "C:\\Tools\\app.exe",
             "C:\\Tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(dos.iter(), None, false, Vec::new())
+        assert!(parse_events_from_xml(dos.iter(), None, false, no_caps())
             .valid_access_events
             .is_empty());
 
@@ -525,7 +538,7 @@ mod tests {
             "\\Device\\HarddiskVolume3\\tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(cased.iter(), None, false, Vec::new())
+        assert!(parse_events_from_xml(cased.iter(), None, false, no_caps())
             .valid_access_events
             .is_empty());
     }
@@ -541,7 +554,7 @@ mod tests {
             "\\Device\\HarddiskVolume3\\Tools\\app.exe",
             "0x1",
         )];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\app.exe");
     }
@@ -551,7 +564,7 @@ mod tests {
     #[test]
     fn consume_keeps_normal_valid_event() {
         let xmls = [make_event_xml("C:\\Users\\test\\doc.txt", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(
             result.valid_access_events[0].file_path,
@@ -570,7 +583,7 @@ mod tests {
             make_event_xml("C:\\USERS\\TEST\\DUP.TXT", "0x2"),
             make_event_xml("C:\\Users\\test\\dup.txt", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false, Vec::new());
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(
             result.valid_access_events.len(),
             1,
