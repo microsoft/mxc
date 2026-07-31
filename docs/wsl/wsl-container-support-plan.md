@@ -238,7 +238,7 @@ script locates the DLL by architecture.
 Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 
 1. `initialize()`:
-   - Call `WslcGetMissingComponents()` — fail fast if WSLC runtime is not available
+   - Call `WslcGetMissingComponents()` — fail fast if the WSLC runtime is unavailable
    - Call `WslcInitSessionSettings()` with storage path
    - Configure session: CPU count, memory, timeout from `ContainerConfig`
    - Call `WslcSessionCreate()` to start the WSL2 micro-VM
@@ -277,7 +277,7 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 **Cleanup and error handling:**
 - On normal exit: release process → stop container → delete container → terminate session (reverse creation order)
 - On crash/signal: register a `ctrlc` handler that runs the same cleanup sequence
-- If WSLC runtime is not available: `WslcGetMissingComponents()` reports missing components — fail fast with a clear message listing what needs to be installed
+- If the WSLC runtime is unavailable: `WslcGetMissingComponents()` reports missing components — fail fast with a clear message listing what needs to be installed
 - If image is not found: fail fast with a clear error message listing the expected image name
 - HRESULT error codes from WSLC SDK are translated to descriptive Rust errors
 

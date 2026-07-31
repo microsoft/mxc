@@ -603,6 +603,39 @@ fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
     ScriptResponse::error(&msg)
 }
 
+/// Builds a user-facing prerequisite error for the components `WslcGetMissingComponents`
+/// reports as missing. `missing` may combine multiple bits, and the guidance is branched
+/// per-component so a user missing only `VirtualMachinePlatform` isn't told to update WSL
+/// (which doesn't enable that Windows optional feature), and vice versa.
+fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
+    let needs_vmp =
+        missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM.0 != 0;
+    let needs_wsl_package = missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.0 != 0;
+
+    let mut guidance = Vec::new();
+    if needs_vmp {
+        guidance.push(
+            "enable the \"Virtual Machine Platform\" Windows optional feature (Settings > \
+             Apps > Optional features > More Windows features, or run `dism.exe /online \
+             /enable-feature /featurename:VirtualMachinePlatform /all`) and restart"
+                .to_string(),
+        );
+    }
+    if needs_wsl_package {
+        guidance
+            .push("install WSL 2.9.3 or newer and run `wsl --update --pre-release`".to_string());
+    }
+    if guidance.is_empty() {
+        guidance.push("ensure WSL2 and the WSLC SDK are installed".to_string());
+    }
+
+    format!(
+        "WSLC runtime unavailable. Missing components: {}. Please {}.",
+        missing,
+        guidance.join("; "),
+    )
+}
+
 impl ScriptRunner for WSLContainerRunner {
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         unsafe { self.run_internal(request, logger) }
@@ -650,11 +683,7 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
         }
         if missing.any_missing() {
-            return Err(ScriptResponse::error(&format!(
-                "WSLC runtime not available. Missing components: {}. \
-                 Ensure WSL2 and the WSLC SDK are installed.",
-                missing
-            )));
+            return Err(ScriptResponse::error(&wslc_prerequisite_error(missing)));
         }
         let _ = writeln!(logger, "[WSLC] Runtime check passed");
 
@@ -2420,5 +2449,47 @@ mod tests {
         let stream = IoSink::Stream(writer);
         stream.write(b"streamed");
         assert_eq!(stream.captured(), "", "streamed bytes are not re-reported");
+    }
+
+    #[test]
+    fn prerequisite_error_for_wsl_package_missing() {
+        let message = wslc_prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE);
+
+        assert!(message.contains("WslPackage"));
+        assert!(message.contains("2.9.3"));
+        assert!(message.contains("wsl --update --pre-release"));
+        assert!(!message.contains("Virtual Machine Platform"));
+    }
+
+    #[test]
+    fn prerequisite_error_for_virtual_machine_platform_missing() {
+        let message = wslc_prerequisite_error(
+            WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM,
+        );
+
+        assert!(message.contains("VirtualMachinePlatform"));
+        assert!(message.contains("Virtual Machine Platform"));
+        assert!(!message.contains("wsl --update"));
+    }
+
+    #[test]
+    fn prerequisite_error_for_combined_missing_components() {
+        let combined = WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM
+            | WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE;
+        let message = wslc_prerequisite_error(combined);
+
+        assert!(message.contains("VirtualMachinePlatform"));
+        assert!(message.contains("WslPackage"));
+        assert!(message.contains("wsl --update"));
+        assert!(message.contains("Virtual Machine Platform"));
+    }
+
+    #[test]
+    fn prerequisite_error_for_sdk_needs_update() {
+        let message =
+            wslc_prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE);
+
+        assert!(message.contains("SdkNeedsUpdate"));
+        assert!(message.contains("ensure WSL2 and the WSLC SDK are installed"));
     }
 }
