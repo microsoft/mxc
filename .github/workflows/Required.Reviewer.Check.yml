@@ -1,5 +1,7 @@
 # Enforces a commit status for schema and SDK contract changes. The status
-# passes when either MGudgin or shschaefer has approved the current PR head.
+# passes when a member of @microsoft/mxc-architect-team approves the current
+# PR head. MXC_ARCHITECT_TEAM_TOKEN supplies read-only access to the closed
+# team's membership; repository reads and status writes use GITHUB_TOKEN.
 # Review events arrive through Required Reviewer Event so this trusted workflow
 # can update statuses for fork PRs without executing untrusted code.
 
@@ -42,6 +44,8 @@ jobs:
 
       - name: Check required reviewers
         uses: actions/github-script@v9
+        env:
+          ARCHITECT_TEAM_TOKEN: ${{ secrets.MXC_ARCHITECT_TEAM_TOKEN }}
         with:
           script: |
             const fs = require("fs");
@@ -70,7 +74,8 @@ jobs:
               pull_number: pullNumber,
             });
 
-            const requiredApprovers = ["mgudgin", "shschaefer"];
+            const teamOrg = "microsoft";
+            const teamSlug = "mxc-architect-team";
             const protectedDirectories = [
               "schemas/",
               "scripts/versioning/",
@@ -140,6 +145,53 @@ jobs:
               return;
             }
 
+            const teamToken = process.env.ARCHITECT_TEAM_TOKEN;
+            if (!teamToken) {
+              const message =
+                "MXC_ARCHITECT_TEAM_TOKEN is required to read architect team membership";
+              await setStatus("failure", message);
+              core.setFailed(message);
+              return;
+            }
+
+            const teamMembers = new Set();
+            let membersUrl =
+              `${context.apiUrl}/orgs/${teamOrg}/teams/${teamSlug}/members` +
+              "?per_page=100";
+            while (membersUrl) {
+              const response = await fetch(membersUrl, {
+                headers: {
+                  Accept: "application/vnd.github+json",
+                  Authorization: `Bearer ${teamToken}`,
+                  "X-GitHub-Api-Version": "2022-11-28",
+                },
+              });
+              if (!response.ok) {
+                const message =
+                  `Unable to read @${teamOrg}/${teamSlug}: ` +
+                  `${response.status} ${response.statusText}`;
+                await setStatus("failure", message);
+                core.setFailed(message);
+                return;
+              }
+
+              const members = await response.json();
+              for (const member of members) {
+                teamMembers.add(member.login.toLowerCase());
+              }
+
+              membersUrl =
+                response.headers
+                  .get("link")
+                  ?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+            }
+            if (teamMembers.size === 0) {
+              const message = `@${teamOrg}/${teamSlug} has no visible members`;
+              await setStatus("failure", message);
+              core.setFailed(message);
+              return;
+            }
+
             const reviews = await github.paginate(
               github.rest.pulls.listReviews,
               {
@@ -158,7 +210,7 @@ jobs:
               const login = review.user?.login?.toLowerCase();
               const state = review.state?.toUpperCase();
               if (
-                requiredApprovers.includes(login) &&
+                teamMembers.has(login) &&
                 state !== "COMMENTED" &&
                 state !== "PENDING"
               ) {
@@ -169,11 +221,13 @@ jobs:
               }
             }
 
-            const approvedBy = requiredApprovers.filter(
-              (login) =>
-                latestReview.get(login)?.state === "APPROVED" &&
-                latestReview.get(login)?.commitId === pullRequest.head.sha,
-            );
+            const approvedBy = [...latestReview.entries()]
+              .filter(
+                ([, review]) =>
+                  review.state === "APPROVED" &&
+                  review.commitId === pullRequest.head.sha,
+              )
+              .map(([login]) => login);
 
             core.info(
               `Protected changes:\n${protectedChanges
@@ -182,11 +236,11 @@ jobs:
             );
 
             if (approvedBy.length === 0) {
-              const message = "Approval required from MGudgin or shschaefer";
+              const message = `Approval required from @${teamOrg}/${teamSlug}`;
               await setStatus("failure", message);
               core.setFailed(message);
               return;
             }
 
-            await setStatus("success", `Approved by ${approvedBy.join(", ")}`);
+            await setStatus("success", `Approved by team member ${approvedBy[0]}`);
             core.info(`Protected changes approved by ${approvedBy.join(", ")}.`);

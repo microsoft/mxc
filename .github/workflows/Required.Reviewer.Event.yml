@@ -1,6 +1,6 @@
 # Records the PR number whenever a review is submitted or dismissed. The
 # trusted Required Reviewer Check workflow consumes the short-lived artifact
-# and reevaluates the protected-path approval status.
+# and reevaluates approval by @microsoft/mxc-architect-team.
 
 name: Required Reviewer Event
 
