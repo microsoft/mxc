@@ -105,7 +105,7 @@ have TypeScript read that result rather than compute its own.
 | Step | What | Why it gives parity |
 | --- | --- | --- |
 | 1. Consolidate detectors in Rust | Port the two TypeScript-only checks (`windows_sandbox` DISM/feature check, `lxc-ls`) into Rust<br>so `available_backends()` covers every backend. | Each backend has exactly one detector. |
-| 2. TypeScript stops probing itself | `getPlatformSupport()` reads the native probe instead of running its own `dism`/`lxc-ls`.<br>It already does this for the Windows tier via `populateIsolationFromProbe()` → `wxc-exec --probe`;<br>extend that JSON to carry the backend list. | TypeScript becomes a pure projection of the Rust result. |
+| 2. TypeScript stops probing itself | `getPlatformSupport()` reads the native backend-availability result instead of running its own `dism`/`lxc-ls`.<br>The transport must be **side-effect-free**: `wxc-exec --probe` runs *after* `recover_orphaned_state()` (which can restore/prune DACL state on the host), so it cannot be extended unchanged without violating the read-only contract.<br>Instead, expose backend availability via a dedicated mode handled **before** DACL recovery (e.g. `wxc-exec --available-backends`), or directly through `mxc_ffi`. | TypeScript becomes a pure projection of the Rust result, without triggering host mutation. |
 | 3. Names flow from serde | Backend names (`Containment`) and tier strings (`IsolationTier::as_str()`) are already Rust-serialized;<br>TypeScript consumes them as-is instead of hand-re-encoding. | Removes the wire-name drift class structurally. |
 
 See §7.9 for why the canonical probe stays in Rust rather than moving into the TypeScript layer.
@@ -138,8 +138,12 @@ Writing the missing detectors and wiring the TypeScript projection, one issue ea
 3. `microvm` / `hyperlight` - hypervisor-presence probe.
 4. `lxc` - port the `lxc-ls` presence check from TypeScript to Rust,
 so the probe (not just the SDK) can report it (§4.2, step 1).
-5. TypeScript projection - make `getPlatformSupport()` read the native probe (`wxc-exec --probe` / `mxc_ffi`)
-instead of running its own `dism`/`lxc-ls`, so the two layers can't drift (§4.2, step 2).
+5. TypeScript projection - make `getPlatformSupport()` read the native backend availability via a
+side-effect-free transport (e.g. a new `wxc-exec --available-backends` mode handled **before**
+`recover_orphaned_state()`, or `mxc_ffi`) instead of running its own `dism`/`lxc-ls`, so the two
+layers can't drift (§4.2, step 2). Do **not** extend the existing `--probe` flag: it runs after
+`recover_orphaned_state()`, which can restore/prune DACL state and would violate the read-only
+contract of this API.
 ---
 
 ## 7. Appendix - Decisions & Notes
