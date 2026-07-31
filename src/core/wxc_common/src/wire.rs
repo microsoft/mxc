@@ -623,7 +623,14 @@ mod schema_gen {
     /// JSON-schema renderer and the TypeScript emitter so both consume exactly the
     /// same model.
     fn schema_value() -> serde_json::Value {
-        let schema = schemars::schema_for!(MxcConfig);
+        // schemars 1.x defaults to JSON Schema 2020-12 with `$defs`. The committed
+        // artifacts — and every released stable schema — are draft-07 with
+        // `definitions`, so pin those settings explicitly rather than let a
+        // dependency upgrade silently restate the published contract in a
+        // different dialect.
+        let schema = schemars::generate::SchemaSettings::draft07()
+            .into_generator()
+            .into_root_schema_for::<MxcConfig>();
         let mut value = serde_json::to_value(&schema).expect("schema serialises to JSON value");
         normalize_integer_formats(&mut value);
         if let serde_json::Value::Object(map) = &mut value {

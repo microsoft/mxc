@@ -93,8 +93,13 @@ fn enum_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<String>> {
     if let Some(Value::Array(one_of)) = obj.get("oneOf") {
         let mut variants = Vec::new();
         for branch in one_of {
-            let e = branch.get("enum")?.as_array()?;
-            let s = e.first()?.as_str()?;
+            // schemars renders a single-valued variant as `const` (1.x) or as a
+            // one-element `enum` array (0.8). Accept both so the emitted union
+            // does not silently degrade to an index signature.
+            let s = match branch.get("const") {
+                Some(v) => v.as_str()?,
+                None => branch.get("enum")?.as_array()?.first()?.as_str()?,
+            };
             variants.push(s.to_string());
         }
         return Some(variants);

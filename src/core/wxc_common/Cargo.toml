@@ -20,7 +20,7 @@ base64 = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
-schemars = { version = "0.8", optional = true }
+schemars = { version = "1.2.2", optional = true }
 nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }

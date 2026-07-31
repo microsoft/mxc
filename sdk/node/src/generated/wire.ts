@@ -38,15 +38,22 @@ export interface BaseProcessUi {
 }
 
 /**
- * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.
+ * Windows denial-capture settings. The presence of the `captureDenials`
+ * object enables capture; all fields are optional.
  */
 export interface CaptureDenials {
   /**
-   * How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block` when omitted.
+   * How each ungranted access check is handled while it is recorded. Both
+   * modes log every access the policy does not grant to the ETL trace; the
+   * mode only decides whether that access is blocked or allowed. Defaults to
+   * `block` when omitted.
    */
   mode?: CaptureDenialsMode | null;
   /**
-   * Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist.
+   * Absolute path where the denial ETL trace is written. The caller names
+   * the path; the OS opens it under the caller's own identity when the trace
+   * is sealed. When omitted, MXC writes the trace to a managed per-run
+   * temporary file. The parent directory must already exist.
    */
   outputPath?: string | null;
 }
@@ -67,7 +74,11 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
- * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
+ * Experimental features (only honored with `--experimental`). This block is
+ * intentionally **permissive** (no `deny_unknown_fields`): experimental
+ * backends are in flux, so the schema documents the known shapes for editor
+ * help without rejecting in-progress fields. The strict, closed contract is
+ * the stable (top-level) surface.
  */
 export interface Experimental {
   /**
@@ -131,7 +142,9 @@ export interface Filesystem {
 export type IsolationConfigurationId = "small" | "medium" | "large" | "composable";
 
 /**
- * IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).
+ * IsolationSession backend config. Carries both the one-shot fields
+ * (`configurationId`, `user`) and the per-phase state-aware nesting
+ * (`provision` / `start` / `stop` / `deprovision`).
  */
 export interface IsolationSession {
   /**
@@ -177,7 +190,8 @@ export interface IsolationSessionPhase {
 }
 
 /**
- * Entra cloud-agent user bundle. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
+ * Entra cloud-agent user bundle. Reachable only under the permissive
+ * `experimental` surface, so unknown fields are tolerated (forward-compat).
  */
 export interface IsolationUser {
   /**
@@ -270,7 +284,8 @@ export type NetworkPolicy = "allow" | "block";
 export type Phase = "provision" | "start" | "exec" | "stop" | "deprovision";
 
 /**
- * A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
+ * A single host → container port forward. Reachable only under the permissive
+ * `experimental` surface, so unknown fields are tolerated (forward-compat).
  */
 export interface PortMapping {
   /**
@@ -315,15 +330,26 @@ export interface Process {
  */
 export interface ProcessContainer {
   /**
-   * AppContainer capabilities (e.g. `internetClient`, `registryRead`). Each array entry must contain exactly one capability name; commas are rejected because BaseContainer uses commas as its wire delimiter. `learningModeLogging` and `permissiveLearningMode` are reserved and rejected here; use `learningMode`, `--audit`, or the dedicated denial capture configuration instead.
+   * AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+   * Each array entry must contain exactly one capability name; commas are
+   * rejected because BaseContainer uses commas as its wire delimiter.
+   * `learningModeLogging` and `permissiveLearningMode` are reserved and
+   * rejected here; use `learningMode`, `--audit`, or the dedicated denial
+   * capture configuration instead.
    */
   capabilities?: string[] | null;
   /**
-   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the learning-mode OS API.
+   * Windows denial capture. When present, the runner records the sandboxed
+   * process's access attempts to a learning-mode ETL trace for later
+   * inspection. Requires a host that exposes the learning-mode OS API.
    */
   captureDenials?: CaptureDenials | null;
   /**
-   * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.
+   * AppContainer learning mode (deny-and-record): failed access checks are
+   * logged for diagnostics while the accesses stay denied; containment is
+   * unchanged. Distinct from the allow-all `permissiveLearningMode`
+   * capability, which is injected internally by the `--audit` CLI flag or
+   * dedicated denial-capture configuration.
    */
   learningMode?: boolean | null;
   /**
@@ -389,7 +415,8 @@ export interface Seatbelt {
  */
 export interface Telemetry {
   /**
-   * Explicit telemetry override. `true` = force on, `false` = force off, omitted = disabled (default off).
+   * Explicit telemetry override. `true` = force on, `false` = force off,
+   * omitted = disabled (default off).
    */
   enabled?: boolean | null;
   [k: string]: unknown;
@@ -407,7 +434,8 @@ export interface TestFeature {
 }
 
 /**
- * Port-forward transport protocol. Only `tcp` is currently supported by the vendored WSLC SDK runtime; `udp` is rejected at parse time.
+ * Port-forward transport protocol. Only `tcp` is currently supported by the
+ * vendored WSLC SDK runtime; `udp` is rejected at parse time.
  */
 export type TransportProtocol = "tcp";
 
@@ -478,7 +506,9 @@ export interface Wslc {
    */
   memoryMb?: number | null;
   /**
-   * Host → container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings.
+   * Host → container port forwards. Only TCP is currently supported; the
+   * parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL`
+   * for UDP port mappings.
    */
   portMappings?: PortMapping[] | null;
   /**
@@ -493,11 +523,14 @@ export interface Wslc {
 }
 
 /**
- * MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.
+ * MXC container execution configuration. Defines the recommended config format
+ * for both one-shot and state-aware sandbox lifecycle requests. A few
+ * deprecated field spellings not listed here are also accepted via serde aliases.
  */
 export interface MXCConfiguration {
   /**
-   * Optional JSON Schema reference for editor validation. Accepted but ignored by the parser.
+   * Optional JSON Schema reference for editor validation. Accepted but
+   * ignored by the parser.
    */
   $schema?: string | null;
   /**
@@ -509,11 +542,22 @@ export interface MXCConfiguration {
    */
   containerId?: string | null;
   /**
-   * Containment backend to use for execution. Accepts abstract intents (`process`, `vm`) and concrete backends; the binary resolves intents to a concrete backend per host at run time.
+   * Containment backend to use for execution. Accepts abstract intents
+   * (`process`, `vm`) and concrete backends; the binary resolves intents to
+   * a concrete backend per host at run time.
    */
   containment?: Containment | null;
   /**
-   * Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in the provision result. The client relays it verbatim into every later state-aware phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on each non-provision phase it validates the relayed value and *spins* a fresh child element off a mutable base (so multiple invocations of one phase stay distinct), passes an already-frozen vector through unchanged, and reseeds a brand-new base if the relayed value is absent or malformed — so a missing or hostile relay never reaches telemetry unvalidated. Ignored unless experimental telemetry is enabled; not valid on one-shot requests.
+   * Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in
+   * the provision result. The client relays it verbatim into every later
+   * state-aware phase so all phases of one lifecycle share a telemetry base
+   * prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on
+   * each non-provision phase it validates the relayed value and *spins* a fresh
+   * child element off a mutable base (so multiple invocations of one phase stay
+   * distinct), passes an already-frozen vector through unchanged, and reseeds a
+   * brand-new base if the relayed value is absent or malformed — so a missing
+   * or hostile relay never reaches telemetry unvalidated. Ignored unless
+   * experimental telemetry is enabled; not valid on one-shot requests.
    */
   correlationVector?: string | null;
   /**
@@ -541,7 +585,9 @@ export interface MXCConfiguration {
    */
   network?: Network | null;
   /**
-   * State-aware lifecycle phase. When present, the request is a state-aware request (`sandboxId` is required for non-provision phases); when absent, the request is one-shot.
+   * State-aware lifecycle phase. When present, the request is a state-aware
+   * request (`sandboxId` is required for non-provision phases); when absent,
+   * the request is one-shot.
    */
   phase?: Phase | null;
   /**
@@ -549,15 +595,18 @@ export interface MXCConfiguration {
    */
   process?: Process | null;
   /**
-   * ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.
+   * ProcessContainer-specific settings (Windows). Used when containment is
+   * `processcontainer`.
    */
   processContainer?: ProcessContainer | null;
   /**
-   * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
+   * Sandbox identifier returned by a prior provision request. Required for
+   * non-provision state-aware phases.
    */
   sandboxId?: string | null;
   /**
-   * macOS Seatbelt backend configuration. Used when containment is `seatbelt`.
+   * macOS Seatbelt backend configuration. Used when containment is
+   * `seatbelt`.
    */
   seatbelt?: Seatbelt | null;
   /**
