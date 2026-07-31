@@ -69,6 +69,22 @@ fn timeout_error(timeout_ms: u32) -> std::io::Error {
     )
 }
 
+/// The `ErrorKind::TimedOut` error reported when the deadline elapsed but the
+/// kill could **not** be confirmed.
+///
+/// Still a timeout — the deadline is spent either way, so reporting an exit
+/// code would be wrong — but deliberately worded not to claim the termination
+/// [`timeout_error`] promises, since that is exactly what could not be shown.
+fn unconfirmed_timeout_error(timeout_ms: u32) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "Process timed out after {timeout_ms}ms; the container could not be confirmed \
+             terminated (call wait() to retry the teardown)"
+        ),
+    )
+}
+
 /// A running WSL container's init process.
 struct WslcSandboxProcess {
     started: StartedContainer,
@@ -120,6 +136,43 @@ struct WslcSandboxProcess {
 // not claimed), so at most one thread calls into the SDK at a time.
 unsafe impl Send for WslcSandboxProcess {}
 
+/// What an earlier wait already established about this process's outcome, which
+/// every later `wait` / `try_wait` must keep reporting.
+///
+/// Extracted so the two entry points cannot drift: the trait's promise is that
+/// once a run is reported as timed out, no later status query downgrades it to
+/// an exit code — and a timeout *kills* the container, so the raw SDK exit code
+/// is always available to be mistakenly reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// The deadline elapsed and the kill was confirmed.
+    TimedOut,
+    /// The deadline elapsed, but the kill could not be confirmed. Still a
+    /// timeout — the deadline is spent — with the termination unproven.
+    DeadlineUnconfirmed,
+    /// The process exited on its own and teardown completed.
+    Exited(i32),
+    /// Nothing established yet; ask the container.
+    Pending,
+}
+
+/// Decide the sticky outcome from the flags an earlier wait set.
+///
+/// `deadline_elapsed` and `exit` are mutually exclusive by construction (the
+/// first is only set on the timeout path, the second only on the normal one),
+/// so the order these are tested in does not matter.
+fn settled_outcome(timed_out: bool, deadline_elapsed: bool, exit: Option<i32>) -> Settled {
+    if timed_out {
+        Settled::TimedOut
+    } else if deadline_elapsed {
+        Settled::DeadlineUnconfirmed
+    } else if let Some(code) = exit {
+        Settled::Exited(code)
+    } else {
+        Settled::Pending
+    }
+}
+
 impl WslcSandboxProcess {
     fn new(mut started: StartedContainer) -> Self {
         let pipes = started.pipes.take();
@@ -139,6 +192,11 @@ impl WslcSandboxProcess {
             torn_down: false,
             logger: Logger::new(Mode::Buffer),
         }
+    }
+
+    /// This handle's [`Settled`] outcome so far.
+    fn settled(&self) -> Settled {
+        settled_outcome(self.timed_out, self.deadline_elapsed, self.exit)
     }
 
     /// Complete the timeout path: confirm the sandboxed process is really gone,
@@ -179,9 +237,22 @@ impl SandboxProcess for WslcSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        // A cached code means `wait` already ran the full teardown; reuse it.
-        if let Some(code) = self.exit {
-            return Ok(Some(code));
+        // The settled outcome is checked exactly as in `wait`. Without this,
+        // the timeout path — which kills the container — leaves `has_exited()`
+        // true below, so a caller that saw `wait` fail with `TimedOut` would
+        // get `Ok(Some(<kill code>))` from a later poll: two contradictory
+        // answers, with the timeout silently downgraded to a normal exit.
+        match self.settled() {
+            Settled::TimedOut => return Err(timeout_error(self.started.timeout_ms)),
+            // `try_wait` is non-blocking, so confirmation cannot be retried
+            // here the way `wait` retries it — but an exit code would still be
+            // the wrong answer for a spent deadline.
+            Settled::DeadlineUnconfirmed => {
+                return Err(unconfirmed_timeout_error(self.started.timeout_ms))
+            }
+            // A cached code means `wait` already ran the full teardown.
+            Settled::Exited(code) => return Ok(Some(code)),
+            Settled::Pending => {}
         }
         if !self.started.has_exited() {
             return Ok(None);
@@ -214,20 +285,18 @@ impl SandboxProcess for WslcSandboxProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
-        // A *confirmed* timeout is checked first so it stays sticky: `wait` must
-        // keep reporting `TimedOut` rather than a later-observed exit code.
-        if self.timed_out {
-            return Err(timeout_error(self.started.timeout_ms));
-        }
-        if let Some(code) = self.exit {
-            return Ok(code);
-        }
-        // An earlier call already burned the deadline but could not confirm the
-        // kill. Resume at the confirmation step: re-entering `wait_for_exit`
-        // would block for another full deadline, while reporting `TimedOut`
-        // outright would promise a kill that never happened.
-        if self.deadline_elapsed {
-            return self.finish_timed_out();
+        match self.settled() {
+            // Sticky: a confirmed timeout must keep being reported as one,
+            // never as a later-observed exit code.
+            Settled::TimedOut => return Err(timeout_error(self.started.timeout_ms)),
+            Settled::Exited(code) => return Ok(code),
+            // An earlier call already burned the deadline but could not confirm
+            // the kill. Resume at the confirmation step: re-entering
+            // `wait_for_exit` would block for another full deadline, while
+            // reporting `TimedOut` outright would promise a kill that never
+            // happened.
+            Settled::DeadlineUnconfirmed => return self.finish_timed_out(),
+            Settled::Pending => {}
         }
 
         // Drain the streams the caller did not take, concurrently with the
@@ -302,5 +371,95 @@ impl Drop for WslcSandboxProcess {
         // before the `IoContext` is freed and the DLL unloaded.
         let mut logger = Logger::new(Mode::Buffer);
         self.started.quiesce(&mut logger);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact contradiction the streaming contract forbids: a timed-out run
+    /// is killed, so the container *has* an exit code to report — and reporting
+    /// it would turn `wait`'s `Err(TimedOut)` into a later `Ok(Some(137))`.
+    /// Both entry points read this one decision, so they cannot disagree.
+    #[test]
+    fn a_confirmed_timeout_is_never_downgraded_to_an_exit_code() {
+        assert_eq!(
+            settled_outcome(true, true, None),
+            Settled::TimedOut,
+            "a confirmed timeout stays a timeout"
+        );
+        // Even with an exit code somehow recorded, the timeout still wins.
+        assert_eq!(
+            settled_outcome(true, true, Some(137)),
+            Settled::TimedOut,
+            "a recorded exit code must not mask a confirmed timeout"
+        );
+    }
+
+    /// A deadline that elapsed but whose kill could not be confirmed is still a
+    /// timeout — never an exit code — but it is reported apart from the
+    /// confirmed case so nothing claims a termination that was not shown.
+    #[test]
+    fn an_unconfirmed_deadline_is_distinct_from_a_confirmed_timeout() {
+        assert_eq!(
+            settled_outcome(false, true, None),
+            Settled::DeadlineUnconfirmed,
+        );
+        assert_ne!(
+            settled_outcome(false, true, None),
+            Settled::TimedOut,
+            "an unconfirmed kill must not report as a completed termination"
+        );
+    }
+
+    #[test]
+    fn a_normal_exit_is_reported_once_teardown_cached_it() {
+        assert_eq!(settled_outcome(false, false, Some(0)), Settled::Exited(0));
+        assert_eq!(settled_outcome(false, false, Some(3)), Settled::Exited(3));
+    }
+
+    #[test]
+    fn a_fresh_handle_has_nothing_settled_yet() {
+        assert_eq!(settled_outcome(false, false, None), Settled::Pending);
+    }
+
+    /// The safety property behind both entry points: once the deadline has
+    /// elapsed, *no* combination of flags may answer "exited normally". This is
+    /// what stops a killed container's exit code from masking the timeout.
+    #[test]
+    fn a_spent_deadline_never_yields_an_exit_code() {
+        for timed_out in [false, true] {
+            for exit in [None, Some(0), Some(137)] {
+                let outcome = settled_outcome(timed_out, true, exit);
+                assert!(
+                    !matches!(outcome, Settled::Exited(_)),
+                    "a spent deadline (timed_out={timed_out}, exit={exit:?}) must not report an \
+                     exit code, got {outcome:?}"
+                );
+            }
+        }
+    }
+
+    /// The two timeout errors must both surface as `TimedOut` — callers match
+    /// on the kind — while saying different things about the termination.
+    #[test]
+    fn both_timeout_errors_report_the_timedout_kind() {
+        let confirmed = timeout_error(1500);
+        let unconfirmed = unconfirmed_timeout_error(1500);
+
+        assert_eq!(confirmed.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(unconfirmed.kind(), std::io::ErrorKind::TimedOut);
+
+        assert!(confirmed.to_string().contains("1500ms"));
+        assert!(unconfirmed.to_string().contains("1500ms"));
+        assert!(
+            confirmed.to_string().contains("was terminated"),
+            "the confirmed message states the termination"
+        );
+        assert!(
+            !unconfirmed.to_string().contains("was terminated"),
+            "the unconfirmed message must not claim a termination it did not prove"
+        );
     }
 }

@@ -18,10 +18,12 @@
 
 use std::ffi::c_void;
 use std::fmt::Write;
+use std::io::Read;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use wxc_common::logger::Logger;
+use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
 use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
@@ -40,16 +42,9 @@ use crate::wslc_bindings::*;
 enum IoSink {
     /// Accumulate in memory for [`WSLContainerRunner::collect_output`].
     Buffer(Mutex<Vec<u8>>),
-    /// Hand to the caller's live reader.
+    /// Hand to a reader: either the caller's ([`StdioMode::Pipes`]) or an
+    /// [`inherit_pump`] forwarding to the host's stdio ([`StdioMode::Inherit`]).
     Stream(StreamWriter),
-    /// Write straight through to the host's own stdout/stderr.
-    Inherit(HostStream),
-}
-
-/// The host stream an [`IoSink::Inherit`] sink writes through to.
-enum HostStream {
-    Stdout,
-    Stderr,
 }
 
 impl IoSink {
@@ -57,22 +52,20 @@ impl IoSink {
     ///
     /// This runs on an SDK callback thread, and that same thread delivers the
     /// process-exit callback teardown waits for, so a sink must not stall it:
-    /// the `Buffer` and `Stream` sinks only take a short-lived lock, never OS
-    /// I/O. (`Inherit` writes to the host's own stdio, which the host owns and
-    /// is expected to keep drained.) Write errors are dropped for the same
-    /// reason: there is nowhere to report them from here, and a closed host
-    /// stdout must not take the run down.
+    /// both sinks only take a short-lived lock, never OS I/O. That is why the
+    /// host-stdio (`Inherit`) case is *also* a `Stream` — writing straight
+    /// through to `stdout` here would block this thread whenever the host's
+    /// pipe is full, and the exit callback would then never arrive. A
+    /// [`inherit_pump`] thread does that blocking write instead.
     fn write(&self, bytes: &[u8]) {
         match self {
             IoSink::Buffer(buffer) => lock(buffer).extend_from_slice(bytes),
             IoSink::Stream(writer) => writer.write(bytes),
-            IoSink::Inherit(HostStream::Stdout) => write_through(std::io::stdout().lock(), bytes),
-            IoSink::Inherit(HostStream::Stderr) => write_through(std::io::stderr().lock(), bytes),
         }
     }
 
-    /// End the stream so a streaming reader sees EOF once it has drained what
-    /// is buffered. Idempotent, and a no-op for the buffer / inherit sinks.
+    /// End the stream so a reader sees EOF once it has drained what is
+    /// buffered. Idempotent, and a no-op for the buffer sink.
     fn close(&self) {
         if let IoSink::Stream(writer) = self {
             writer.close();
@@ -80,20 +73,73 @@ impl IoSink {
     }
 
     /// The bytes captured so far, lossily decoded. Always empty for the
-    /// streaming sinks — the caller consumed those bytes live.
+    /// streaming sink — the caller (or the pump) consumed those bytes live.
     fn captured(&self) -> String {
         match self {
             IoSink::Buffer(buffer) => String::from_utf8_lossy(&lock(buffer)).to_string(),
-            IoSink::Stream(_) | IoSink::Inherit(_) => String::new(),
+            IoSink::Stream(_) => String::new(),
         }
     }
 }
 
+/// Drain `reader` to one of the host's own streams until EOF, on a thread of
+/// its own.
+///
+/// [`StdioMode::Inherit`] means "the sandboxed process writes the host's
+/// stdout/stderr", and those are blocking handles: whoever writes them stalls
+/// whenever the host stops draining its end. Doing that on the SDK's callback
+/// thread would stall the process-exit callback with it — deadlocking teardown
+/// against a pipe only the host can drain — so the blocking write happens here,
+/// where stalling costs nothing but this thread. Teardown joins these after the
+/// container is settled, so a slow host delays only the final flush.
+///
+/// Write errors end the pump: a host stream that has gone away (a closed pipe)
+/// cannot recover, and there is nowhere to report it from — the same reason the
+/// callback path drops them.
+fn inherit_pump(mut reader: StreamReader, host: HostStream) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        // Locked per chunk rather than for the whole pump: the host's stdio is
+        // shared (the logger writes it too), so holding the lock for the life
+        // of the container would block everything else on the host.
+        pump(&mut reader, |bytes| match host {
+            HostStream::Stdout => write_through(std::io::stdout().lock(), bytes),
+            HostStream::Stderr => write_through(std::io::stderr().lock(), bytes),
+        })
+    })
+}
+
+/// Drain `reader` into `write_chunk` until the stream ends.
+///
+/// Split out from [`inherit_pump`] so the loop can be driven against a sink a
+/// test controls — in particular one that blocks, which is the case that must
+/// not reach an SDK callback thread.
+fn pump(reader: &mut StreamReader, mut write_chunk: impl FnMut(&[u8]) -> std::io::Result<()>) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            // EOF, or a stream that cannot be read again: either way, done.
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                if write_chunk(&buf[..n]).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Which host stream an [`inherit_pump`] drains into.
+#[derive(Clone, Copy)]
+enum HostStream {
+    Stdout,
+    Stderr,
+}
+
 /// Write one chunk straight through to a host stream, flushing it so output
 /// appears as the container produces it.
-fn write_through(mut sink: impl std::io::Write, bytes: &[u8]) {
-    let _ = sink.write_all(bytes);
-    let _ = sink.flush();
+fn write_through(mut sink: impl std::io::Write, bytes: &[u8]) -> std::io::Result<()> {
+    sink.write_all(bytes)?;
+    sink.flush()
 }
 
 /// How long to wait for the SDK's exit callback, which is what guarantees all
@@ -126,30 +172,46 @@ pub(crate) enum OutputMode {
 }
 
 impl IoContext {
-    /// Build the context for `mode`, along with the read ends the caller
-    /// streams ([`StdioMode::Pipes`] only).
-    fn new(mode: OutputMode) -> (Self, Option<StreamPipes>) {
-        let (stdout, stderr, pipes) = match mode {
+    /// Build the context for `mode`, along with whatever else that mode needs
+    /// wired up (see [`IoWiring`]).
+    fn new(mode: OutputMode) -> (Self, IoWiring) {
+        let (stdout, stderr, wiring) = match mode {
             OutputMode::Capture => (
                 IoSink::Buffer(Mutex::new(Vec::new())),
                 IoSink::Buffer(Mutex::new(Vec::new())),
-                None,
+                IoWiring::default(),
             ),
-            OutputMode::Stream(StdioMode::Inherit) => (
-                IoSink::Inherit(HostStream::Stdout),
-                IoSink::Inherit(HostStream::Stderr),
-                None,
-            ),
+            // Inherit is a `Stream` too, drained by a pump thread rather than
+            // by the caller — see `inherit_pump` for why the SDK's callback
+            // thread must not write the host's stdio itself.
+            OutputMode::Stream(StdioMode::Inherit) => {
+                let (stdout_writer, stdout_reader) = stream_pair();
+                let (stderr_writer, stderr_reader) = stream_pair();
+                (
+                    IoSink::Stream(stdout_writer),
+                    IoSink::Stream(stderr_writer),
+                    IoWiring {
+                        pipes: None,
+                        pumps: vec![
+                            inherit_pump(stdout_reader, HostStream::Stdout),
+                            inherit_pump(stderr_reader, HostStream::Stderr),
+                        ],
+                    },
+                )
+            }
             OutputMode::Stream(StdioMode::Pipes) => {
                 let (stdout_writer, stdout_reader) = stream_pair();
                 let (stderr_writer, stderr_reader) = stream_pair();
                 (
                     IoSink::Stream(stdout_writer),
                     IoSink::Stream(stderr_writer),
-                    Some(StreamPipes {
-                        stdout: stdout_reader,
-                        stderr: stderr_reader,
-                    }),
+                    IoWiring {
+                        pipes: Some(StreamPipes {
+                            stdout: stdout_reader,
+                            stderr: stderr_reader,
+                        }),
+                        pumps: Vec::new(),
+                    },
                 )
             }
         };
@@ -159,7 +221,7 @@ impl IoContext {
                 stderr,
                 exited: (Mutex::new(false), Condvar::new()),
             },
-            pipes,
+            wiring,
         )
     }
 
@@ -213,6 +275,17 @@ fn await_callbacks_quiesced(io_ctx: &Arc<IoContext>) -> bool {
 pub(crate) struct StreamPipes {
     pub(crate) stdout: StreamReader,
     pub(crate) stderr: StreamReader,
+}
+
+/// Everything an [`IoContext`] needs alongside itself, which varies by
+/// [`OutputMode`]: read ends for the caller, or pump threads for the host.
+#[derive(Default)]
+struct IoWiring {
+    /// Caller-side read ends ([`StdioMode::Pipes`] only).
+    pipes: Option<StreamPipes>,
+    /// Forwarders draining to the host's stdio ([`StdioMode::Inherit`] only),
+    /// joined by teardown once the streams are closed.
+    pumps: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// RAII guard that reclaims an Arc<IoContext> from a raw pointer on drop.
@@ -966,18 +1039,42 @@ impl WSLContainerRunner {
 
         // Wait for exit callback to fire — guarantees all I/O is flushed.
         if !await_callbacks_quiesced(io_ctx) {
-            let _ = writeln!(
-                logger,
-                "[WSLC] Warning: exit callback did not fire within {}s; leaking the callback \
-                 context so a late callback cannot touch freed memory",
-                EXIT_CALLBACK_TIMEOUT.as_secs()
-            );
+            if timed_out {
+                // The `SIGTERM` above was only a request, and it plainly did not
+                // land: the process is still running and still producing output.
+                // Escalate *before* the backstop close below, so that output is
+                // not cut off from a process we are about to kill anyway.
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Container did not stop after the timeout SIGTERM — escalating to \
+                     SIGKILL"
+                );
+                let mut err_msg = CoTaskMemPWSTR::null();
+                let _ = sdk.WslcStopContainer(
+                    container_guard.as_raw(),
+                    WslcSignal::WSLC_SIGNAL_SIGKILL,
+                    0,
+                    err_msg.as_mut_ptr(),
+                );
+                drop(err_msg);
+            }
+            // Re-checked after the escalation: only a callback that still has
+            // not fired forces the context leak.
+            if !await_callbacks_quiesced(io_ctx) {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC] Warning: exit callback did not fire within {}s; leaking the callback \
+                     context so a late callback cannot touch freed memory",
+                    EXIT_CALLBACK_TIMEOUT.as_secs()
+                );
+            }
         }
 
         // Backstop for the streaming path: the exit callback normally closes the
         // pipes, but if it never fired (the warning above) a caller blocked on a
-        // `read` would otherwise hang forever. No-op once already closed, and no
-        // I/O can be lost — the SDK stops delivering output at process exit.
+        // `read` would otherwise hang forever. No-op once already closed. Only
+        // output from a process that outlived even the escalation above can be
+        // cut off here, which is the lesser of the two failures.
         io_ctx.close_streams();
 
         let mut exit_code: i32 = -1;
@@ -1128,7 +1225,7 @@ impl WSLContainerRunner {
         // registered). The SDK may still invoke callbacks on its internal
         // threads; Arc ensures the memory isn't freed until all references
         // (including the one held by the SDK via raw pointer) are dropped.
-        let (io_ctx, pipes) = IoContext::new(output);
+        let (io_ctx, io_wiring) = IoContext::new(output);
         let io_ctx = Arc::new(io_ctx);
         // Give the SDK an Arc reference via raw pointer. We must reconstruct
         // the Arc later to avoid leaking the reference count.
@@ -1455,7 +1552,9 @@ impl WSLContainerRunner {
             io_ctx_guard,
             io_ctx,
             sdk,
-            pipes,
+            pipes: io_wiring.pipes,
+            pumps: Mutex::new(io_wiring.pumps),
+            settled: AtomicBool::new(false),
             destroy_on_exit: request.lifecycle.destroy_on_exit,
             timeout_ms: wait_timeout_ms(request),
         })
@@ -1611,10 +1710,38 @@ pub(crate) struct StartedContainer {
     sdk: &'static WslcSdk,
     /// Caller-side read ends, present only for [`StdioMode::Pipes`].
     pub(crate) pipes: Option<StreamPipes>,
+    /// Host-stdio forwarders, present only for [`StdioMode::Inherit`]. Joined
+    /// by [`join_pumps`](Self::join_pumps) once the streams are closed, so the
+    /// container's last output reaches the host before teardown returns.
+    /// `Mutex` only so the `&self` teardown methods can take them.
+    pumps: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Whether teardown has already run, so [`Drop`] knows not to repeat it —
+    /// and, crucially, knows to *run* it when an unwind skipped it.
+    settled: AtomicBool,
     /// Whether the container is stopped and deleted after the process exits.
     pub(crate) destroy_on_exit: bool,
     /// Wait deadline in milliseconds; `u32::MAX` waits forever.
     pub(crate) timeout_ms: u32,
+}
+
+impl Drop for StartedContainer {
+    /// Settle a container no teardown path reached — in practice, one abandoned
+    /// by a **panic** unwinding past it.
+    ///
+    /// Without this, unwinding drops the fields below in declaration order:
+    /// the guards close the SDK handles and the `IoContext` is freed while the
+    /// SDK may still be invoking callbacks that write through it. Every normal
+    /// path already tears down explicitly (and marks the container settled), so
+    /// this only fires when something skipped them.
+    fn drop(&mut self) {
+        if self.settled.load(Ordering::Acquire) {
+            return;
+        }
+        // No error channel and no caller logger here, so the diagnostics are
+        // buffered and dropped with `self`; the alternative is a use-after-free.
+        let mut logger = Logger::new(Mode::Buffer);
+        self.quiesce(&mut logger);
+    }
 }
 
 impl StartedContainer {
@@ -1666,6 +1793,20 @@ impl StartedContainer {
         // abandoned run, or `Drop`), so there is no caller left to hand a
         // failure to. `destroy` logs it.
         let _ = self.destroy(logger);
+    }
+
+    /// Wait for the host-stdio forwarders to finish.
+    ///
+    /// Only [`StdioMode::Inherit`] has any, and they end as soon as their
+    /// stream is closed and drained — so this is where the container's last
+    /// output reaches the host. Deliberately *after* the container is settled:
+    /// a host that has stopped draining its own stdout then delays only this
+    /// final flush, never the SDK teardown that a callback-thread write would
+    /// have stalled.
+    fn join_pumps(&self) {
+        for pump in lock(&self.pumps).drain(..) {
+            let _ = pump.join();
+        }
     }
 
     /// Stop and delete the container when the request asked for it. The session
@@ -1720,6 +1861,15 @@ impl StartedContainer {
                 drop(err_msg);
             }
         }
+
+        // Teardown has now run, whether or not it succeeded: `Drop` must not
+        // repeat the stop/delete, and the streaming path tracks a *failed*
+        // teardown through its own `torn_down` flag so it can retry deliberately.
+        self.settled.store(true, Ordering::Release);
+        // The streams are done, so the forwarders can finish flushing to the
+        // host now that the container itself is settled.
+        self.close_streams();
+        self.join_pumps();
 
         // Session termination is handled by WslcSessionGuard's Drop impl.
         match failure {
@@ -2037,5 +2187,124 @@ mod tests {
             "expected the overlap error, got: {}",
             response.error_message
         );
+    }
+
+    // -- Host-stdio forwarding (`StdioMode::Inherit`) --------------------
+
+    /// The regression this whole indirection exists for: the SDK's callback
+    /// thread must not do the host's blocking I/O, because that same thread
+    /// delivers the process-exit callback teardown waits on.
+    ///
+    /// The sink here never returns, standing in for a host that has stopped
+    /// draining its stdout. Writing through it from the callback path — which
+    /// is what `IoSink::Inherit` used to do — would park this test.
+    #[test]
+    fn callback_writes_do_not_block_on_a_stalled_host_sink() {
+        let (writer, mut reader) = stream_pair();
+        let sink = IoSink::Stream(writer);
+
+        let released = Arc::new((Mutex::new(false), Condvar::new()));
+        let pump_gate = Arc::clone(&released);
+        let pump_thread = std::thread::spawn(move || {
+            pump(&mut reader, |_| {
+                // Blocks exactly like a write to a full host pipe.
+                let (mutex, cvar) = &*pump_gate;
+                let mut done = mutex.lock().unwrap();
+                while !*done {
+                    done = cvar.wait(done).unwrap();
+                }
+                Ok(())
+            })
+        });
+
+        let start = std::time::Instant::now();
+        for _ in 0..64 {
+            sink.write(&[b'x'; 64 * 1024]);
+        }
+        sink.close();
+        let elapsed = start.elapsed();
+
+        // Let the pump go so the test doesn't leak a parked thread.
+        {
+            let (mutex, cvar) = &*released;
+            *mutex.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+        pump_thread.join().expect("pump thread");
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "callback-path writes must not block on a stalled host sink, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn pump_forwards_every_chunk_then_ends_at_eof() {
+        let (writer, mut reader) = stream_pair();
+        writer.write(b"first ");
+        writer.write(b"second");
+        writer.close();
+
+        let mut seen = Vec::new();
+        pump(&mut reader, |bytes| {
+            seen.extend_from_slice(bytes);
+            Ok(())
+        });
+
+        assert_eq!(seen, b"first second", "pump must forward the whole stream");
+    }
+
+    /// A host stream that has gone away (a closed pipe) cannot recover, so the
+    /// pump must give up rather than spin on a stream that is still open.
+    #[test]
+    fn pump_stops_when_the_host_sink_errors() {
+        let (writer, mut reader) = stream_pair();
+        writer.write(b"delivered");
+        writer.write(b"dropped");
+        // Deliberately left open: only the sink error may end the pump.
+
+        let mut writes = 0usize;
+        pump(&mut reader, |_| {
+            writes += 1;
+            Err(std::io::Error::other("host stream closed"))
+        });
+
+        assert_eq!(writes, 1, "pump must stop at the first sink error");
+    }
+
+    /// `Inherit` must not hand read ends to the caller (they belong to the
+    /// pumps), and `Pipes` must not spawn pumps (the caller drains those).
+    #[test]
+    fn io_wiring_matches_the_output_mode() {
+        let (_ctx, capture) = IoContext::new(OutputMode::Capture);
+        assert!(capture.pipes.is_none(), "capture has no caller pipes");
+        assert!(capture.pumps.is_empty(), "capture has no host pumps");
+
+        let (ctx, inherit) = IoContext::new(OutputMode::Stream(StdioMode::Inherit));
+        assert!(inherit.pipes.is_none(), "inherit keeps its readers");
+        assert_eq!(inherit.pumps.len(), 2, "inherit pumps stdout and stderr");
+        // Close so the pumps end, then join them rather than leaking threads.
+        ctx.close_streams();
+        for pump in inherit.pumps {
+            pump.join().expect("inherit pump");
+        }
+
+        let (_ctx, pipes) = IoContext::new(OutputMode::Stream(StdioMode::Pipes));
+        assert!(pipes.pipes.is_some(), "pipes hands the caller its readers");
+        assert!(pipes.pumps.is_empty(), "pipes has no host pumps");
+    }
+
+    /// `Capture` keeps the bytes for the `ScriptResponse`; the streaming sink
+    /// must report none, since the caller (or a pump) consumed them live.
+    #[test]
+    fn only_the_capture_sink_reports_captured_bytes() {
+        let buffer = IoSink::Buffer(Mutex::new(Vec::new()));
+        buffer.write(b"captured");
+        assert_eq!(buffer.captured(), "captured");
+
+        let (writer, _reader) = stream_pair();
+        let stream = IoSink::Stream(writer);
+        stream.write(b"streamed");
+        assert_eq!(stream.captured(), "", "streamed bytes are not re-reported");
     }
 }
