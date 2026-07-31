@@ -793,6 +793,9 @@ pub struct ScriptResponse {
     /// Indicates at what phase the failure occurred.
     #[serde(default)]
     pub failure_phase: FailurePhase,
+    /// Structured metadata produced after the sandboxed process exits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_metadata: Option<Box<SandboxOutputMetadata>>,
 }
 
 impl Default for ScriptResponse {
@@ -804,8 +807,40 @@ impl Default for ScriptResponse {
             error_message: String::new(),
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
+            output_metadata: None,
         }
     }
+}
+
+/// Structured outputs produced by optional sandbox features.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxOutputMetadata {
+    /// Location and summary of a captureDenials output document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_denials: Option<CaptureDenialsOutput>,
+}
+
+/// Location and summary of a captureDenials output document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDenialsOutput {
+    /// Discriminator used by line-oriented CLI consumers.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Absolute path to the JSON denials output file.
+    pub output_path: String,
+    /// Exit code of the sandboxed child.
+    pub exit_code: i32,
+    /// Count of unique denials written.
+    pub total_denials: usize,
+    /// Whether the emitted denial set was truncated.
+    pub denied_resources_truncated: bool,
+}
+
+impl CaptureDenialsOutput {
+    /// The fixed `type` discriminator value.
+    pub const KIND: &'static str = "captureDenials";
 }
 
 impl ScriptResponse {

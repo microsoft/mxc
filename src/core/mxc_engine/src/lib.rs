@@ -85,6 +85,10 @@ impl SandboxProcess for ProcessWithWarnings {
         &self.warnings
     }
 
+    fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+        self.inner.output_metadata()
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         self.inner.take_stdin()
     }

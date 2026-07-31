@@ -177,6 +177,7 @@ public static class MxcLifecycle
                 TimedOut = result.TimedOut,
                 Stdout = Encoding.UTF8.GetString(stdout),
                 Stderr = Encoding.UTF8.GetString(stderr),
+                OutputMetadata = proc.OutputMetadata,
             };
         }
         finally

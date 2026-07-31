@@ -41,6 +41,7 @@ use crate::{path_norm, tdh_decode};
 /// `OpenTraceW` returns this sentinel (`(TRACEHANDLE)-1`) on failure.
 const INVALID_PROCESSTRACE_HANDLE: u64 = u64::MAX;
 const MAX_UNIQUE_DENIALS: usize = 10_000;
+const MAX_PROCESSED_EVENTS: usize = 1_000_000;
 
 /// One decoded ETW event, retaining the header context the extractors need.
 #[cfg(test)]
@@ -67,6 +68,9 @@ struct Accumulator<'visitor> {
     truncated: bool,
     raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
     raw_event_count: usize,
+    processed_event_count: usize,
+    processing_limit_reached: bool,
+    stop_requested: bool,
     decode_error: Option<String>,
     panic_payload: Option<Box<dyn std::any::Any + Send>>,
     schema_cache: tdh_decode::EventSchemaCache,
@@ -81,6 +85,9 @@ impl<'visitor> Accumulator<'visitor> {
             truncated: false,
             raw_visitor: None,
             raw_event_count: 0,
+            processed_event_count: 0,
+            processing_limit_reached: false,
+            stop_requested: false,
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
@@ -95,6 +102,9 @@ impl<'visitor> Accumulator<'visitor> {
             truncated: false,
             raw_visitor: Some(visitor),
             raw_event_count: 0,
+            processed_event_count: 0,
+            processing_limit_reached: false,
+            stop_requested: false,
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
@@ -128,6 +138,7 @@ impl<'visitor> Accumulator<'visitor> {
         }
         if self.denials.len() >= MAX_UNIQUE_DENIALS {
             self.truncated = true;
+            self.stop_requested = true;
             return;
         }
         self.seen.insert((dedup_resource, raw.access_type));
@@ -138,6 +149,17 @@ impl<'visitor> Accumulator<'visitor> {
             pid: raw.pid,
             filetime: raw.filetime,
         });
+    }
+
+    fn begin_event(&mut self) -> bool {
+        if self.processed_event_count >= MAX_PROCESSED_EVENTS {
+            self.processing_limit_reached = true;
+            self.truncated = true;
+            self.stop_requested = true;
+            return false;
+        }
+        self.processed_event_count += 1;
+        true
     }
 
     fn visit_raw_event(&mut self, parts: &DecodedEventParts) {
@@ -217,6 +239,11 @@ pub fn visit_raw_events(
 ) -> Result<usize, AnalyzeError> {
     let mut accumulator = Accumulator::raw(visitor);
     process_trace_file(source_path, &mut accumulator)?;
+    if accumulator.processing_limit_reached {
+        return Err(AnalyzeError::Decode(format!(
+            "trace exceeded the {MAX_PROCESSED_EVENTS}-event processing limit"
+        )));
+    }
     if let Some(error) = accumulator.decode_error {
         return Err(AnalyzeError::Decode(error));
     }
@@ -231,6 +258,9 @@ fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> AnalysisRes
     let mut accumulator = Accumulator::analyze();
     for raw in raws {
         accumulator.add_raw_denial(raw);
+        if accumulator.stop_requested {
+            break;
+        }
     }
     accumulator
         .into_analysis()
@@ -259,6 +289,7 @@ fn process_trace_file(
     let mut logfile: EVENT_TRACE_LOGFILEW = unsafe { core::mem::zeroed() };
     logfile.LogFileName = PWSTR(name_wide.as_mut_ptr());
     logfile.Anonymous1.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD;
+    logfile.BufferCallback = Some(trace_buffer_callback);
     logfile.Anonymous2.EventRecordCallback = Some(event_record_callback);
     logfile.Context = std::ptr::from_mut(accumulator).cast();
 
@@ -289,8 +320,8 @@ fn process_trace_file(
         std::panic::resume_unwind(payload);
     }
 
-    // ERROR_SUCCESS (0) and ERROR_CANCELLED (1223) are both acceptable
-    // terminal states for a completed file trace.
+    // ERROR_SUCCESS (0) is end-of-file. ERROR_CANCELLED (1223) is expected
+    // when our buffer callback stops after a processing bound or fatal error.
     if status.0 != 0 && status.0 != 1223 {
         return Err(AnalyzeError::Decode(format!(
             "ProcessTrace failed for '{}': Win32 error {}",
@@ -322,7 +353,10 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     // ProcessTrace invokes this callback synchronously on our thread, so no
     // aliasing/concurrency with the owner occurs.
     let acc = unsafe { &mut *context };
-    if acc.decode_error.is_some() || acc.panic_payload.is_some() {
+    if acc.stop_requested || acc.decode_error.is_some() || acc.panic_payload.is_some() {
+        return;
+    }
+    if !acc.begin_event() {
         return;
     }
 
@@ -331,6 +365,27 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
         // context for this synchronous ProcessTrace invocation.
         unsafe { process_event_record(event_record, acc) };
     });
+}
+
+/// Stops `ProcessTrace` after the buffer containing the event that crossed an
+/// analysis bound. Returning zero is the documented cancellation signal.
+unsafe extern "system" fn trace_buffer_callback(logfile: *mut EVENT_TRACE_LOGFILEW) -> u32 {
+    if logfile.is_null() {
+        return 0;
+    }
+    // SAFETY: ETW passes the same live logfile and Context configured in
+    // `process_trace_file`; the callback is synchronous with ProcessTrace.
+    let context = unsafe { (*logfile).Context } as *mut Accumulator<'_>;
+    if context.is_null() {
+        return 0;
+    }
+    // SAFETY: `context` points to the live accumulator for this trace.
+    let accumulator = unsafe { &*context };
+    u32::from(
+        !accumulator.stop_requested
+            && accumulator.decode_error.is_none()
+            && accumulator.panic_payload.is_none(),
+    )
 }
 
 fn run_callback_guard(acc: &mut Accumulator<'_>, process: impl FnOnce(&mut Accumulator<'_>)) {
@@ -523,6 +578,44 @@ mod tests {
         let out = dedup_to_resources(denials);
         assert_eq!(out.denials.len(), MAX_UNIQUE_DENIALS);
         assert!(out.denied_resources_truncated);
+    }
+
+    #[test]
+    fn unique_denial_bound_requests_trace_stop() {
+        let mut accumulator = Accumulator::analyze();
+        accumulator.denials = (0..MAX_UNIQUE_DENIALS)
+            .map(|index| DeniedResource {
+                resource: format!(r"C:\data\{index}.txt"),
+                resource_type: ResourceType::File,
+                access_type: AccessType::Read,
+                pid: 1,
+                filetime: 1,
+            })
+            .collect();
+
+        accumulator.add_raw_denial(raw(
+            r"C:\data\overflow.txt",
+            AccessType::Read,
+            ResourceType::File,
+        ));
+
+        assert!(accumulator.stop_requested);
+        assert!(accumulator.truncated);
+    }
+
+    #[test]
+    fn event_processing_is_bounded_and_reports_truncation() {
+        let mut accumulator = Accumulator {
+            processed_event_count: MAX_PROCESSED_EVENTS - 1,
+            ..Accumulator::analyze()
+        };
+
+        assert!(accumulator.begin_event());
+        assert!(!accumulator.begin_event());
+        assert_eq!(accumulator.processed_event_count, MAX_PROCESSED_EVENTS);
+        assert!(accumulator.processing_limit_reached);
+        assert!(accumulator.stop_requested);
+        assert!(accumulator.truncated);
     }
 
     #[test]

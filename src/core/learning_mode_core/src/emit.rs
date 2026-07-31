@@ -22,9 +22,8 @@
 //! `denials` array. The document is self-contained: one file is written
 //! per `wxc-exec` invocation, so there is no record framing to parse.
 //!
-//! Separately, the runner prints a one-line [`DenialsOutputPointer`] to
-//! its own stderr so a caller can locate the file without scanning the
-//! filesystem — see that type for the pointer contract.
+//! Separately, the CLI can print a one-line [`DenialsOutputPointer`] so a
+//! caller can locate the file without scanning the filesystem.
 //!
 //! This module is transport-agnostic — it writes to any [`io::Write`],
 //! so the same code path serves the on-disk output file and in-memory
@@ -114,19 +113,9 @@ impl DenialsOutputPointer {
     }
 
     /// Serialises the pointer to a single-line JSON string (no trailing
-    /// newline). A fixed-shape struct of strings/ints/bools always
-    /// serialises, so this is effectively infallible.
-    #[must_use]
-    pub fn to_line(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| {
-            format!(
-                r#"{{"type":"{}","outputPath":"","exitCode":{},"totalDenials":{},"deniedResourcesTruncated":{}}}"#,
-                Self::KIND,
-                self.exit_code,
-                self.total_denials,
-                self.denied_resources_truncated
-            )
-        })
+    /// newline).
+    pub fn to_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
     }
 }
 
@@ -227,7 +216,7 @@ mod tests {
     fn pointer_is_single_line_tagged_json_echoing_summary() {
         let summary = DenialSummary::new(3, 5, true);
         let pointer = DenialsOutputPointer::new(r"C:\out\denials.json", &summary);
-        let line = pointer.to_line();
+        let line = pointer.to_line().unwrap();
 
         assert!(!line.contains('\n'));
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -242,7 +231,8 @@ mod tests {
     fn pointer_round_trips_through_json() {
         let summary = DenialSummary::new(0, 0, false);
         let pointer = DenialsOutputPointer::new("out.json", &summary);
-        let parsed: DenialsOutputPointer = serde_json::from_str(&pointer.to_line()).unwrap();
+        let parsed: DenialsOutputPointer =
+            serde_json::from_str(&pointer.to_line().unwrap()).unwrap();
         assert_eq!(pointer, parsed);
     }
 }

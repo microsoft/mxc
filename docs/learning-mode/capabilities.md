@@ -161,6 +161,9 @@ regenerate its sandbox policy:
 
 - `denials` is already de-duplicated per `(resource, accessType)`, so
   `summary.totalDenials` equals `denials.length`.
+- Analysis retains at most 10,000 unique denials and processes at most
+  1,000,000 ETW events. Reaching either bound stops further analysis and sets
+  `summary.deniedResourcesTruncated` to `true`.
 - `resource` is the user-visible identifier for the denied resource,
   interpreted by `resourceType`: a canonical `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
@@ -180,14 +183,18 @@ explicitly (its parent directory must already exist). MXC inserts a unique
 per-run identifier (process id plus random suffix) into the file stem
 (`denials.json` → `denials.<run-id>.json`) so concurrent and sequential
 captures using the same configured path do not collide. If `outputPath` is
-omitted, MXC writes a managed per-run temp file. Either way, `wxc-exec` prints
-**one structured pointer line** to its own **stderr** — carrying the *actual*
-path — so the caller can locate the deliverable without scanning the filesystem:
+omitted, MXC writes a managed per-run temp file. `wxc-exec` prints **one
+structured pointer line** to its own **stderr** — carrying the *actual* path —
+so CLI callers can locate the deliverable without scanning the filesystem:
 
 ```json
 {"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
 ```
 
 The pointer echoes the file's `summary`; the authoritative record is the file
-itself. The intermediate ETW `.etl` trace is an internal, runner-managed temp
-file that MXC decodes and then deletes — callers never see it.
+itself. In-process Rust callers receive the same information through
+`Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
+C# SDK exposes it through `RunResult.OutputMetadata` and
+`MxcSandboxProcess.OutputMetadata`. The intermediate ETW `.etl` trace is an
+internal, runner-managed temp file that MXC decodes and then deletes — callers
+never see it.

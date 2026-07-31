@@ -87,7 +87,9 @@ pub use mxc_engine::{
     SandboxRequest,
 };
 
-pub use sandbox::{Output, Sandbox, StreamCloser, WaitOutcome};
+pub use sandbox::{
+    CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata, StreamCloser, WaitOutcome,
+};
 
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
 /// the command, and any working directory / env, filled in).
