@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
+use std::fmt;
 
 /// Closed set of wire-format error codes. Matches the SDK's `ErrorCode` string
 /// union one-for-one; serialised as snake_case strings on the wire.
@@ -60,12 +60,17 @@ impl std::fmt::Display for MxcErrorCode {
 /// Structured detail for a failure that originated in an underlying platform
 /// API.
 ///
-/// Grouping these makes the envelope invariant unrepresentable to violate:
-/// `native_code` and `remediation` cannot exist without `operation`, because
-/// they live inside the same value. `MxcError` holds this boxed, so adding
-/// detail costs one pointer rather than widening every `Result<_, MxcError>`
-/// in the codebase.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Grouping these is what carries the envelope invariant: `native_code` and
+/// `remediation` live beside `operation` rather than as independent optionals,
+/// so a failure that names a status without naming the call it came from is
+/// not something the normal construction path can produce. Build one with
+/// [`ApiFailure::new`], which requires the operation up front, and add the
+/// optional parts with the `with_*` builders. (The fields are `pub` for
+/// destructuring, so a hand-rolled literal *can* still put an empty string in
+/// `operation` — the type makes the invariant the easy path, not an enforced
+/// one.) `MxcError` holds this boxed, so adding detail costs one pointer
+/// rather than widening every `Result<_, MxcError>` in the codebase.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiFailure {
     /// The API call that failed, namespaced by its interface — e.g.
     /// `IsoSessionOps.RunProcessWithOptionsAsync`. Kept low-cardinality and
@@ -120,8 +125,8 @@ impl ApiFailure {
 /// A new *backend-neutral* concept earns a field on `ApiFailure`;
 /// *backend-specific* structured data belongs in `details`, which stays open
 /// for that purpose.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{code}: {message}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MxcError {
     pub code: MxcErrorCode,
     pub message: String,
@@ -129,6 +134,31 @@ pub struct MxcError {
     /// Present only when an underlying API operation was in flight.
     pub api_failure: Option<Box<ApiFailure>>,
 }
+
+/// Renders `code: message`, then the API detail in brackets when present —
+/// e.g. `backend_error: The provision was not found. [IsoSessionOps.StopSessionAsync 0x80070490]`.
+///
+/// The bracketed suffix exists because `message` is now the API's own text
+/// alone; without it a consumer that only logs the error (`error!("{e}")`,
+/// `e.to_string()`) would lose the operation and status that used to be
+/// concatenated into the message. This affects **rendering only** — the wire
+/// envelope still carries `message` bare, with the components in their own
+/// fields.
+impl fmt::Display for MxcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)?;
+        if let Some(api) = &self.api_failure {
+            write!(f, " [{}", api.operation)?;
+            if let Some(native_code) = &api.native_code {
+                write!(f, " {native_code}")?;
+            }
+            f.write_str("]")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MxcError {}
 
 impl MxcError {
     pub fn new(code: MxcErrorCode, message: impl Into<String>) -> Self {
@@ -231,6 +261,7 @@ impl MxcError {
 /// See [`MxcError`] for the meaning of the structured failure fields and the
 /// invariant relating them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ErrorEnvelope {
     pub code: MxcErrorCode,
     pub message: String,
@@ -475,9 +506,10 @@ mod tests {
         assert_eq!(err.remediation(), Some("Re-provision the sandbox."));
     }
 
-    /// `native_code` and `remediation` live inside `ApiFailure`, so they
-    /// cannot be set without an `operation` — the envelope invariant holds
-    /// by construction rather than by convention.
+    /// `native_code` and `remediation` live inside `ApiFailure`, so the
+    /// normal construction path cannot set them without an `operation` —
+    /// the envelope invariant holds by construction rather than by
+    /// convention.
     #[test]
     fn structured_detail_always_carries_an_operation() {
         let err = MxcError::backend_error("boom")
@@ -485,6 +517,56 @@ mod tests {
         assert_eq!(err.operation(), Some("IsoSessionOps.AddUserAsync"));
         assert_eq!(err.native_code(), None);
         assert_eq!(err.remediation(), None);
+    }
+
+    // ── Display keeps the diagnostic detail a logger would otherwise lose ─
+
+    /// `message` is the API's own text alone now, so a consumer that only
+    /// logs the error would lose the operation and status that used to be
+    /// concatenated into it. `Display` re-attaches them.
+    #[test]
+    fn display_appends_operation_and_native_code() {
+        let err = MxcError::backend_error("The provision was not found.")
+            .with_api_failure(full_api_failure());
+        assert_eq!(
+            err.to_string(),
+            "backend_error: The provision was not found. \
+             [IsoSessionOps.AddUserAsync 0x80070490]"
+        );
+    }
+
+    /// A status that could not be read leaves `native_code` absent; the
+    /// operation alone is still worth rendering.
+    #[test]
+    fn display_renders_operation_without_native_code() {
+        let err = MxcError::backend_error("boom")
+            .with_api_failure(ApiFailure::new("IsoSessionOps.AddUserAsync"));
+        assert_eq!(
+            err.to_string(),
+            "backend_error: boom [IsoSessionOps.AddUserAsync]"
+        );
+    }
+
+    /// A failure MXC raises itself has no API detail, so the rendering is
+    /// unchanged from before the structured fields existed.
+    #[test]
+    fn display_without_api_failure_is_code_and_message_only() {
+        assert_eq!(
+            MxcError::policy_validation("user.upn must contain '@'").to_string(),
+            "policy_validation: user.upn must contain '@'"
+        );
+    }
+
+    /// `Display` is a rendering concern only — the wire `message` stays the
+    /// bare API text, with the components in their own fields.
+    #[test]
+    fn display_enrichment_does_not_leak_into_the_envelope() {
+        let env = MxcError::backend_error("The provision was not found.")
+            .with_api_failure(full_api_failure())
+            .to_envelope();
+        assert_eq!(env.message, "The provision was not found.");
+        assert!(!env.message.contains("IsoSessionOps"));
+        assert!(!env.message.contains("0x80070490"));
     }
 
     #[test]

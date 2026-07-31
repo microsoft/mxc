@@ -117,6 +117,33 @@ describe('MxcError structured fields', () => {
     assert.strictEqual(err.remediation, undefined);
     assert.strictEqual(err.details, undefined);
   });
+
+  // The overload discriminates on `typeof === 'string'`, so a nullish
+  // argument takes the object branch. Without a guard it fails inside
+  // `super()` with a TypeError naming `message`, which tells the reader
+  // nothing about what actually went wrong.
+  for (const bad of [undefined, null]) {
+    it(`rejects ${String(bad)} with a message naming the real problem`, () => {
+      assert.throws(
+        () => new (MxcError as unknown as new (arg: unknown) => MxcError)(bad),
+        (err: unknown) => {
+          assert.ok(err instanceof TypeError, `expected TypeError, got ${String(err)}`);
+          assert.match(err.message, /MxcError: expected an error code string or a field object/);
+          assert.match(err.message, new RegExp(String(bad)));
+          return true;
+        },
+      );
+    });
+  }
+
+  // `message` was an unchecked `as string`. Omitting it yields an empty
+  // string (the `Error` constructor ignores an undefined message), not the
+  // literal text "undefined".
+  it('yields an empty message when the positional message is omitted', () => {
+    const err = new (MxcError as unknown as new (code: string) => MxcError)('stale_id');
+    assert.strictEqual(err.code, 'stale_id');
+    assert.strictEqual(err.message, '');
+  });
 });
 
 describe('mxcErrorFromEnvelope', () => {

@@ -67,14 +67,19 @@ export {
   ToolsPolicyOptions,
 } from './policy.js';
 
-// Export typed wire-format errors
+// Export typed wire-format errors.
+//
+// `WireError` and `mxcErrorFromEnvelope` are deliberately NOT re-exported:
+// they exist so the SDK's own envelope-parsing sites share one widening
+// point, and keeping them module-internal leaves the wire-parsing internals
+// free to change. `MxcErrorFields` *is* exported because it is the parameter
+// type of a public `MxcError` constructor overload — hiding the name would
+// leave the type usable via an object literal but impossible to name.
 export {
   ErrorCode,
   MxcError,
   MxcErrorFields,
-  WireError,
   mxcErrorFromCode,
-  mxcErrorFromEnvelope,
 } from './errors.js';
 
 // Export state-aware lifecycle types

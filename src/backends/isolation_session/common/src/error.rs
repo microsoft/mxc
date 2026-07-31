@@ -234,9 +234,25 @@ pub(super) fn transport_err(
     IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure::new(
         operation,
         Some(err.code().0 as u32),
-        Some(format!("{}: {}", step, err.message())),
+        Some(compose_transport_message(step, &err.message())),
         None,
     )))
+}
+
+/// Joins `step` with the platform's text, tolerating an absent text.
+///
+/// `windows_core::Error::message()` answers with an empty string for an
+/// HRESULT that has no entry in the OS message table (`0xDEADBEEF`, and any
+/// custom facility code a service invents). Formatting unconditionally would
+/// then yield a dangling `"wait failed: "` — non-empty, so it sails past the
+/// empty-message guard in [`IsoApiFailure::new`] and reaches the caller as a
+/// trailing colon with no explanation. Fall back to the step alone instead.
+fn compose_transport_message(step: &str, platform_message: &str) -> String {
+    if platform_message.is_empty() {
+        step.to_string()
+    } else {
+        format!("{step}: {platform_message}")
+    }
 }
 
 /// Maps an activation failure of the in-proc IsolationSession runtime API to
@@ -301,8 +317,8 @@ pub(super) fn classify_api_failure(
 
 /// Reads an `IsoSessionError`'s components and classifies them.
 ///
-/// Thin by design — the rules live in [`classify_api_failure`]; this only
-/// crosses the WinRT boundary.
+/// Thin by design — the rules live in [`classify_api_failure`] and
+/// [`unreadable_code_failure`]; this only crosses the WinRT boundary.
 pub(super) fn format_iso_error(
     operation: &str,
     err: &IsoSessionError,
@@ -330,21 +346,38 @@ pub(super) fn format_iso_error(
             promotion,
         ),
         Err(read_err) => {
-            // No usable status, so the note is the only signal that
-            // classification is degraded — keep it in the message.
-            let note = format!("could not read HRESULT code: {read_err}");
-            let message = Some(match message {
-                Some(m) => format!("{m} ({note})"),
-                None => note,
-            });
-            IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure::new(
-                operation,
-                None,
-                message,
-                remediation,
-            )))
+            unreadable_code_failure(operation, message, remediation, &read_err.to_string())
         }
     }
+}
+
+/// Builds the failure for the case where the status getter itself failed.
+///
+/// Pure, and split out of [`format_iso_error`] for the same reason
+/// [`classify_api_failure`] is: that function takes an `IsoSessionError`, a
+/// WinRT interface obtained by activation, so nothing inside it can be reached
+/// from a unit test.
+///
+/// With no usable status there is nothing to classify on, so this never
+/// promotes to `Stale` — the note is the only signal that classification is
+/// degraded, which is why it is folded into the message rather than dropped.
+fn unreadable_code_failure(
+    operation: &str,
+    message: Option<String>,
+    remediation: Option<String>,
+    read_err: &str,
+) -> IsolationSessionError {
+    let note = format!("could not read HRESULT code: {read_err}");
+    let message = Some(match message {
+        Some(m) => format!("{m} ({note})"),
+        None => note,
+    });
+    IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure::new(
+        operation,
+        None,
+        message,
+        remediation,
+    )))
 }
 
 /// Checks the `Error` property of an `IsoSessionResult`. `Ok(())` on no
@@ -515,6 +548,85 @@ mod tests {
         let mapped = map_lifecycle_error(transport_err(op::STOP_SESSION, "call failed", &err));
         assert_eq!(mapped.code, MxcErrorCode::BackendError);
         assert_eq!(mapped.native_code(), Some("0x80070490"));
+    }
+
+    // ── Transport messages tolerate an absent platform text ──────────────
+
+    /// An HRESULT with no OS message-table entry yields an empty
+    /// `message()`. Joining unconditionally produced `"wait failed: "`, which
+    /// is non-empty and therefore slipped past the guard in
+    /// `IsoApiFailure::new` — the caller got a trailing colon and no
+    /// explanation.
+    #[test]
+    fn transport_message_without_platform_text_is_the_step_alone() {
+        assert_eq!(compose_transport_message("wait failed", ""), "wait failed");
+    }
+
+    #[test]
+    fn transport_message_with_platform_text_keeps_the_step_prefix() {
+        assert_eq!(
+            compose_transport_message("wait failed", "Unspecified error"),
+            "wait failed: Unspecified error"
+        );
+    }
+
+    /// End-to-end over a real `windows_core::Error`: `0xDEADBEEF` has no
+    /// message-table entry on any Windows build, so this pins the whole path
+    /// rather than just the helper.
+    #[test]
+    fn transport_failure_with_unmapped_hresult_has_no_dangling_separator() {
+        let err = windows_core::Error::from_hresult(windows_core::HRESULT(0xDEADBEEF_u32 as i32));
+        assert!(
+            err.message().is_empty(),
+            "0xDEADBEEF unexpectedly has a message-table entry: {:?}",
+            err.message()
+        );
+        let mapped = map_lifecycle_error(transport_err(op::ADD_USER, "wait failed", &err));
+        assert_eq!(mapped.message, "wait failed");
+        assert!(!mapped.message.ends_with(": "));
+        assert_eq!(mapped.native_code(), Some("0xdeadbeef"));
+    }
+
+    // ── The status getter itself can fail ────────────────────────────────
+
+    /// With no readable status there is nothing to classify on, so the
+    /// failure stays a plain lifecycle error and `nativeCode` stays off the
+    /// wire — carrying the getter's own HRESULT would describe reading the
+    /// field, not the operation.
+    #[test]
+    fn unreadable_code_keeps_the_message_and_omits_native_code() {
+        let err = unreadable_code_failure(
+            op::STOP_SESSION,
+            Some("agent user not found".to_string()),
+            Some("Re-provision the sandbox.".to_string()),
+            "RPC_E_DISCONNECTED",
+        );
+        let mapped = map_lifecycle_error(err);
+        assert_eq!(mapped.code, MxcErrorCode::BackendError);
+        assert_eq!(
+            mapped.message,
+            "agent user not found (could not read HRESULT code: RPC_E_DISCONNECTED)"
+        );
+        assert_eq!(mapped.operation(), Some("IsoSessionOps.StopSessionAsync"));
+        assert_eq!(mapped.native_code(), None);
+        assert_eq!(mapped.remediation(), Some("Re-provision the sandbox."));
+    }
+
+    /// Even an `ERROR_NOT_FOUND`-shaped failure cannot promote here: the code
+    /// is precisely what could not be read.
+    #[test]
+    fn unreadable_code_never_promotes_to_stale() {
+        let err = unreadable_code_failure(op::STOP_SESSION, None, None, "RPC_E_DISCONNECTED");
+        assert!(matches!(
+            err,
+            IsolationSessionError::Lifecycle(LifecycleFailure::Api(_))
+        ));
+        let mapped = map_lifecycle_error(err);
+        assert_eq!(mapped.code, MxcErrorCode::BackendError);
+        assert_eq!(
+            mapped.message,
+            "could not read HRESULT code: RPC_E_DISCONNECTED"
+        );
     }
 
     // ── Field population and the MxcError invariant ──────────────────────

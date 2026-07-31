@@ -92,9 +92,19 @@ export class MxcError extends Error {
     message?: string,
     details?: Record<string, unknown>,
   ) {
+    // The overload discriminates on `typeof === 'string'`, so anything else
+    // — including `null` and `undefined` from an `any` cast or an absent wire
+    // envelope — would take the object branch and fail inside `super()` with
+    // a `TypeError` naming `message`, which says nothing about the real
+    // mistake. Reject it here instead, where the message can.
+    if (codeOrFields === null || codeOrFields === undefined) {
+      throw new TypeError(
+        `MxcError: expected an error code string or a field object, got ${String(codeOrFields)}`,
+      );
+    }
     const fields: MxcErrorFields =
       typeof codeOrFields === 'string'
-        ? { code: codeOrFields, message: message as string, details }
+        ? { code: codeOrFields, message: message ?? '', details }
         : codeOrFields;
     super(fields.message);
     this.code = fields.code;
