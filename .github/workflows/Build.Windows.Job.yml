@@ -18,8 +18,8 @@ jobs:
           - arch: arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            # nanvixd.exe is x64-only, so microvm tests can't run on arm64.
-            features: hyperlight isolation_session wslc
+            # Hyperlight and MicroVM runtimes are x64-only.
+            features: isolation_session wslc
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -71,6 +71,35 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      - name: Verify artifact payload
+        shell: pwsh
+        run: |
+          $binDir = "target\${{ matrix.target }}\release"
+          $required = @(
+            "wxc-exec.exe",
+            "wxc-host-prep.exe",
+            "winhttp-proxy-shim.exe",
+            "wxc-windows-sandbox-daemon.exe",
+            "wxc-windows-sandbox-guest.exe",
+            "wxc-test-proxy.exe",
+            "wxc-test-driver.exe",
+            "wxc-ui-probe.exe",
+            "mxc-diagnostic-console.exe",
+            "wslcsdk.dll"
+          )
+          if ("${{ matrix.arch }}" -eq "x64") {
+            $required += @(
+              "nanvixd.exe",
+              "nanvix_rootfs.img",
+              "python3.initrd",
+              "bin\kernel.elf"
+            )
+          }
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+          if ($missing) {
+            throw "Missing artifact files: $($missing -join ', ')"
+          }
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -82,7 +111,15 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
+            src/target/${{ matrix.target }}/release/wxc-test-driver.exe
+            src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/wslcsdk.dll
-          if-no-files-found: warn
+            src/target/${{ matrix.target }}/release/nanvixd.exe
+            src/target/${{ matrix.target }}/release/nanvix_rootfs.img
+            src/target/${{ matrix.target }}/release/python3.initrd
+            src/target/${{ matrix.target }}/release/bin/kernel.elf
+            src/target/${{ matrix.target }}/release/snapshots/kernel.vmem
+            src/target/${{ matrix.target }}/release/snapshots/kernel.whp.cbor
+          if-no-files-found: error
           retention-days: 1

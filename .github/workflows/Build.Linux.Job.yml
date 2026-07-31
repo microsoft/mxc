@@ -13,9 +13,11 @@ jobs:
           - arch: x64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            features: hyperlight microvm
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            features: ''
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -54,12 +56,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
 
       - name: Build lxc
-        run: cargo build --locked --release --target ${{ matrix.target }}
-             --no-default-features --features hyperlight
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ -n "${{ matrix.features }}" ]]; then
+            features=(--features "${{ matrix.features }}")
+          fi
+          cargo build --locked --release --target "${{ matrix.target }}" \
+            --no-default-features "${features[@]}"
 
       - name: Test lxc
-        run: cargo test --locked --release --target ${{ matrix.target }}
-             --no-default-features --features hyperlight
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ -n "${{ matrix.features }}" ]]; then
+            features=(--features "${{ matrix.features }}")
+          fi
+          cargo test --locked --release --target "${{ matrix.target }}" \
+            --no-default-features "${features[@]}"
 
       # Bubblewrap is required to run the executor characterization tests in
       # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
@@ -103,6 +119,25 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }}
              -p unix_test_proxy
 
+      - name: Verify artifact payload
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          bin_dir="src/target/${{ matrix.target }}/release"
+          required=(lxc-exec unix-test-proxy)
+          if [[ "${{ matrix.arch }}" == "x64" ]]; then
+            required+=(nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf)
+          fi
+          missing=()
+          for file in "${required[@]}"; do
+            [[ -f "$bin_dir/$file" ]] || missing+=("$file")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing artifact files: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -110,5 +145,9 @@ jobs:
           path: |
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/unix-test-proxy
+            src/target/${{ matrix.target }}/release/nanvixd.elf
+            src/target/${{ matrix.target }}/release/nanvix_rootfs.img
+            src/target/${{ matrix.target }}/release/python3.initrd
+            src/target/${{ matrix.target }}/release/bin/kernel.elf
           if-no-files-found: error
           retention-days: 1

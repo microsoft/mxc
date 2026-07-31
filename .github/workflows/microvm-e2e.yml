@@ -1,5 +1,7 @@
 name: Integration Tests
 
+# Retained until the unified test matrix has equivalent MicroVM coverage.
+
 on:
   push:
     branches: [main]
