@@ -1252,7 +1252,12 @@ fn convert_wire_config(
     // rejected above.
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
 
-    // UI section
+    // UI section. Capture presence before the typed mapping consumes `ui`:
+    // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
+    // otherwise indistinguishable from an absent one, and a backend that cannot
+    // honor UI restrictions has no way to tell "caller asked for lockdown" from
+    // "caller said nothing". Twin of `network_specified`.
+    policy.ui_specified = cfg.ui.is_some();
     if let Some(raw_ui) = cfg.ui {
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
@@ -2905,6 +2910,43 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.network_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_when_ui_present() {
+        // An empty `ui: {}` still counts as "supplied" — the twin of
+        // `network_specified`. Backends with no UI primitive refuse on
+        // presence, because `UiPolicy::default()` is full lockdown and so an
+        // explicit lockdown `ui` is indistinguishable from an absent one.
+        let json = r#"{"process": {"commandLine": "echo x"}, "ui": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_false_when_ui_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_on_state_aware_requests() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "ui": {"disable": true}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
     }
 
     #[test]
