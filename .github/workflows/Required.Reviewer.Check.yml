@@ -1,0 +1,187 @@
+name: Required Reviewer Check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_run:
+    workflows: [Required Reviewer Event]
+    types: [completed]
+
+concurrency:
+  group: >-
+    required-reviewers-${{
+      github.event.pull_request.number ||
+      github.event.workflow_run.pull_requests[0].number ||
+      github.run_id
+    }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  check-approvals:
+    name: Verify protected-path approvals
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download review event context
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: required-reviewer-event
+          path: ${{ runner.temp }}/required-reviewer-event
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Check required reviewers
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            let pullNumber = context.payload.pull_request?.number;
+            if (!pullNumber && context.eventName === "workflow_run") {
+              const numberPath = path.join(
+                process.env.RUNNER_TEMP,
+                "required-reviewer-event",
+                "pull-request-number",
+              );
+              pullNumber = Number.parseInt(
+                fs.readFileSync(numberPath, "utf8").trim(),
+                10,
+              );
+            }
+            if (!pullNumber) {
+              core.setFailed("Unable to determine the pull request number.");
+              return;
+            }
+
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullNumber,
+            });
+
+            const requiredApprovers = ["mgudgin", "shschaefer"];
+            const protectedDirectories = [
+              "schemas/",
+              "scripts/versioning/",
+              "src/tools/mxc_schema_gen/",
+            ];
+            const protectedFiles = new Set([
+              ".github/workflows/Required.Reviewer.Check.yml",
+              ".github/workflows/Required.Reviewer.Event.yml",
+              ".github/workflows/SDK.Integration.Test.Job.yml",
+              ".github/workflows/SDK.Unit.Test.Job.yml",
+              ".github/workflows/Versioning.Checks.Job.yml",
+              "scripts/check-version-sync.js",
+              "sdk/dotnet/Microsoft.Mxc.Sdk/MxcLifecycle.cs",
+              "sdk/node/src/sandbox.ts",
+              "sdk/node/src/state-aware-helper.ts",
+              "sdk/node/src/state-aware-types.ts",
+              "sdk/node/src/types.ts",
+              "sdk/node/src/generated/wire.ts",
+              "src/core/wxc_common/src/config_deserialize.rs",
+              "src/core/wxc_common/src/config_parser.rs",
+              "src/core/wxc_common/src/models.rs",
+              "src/core/wxc_common/src/ts_emit.rs",
+              "src/core/wxc_common/src/wire.rs",
+            ]);
+
+            const isProtected = (path) =>
+              Boolean(path) &&
+              (protectedFiles.has(path) ||
+                protectedDirectories.some((directory) => path.startsWith(directory)));
+
+            const changedFiles = await github.paginate(
+              github.rest.pulls.listFiles,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullNumber,
+                per_page: 100,
+              },
+            );
+
+            // Check previous_filename as well so renaming a protected file still
+            // requires a designated approval.
+            const protectedChanges = changedFiles.filter((file) =>
+              isProtected(file.filename) || isProtected(file.previous_filename),
+            );
+
+            const statusContext = "Required Reviewer Check";
+            const runUrl =
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+
+            const setStatus = async (state, description) => {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: pullRequest.head.sha,
+                state,
+                context: statusContext,
+                description,
+                target_url: runUrl,
+              });
+            };
+
+            if (protectedChanges.length === 0) {
+              await setStatus("success", "No protected files changed");
+              core.info("No protected files changed; no specific approvals are required.");
+              return;
+            }
+
+            const reviews = await github.paginate(
+              github.rest.pulls.listReviews,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullNumber,
+                per_page: 100,
+              },
+            );
+
+            // GitHub returns review comments as COMMENTED reviews. Ignore those
+            // so a later comment does not erase an earlier approval. Record the
+            // reviewed commit so a new push requires a fresh designated approval.
+            const latestReview = new Map();
+            for (const review of reviews.sort((left, right) => left.id - right.id)) {
+              const login = review.user?.login?.toLowerCase();
+              const state = review.state?.toUpperCase();
+              if (
+                requiredApprovers.includes(login) &&
+                state !== "COMMENTED" &&
+                state !== "PENDING"
+              ) {
+                latestReview.set(login, {
+                  state,
+                  commitId: review.commit_id,
+                });
+              }
+            }
+
+            const approvedBy = requiredApprovers.filter(
+              (login) =>
+                latestReview.get(login)?.state === "APPROVED" &&
+                latestReview.get(login)?.commitId === pullRequest.head.sha,
+            );
+
+            core.info(
+              `Protected changes:\n${protectedChanges
+                .map((file) => `- ${file.filename}`)
+                .join("\n")}`,
+            );
+
+            if (approvedBy.length === 0) {
+              const message = "Approval required from MGudgin or shschaefer";
+              await setStatus("failure", message);
+              core.setFailed(message);
+              return;
+            }
+
+            await setStatus("success", `Approved by ${approvedBy.join(", ")}`);
+            core.info(`Protected changes approved by ${approvedBy.join(", ")}.`);

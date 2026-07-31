@@ -1,0 +1,26 @@
+name: Required Reviewer Event
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+
+jobs:
+  record-review-change:
+    name: Record review change
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record pull request number
+        run: |
+          mkdir -p "${RUNNER_TEMP}/required-reviewer-event"
+          echo "${{ github.event.pull_request.number }}" \
+            > "${RUNNER_TEMP}/required-reviewer-event/pull-request-number"
+
+      - name: Upload review event context
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: required-reviewer-event
+          path: ${{ runner.temp }}/required-reviewer-event/pull-request-number
+          retention-days: 1
