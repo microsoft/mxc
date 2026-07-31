@@ -288,10 +288,10 @@ export function createConfigFromPolicy(
             }
         }
         // Unix backends accept host lists without allowOutbound. Bubblewrap and
-        // LXC enforce them via iptables; Seatbelt accepts them for SDK
-        // compatibility and leaves its limitations to native validation. WSLC
-        // rejects host lists at config-parse time (CAP_NET_ADMIN is not
-        // available in WSLC containers, so iptables enforcement is impossible).
+        // LXC enforce them; WSLC does not (per-host filtering is non-functional —
+        // no in-kernel iptables + no CAP_NET_ADMIN — and is rejected at parse
+        // time); Seatbelt accepts them for SDK compatibility and leaves its
+        // limitations to native validation.
         const acceptsHostRulesWithoutOutbound =
             containment === 'wslc' ||
             containment === 'seatbelt' ||

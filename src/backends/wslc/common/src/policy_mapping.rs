@@ -419,11 +419,18 @@ fn is_valid_host(host: &str) -> bool {
 
 /// Build iptables commands for per-host network filtering.
 ///
-/// **Note: per-host filtering is not supported in WSLC and configs that request
-/// it are rejected at config-parse time.** WSLC containers do not receive
-/// `CAP_NET_ADMIN` — `WSLC_CONTAINER_FLAG_PRIVILEGED` grants root but does not
-/// grant `NET_ADMIN`, so iptables rules cannot be applied. This function is
-/// retained for reference but is unreachable under normal operation.
+/// **NOTE: WSLC per-host filtering is non-functional.** Two independent
+/// blockers prevent it from working:
+/// 1. The WSLC kernel has **no in-kernel `iptables`** (no netfilter/nf_tables
+///    support), so iptables commands cannot install any rules regardless of
+///    capabilities.
+/// 2. WSLC containers lack `CAP_NET_ADMIN` — the SDK's `Privileged` flag does
+///    **not** grant it — so iptables would fail with "Permission denied" even
+///    if the kernel supported it.
+///
+/// Configs that require per-host filtering are therefore **rejected at
+/// config-parse time** before this function is reached. This function is
+/// retained for reference but its output is never applied.
 ///
 /// When `defaultPolicy` is `Block` + `allowedHosts`:
 ///   - Default DROP all outbound
