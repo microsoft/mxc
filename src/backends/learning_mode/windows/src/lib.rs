@@ -43,7 +43,7 @@ pub use lifecycle::CaptureSession;
 pub use secenv::{
     is_security_environment_api_available, probe_security_environment_exports,
     ProcessSecurityEnvironment, SecurityEnvironmentApi, SecurityEnvironmentExportReport,
-    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 
 /// Errors surfaced while loading or invoking the Learning Mode trace API.

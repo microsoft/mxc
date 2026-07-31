@@ -16,12 +16,13 @@ use std::path::PathBuf;
 use std::ptr;
 
 use learning_mode_windows::{
-    CaptureSession, LearningModeApi, SecurityEnvironmentApi, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    CaptureSession, LearningModeApi, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
+    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
-    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED,
+    ERROR_NOT_SUPPORTED, E_NOTIMPL, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -30,10 +31,11 @@ use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION,
+    CreateProcessW, GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
+    EXTENDED_STARTUPINFO_PRESENT, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOW,
 };
-use windows_core::PCWSTR;
+use windows_core::{PCWSTR, PWSTR};
 
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
@@ -206,7 +208,7 @@ const CAPTURE_SECURITY_ENVIRONMENT_CLEANUP_DEFERRED_REASON: &str =
     "capture initialization failed and the process security environment could not be closed";
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
-    "CreateProcessAsUserInsideSecurityEnvironment";
+    "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
 
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
@@ -217,7 +219,7 @@ fn is_api_not_implemented(err: u32) -> bool {
 fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningModeError) -> bool {
     match error {
         learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
-            is_api_not_implemented(*code)
+            is_api_not_implemented(*code) || *code == ERROR_NOT_SUPPORTED.0
         }
         learning_mode_windows::LearningModeError::CleanupFailed { primary, .. } => {
             learning_mode_api_not_implemented(primary)
@@ -265,7 +267,7 @@ impl BaseContainerRunner {
         Self::default()
     }
 
-    fn cleanup_capture_begin_failure(
+    fn cleanup_capture_prelaunch_failure(
         &mut self,
         error: &learning_mode_windows::LearningModeError,
         request: &ExecutionRequest,
@@ -1149,13 +1151,11 @@ impl BaseContainerRunner {
         // environment that already has a learning-mode trace started against it,
         // instead of the one-shot CreateProcessInSandbox. `begin` creates the
         // environment and starts the trace *before* the child launches (so no
-        // early denials are missed); the child is then launched into that
-        // environment via CreateProcessAsUserInsideSecurityEnvironment, which
-        // returns a real PROCESS_INFORMATION we own and wait on exactly like the
-        // normal path. On any early return below, `capture_session` drops and its
-        // Drop discards the trace and closes the environment (no broker leak).
+        // early denials are missed); the environment handle is attached to a
+        // normal CreateProcessW call via PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT.
+        // On any early return below, `capture_session` drops and its Drop
+        // discards the trace and closes the environment (no broker leak).
         let mut capture_session: Option<CaptureSession> = None;
-        let mut capture_se_api: Option<SecurityEnvironmentApi> = None;
         if let Some((se_api, lm_api)) = capture_apis {
             match CaptureSession::begin(
                 se_api,
@@ -1168,9 +1168,6 @@ impl BaseContainerRunner {
                         logger,
                         "captureDenials: security environment created and trace started"
                     );
-                    // `SecurityEnvironmentApi` is Copy, so we keep our own copy to
-                    // call `launch_fn` at the launch site below.
-                    capture_se_api = Some(se_api);
                     capture_session = Some(session);
                 }
                 Err(e) => {
@@ -1181,7 +1178,7 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    self.cleanup_capture_begin_failure(&e, &request, &sid_string, logger);
+                    self.cleanup_capture_prelaunch_failure(&e, &request, &sid_string, logger);
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -1194,36 +1191,60 @@ impl BaseContainerRunner {
         }
 
         // The launch yields (api_return_code, last_win32_error_on_failure).
-        let (success, last_error, launch_api_name) = if let (Some(session), Some(se_api)) =
-            (capture_session.as_ref(), capture_se_api.as_ref())
+        let (success, last_error, launch_api_name) = if let Some(session) = capture_session.as_ref()
         {
             // Single-attempt in-environment launch. The learning-mode security
-            // environment only exists on builds that support the `environment`
-            // parameter, so the CreateProcessInSandbox env-not-supported retry
-            // does not apply here.
+            // environment is attached as a process-thread attribute; the
+            // CreateProcessInSandbox environment fallback does not apply here.
             pi = unsafe { std::mem::zeroed() };
-            let launch = se_api.launch_fn();
-            // SAFETY: `launch` was resolved from processmodel.dll and matches the
-            // declared C signature. `cmd_wide` is a mutable, null-terminated
-            // UTF-16 buffer; `si`/`pi` are valid; `session.environment()` is the
-            // live handle from the just-begun session. When `current_env_ptr` is
-            // non-null, `current_creation_flags` already carries
-            // CREATE_UNICODE_ENVIRONMENT.
-            let ok = unsafe {
-                launch(
-                    HANDLE(ptr::null_mut()), // userToken: caller context
-                    ptr::null(),             // applicationName (from command line)
-                    cmd_wide.as_mut_ptr(),   // commandLine
-                    current_creation_flags,  // creationFlags
-                    current_env_ptr,         // environment
-                    cwd_ptr,                 // currentDirectory
-                    &si,                     // startupInfo
-                    session.environment(),   // process security environment
-                    &mut pi,                 // processInformation
+            let inherited_handles = if pipe_mode {
+                vec![h_stdin, h_stdout, h_stderr]
+            } else {
+                Vec::new()
+            };
+            let extended_startup = match SecurityEnvironmentStartupInfo::new(
+                si,
+                session.environment(),
+                &inherited_handles,
+            ) {
+                Ok(startup) => startup,
+                Err(error) => {
+                    let msg = format!(
+                            "captureDenials: failed to attach the process security environment: {error}"
+                        );
+                    let _ = writeln!(logger, "Error: {msg}");
+                    let failure_phase = if learning_mode_api_not_implemented(&error) {
+                        FailurePhase::BackendUnavailable
+                    } else {
+                        FailurePhase::LaunchFailed
+                    };
+                    self.cleanup_capture_prelaunch_failure(&error, &request, &sid_string, logger);
+                    return Err(ScriptResponse {
+                        exit_code: -1,
+                        error_message: msg.clone(),
+                        standard_err: msg,
+                        failure_phase,
+                        ..Default::default()
+                    });
+                }
+            };
+            let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
+            let result = unsafe {
+                CreateProcessW(
+                    PCWSTR::null(),
+                    Some(PWSTR(cmd_wide.as_mut_ptr())),
+                    None,
+                    None,
+                    !inherited_handles.is_empty(),
+                    PROCESS_CREATION_FLAGS(current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0),
+                    environment,
+                    PCWSTR(cwd_ptr),
+                    &extended_startup.startup_info().StartupInfo,
+                    &mut pi,
                 )
             };
-            if ok != 0 {
-                (ok, None, CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API)
+            if result.is_ok() {
+                (1, None, CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API)
             } else {
                 (
                     0,
