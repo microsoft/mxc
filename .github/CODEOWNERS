@@ -1,1 +1,23 @@
 * @microsoft/tessera-code-reviewers
+
+# Changes to schema and public SDK contracts require approval from an MXC
+# architect. These more-specific rules override the repository-wide owner.
+/.github/CODEOWNERS @microsoft/mxc-architect-team
+/.github/workflows/SDK.Integration.Test.Job.yml @microsoft/mxc-architect-team
+/.github/workflows/SDK.Unit.Test.Job.yml @microsoft/mxc-architect-team
+/.github/workflows/Versioning.Checks.Job.yml @microsoft/mxc-architect-team
+/schemas/** @microsoft/mxc-architect-team
+/scripts/versioning/** @microsoft/mxc-architect-team
+/scripts/check-version-sync.js @microsoft/mxc-architect-team
+/sdk/dotnet/Microsoft.Mxc.Sdk/MxcLifecycle.cs @microsoft/mxc-architect-team
+/sdk/node/src/generated/wire.ts @microsoft/mxc-architect-team
+/sdk/node/src/sandbox.ts @microsoft/mxc-architect-team
+/sdk/node/src/state-aware-helper.ts @microsoft/mxc-architect-team
+/sdk/node/src/state-aware-types.ts @microsoft/mxc-architect-team
+/sdk/node/src/types.ts @microsoft/mxc-architect-team
+/src/core/wxc_common/src/config_deserialize.rs @microsoft/mxc-architect-team
+/src/core/wxc_common/src/config_parser.rs @microsoft/mxc-architect-team
+/src/core/wxc_common/src/models.rs @microsoft/mxc-architect-team
+/src/core/wxc_common/src/ts_emit.rs @microsoft/mxc-architect-team
+/src/core/wxc_common/src/wire.rs @microsoft/mxc-architect-team
+/src/tools/mxc_schema_gen/** @microsoft/mxc-architect-team
