@@ -4,6 +4,7 @@
 // Platform-agnostic modules (shared by wxc-exec, lxc-exec, mxc-exec-mac
 // and every backend crate).
 pub mod cmdline;
+mod config_deserialize;
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
