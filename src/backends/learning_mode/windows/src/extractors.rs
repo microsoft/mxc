@@ -62,6 +62,11 @@ pub(crate) const PRIVACY_LEARNING_MODE_PROVIDER: GUID = GUID {
     data4: [0xad, 0xc0, 0x4b, 0x18, 0x61, 0x70, 0xe7, 0x60],
 };
 
+pub(crate) const ACCESS_CHECK_EVENT_ID: u16 = 14;
+pub(crate) const LEARNING_MODE_VIOLATION_EVENT_ID: u16 = 27;
+pub(crate) const CAPABILITY_DENIAL_EVENT_ID: u16 = 28;
+pub(crate) const PRIVACY_ACCESS_CHECK_EVENT_ID: u16 = 4907;
+
 /// Pre-decoded event payload handed to the extractors.
 ///
 /// The trace consumer decodes each raw `EVENT_RECORD` into this shape via
@@ -108,9 +113,11 @@ pub fn extract_denial(parts: &DecodedEventParts, pid: u32, filetime: u64) -> Opt
         return None;
     }
     match parts.event_id {
-        14 | 4907 => build_denial_from_access_check(parts, pid, filetime),
-        27 => build_denial_from_learning_mode(parts, pid, filetime),
-        28 => build_denial_from_capability(parts, pid, filetime),
+        ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
+            build_denial_from_access_check(parts, pid, filetime)
+        }
+        LEARNING_MODE_VIOLATION_EVENT_ID => build_denial_from_learning_mode(parts, pid, filetime),
+        CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime),
         _ => None,
     }
 }
@@ -118,9 +125,17 @@ pub fn extract_denial(parts: &DecodedEventParts, pid: u32, filetime: u64) -> Opt
 /// Whether a provider/event pair belongs to the Learning Mode capture schema.
 pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
     if provider == KERNEL_GENERAL_PROVIDER {
-        matches!(event_id, 14 | 27 | 28)
+        matches!(
+            event_id,
+            ACCESS_CHECK_EVENT_ID | LEARNING_MODE_VIOLATION_EVENT_ID | CAPABILITY_DENIAL_EVENT_ID
+        )
     } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
-        matches!(event_id, 14 | 27 | 4907)
+        matches!(
+            event_id,
+            ACCESS_CHECK_EVENT_ID
+                | LEARNING_MODE_VIOLATION_EVENT_ID
+                | PRIVACY_ACCESS_CHECK_EVENT_ID
+        )
     } else {
         false
     }

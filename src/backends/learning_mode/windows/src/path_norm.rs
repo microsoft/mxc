@@ -40,6 +40,14 @@ static DRIVE_MAP: OnceLock<Vec<(String, String)>> = OnceLock::new();
 /// Returns `None` when the path is not a filesystem path that can be
 /// canonicalized (registry or unknown device).
 pub fn to_user_visible(kernel_path: &str) -> Option<String> {
+    if kernel_path.starts_with(r"\Device\") && !kernel_path.starts_with(r"\Device\Mup\") {
+        to_user_visible_with_map(kernel_path, DRIVE_MAP.get_or_init(load_drive_map))
+    } else {
+        to_user_visible_with_map(kernel_path, &[])
+    }
+}
+
+fn to_user_visible_with_map(kernel_path: &str, map: &[(String, String)]) -> Option<String> {
     // DOS-device prefixes map directly to the path that follows. The UNC
     // spelling retains its network-path leading slashes.
     if let Some(rest) = kernel_path
@@ -85,8 +93,6 @@ pub fn to_user_visible(kernel_path: &str) -> Option<String> {
     if !kernel_path.starts_with(r"\Device\") {
         return None;
     }
-
-    let map = DRIVE_MAP.get_or_init(load_drive_map);
 
     map_device_path(kernel_path, map)
 }
@@ -266,26 +272,20 @@ mod tests {
 
     #[test]
     fn canonicalizes_system_drive_paths() {
-        let map = rebuild_drive_map_for_tests();
-        if let Some((letter, kernel_prefix)) = map.first() {
-            let synthetic = format!(r"{kernel_prefix}\Windows\System32\drivers\etc\hosts");
-            let canon = to_user_visible(&synthetic).expect("should canonicalize");
-            assert_eq!(
-                canon,
-                format!(r"{letter}\Windows\System32\drivers\etc\hosts")
-            );
-        }
+        let map = vec![("C:".to_string(), r"\Device\HarddiskVolume42".to_string())];
+        assert_eq!(
+            to_user_visible_with_map(
+                r"\Device\HarddiskVolume42\Windows\System32\drivers\etc\hosts",
+                &map
+            )
+            .as_deref(),
+            Some(r"C:\Windows\System32\drivers\etc\hosts")
+        );
     }
 
     #[test]
     fn device_prefix_requires_component_boundary() {
-        let map = rebuild_drive_map_for_tests();
-        if let Some((_, kernel_prefix)) = map.first() {
-            let false_prefix = format!("{kernel_prefix}0\\Windows");
-            assert!(
-                to_user_visible(&false_prefix).is_none(),
-                "{kernel_prefix} must not match {false_prefix}"
-            );
-        }
+        let map = vec![("C:".to_string(), r"\Device\HarddiskVolume42".to_string())];
+        assert!(to_user_visible_with_map(r"\Device\HarddiskVolume420\Windows", &map).is_none());
     }
 }

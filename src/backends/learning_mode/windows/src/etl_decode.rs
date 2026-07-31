@@ -19,8 +19,8 @@
 //! consumer in `tools/mxc_diagnostic_console`. It is a binary-private module
 //! that owns trace sessions and channels arbitrary provider events to a UI.
 //! This backend instead reads sealed files synchronously, filters a fixed
-//! provider/event vocabulary, bounds results, and propagates target decode
-//! failures. Depending on the tool would invert the workspace dependency
+//! provider/event vocabulary, bounds results, and skips malformed individual
+//! events without invalidating the rest of the capture. Depending on the tool would invert the workspace dependency
 //! direction; shared generic TDH primitives can be extracted later if another
 //! runtime consumer needs them.
 
@@ -68,7 +68,8 @@ struct Accumulator<'visitor> {
     raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
     raw_event_count: usize,
     decode_error: Option<String>,
-    visitor_panic: Option<Box<dyn std::any::Any + Send>>,
+    panic_payload: Option<Box<dyn std::any::Any + Send>>,
+    schema_cache: tdh_decode::EventSchemaCache,
 }
 
 impl<'visitor> Accumulator<'visitor> {
@@ -81,7 +82,8 @@ impl<'visitor> Accumulator<'visitor> {
             raw_visitor: None,
             raw_event_count: 0,
             decode_error: None,
-            visitor_panic: None,
+            panic_payload: None,
+            schema_cache: tdh_decode::EventSchemaCache::default(),
         }
     }
 
@@ -94,7 +96,8 @@ impl<'visitor> Accumulator<'visitor> {
             raw_visitor: Some(visitor),
             raw_event_count: 0,
             decode_error: None,
-            visitor_panic: None,
+            panic_payload: None,
+            schema_cache: tdh_decode::EventSchemaCache::default(),
         }
     }
 
@@ -143,7 +146,20 @@ impl<'visitor> Accumulator<'visitor> {
             Ok(Err(error)) => {
                 self.decode_error = Some(format!("raw event consumer failed: {error}"));
             }
-            Err(payload) => self.visitor_panic = Some(payload),
+            Err(payload) => self.panic_payload = Some(payload),
+        }
+    }
+
+    fn record_event_decode_error(
+        &mut self,
+        provider: windows::core::GUID,
+        event_id: u16,
+        error: tdh_decode::DecodeError,
+    ) {
+        if (matches!(self.mode, CollectionMode::Raw) || error.is_schema_error())
+            && self.decode_error.is_none()
+        {
+            self.decode_error = Some(format!("provider {:?} event {event_id}: {error}", provider));
         }
     }
 
@@ -266,7 +282,7 @@ fn process_trace_file(
         let _ = CloseTrace(handle);
     }
 
-    if let Some(payload) = accumulator.visitor_panic.take() {
+    if let Some(payload) = accumulator.panic_payload.take() {
         std::panic::resume_unwind(payload);
     }
 
@@ -294,8 +310,6 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     if event_record.is_null() {
         return;
     }
-    // SAFETY: ETW guarantees a valid record; we only read POD header fields.
-    let header = unsafe { (*event_record).EventHeader };
     let context = unsafe { (*event_record).UserContext } as *mut Accumulator<'_>;
     if context.is_null() {
         return;
@@ -305,17 +319,34 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     // ProcessTrace invokes this callback synchronously on our thread, so no
     // aliasing/concurrency with the owner occurs.
     let acc = unsafe { &mut *context };
-    if acc.decode_error.is_some() || acc.visitor_panic.is_some() {
+    if acc.decode_error.is_some() || acc.panic_payload.is_some() {
         return;
     }
 
+    run_callback_guard(acc, |acc| {
+        // SAFETY: ETW supplied a valid record, and `acc` is the live callback
+        // context for this synchronous ProcessTrace invocation.
+        unsafe { process_event_record(event_record, acc) };
+    });
+}
+
+fn run_callback_guard(acc: &mut Accumulator<'_>, process: impl FnOnce(&mut Accumulator<'_>)) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| process(acc)));
+    if let Err(payload) = result {
+        acc.panic_payload = Some(payload);
+    }
+}
+
+unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumulator<'_>) {
+    // SAFETY: ETW guarantees a valid record; we only read POD header fields.
+    let header = unsafe { (*event_record).EventHeader };
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
     if matches!(acc.mode, CollectionMode::Analyze) && !is_learning_mode_event(provider, event_id) {
         return;
     }
 
-    match unsafe { tdh_decode::decode_event_parts(event_record) } {
+    match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
         Ok(parts) => match acc.mode {
             CollectionMode::Analyze => {
                 if let Some(raw) = extract_denial(&parts, header.ProcessId, header.TimeStamp as u64)
@@ -325,12 +356,7 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
             }
             CollectionMode::Raw => acc.visit_raw_event(&parts),
         },
-        Err(error) => {
-            if acc.decode_error.is_none() {
-                acc.decode_error =
-                    Some(format!("provider {:?} event {event_id}: {error}", provider));
-            }
-        }
+        Err(error) => acc.record_event_decode_error(provider, event_id, error),
     }
 }
 
@@ -352,7 +378,57 @@ mod tests {
 
         accumulator.visit_raw_event(&parts);
 
-        assert!(accumulator.visitor_panic.is_some());
+        assert!(accumulator.panic_payload.is_some());
+    }
+
+    #[test]
+    fn callback_guard_captures_production_processing_panics() {
+        let mut accumulator = Accumulator::analyze();
+        run_callback_guard(&mut accumulator, |_| {
+            panic!("simulated decoder panic");
+        });
+
+        assert!(accumulator.panic_payload.is_some());
+    }
+
+    #[test]
+    fn analyze_mode_skips_malformed_event_without_failing_trace() {
+        let mut accumulator = Accumulator::analyze();
+        accumulator.record_event_decode_error(
+            windows::core::GUID::from_u128(1),
+            14,
+            tdh_decode::DecodeError::Event("malformed property".to_string()),
+        );
+
+        assert!(accumulator.into_analysis().is_ok());
+    }
+
+    #[test]
+    fn raw_mode_reports_malformed_event_with_context() {
+        let mut visitor = |_: &DecodedEventParts| Ok(());
+        let mut accumulator = Accumulator::raw(&mut visitor);
+        accumulator.record_event_decode_error(
+            windows::core::GUID::from_u128(1),
+            14,
+            tdh_decode::DecodeError::Event("malformed property".to_string()),
+        );
+
+        let error = accumulator.decode_error.as_deref().unwrap();
+        assert!(error.contains("event 14"));
+        assert!(error.contains("malformed property"));
+    }
+
+    #[test]
+    fn analyze_mode_reports_schema_lookup_failure() {
+        let mut accumulator = Accumulator::analyze();
+        accumulator.record_event_decode_error(
+            windows::core::GUID::from_u128(1),
+            14,
+            tdh_decode::DecodeError::Schema("manifest unavailable".to_string()),
+        );
+
+        let error = accumulator.into_analysis().unwrap_err();
+        assert!(error.to_string().contains("manifest unavailable"));
     }
 
     fn raw(path: &str, access: AccessType, rt: ResourceType) -> RawDenial {
@@ -456,14 +532,14 @@ mod tests {
     }
 
     #[test]
-    fn target_event_decode_failure_is_reported() {
+    fn fatal_analysis_error_is_reported() {
         let accumulator = Accumulator {
-            decode_error: Some("event 14 malformed".to_string()),
+            decode_error: Some("trace consumer failed".to_string()),
             ..Accumulator::analyze()
         };
         let error = accumulator.into_analysis().expect_err("decode must fail");
         assert!(matches!(error, AnalyzeError::Decode(_)));
-        assert!(error.to_string().contains("event 14 malformed"));
+        assert!(error.to_string().contains("trace consumer failed"));
     }
 
     // ---- decode composition over real event shapes ------------------------
