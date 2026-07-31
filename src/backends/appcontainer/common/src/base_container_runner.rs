@@ -21,8 +21,7 @@ use learning_mode_core::{
 };
 use learning_mode_windows::{
     CaptureSession, EtlDenialAnalyzer, LearningModeApi, SecurityEnvironmentApi,
-    SecurityEnvironmentStartupInfo,
-    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 
 use windows::Win32::Foundation::{
