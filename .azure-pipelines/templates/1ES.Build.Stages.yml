@@ -29,6 +29,23 @@ stages:
   displayName: 'Build Executables'
   jobs:
 
+    - job: check_platform_package_versions
+      displayName: 'Check platform package versions'
+      pool:
+        name: Azure-Pipelines-1ESPT-ExDShared
+        image: ubuntu-latest
+        os: linux
+      steps:
+        - checkout: self
+
+        - task: UseNode@1
+          displayName: Use Node.js 20
+          inputs:
+            version: '20.x'
+
+        - script: node scripts/sync-platform-package-versions.js --check
+          displayName: Check platform package versions
+
     - template: Rust.Build.Job.yml
       parameters:
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
@@ -68,14 +85,19 @@ stages:
     parameters:
       targets:
         - artifact: wxc-binaries-x86_64-pc-windows-msvc
+          os: win32
           sdkArch: x64
         - artifact: wxc-binaries-aarch64-pc-windows-msvc
+          os: win32
           sdkArch: arm64
         - artifact: lxc-binaries-x86_64-unknown-linux-gnu
+          os: linux
           sdkArch: x64
         - artifact: lxc-binaries-aarch64-unknown-linux-gnu
+          os: linux
           sdkArch: arm64
         - artifact: mxc-binaries-aarch64-apple-darwin
+          os: darwin
           sdkArch: arm64
 
       ESRPInfo: ${{ parameters.ESRPInfo }}
