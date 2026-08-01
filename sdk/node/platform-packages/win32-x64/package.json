@@ -14,6 +14,7 @@
     "wxc-windows-sandbox-daemon.exe",
     "winhttp-proxy-shim.exe",
     "wxc-host-prep.exe",
+    "wxc-wslc-daemon.exe",
     "wslcsdk.dll",
     "README.md"
   ],
