@@ -16,6 +16,7 @@ import {
   createTempDir,
   withToolPaths,
   startTestProxy,
+  isTestProxyAvailable,
   debugSpawnOptions,
   pythonCommand,
   pythonSkipReason,
@@ -124,7 +125,13 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     assert.ok(result.stdout.includes('version ok'));
   });
 
-  describe('proxy end-to-end', { skip: sandboxSkipReason }, () => {
+  describe('proxy end-to-end', {
+    skip: sandboxSkipReason
+      ? sandboxSkipReason
+      : !isTestProxyAvailable('wxc-test-proxy.exe')
+      ? 'wxc-test-proxy.exe unavailable (excluded from shipped package per #512; set MXC_TEST_PROXY_DIR or build the Rust binaries locally)'
+      : undefined,
+  }, () => {
     let proxyProcess: ChildProcess | null = null;
     let originalMaxListeners: number;
 

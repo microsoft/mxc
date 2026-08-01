@@ -9,6 +9,7 @@ import fs from 'fs';
 import os from 'os';
 import semver from 'semver';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import * as sdkNamespace from '@microsoft/mxc-sdk';
 import {
   MxcError,
@@ -17,6 +18,7 @@ import {
   type SandboxId,
   type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk';
+import { evaluateProxyAvailability } from './proxy-availability.js';
 
 const require = createRequire(import.meta.url);
 export const sdk = sdkNamespace;
@@ -31,56 +33,175 @@ export const supportedVersions = [
 
 // SDK package location
 
-/** Resolve the root directoryof the installed @microsoft/mxc-sdk package. */
-function getSdkPackageRoot(): string {
-  const sdkPkg = require.resolve('@microsoft/mxc-sdk/package.json');
-  return path.dirname(sdkPkg);
+// Upper bound on how many parent directories to walk when locating the SDK root
+// / monorepo layout from this file's (compiled) location. Generous enough to
+// cover dist-tests nesting; small enough to terminate quickly at the FS root.
+const MAX_PARENT_WALK_UPS = 8;
+
+/** SDK arch label (`x64` | `arm64`) used in platform-package names. */
+function sdkArch(): string {
+  return os.arch() === 'arm64' ? 'arm64' : 'x64';
 }
 
-/** Return the SDK bin directory for the current architecture. */
+/** Name of the host's per-platform binary package. */
+export function getPlatformPackageName(): string {
+  return `@microsoft/mxc-sdk-${process.platform}-${sdkArch()}`;
+}
+
+/**
+ * Resolve the per-platform binary package directory (where the native executor
+ * and its sandbox helpers live after #512 — at the package root, not a
+ * `bin/<arch>` subdir). Resolution order:
+ *   1. the installed optional package (`@microsoft/mxc-sdk-<os>-<arch>`); else
+ *   2. the monorepo dev layout `sdk/node/platform-packages/<os>-<arch>`.
+ *
+ * The dev-layout fallback matters because the integration suite installs the
+ * SDK via `file:../../`, which does NOT pull the os/cpu-filtered optional
+ * platform packages — so in a source checkout the installed lookup always
+ * misses. Without the fallback this threw at import-time and crashed the entire
+ * integration suite. Throws only when neither source is present.
+ */
+export function getPlatformPackageDir(): string {
+  const name = getPlatformPackageName();
+  // 1. Installed optional package (published registry or a CI artifact).
+  try {
+    return path.dirname(require.resolve(`${name}/package.json`));
+  } catch {
+    // not installed; try the dev layout
+  }
+  // 2. Monorepo dev layout: walk up to the SDK root and use its
+  //    platform-packages/<tuple> dir (robust to this file's compiled location).
+  const tuple = `${process.platform}-${sdkArch()}`;
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < MAX_PARENT_WALK_UPS; i++) {
+    const candidate = path.join(dir, 'platform-packages', tuple);
+    if (fs.existsSync(path.join(candidate, 'package.json'))) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(
+    `Platform package ${name} is not installed and no dev layout was found ` +
+      `(sdk/node/platform-packages/${tuple}). The integration suite needs the native ` +
+      `binary — install the platform package alongside @microsoft/mxc-sdk or ` +
+      `build/stage it locally.`,
+  );
+}
+
+/**
+ * Directory the SDK ships its executor + sandbox helpers in. Post-#512 this is
+ * the per-platform package root.
+ */
 export function getSdkBinDir(): string {
-  const arch = os.arch() === 'arm64' ? 'arm64' : 'x64';
-  return path.join(getSdkPackageRoot(), 'bin', arch);
+  return getPlatformPackageDir();
 }
 
-// Expected package binaries
+/**
+ * Resolve a directory containing the dev/test-only proxy binaries
+ * (`wxc-test-proxy.exe` / `unix-test-proxy`). These are intentionally NOT
+ * shipped in the per-platform packages (#512), so they are sourced from:
+ *   1. `MXC_TEST_PROXY_DIR` (explicit override, e.g. a CI test artifact), or
+ *   2. the monorepo Cargo build output (local dev), if present.
+ * Returns `null` when no source is available — callers skip proxy tests.
+ */
+export function getTestBinDir(): string | null {
+  const override = process.env.MXC_TEST_PROXY_DIR;
+  if (override && fs.existsSync(override)) {
+    return override;
+  }
+  // Walk up from this file to the monorepo root (the dir that has src/target).
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < MAX_PARENT_WALK_UPS; i++) {
+    const targetDir = path.join(dir, 'src', 'target');
+    if (fs.existsSync(targetDir)) {
+      const triple = rustTriple();
+      const candidates = [
+        path.join(targetDir, triple, 'release'),
+        path.join(targetDir, triple, 'debug'),
+        path.join(targetDir, 'release'),
+        path.join(targetDir, 'debug'),
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c)) return c;
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** Rust target triple for the current host. */
+function rustTriple(): string {
+  const arch = os.arch() === 'arm64' ? 'aarch64' : 'x86_64';
+  if (process.platform === 'linux') return `${arch}-unknown-linux-gnu`;
+  if (process.platform === 'darwin') return `${arch}-apple-darwin`;
+  return `${arch}-pc-windows-msvc`;
+}
+
+/**
+ * True when the given test-proxy binary can be sourced, else proxy tests skip.
+ *
+ * In a CI environment that is expected to run the proxy tests (signalled by
+ * `MXC_REQUIRE_PROXY_TESTS`), a missing proxy is a hard failure rather than a
+ * silent skip — otherwise a real proxy regression and a missing fixture are
+ * indistinguishable (both green-with-skips). Local/dev runs without the env var
+ * keep the skip.
+ */
+export function isTestProxyAvailable(binary: string): boolean {
+  return evaluateProxyAvailability({ binary, dir: getTestBinDir() });
+}
+
+// Expected per-platform package binaries. After #512 each platform package
+// ships only its own host's executor + sandbox helpers — NOT the dev/test-only
+// proxies (wxc-test-proxy.exe / unix-test-proxy) or the diagnostic console,
+// which are intentionally excluded to keep the install lean.
 
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
   'wxc-host-prep.exe',
   'winhttp-proxy-shim.exe',
-  'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
   'wxc-windows-sandbox-guest.exe',
-  'mxc-diagnostic-console.exe',
 ];
 
 export const EXPECTED_LINUX_BINARIES = [
   'lxc-exec',
-  'unix-test-proxy',
 ];
 
 export const EXPECTED_MACOS_BINARIES = [
   'mxc-exec-mac',
-  'unix-test-proxy',
 ];
 
 // Binaries that are optional (feature-gated or only present in certain builds)
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
-  'wslcsdk.dll',   // Only built with --with-wslc
-  'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
-                   // only when the plm crate is included in the build.
+  'wslcsdk.dll',      // Only built with --with-wslc
+  'plm.exe',          // Permissive Learning Mode helper (Windows-only); staged
+                      // only when the plm crate is included in the build.
+  'nanvixd.exe',      // Only built with --with-microvm
+  'nanvix_rootfs.img',
+  'python3.initrd',
 ];
 
-// Combined list of all known binaries across platforms. The npm package
-// bundles both Windows and Linux binaries in the same arch directory, so
-// the "no unexpected binaries" check must allow binaries from either OS.
+// Combined list of all known binaries across platforms. Each platform package
+// only ships its own host's binaries, but the "no unexpected binaries" check
+// stays permissive across OSes for robustness.
 export const ALL_KNOWN_BINARIES = [
   ...EXPECTED_WINDOWS_BINARIES,
   ...EXPECTED_LINUX_BINARIES,
   ...EXPECTED_MACOS_BINARIES,
   ...OPTIONAL_BINARIES,
+];
+
+// Dev/test-only proxy binaries — excluded from shipped packages (#512); sourced
+// for proxy E2E tests via getTestBinDir(), which skips the tests when absent.
+export const TEST_ONLY_BINARIES = [
+  'wxc-test-proxy.exe',
+  'unix-test-proxy',
 ];
 
 // Platform / version helpers
@@ -337,14 +458,17 @@ export function withToolPaths(policy: Record<string, any>): Record<string, any> 
 
 // Windows-only: proxy helpers
 
-/** Locate wxc-test-proxy.exein the SDK package bin directory (package only, no local fallback). */
+/** Locate wxc-test-proxy.exe in the test-proxy source dir (not shipped in the package). */
 function findTestProxyBinary(): string {
-  const binDir = getSdkBinDir();
-  const proxyPath = path.join(binDir, 'wxc-test-proxy.exe');
-  if (fs.existsSync(proxyPath)) {
+  const binDir = getTestBinDir();
+  const proxyPath = binDir ? path.join(binDir, 'wxc-test-proxy.exe') : null;
+  if (proxyPath && fs.existsSync(proxyPath)) {
     return proxyPath;
   }
-  throw new Error(`wxc-test-proxy.exe not found at expected SDK package location: ${proxyPath}`);
+  throw new Error(
+    'wxc-test-proxy.exe not found. It is excluded from the shipped platform ' +
+      'package (#512); set MXC_TEST_PROXY_DIR or build the Rust binaries locally.',
+  );
 }
 
 /**
@@ -386,14 +510,17 @@ export function startTestProxy(dir: string): { port: number; proxyProcess: Child
 
 // unix-test-proxy helpers (currently only exercised by the Linux Bubblewrap test)
 
-/** Locate unix-test-proxy in the SDK package bin directory. */
+/** Locate unix-test-proxy in the test-proxy source dir (not shipped in the package). */
 function findUnixTestProxyBinary(): string {
-  const binDir = getSdkBinDir();
-  const proxyPath = path.join(binDir, 'unix-test-proxy');
-  if (fs.existsSync(proxyPath)) {
+  const binDir = getTestBinDir();
+  const proxyPath = binDir ? path.join(binDir, 'unix-test-proxy') : null;
+  if (proxyPath && fs.existsSync(proxyPath)) {
     return proxyPath;
   }
-  throw new Error(`unix-test-proxy not found at expected SDK package location: ${proxyPath}`);
+  throw new Error(
+    'unix-test-proxy not found. It is excluded from the shipped platform ' +
+      'package (#512); set MXC_TEST_PROXY_DIR or build the Rust binaries locally.',
+  );
 }
 
 /**
