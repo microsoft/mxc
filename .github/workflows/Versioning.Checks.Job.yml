@@ -20,6 +20,12 @@ jobs:
       - name: Check product version sync (Cargo == npm)
         run: node scripts/check-version-sync.js
 
+      - name: Test platform package version-sync logic
+        run: node --test scripts/sync-platform-package-versions.test.js
+
+      - name: Check platform package version sync (meta == platform packages)
+        run: node scripts/sync-platform-package-versions.js --check
+
       - name: Install tooling deps
         working-directory: scripts/versioning
         run: npm ci
