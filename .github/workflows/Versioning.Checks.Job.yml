@@ -23,6 +23,9 @@ jobs:
       - name: Test platform package version-sync logic
         run: node --test scripts/sync-platform-package-versions.test.js
 
+      - name: Test release-completeness logic
+        run: node --test scripts/check-release-completeness.test.js
+
       - name: Check platform package version sync (meta == platform packages)
         run: node scripts/sync-platform-package-versions.js --check
 

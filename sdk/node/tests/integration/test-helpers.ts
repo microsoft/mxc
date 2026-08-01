@@ -182,9 +182,6 @@ const OPTIONAL_BINARIES = [
   'wslcsdk.dll',      // Only built with --with-wslc
   'plm.exe',          // Permissive Learning Mode helper (Windows-only); staged
                       // only when the plm crate is included in the build.
-  'nanvixd.exe',      // Only built with --with-microvm
-  'nanvix_rootfs.img',
-  'python3.initrd',
 ];
 
 // Combined list of all known binaries across platforms. Each platform package
