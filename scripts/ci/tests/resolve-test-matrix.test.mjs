@@ -28,14 +28,14 @@ test('catalog validates and contains all five build targets', () => {
   assert.doesNotThrow(() => validateCatalog(catalog()));
 });
 
-test('phase one enables two PR, two nightly, and four Sunday jobs', () => {
+test('current rollout enables two PR jobs and no scheduled jobs', () => {
   const pr = resolvePlan(catalog(), 'pr');
   const nightly = resolvePlan(catalog(), 'nightly');
   const weekly = resolvePlan(catalog(), 'weekly');
 
   assert.equal(pr.windows.length + pr.linux.length + pr.macos.length, 2);
-  assert.equal(nightly.windows.length + nightly.linux.length + nightly.macos.length, 2);
-  assert.equal(weekly.windows.length + weekly.linux.length + weekly.macos.length, 4);
+  assert.equal(nightly.windows.length + nightly.linux.length + nightly.macos.length, 0);
+  assert.equal(weekly.windows.length + weekly.linux.length + weekly.macos.length, 0);
 });
 
 test('weekly includes all enabled nightly combinations', () => {

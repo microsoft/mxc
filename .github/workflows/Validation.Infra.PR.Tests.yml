@@ -1,0 +1,28 @@
+name: Validation Infrastructure PR Tests
+
+on:
+  push:
+    branches:
+      - user/emichlin/validation-infra-lite
+
+concurrency:
+  group: validation-infra-pr-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  windows:
+    uses: ./.github/workflows/Build.Windows.Job.yml
+
+  linux:
+    uses: ./.github/workflows/Build.Linux.Job.yml
+
+  test:
+    needs: [windows, linux]
+    uses: ./.github/workflows/Test.Matrix.Job.yml
+    with:
+      # The resolver selects only explicitly enabled entries in the PR trigger.
+      plan: pr

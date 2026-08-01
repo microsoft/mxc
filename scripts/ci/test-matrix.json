@@ -98,7 +98,7 @@
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "1es-mxc-e2e-windows-25h2-pro-x64",
           "backends": [
             "process-t3",
             "wslc",
@@ -185,7 +185,7 @@
         "x64": {
           "target": "x86_64-unknown-linux-gnu",
           "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "1es-mxc-e2e-ubuntu-26.04-x64",
           "backends": [
             "bubblewrap",
             "hyperlight",
@@ -534,30 +534,6 @@
     {
       "plan": "pr",
       "os": "ubuntu-26.04",
-      "architecture": "x64",
-      "backend": "bubblewrap"
-    },
-    {
-      "plan": "nightly",
-      "os": "windows-prerelease-isolation-session",
-      "architecture": "x64",
-      "backend": "isolation-session"
-    },
-    {
-      "plan": "nightly",
-      "os": "ubuntu-26.04",
-      "architecture": "x64",
-      "backend": "lxc"
-    },
-    {
-      "plan": "weekly",
-      "os": "windows-24h2",
-      "architecture": "x64",
-      "backend": "windows-sandbox"
-    },
-    {
-      "plan": "weekly",
-      "os": "debian-13",
       "architecture": "x64",
       "backend": "bubblewrap"
     }
