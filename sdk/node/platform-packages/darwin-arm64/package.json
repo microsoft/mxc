@@ -1,0 +1,25 @@
+{
+  "name": "@microsoft/mxc-sdk-darwin-arm64",
+  "version": "0.7.0",
+  "description": "MXC SDK native binaries for darwin-arm64 (aarch64-apple-darwin).",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "mxc-exec-mac",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node -e \"if(!require('fs').existsSync('mxc-exec-mac')){console.error('prepack: mxc-exec-mac not staged; refusing to pack an empty platform package');process.exit(1)}\""
+  },
+  "license": "MIT",
+  "author": "Microsoft Corporation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/mxc.git",
+    "directory": "sdk/node/platform-packages/darwin-arm64"
+  }
+}

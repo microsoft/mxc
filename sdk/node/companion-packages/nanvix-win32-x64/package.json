@@ -1,0 +1,34 @@
+{
+  "name": "@microsoft/mxc-sdk-nanvix-win32-x64",
+  "version": "0.7.0",
+  "description": "Opt-in NanVix MicroVM runtime for @microsoft/mxc-sdk on win32-x64.",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "wxc-exec.exe",
+    "nanvixd.exe",
+    "nanvix_rootfs.img",
+    "python3.initrd",
+    "bin/kernel.elf",
+    "snapshots/kernel.vmem",
+    "snapshots/kernel.whp.cbor",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node -e \"const f=require('fs');if(!f.existsSync('wxc-exec.exe')||!f.existsSync('nanvixd.exe')){console.error('prepack: wxc-exec.exe and nanvixd.exe must be staged; refusing to pack an incomplete NanVix package');process.exit(1)}\""
+  },
+  "peerDependencies": {
+    "@microsoft/mxc-sdk": "0.7.0"
+  },
+  "license": "MIT",
+  "author": "Microsoft Corporation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/mxc.git",
+    "directory": "sdk/node/companion-packages/nanvix-win32-x64"
+  }
+}
