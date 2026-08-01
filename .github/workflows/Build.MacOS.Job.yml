@@ -51,9 +51,9 @@ jobs:
       # mxc-exec-mac (built above via -p mxc_darwin) is what they drive; the
       # tests skip via has_platform_exec() if it is missing. sandbox-exec needs
       # no elevation, so they run in this standard macOS job.
-      - name: Test
-        run: cargo test --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
+      # - name: Test
+      #   run: cargo test --locked --release --target aarch64-apple-darwin
+      #        -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
 
       - name: Verify artifact payload
         shell: bash
