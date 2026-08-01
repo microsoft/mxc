@@ -1,0 +1,8 @@
+# Native binaries are staged into companion packages at build time and must
+# never be committed. The package manifests and READMEs are the only tracked
+# files; package.json "files" allowlists define the npm publish boundary.
+**
+!*/
+!*/package.json
+!*/README.md
+!.gitignore
