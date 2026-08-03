@@ -1,4 +1,5 @@
 {
+    "version": "0.8.0-alpha",
     "process": {
         "commandLine": "import sys; sys.exit(42)",
         "timeout": 30000

@@ -1,4 +1,5 @@
 {
+    "version": "0.8.0-alpha",
     "process": {
         "commandLine": "import urllib.request; r = urllib.request.urlopen('http://example.com/'); print(r.status)",
         "timeout": 30000

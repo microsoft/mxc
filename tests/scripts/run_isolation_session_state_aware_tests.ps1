@@ -47,6 +47,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Schema version stamped on every state-aware request built from a hashtable in
+# this script. `version` is required by the parser and selects which config
+# fields are legal, so it is applied centrally in the Invoke-* helper rather
+# than repeated at each call site. Matches the SDK's STATE_AWARE_VERSION and
+# `stateAware` in schemas/schema-version.json.
+$StateAwareSchemaVersion = '0.6.0-alpha'
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 # ---------------- Locate wxc-exec.exe ----------------
@@ -137,6 +144,13 @@ function Invoke-StateAware {
             $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
         }
     } elseif ($Request) {
+        # `version` is required by the parser and selects which fields are legal,
+        # so stamp it centrally rather than at every call site. (Fixture-driven
+        # requests carry their own version in the JSON file.)
+        if (-not $Request.ContainsKey('version')) {
+            $Request = $Request.Clone()
+            $Request['version'] = $StateAwareSchemaVersion
+        }
         $json = $Request | ConvertTo-Json -Compress -Depth 12
     } else {
         throw "Invoke-StateAware requires either -Request or -ConfigFile"

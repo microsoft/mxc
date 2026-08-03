@@ -1,6 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// `#[derive(VersionAvailability)]` emits `::wxc_common::…` paths so it works from any
+// crate; this alias makes those paths resolve inside `wxc_common` itself, where
+// the wire model that uses the derive lives. (Same trick serde uses.)
+extern crate self as wxc_common;
+
 // Platform-agnostic modules (shared by wxc-exec, lxc-exec, mxc-exec-mac
 // and every backend crate).
 pub mod cmdline;
@@ -29,6 +34,10 @@ pub mod state_aware_request;
 pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
+// Per-field schema-availability ranges: the runtime half of
+// `#[derive(VersionAvailability)]`, consumed by the config parser and by schema
+// generation so both read one declaration.
+pub mod version_availability;
 
 // Dedicated well-typed wire model. It is the parser's deserialization target;
 // the JSON Schema is generated from it under the `schema-gen` feature.

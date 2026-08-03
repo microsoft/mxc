@@ -62,7 +62,7 @@ pub use streaming::*;
 
 /// Success.
 pub const MXC_STATUS_SUCCESS: i32 = 0;
-// 1..=12 mirror `mxc_sdk::ErrorCode` (kept in lockstep with a CI drift gate).
+// 1..=13 mirror `mxc_sdk::ErrorCode` (kept in lockstep with a CI drift gate).
 /// The request/policy was malformed.
 pub const MXC_STATUS_MALFORMED_REQUEST: i32 = 1;
 /// The requested containment backend is not supported by this library.
@@ -87,6 +87,9 @@ pub const MXC_STATUS_ALREADY_STOPPED: i32 = 10;
 pub const MXC_STATUS_POLICY_VALIDATION: i32 = 11;
 /// A generic backend error.
 pub const MXC_STATUS_BACKEND_ERROR: i32 = 12;
+/// The config declared an unsupported schema version, or used a field outside
+/// the version window it is valid in.
+pub const MXC_STATUS_VERSION_INCOMPATIBLE: i32 = 13;
 
 // 100+ are FFI-local statuses with no `ErrorCode` equivalent.
 /// A required pointer argument was null.
@@ -111,6 +114,7 @@ pub(crate) fn status_from_error_code(code: ErrorCode) -> i32 {
         ErrorCode::AlreadyStopped => MXC_STATUS_ALREADY_STOPPED,
         ErrorCode::PolicyValidation => MXC_STATUS_POLICY_VALIDATION,
         ErrorCode::BackendError => MXC_STATUS_BACKEND_ERROR,
+        ErrorCode::VersionIncompatible => MXC_STATUS_VERSION_INCOMPATIBLE,
     }
 }
 

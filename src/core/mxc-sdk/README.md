@@ -232,13 +232,13 @@ use mxc_sdk::{run_state_aware_json, exec_sandbox};
 
 // Envelope phase: provision returns { "result": { "sandboxId": ... } }.
 let provisioned = run_state_aware_json(
-    r#"{"phase":"provision","containment":"isolation_session"}"#,
+    r#"{"version":"0.6.0-alpha","phase":"provision","containment":"isolation_session"}"#,
     false,
 )?;
 
 // Exec phase: a live streaming handle.
 let mut proc = exec_sandbox(
-    r#"{"phase":"exec","sandboxId":"iso:...","process":{"commandLine":"echo hi"}}"#,
+    r#"{"version":"0.6.0-alpha","phase":"exec","sandboxId":"iso:...","process":{"commandLine":"echo hi"}}"#,
 )?;
 let _ = proc.wait();
 # Ok::<(), Box<dyn std::error::Error>>(())

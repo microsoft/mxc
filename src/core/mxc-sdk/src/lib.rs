@@ -152,6 +152,7 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
     sandbox.wait_with_output().map_err(|e| Error {
         code: ErrorCode::BackendError,
         message: format!("waiting for the sandbox to complete failed: {e}"),
+        details: None,
     })
 }
 

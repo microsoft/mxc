@@ -232,10 +232,14 @@ Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`
 
 ### Schema Versioning
 
-MXC config files include an optional `version` field using
+MXC config files declare a `version` field using
 [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH). The parser uses
-this to detect incompatible configs and provide clear upgrade guidance. If
-`version` is absent, the config is assumed compatible with the current version.
+this to detect incompatible configs, to decide which fields are legal (see
+[availability ranges](#version-availability)), and to provide clear upgrade guidance.
+
+`version` is **required**. It is not merely metadata: it selects the accepted
+field surface, so a config without one would silently opt out of every range
+rather than defaulting to something safe.
 
 Versions with a pre-release suffix (e.g., `-alpha`) indicate the schema is not
 yet stable — breaking changes may occur in any release. Once the schema is
@@ -247,13 +251,50 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.6, <=0.8 | Accepted (assumed compatible) |
+| absent or `""` | >=0.6, <=0.8 | **Rejected** — `version_incompatible`, "Missing required field: version" |
 | `"0.5.0-alpha"` | >=0.6, <=0.8 | **Rejected** — "older than supported" |
 | `"0.6.0-alpha"` | >=0.6, <=0.8 | Accepted (0.6 in range) |
 | `"0.7.0-alpha"` | >=0.6, <=0.8 | Accepted (0.7 in range) |
 | `"0.8.0-alpha"` | >=0.6, <=0.8 | Accepted (0.8 in range) |
 | `"0.9.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
 | `"1.0.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
+
+#### Version availability
+
+A field may declare the range of schema versions it is valid in. The generated
+schema publishes these as `x-mxc-since` / `x-mxc-until` on the property:
+
+```jsonc
+"seatbelt": {
+  "anyOf": [{ "$ref": "#/definitions/Seatbelt" }, { "type": "null" }],
+  "x-mxc-since": "0.7"        // rejected in a config declaring 0.6
+}
+```
+
+Both bounds are **inclusive** and compare `major.minor` only. Using a field
+outside its range is rejected at parse time with `version_incompatible` and
+structured `details`:
+
+```json
+{
+  "error": {
+    "code": "version_incompatible",
+    "message": "Config field 'seatbelt' was introduced in schema version 0.7 but the config declares '0.6.0-alpha'. Raise the config's 'version' to 0.7 or newer, or remove the field.",
+    "details": {
+      "field": "seatbelt",
+      "declaredVersion": "0.6.0-alpha",
+      "since": "0.7",
+      "until": null
+    }
+  }
+}
+```
+
+Annotation is **opt-in**: an unannotated field is valid across the whole
+supported range. Annotating one is a deliberate behavioural change — it starts
+rejecting configs that were previously accepted — and is checked against history
+by a CI gate. See [Version availability](versioning.md#version-availability) in the
+versioning design for how to add one.
 
 #### When to bump
 

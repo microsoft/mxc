@@ -4,7 +4,7 @@
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>
-/// Error codes returned across the native FFI boundary. Values 0–12 mirror the
+/// Error codes returned across the native FFI boundary. Values 0–13 mirror the
 /// Rust <c>MxcErrorCode</c> / <c>mxc_sdk::ErrorCode</c> one-for-one; values 100+
 /// are FFI-local conditions with no Rust equivalent. Kept in lockstep with the
 /// native <c>MXC_STATUS_*</c> constants by a CI drift gate.
@@ -49,6 +49,12 @@ public enum ErrorCode
 
     /// <summary>A generic backend error.</summary>
     BackendError = 12,
+
+    /// <summary>
+    /// The config declared an unsupported schema version, or used a field
+    /// outside the version window it is valid in.
+    /// </summary>
+    VersionIncompatible = 13,
 
     /// <summary>A required pointer argument was null (FFI-local).</summary>
     NullArgument = 100,

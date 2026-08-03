@@ -1596,7 +1596,9 @@ mod tests {
 
     #[test]
     fn cli_captures_command_after_config_base64() {
-        let encoded = encoded_policy(r#"{ "process": { "commandLine": "policy" } }"#);
+        let encoded = encoded_policy(
+            r#"{ "version": "0.8.0-alpha", "process": { "commandLine": "policy" } }"#,
+        );
         let cli = parse_cli(&[
             "wxc-exec",
             "--config-base64",
@@ -1671,6 +1673,7 @@ mod tests {
             command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess).unwrap();
         let mut logger = test_logger();
         let policy = r#"{
+            "version": "0.8.0-alpha",
             "process": {
                 "commandLine": "policy-app.exe --from-policy",
                 "cwd": "C:\\workspace"
@@ -1721,12 +1724,14 @@ mod tests {
         let mut policy_logger = test_logger();
         let mut cli_logger = test_logger();
         let policy = r#"{
+            "version": "0.8.0-alpha",
             "process": {
                 "commandLine": "cli-app.exe --message \"hello world\"",
                 "cwd": "C:\\workspace"
             }
         }"#;
         let cli_policy = r#"{
+            "version": "0.8.0-alpha",
             "process": {
                 "cwd": "C:\\workspace"
             }

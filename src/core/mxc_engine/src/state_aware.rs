@@ -110,9 +110,8 @@ fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
     use wxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
-        ParseError::Decode(err) | ParseError::OneShot(err) => {
-            MxcError::malformed_request(err.to_string())
-        }
+        // `to_mxc_error` keeps a version incompatibility's code and details.
+        ParseError::Decode(err) | ParseError::OneShot(err) => err.to_mxc_error(),
     }
 }
 

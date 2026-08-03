@@ -365,12 +365,18 @@ only the first; it does **not** influence stages 2 or 3 (Phase 3a removed that
 coupling).
 
 ```
-Stage 1 — Schema-range check (the trust boundary, `config_parser`)
+Stage 1 — Schema-range check + availability ranges (the trust boundary,
+          `config_parser`)
+  Is config.version present?  (required — it selects the legal field surface)
+    absent / empty → error: "Missing required field: version"
   Is config.version within [floor, dev-ceiling]?  (major.minor; pre-release
   labels ignored)
     below floor   → error: "older than supported" (update your config)
     above ceiling → error: "newer than supported" (upgrade wxc-exec)
-    in range / absent → continue
+    in range      → continue
+  Does every populated field fall inside its availability range?
+    no            → error naming the field and its bounds
+    yes           → continue
 
 Stage 2 — Containment resolve (independent of schema version)
   Map the `containment` intent to a concrete backend:
@@ -413,6 +419,123 @@ backend cannot honor the requested filesystem/network policy, execution fails
 with a typed, actionable error rather than silently weakening enforcement (see
 [Error Contract](#error-contract)).
 
+## Version availability
+
+### The requirement
+
+> Breaking config-schema changes must be possible **without removing support for
+> an earlier version.**
+
+"Support" here means **shape only**: an older config keeps parsing, and is then
+enforced with *today's* semantics. Reproducing an old version's *behaviour* is
+explicitly a non-goal, for two reasons:
+
+* Most behavioural changes are **bug fixes**. Supporting 0.6 must not mean
+  reproducing 0.6's bugs.
+* At least one change tightened a sandbox default (Bubblewrap moved from
+  whole-host-root-readable to deny-by-default). Honouring old behaviour would be
+  a **downgrade attack**: an attacker-influenced config could select a weaker
+  sandbox merely by declaring an older version.
+
+### The consequence: breaking changes are additive
+
+Because one dev schema has to validate configs declaring *every* supported
+version, the schema cannot be the thing that retires a field — any surface a
+supported version can use has to stay in it. So a breaking change is made
+**additively**:
+
+1. Keep the old field, and mark it `until` the last version it was valid in.
+2. Add the new shape alongside it, marked `since` the version that introduced it.
+3. Let the declared version decide which one a given config may use.
+
+This is also why the dev-schema compatibility gate
+(`check-dev-schema-compat.js`) has no per-field escape hatch: a removal is
+always the wrong shape for a change, not an exception to be waived. Deleting an
+`until`-marked field is legitimate only once the supported floor rises past its
+`until` value.
+
+### Declaring an availability range
+
+Availability ranges are declared **once**, on the wire model, with
+`#[derive(VersionAvailability)]` (crate `mxc_version_derive`):
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, VersionAvailability)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Network {
+    // Unannotated: valid across the whole supported range.
+    pub enforcement_mode: Option<NetworkEnforcement>,
+    // Introduced at 0.8: rejected in a config declaring 0.6 or 0.7.
+    #[mxc_version(since = "0.8")]
+    pub egress: Option<NetworkEgress>,
+    // Retired after 0.7: rejected in a config declaring 0.8.
+    #[mxc_version(until = "0.7")]
+    pub default_policy: Option<NetworkPolicy>,
+}
+```
+
+Both bounds are inclusive and compare `major.minor` only, matching the
+supported-range check.
+
+One declaration feeds **both** consumers:
+
+* the **parser** enforces it (`wxc_common::version_availability::validate_document`),
+  immediately after deserialisation and before the wire→domain mapping moves
+  fields out of the config;
+* **schema generation** publishes it as `x-mxc-since` / `x-mxc-until`, so the
+  committed schema documents the same thing the parser enforces. Adding an
+  annotation without regenerating fails the existing codegen gate.
+
+A derive is required rather than `#[schemars(extend(...))]`: the schemars
+attributes sit behind the `schema-gen` feature, which only `mxc_schema_gen`
+enables, so they are invisible to the parser. An annotation nothing enforces is
+documentation, not a contract.
+
+### Rules and hazards
+
+**Annotation is opt-in.** An unannotated field is valid across the whole
+supported range. There is no obligation to annotate every field, and annotating
+one is a behavioural change: it starts rejecting configs that were previously
+accepted.
+
+**Put the range on the containing field, not inside a shared struct.** A
+struct reached from two places is *one* node, so a range on its fields applies
+to every path that reaches it. `Seatbelt`, for example, is both the top-level
+`seatbelt` section and `experimental.seatbelt`; the range therefore lives on
+`MxcConfig::seatbelt`. The oracle gate refuses any range that would leak onto
+the `experimental` surface this way.
+
+**Schema presence is not the same as accepted surface.** A field's first
+appearance in the JSON Schema is a *lower* bound on how long it has been
+accepted, not the truth:
+
+* `experimental` declared no properties before 0.8, so anything under it
+  validated vacuously and has always been accepted. The oracle gate **refuses**
+  ranges under this subtree rather than deriving a bound it cannot justify.
+* State-aware requests declare `0.6.0-alpha` while carrying `phase` /
+  `sandboxId`, which the schema only described from 0.8. Annotating those from
+  schema data would break every state-aware request.
+
+The behavioural counter-check is the corpus parse test
+(`src/core/wxc_common/tests/corpus_parses.rs`): every config in
+`tests/examples` + `tests/configs` must still parse.
+
+**Aliases share their field's range.** `#[serde(alias = "…")]` is another
+spelling of the same field, so it is checked with the same bounds — otherwise
+the alias would be a bypass — and the diagnostic names the spelling the config
+actually used. This is why the deprecated `appContainer` alias needs no range
+of its own: it inherits `processContainer`'s. (It is a serde alias, never a
+schema property, so it has no independent history to annotate.)
+
+### Gates
+
+| Gate | What it protects |
+|---|---|
+| `check-version-availability.js` | Each `since` matches the field's true first appearance across the frozen 0.6 / 0.7 and dev schemas; each `until` names a version the field really existed in. Fail-closed under `experimental`. |
+| `check-schema-codegen.js` | The committed schema still matches the wire model, so the published `x-mxc-*` cannot drift from what the parser enforces. |
+| `mxc_schema_gen` conformance tests | The JSON field names the derive computes match the ones `schemars` derives. A name that disagrees with `serde` would make the range unreachable — a silent **fail-open**. |
+| `corpus_parses.rs` | Every corpus config still parses, catching an annotation that is schema-correct but behaviourally wrong. |
+
 ## OS APIs
 
 The BaseContainer tier calls the OS sandbox API to launch the child:
@@ -451,6 +574,23 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
 - **Schema-range failures** (Stage 1) carry a clear "older than supported" /
   "newer than supported" message telling the caller whether to update the config
   or upgrade `wxc-exec`.
+- **Version failures** (Stage 1) — a missing `version`, a version outside the
+  supported range, or a field used outside its
+  [availability range](#version-availability) — all surface under the single
+  `version_incompatible` code with structured `details`:
+
+  ```json
+  { "field": "processContainer.captureDenials",
+    "declaredVersion": "0.7.0-alpha",
+    "since": "0.8",
+    "until": null }
+  ```
+
+  `field` is the dotted path of the offending field, or `"version"` when the
+  declared version itself is the problem (in which case `since` / `until` carry
+  the supported range). One code plus structured details keeps the closed error
+  union from growing a variant per direction, and lets a caller act on the
+  failure without re-parsing the message.
 - **Capability failures** (Stage 3) surface on the runner's `ScriptResponse`
   (and the SDK `spawn` path's `MxcError`) as a `BackendUnavailable` failure
   phase when the requested backend's API is absent (e.g. the BaseContainer OS

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
+use wxc_common::version_availability::MajorMinor;
 
 // ---------------------------------------------------------------------------
 // Filesystem policy discovery
@@ -831,10 +832,17 @@ pub fn build_request_with_containment(
     containment: &Containment,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
-    // The shared parser tolerates an empty schema version (treats it as
-    // "unset"), but the SDK requires it; reject it here for parity.
+    // Reject here too, so the SDK reports the same typed failure without
+    // building a config first.
     if policy.version.is_empty() {
-        return Err(MxcError::malformed_request("Policy version is required").into());
+        return Err(MxcError::version_incompatible("Policy version is required")
+            .with_details(serde_json::json!({
+                "field": "version",
+                "declaredVersion": "",
+                "since": null,
+                "until": null,
+            }))
+            .into());
     }
     let config = build_wire_config(policy, containment, container_name)?;
 
@@ -842,8 +850,11 @@ pub fn build_request_with_containment(
     // Map the wire config straight to a request — no base64/file round-trip.
     // The command line is intentionally empty here (the caller fills
     // `script_code` before running), so tolerate a missing command.
+    //
+    // Preserve the loader's typed error: flattening to `malformed_request`
+    // would deny the code and details to every one-shot SDK/FFI/C# caller.
     let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
-        .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
+        .map_err(|e| e.to_mxc_error())?;
     Ok(SandboxRequest { inner })
 }
 
@@ -931,6 +942,27 @@ fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
     }
 }
 
+/// Whether a policy declaring `version` may carry a top-level `seatbelt`
+/// section, which was introduced at 0.7 and carries an availability range.
+///
+/// The block is a pure marker — `containment` already selects the backend, and
+/// an absent section behaves identically to `{}` (every field defaults the same
+/// either way, including `nestedPty`) — so below 0.7 it is omitted.
+///
+/// A free function, not inlined into the `cfg(macos)` arm, so it stays
+/// unit-testable on every host.
+/// Kept compiled on every host (not just macOS) so the decision stays
+/// unit-testable everywhere; only the macOS arm of [`apply_backend`] calls it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn emits_top_level_seatbelt_section(version: &str) -> bool {
+    const SEATBELT_SECTION_SINCE: MajorMinor = MajorMinor::new(0, 7);
+    match MajorMinor::parse_semver(version) {
+        Some(declared) => declared >= SEATBELT_SECTION_SINCE,
+        // `validate_schema_version` owns that diagnostic downstream.
+        None => true,
+    }
+}
+
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
 /// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
 /// ProcessContainer on Windows — which itself resolves to BaseContainer or
@@ -953,9 +985,9 @@ fn apply_host_process_backend(
 
     #[cfg(target_os = "macos")]
     {
-        let _ = (policy, container_id);
+        let _ = container_id;
         config["containment"] = json!("seatbelt");
-        if config.get("seatbelt").is_none() {
+        if config.get("seatbelt").is_none() && emits_top_level_seatbelt_section(&policy.version) {
             config["seatbelt"] = json!({});
         }
     }
@@ -1144,7 +1176,8 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenialsMode, CaptureDenialsSection, NetworkSection, SandboxPolicy,
+        build_request, emits_top_level_seatbelt_section, CaptureDenialsMode, CaptureDenialsSection,
+        NetworkSection, SandboxPolicy,
     };
     use wxc_common::wire;
 
@@ -1157,6 +1190,85 @@ mod tests {
             timeout_ms: None,
             capture_denials: None,
         }
+    }
+
+    #[test]
+    fn seatbelt_section_is_omitted_below_its_version_availability() {
+        // Regression (review F2): the macOS builder synthesises a top-level
+        // `seatbelt` block purely as a marker. That block carries a
+        // `since = "0.7"` range, so emitting it for a 0.6 policy made the
+        // parser reject a field the caller never supplied — every 0.6 macOS
+        // policy built by this crate or the TypeScript SDK failed.
+        //
+        // Tested through the pure predicate rather than `apply_backend`, whose
+        // macOS arm is compiled out on other hosts — which is precisely why the
+        // bug survived a full green run on Windows.
+        assert!(!emits_top_level_seatbelt_section("0.6.0-alpha"));
+        assert!(emits_top_level_seatbelt_section("0.7.0-alpha"));
+        assert!(emits_top_level_seatbelt_section("0.8.0-alpha"));
+        assert!(emits_top_level_seatbelt_section("1.0.0"));
+        // Omitting is safe only because absent behaves exactly like `{}`: every
+        // Seatbelt field defaults identically either way.
+    }
+
+    #[test]
+    fn unparseable_version_does_not_change_seatbelt_emission() {
+        // The loader owns the "not valid semver" diagnostic; this predicate must
+        // not introduce a second, differently-worded failure path.
+        assert!(emits_top_level_seatbelt_section("nonsense"));
+        assert!(emits_top_level_seatbelt_section(""));
+    }
+
+    #[test]
+    fn build_request_preserves_the_version_incompatible_code_and_details() {
+        // Regression (review F3): `build_request` used to wrap every loader
+        // error as `malformed_request`, so one-shot Rust SDK / FFI / C# callers
+        // could never observe the code this change introduced.
+        let policy = SandboxPolicy {
+            version: "0.3.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let err = build_request(&policy, None).expect_err("0.3 is below the supported floor");
+        assert_eq!(err.code, crate::ErrorCode::VersionIncompatible);
+        let details = err.details.expect("a version failure carries details");
+        assert_eq!(details["field"], "version");
+        assert_eq!(details["declaredVersion"], "0.3.0-alpha");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_zero_six_policy_builds_without_a_seatbelt_section() {
+        // The end-to-end form of F2, on the only host where the macOS arm of
+        // `apply_backend` is compiled in.
+        let policy = SandboxPolicy {
+            version: "0.6.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let request = build_request(&policy, None).expect("a 0.6 macOS policy must still build");
+        assert!(
+            request.inner.seatbelt.is_none(),
+            "no seatbelt section is emitted below 0.7"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_zero_seven_policy_still_carries_a_seatbelt_section() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let request = build_request(&policy, None).expect("build_request");
+        assert!(request.inner.seatbelt.is_some());
     }
 
     // Mirror the TypeScript SDK by accepting `allowedHosts` with or without

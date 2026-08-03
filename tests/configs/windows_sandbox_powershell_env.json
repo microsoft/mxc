@@ -1,4 +1,5 @@
 {
+  "version": "0.8.0-alpha",
   "containment": "windows_sandbox",
   "process": {
     "commandLine": "powershell -NoProfile -Command \"Write-Output ('ComputerName=' + $env:COMPUTERNAME); Write-Output ('User=' + $env:USERNAME); Write-Output ('ProcessCount=' + (Get-Process | Measure-Object).Count)\"",

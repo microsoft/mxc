@@ -320,10 +320,14 @@ export interface ProcessContainer {
   capabilities?: string[] | null;
   /**
    * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
+   *
+   * Introduced at 0.8.
    */
   captureDenials?: CaptureDenials | null;
   /**
    * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.
+   * 
+   * Introduced at 0.8.
    */
   learningMode?: boolean | null;
   /**
@@ -558,6 +562,8 @@ export interface MXCConfiguration {
   sandboxId?: string | null;
   /**
    * macOS Seatbelt backend configuration. Used when containment is `seatbelt`.
+   * 
+   * Introduced at 0.7. The range is on this field, not inside [`Seatbelt`], which is shared with the unconstrained `experimental.seatbelt`.
    */
   seatbelt?: Seatbelt | null;
   /**
@@ -569,4 +575,3 @@ export interface MXCConfiguration {
    */
   version?: string | null;
 }
-

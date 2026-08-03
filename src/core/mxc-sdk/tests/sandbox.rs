@@ -117,8 +117,8 @@ fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::Error>
 
 #[test]
 fn version_older_than_supported_is_rejected() {
-    // Schema version below the supported floor (>=0.4) must be rejected by the
-    // parser before any backend selection happens.
+    // Schema version below the supported floor must be rejected by the parser
+    // before any backend selection happens.
     let policy = SandboxPolicy {
         version: "0.3.0-alpha".to_string(),
         filesystem: None,
@@ -130,7 +130,32 @@ fn version_older_than_supported_is_rejected() {
 
     let err =
         build_request(&policy, None).expect_err("an out-of-range schema version must be rejected");
-    assert_eq!(err.code, ErrorCode::MalformedRequest);
+    // Previously this surfaced as the generic `MalformedRequest`, because
+    // `build_request` wrapped every loader error. Version problems now carry
+    // their own code and structured details so a caller can act on them without
+    // parsing the message.
+    assert_eq!(err.code, ErrorCode::VersionIncompatible);
+    let details = err.details.expect("a version failure carries details");
+    assert_eq!(details["field"], "version");
+    assert_eq!(details["declaredVersion"], "0.3.0-alpha");
+    assert_eq!(details["since"], "0.6");
+    assert_eq!(details["until"], "0.8");
+}
+
+#[test]
+fn missing_version_is_rejected_with_the_version_code() {
+    // `version` is required: it selects which fields are legal, so an absent one
+    // must not fall through as "compatible".
+    let policy = SandboxPolicy {
+        version: String::new(),
+        filesystem: None,
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    };
+
+    let err = build_request(&policy, None).expect_err("a missing version must be rejected");
+    assert_eq!(err.code, ErrorCode::VersionIncompatible);
 }
 
 #[cfg(target_os = "macos")]

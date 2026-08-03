@@ -385,6 +385,7 @@ structured `details`. Reference §8 has the full list and the `MxcError` mapping
 | Id problems | `malformed_id`, `stale_id` |
 | State-machine violations | `not_provisioned`, `not_started`, `already_started`, `already_stopped` |
 | Config / policy | `policy_validation` |
+| Schema version | `version_incompatible` (unsupported version, or a field used outside its availability range) |
 | Catch-all | `backend_error` (with structured `details`) |
 
 Process-runtime kill conditions (timeouts, backend-initiated termination) surface as

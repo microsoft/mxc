@@ -527,6 +527,10 @@ pub fn emit_cancellation() {
 fn classify_mxc_error(err: &MxcError) -> FailureReason {
     match err.code {
         MxcErrorCode::MalformedRequest | MxcErrorCode::MalformedId => FailureReason::ConfigError,
+        // A version incompatibility is a property of the submitted config (an
+        // unsupported version, or a field used outside its version window), so
+        // it classifies with the other config-authoring failures.
+        MxcErrorCode::VersionIncompatible => FailureReason::ConfigError,
         MxcErrorCode::PolicyValidation => FailureReason::PolicyError,
         MxcErrorCode::UnsupportedContainment
         | MxcErrorCode::UnsupportedPhase
