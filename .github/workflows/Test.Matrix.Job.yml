@@ -31,7 +31,7 @@ jobs:
         run: node scripts/ci/resolve-test-matrix.mjs --plan "${{ inputs.plan }}"
 
   windows:
-    name: ${{ matrix.os_name }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
+    name: ${{ matrix.backend || 'Windows tests' }}
     needs: resolve
     if: needs.resolve.outputs.has_windows == 'true'
     strategy:
@@ -91,7 +91,7 @@ jobs:
           retention-days: 7
 
   linux:
-    name: ${{ matrix.os_name }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
+    name: ${{ matrix.backend || 'Linux tests' }}
     needs: resolve
     if: needs.resolve.outputs.has_linux == 'true'
     strategy:
@@ -153,7 +153,7 @@ jobs:
           retention-days: 7
 
   macos:
-    name: ${{ matrix.os_name }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
+    name: ${{ matrix.backend || 'macOS tests' }}
     needs: resolve
     if: needs.resolve.outputs.has_macos == 'true'
     strategy:
