@@ -43,6 +43,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Schema version stamped on every state-aware request built from a hashtable in
+# this script. `version` is required by the parser and selects which config
+# fields are legal, so it is applied centrally in the Invoke-* helper rather
+# than repeated at each call site. Matches the SDK's STATE_AWARE_VERSION and
+# `stateAware` in schemas/schema-version.json.
+$StateAwareSchemaVersion = '0.6.0-alpha'
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 # ---------------- Locate wxc-exec.exe ----------------
@@ -130,6 +137,14 @@ function Invoke-StateAware {
         [hashtable]$Request,
         [int]$TimeoutSec = 120
     )
+
+    # `version` is required by the parser and selects which fields are legal, so
+    # stamp it centrally rather than at every call site. State-aware requests use
+    # the same version the SDK emits (STATE_AWARE_VERSION).
+    if ($Request -and -not $Request.ContainsKey('version')) {
+        $Request = $Request.Clone()
+        $Request['version'] = $StateAwareSchemaVersion
+    }
 
     $json = $Request | ConvertTo-Json -Compress -Depth 12
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))

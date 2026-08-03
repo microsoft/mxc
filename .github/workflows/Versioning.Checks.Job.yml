@@ -50,6 +50,13 @@ jobs:
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js
 
+      # After the codegen gates, which guarantee the committed schema still
+      # matches the wire model the ranges are declared in, and before the
+      # compatibility gate: a wrong `since` is a correctness bug in its own
+      # right, independent of whether the diff is breaking.
+      - name: Check availability ranges against the frozen schemas (oracle)
+        run: node scripts/versioning/check-version-availability.js
+
       # Ahead of corpus validation: a pull request that removes a field also
       # migrates the corpus, so validation passes and the removal is what needs
       # reporting.

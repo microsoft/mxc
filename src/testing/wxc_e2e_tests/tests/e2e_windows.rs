@@ -207,6 +207,7 @@ fn microvm_network_blocked() {
 
     // Negative case: host is on the blocklist -> guest egress denied (EACCES).
     let blocked = serde_json::json!({
+        "version": "0.8.0-alpha",
         "process": { "commandLine": source, "timeout": 30000 },
         "containment": "microvm",
         "network": { "blockedHosts": [host_ip.to_string()] }
@@ -233,6 +234,7 @@ fn microvm_network_blocked() {
     // closed target yields a connection error other than EACCES (typically
     // ECONNREFUSED / errno 111), never the filter's EACCES.
     let allowed = serde_json::json!({
+        "version": "0.8.0-alpha",
         "process": { "commandLine": source, "timeout": 30000 },
         "containment": "microvm",
         "network": { "defaultPolicy": "allow" }
@@ -950,6 +952,7 @@ fn hyperlight_suite() {
         );
 
         let config = serde_json::json!({
+            "version": "0.8.0-alpha",
             "process": { "commandLine": script, "timeout": 30000 },
             "containment": "hyperlight",
             "filesystem": { "readwritePaths": [mount_dir.to_string_lossy()] }
@@ -1014,6 +1017,7 @@ fn hyperlight_suite() {
         );
 
         let config = serde_json::json!({
+            "version": "0.8.0-alpha",
             "process": { "commandLine": script, "timeout": 30000 },
             "containment": "hyperlight",
             "filesystem": {

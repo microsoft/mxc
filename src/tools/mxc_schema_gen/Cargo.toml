@@ -8,3 +8,8 @@ edition.workspace = true
 #   cargo run -p mxc_schema_gen -- <out-path>
 [dependencies]
 wxc_common = { path = "../../core/wxc_common", features = ["schema-gen"] }
+
+# Test-only: the version-window conformance tests read the generated schema as
+# JSON to cross-check it against the wire model's window metadata.
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -25,7 +25,7 @@ fn run_state_aware_json_rejects_one_shot_config() {
 fn run_state_aware_json_rejects_non_dry_run_exec() {
     // A non-dry-run exec streams; it must be routed through exec_sandbox, not
     // the envelope entry point.
-    let json = r#"{"phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.6.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
     let err = run_state_aware_json(json, false).expect_err("non-dry-run exec must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
     assert!(err.message.contains("exec"));
@@ -39,7 +39,7 @@ fn run_state_aware_json_malformed_json_is_malformed_request() {
 
 #[test]
 fn exec_sandbox_rejects_non_exec_phase() {
-    let json = r#"{"phase":"provision","containment":"isolation_session"}"#;
+    let json = r#"{"version":"0.6.0-alpha","phase":"provision","containment":"isolation_session"}"#;
     // `Sandbox` is not `Debug`, so match rather than `expect_err`.
     match exec_sandbox(json) {
         Ok(_) => panic!("a provision request is not an exec"),
@@ -66,7 +66,7 @@ fn exec_sandbox_rejects_one_shot_config() {
 // covered by the host-gated executor E2E suites.)
 #[test]
 fn unregistered_backend_prefix_is_unsupported_containment() {
-    let json = r#"{"phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
+    let json = r#"{"version":"0.6.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
     let err = run_state_aware_json(json, false)
         .expect_err("an unregistered sandbox-id prefix has no backend");
     assert_eq!(err.code, ErrorCode::UnsupportedContainment);

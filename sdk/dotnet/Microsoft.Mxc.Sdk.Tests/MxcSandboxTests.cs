@@ -17,14 +17,16 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void Run_MalformedPolicy_ThrowsMalformedRequest()
+    public void Run_VersionlessPolicy_ThrowsVersionIncompatible()
     {
         // A version-less policy is rejected by the native parser before any
         // sandbox is spawned, so this runs on any host (no host-prep needed).
+        // `version` selects which config fields are legal, so it surfaces as its
+        // own typed code rather than the generic MalformedRequest.
         var policy = new SandboxPolicy { Version = string.Empty };
 
         var ex = Assert.Throws<MxcException>(() => MxcSandbox.Run(policy, "echo hi"));
-        Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
+        Assert.Equal(ErrorCode.VersionIncompatible, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
     }
 

@@ -20,7 +20,15 @@ export type ErrorCode =
   | 'already_started'
   | 'already_stopped'
   | 'policy_validation'
-  | 'backend_error';
+  | 'backend_error'
+  /**
+   * The config declared an unsupported schema version, or used a field outside
+   * the version window it is valid in. `details` carries
+   * `{ field, declaredVersion, since, until }` — `field` is the dotted path of
+   * the offending field, or `"version"` when the declared version itself is
+   * outside the supported range.
+   */
+  | 'version_incompatible';
 
 /**
  * Typed error thrown by the MXC SDK in response to a wire-format error

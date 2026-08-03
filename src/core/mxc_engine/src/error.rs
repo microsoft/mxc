@@ -22,6 +22,9 @@ pub enum ErrorCode {
     AlreadyStopped,
     PolicyValidation,
     BackendError,
+    /// The config declared an unsupported schema version, or used a field
+    /// outside the version window it is valid in.
+    VersionIncompatible,
 }
 
 impl ErrorCode {
@@ -40,6 +43,7 @@ impl ErrorCode {
             Self::AlreadyStopped => "already_stopped",
             Self::PolicyValidation => "policy_validation",
             Self::BackendError => "backend_error",
+            Self::VersionIncompatible => "version_incompatible",
         }
     }
 }
@@ -65,6 +69,7 @@ impl From<MxcErrorCode> for ErrorCode {
             MxcErrorCode::AlreadyStopped => Self::AlreadyStopped,
             MxcErrorCode::PolicyValidation => Self::PolicyValidation,
             MxcErrorCode::BackendError => Self::BackendError,
+            MxcErrorCode::VersionIncompatible => Self::VersionIncompatible,
         }
     }
 }
@@ -77,6 +82,9 @@ pub struct Error {
     pub code: ErrorCode,
     /// A human-readable message.
     pub message: String,
+    /// Structured failure information, so a caller can act without re-parsing
+    /// `message`. `VersionIncompatible` reports the field and its bounds.
+    pub details: Option<serde_json::Value>,
 }
 
 impl std::fmt::Display for Error {
@@ -92,6 +100,7 @@ impl From<MxcError> for Error {
         Self {
             code: error.code.into(),
             message: error.message,
+            details: error.details,
         }
     }
 }

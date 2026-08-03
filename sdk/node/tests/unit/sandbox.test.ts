@@ -3,7 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
+import { buildSandboxPayload, createConfigFromPolicy, emitsTopLevelSeatbeltSection, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { platformSkip } from './test-helpers.js';
@@ -1196,5 +1196,30 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         'did not expect --allow-testing-features for a url proxy',
       );
     });
+  });
+});
+
+describe('seatbelt section availability range', () => {
+  // Regression (review F2): the darwin builder synthesises a top-level
+  // `seatbelt` block purely as a marker. That block carries a `since: 0.7`
+  // range natively, so emitting it for a 0.6 policy made the executor reject a
+  // field the caller never supplied — every 0.6 macOS policy failed.
+  //
+  // Asserted through the exported predicate because buildDarwinProcessConfig
+  // only runs on darwin; testing it only there is what let the bug through.
+  it('omits the block below 0.7', () => {
+    assert.strictEqual(emitsTopLevelSeatbeltSection('0.6.0-alpha'), false);
+  });
+
+  it('emits the block at and above 0.7', () => {
+    assert.strictEqual(emitsTopLevelSeatbeltSection('0.7.0-alpha'), true);
+    assert.strictEqual(emitsTopLevelSeatbeltSection('0.8.0-alpha'), true);
+    assert.strictEqual(emitsTopLevelSeatbeltSection('1.0.0'), true);
+  });
+
+  it('leaves an unparseable version to the version validator', () => {
+    // validatePolicyVersion owns that diagnostic; this predicate must not add a
+    // second, differently-worded failure path.
+    assert.strictEqual(emitsTopLevelSeatbeltSection('nonsense'), true);
   });
 });

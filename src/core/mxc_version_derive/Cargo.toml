@@ -1,0 +1,16 @@
+[package]
+name = "mxc_version_derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Derive macro that lifts per-field schema-version windows out of the wire model
+# so the parser and the schema generator read the same declaration. See
+# `wxc_common::version_availability` for the runtime side.
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }

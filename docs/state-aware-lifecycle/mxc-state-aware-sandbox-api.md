@@ -422,11 +422,20 @@ Phases with no backend-specific or cross-cutting fields declare a Config carryin
 change: extend `StateAwareContainmentBackend`, define five new `*Config` interfaces, and
 add an arm to `ConfigsForBackend`.
 
-Each Config carries an optional `version?: string`. When omitted, the SDK fills in its
-own `SUPPORTED_VERSION`; an explicit value is range-validated against the SDK's
-`MIN_VERSION` and `SUPPORTED_VERSION` (same convention as today's
-`validatePolicyVersion`). The override exists so consumers can target a specific wire
-version when debugging or testing version negotiation.
+Each Config carries an optional `version?: string`. It is optional **to the SDK
+caller only**: the wire format *requires* `version` (it selects which config fields are
+legal — see [versioning](../versioning.md#version-availability)), and the SDK always emits
+one, filling in `STATE_AWARE_VERSION` when the caller omits it. An explicit value is
+range-validated against the SDK's `MIN_VERSION` and `SUPPORTED_VERSION` (same convention
+as today's `validatePolicyVersion`). The override exists so consumers can target a
+specific wire version when debugging or testing version negotiation.
+
+A request that reaches the executor without a `version` is rejected with
+`version_incompatible`. Note that the generated JSON Schema does **not** list `version`
+under `required`: the schema is an editor/CI convenience, not the trust boundary (the
+parser is), and adding a `required` entry would be a structural restriction that the
+dev-schema compatibility gate correctly refuses. Cross-field and presence invariants
+live in the parser for exactly this reason.
 
 ### 6.2 Method signatures
 
@@ -991,6 +1000,7 @@ other state-aware backend, so caller error-handling code is portable across back
 | `already_stopped` | `stop` called on an already-stopped sandbox |
 | `policy_validation` | Per-stage config or cross-cutting policy contents do not satisfy the backend's expected shape or values |
 | `backend_error` | Catch-all for backend-specific failures; `details` carries structured information |
+| `version_incompatible` | The config omitted `version`, declared one outside the supported range, or used a field outside its availability range. `details` carries `{ field, declaredVersion, since, until }`, where `field` is the offending field's dotted path or `"version"` for a range failure. See [versioning](../versioning.md#version-availability) |
 
 ```typescript
 type ErrorCode =
@@ -1005,7 +1015,8 @@ type ErrorCode =
   | 'already_started'
   | 'already_stopped'
   | 'policy_validation'
-  | 'backend_error';
+  | 'backend_error'
+  | 'version_incompatible';
 ```
 
 The set is closed at the MXC layer. Backend-specific failures that don't fit one of the

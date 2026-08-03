@@ -115,6 +115,25 @@ function buildLinuxProcessConfig(
 }
 
 /**
+ * Whether a policy declaring `version` may carry a top-level `seatbelt`
+ * section, which was introduced at 0.7 and carries an availability range natively.
+ *
+ * The block is a pure marker — `containment` already selects the backend, and
+ * an absent section behaves identically to `{}` — so below 0.7 it is omitted.
+ *
+ * Exported so it stays unit-testable on any host; `buildDarwinProcessConfig`
+ * only runs on darwin.
+ */
+export function emitsTopLevelSeatbeltSection(version: string): boolean {
+    const parsed = semverParse(version);
+    if (!parsed) {
+        // validatePolicyVersion owns that diagnostic.
+        return true;
+    }
+    return parsed.major > 0 || parsed.minor >= 7;
+}
+
+/**
  * Builds the macOS process container (seatbelt) portion of a ContainerConfig.
  *
  * The seatbelt backend's `sandbox-exec` reads a TinyScheme profile
@@ -127,7 +146,9 @@ function buildDarwinProcessConfig(
     config: ContainerConfig,
 ): ContainerConfig {
     config.containment = 'seatbelt';
-    config.seatbelt = config.seatbelt ?? {};
+    if (config.seatbelt === undefined && emitsTopLevelSeatbeltSection(config.version)) {
+        config.seatbelt = {};
+    }
     return config;
 }
 

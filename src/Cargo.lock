@@ -1549,6 +1549,7 @@ dependencies = [
 name = "mxc_schema_gen"
 version = "0.7.0"
 dependencies = [
+ "serde_json",
  "wxc_common",
 ]
 
@@ -1558,6 +1559,15 @@ version = "0.7.0"
 dependencies = [
  "tracelogging",
  "uuid",
+]
+
+[[package]]
+name = "mxc_version_derive"
+version = "0.7.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -3151,6 +3161,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "mxc_telemetry",
+ "mxc_version_derive",
  "nanvix_common",
  "schemars",
  "semver",

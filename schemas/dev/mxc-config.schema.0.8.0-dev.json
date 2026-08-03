@@ -699,14 +699,16 @@
               "type": "null"
             }
           ],
-          "description": "Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability."
+          "description": "Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.\n\nIntroduced at 0.8.",
+          "x-mxc-since": "0.8"
         },
         "learningMode": {
-          "description": "AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.",
+          "description": "AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.\n\nIntroduced at 0.8.",
           "type": [
             "boolean",
             "null"
-          ]
+          ],
+          "x-mxc-since": "0.8"
         },
         "leastPrivilege": {
           "description": "Enforce least-privilege mode.",
@@ -1138,7 +1140,8 @@
           "type": "null"
         }
       ],
-      "description": "macOS Seatbelt backend configuration. Used when containment is `seatbelt`."
+      "description": "macOS Seatbelt backend configuration. Used when containment is `seatbelt`.\n\nIntroduced at 0.7. The range is on this field, not inside [`Seatbelt`], which is shared with the unconstrained `experimental.seatbelt`.",
+      "x-mxc-since": "0.7"
     },
     "ui": {
       "anyOf": [

@@ -15,6 +15,9 @@ use crate::models::{
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use crate::version_availability::{
+    validate_document, MajorMinor, VersionAvailability, VersionIncompatibility,
+};
 use crate::wire;
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -122,8 +125,7 @@ pub fn load_request_with_options(
     let result = (|| {
         let json_str = decode_request_input_without_logging(input, opts.is_base64)?;
 
-        let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        let cfg = deserialize_and_gate_str(&json_str)?;
 
         convert_wire_config(cfg, logger, true, opts.allow_missing_command)
     })();
@@ -144,13 +146,34 @@ pub fn load_request_from_value(
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
-        let cfg: wire::MxcConfig = config_deserialize::from_value(config)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        let cfg = deserialize_and_gate_value(config)?;
 
         convert_wire_config(cfg, logger, true, allow_missing_command)
     })();
     log_one_shot_error(logger, &result);
     result
+}
+
+/// Deserialise a one-shot config from JSON text and run the version gate.
+///
+/// Typed deserialisation runs first so a malformed config keeps its precise
+/// path and source position.
+fn deserialize_and_gate_str(json_str: &str) -> Result<wire::MxcConfig, WxcError> {
+    let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
+        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+    // Infallible: the typed pass above already parsed this text as JSON.
+    let document: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+    gate_version(&document, cfg.version.as_deref())?;
+    Ok(cfg)
+}
+
+/// As above, for in-process callers (the Rust SDK) that already hold a value.
+fn deserialize_and_gate_value(config: serde_json::Value) -> Result<wire::MxcConfig, WxcError> {
+    let cfg: wire::MxcConfig = config_deserialize::from_value_ref(&config)
+        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+    gate_version(&config, cfg.version.as_deref())?;
+    Ok(cfg)
 }
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
@@ -227,10 +250,9 @@ fn parse_mxc_request_json(
             allow_missing_command,
         )
         .map(MxcRequest::StateAware)
-        .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+        .map_err(|e| ParseError::StateAware(e.to_mxc_error()))
     } else {
-        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
-            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+        let cfg = deserialize_and_gate_str(json_str).map_err(ParseError::OneShot)?;
         convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
@@ -283,6 +305,11 @@ fn decode_request_input_without_logging(input: &str, is_base64: bool) -> Result<
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
 const SUPPORTED_VERSION: &str = ">=0.6, <=0.8";
 
+/// Comparable form of [`SUPPORTED_VERSION`], which the CI gate parses
+/// textually. Pinned to it by `supported_bounds_match_the_range_string`.
+const MIN_SUPPORTED: MajorMinor = MajorMinor::new(0, 6);
+const MAX_SUPPORTED: MajorMinor = MajorMinor::new(0, 8);
+
 /// Canonical "latest" schema version string used in samples and tests. Bump
 /// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
 #[cfg(test)]
@@ -294,43 +321,78 @@ const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 /// section or graduating one from experimental.
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
-/// Validate that the schema version (semver) is supported by this binary.
-/// Compares major.minor only — patch and pre-release labels are ignored.
-fn validate_schema_version(version: &str) -> Result<(), WxcError> {
-    if version.is_empty() {
-        return Ok(());
-    }
+/// Validate that the schema version is present and supported.
+///
+/// `version` is required: it selects which fields are legal, so an absent one
+/// would silently opt out of every range. Patch and pre-release are ignored.
+fn validate_schema_version(version: Option<&str>) -> Result<MajorMinor, WxcError> {
+    let Some(version) = version.filter(|v| !v.is_empty()) else {
+        return Err(WxcError::VersionIncompatible(Box::new(
+            VersionIncompatibility {
+                field: "version".to_string(),
+                declared_version: String::new(),
+                since: Some(MIN_SUPPORTED.to_string()),
+                until: Some(MAX_SUPPORTED.to_string()),
+                message: format!(
+                    "Missing required field: version. Declare the config schema version \
+                     (supported: {SUPPORTED_VERSION}); it selects which fields are valid."
+                ),
+            },
+        )));
+    };
 
     // Parse the version, stripping pre-release suffix for comparison
-    // (e.g., "0.4.0-alpha" is treated as "0.4.0")
-    let parsed = semver::Version::parse(version).map_err(|_| {
+    // Invalid SemVer is a malformed field, not an unsupported version.
+    let declared = MajorMinor::parse_semver(version).ok_or_else(|| {
         WxcError::ConfigParse(format!(
             "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
             config_deserialize::escape_diagnostic_text(version)
         ))
     })?;
 
-    let req = semver::VersionReq::parse(SUPPORTED_VERSION).unwrap();
-
-    // semver crate treats pre-release as lower precedence, so we compare
-    // against a version without the pre-release label for major.minor check.
-    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
-    if !req.matches(&comparable) {
-        let min = semver::VersionReq::parse(">=0.6").unwrap();
+    if declared < MIN_SUPPORTED || declared > MAX_SUPPORTED {
         let safe_version = config_deserialize::escape_diagnostic_text(version);
-        let msg = if !min.matches(&comparable) {
+        let message = if declared < MIN_SUPPORTED {
             format!(
-                "Config schema version '{}' is older than supported (supported: {}). Update your config.",
-                safe_version, SUPPORTED_VERSION
+                "Config schema version '{safe_version}' is older than supported \
+                 (supported: {SUPPORTED_VERSION}). Update your config."
             )
         } else {
             format!(
-                "Config schema version '{}' is newer than supported (supported: {}). Upgrade wxc-exec.",
-                safe_version, SUPPORTED_VERSION
+                "Config schema version '{safe_version}' is newer than supported \
+                 (supported: {SUPPORTED_VERSION}). Upgrade wxc-exec."
             )
         };
-        return Err(WxcError::ConfigParse(msg));
+        return Err(WxcError::VersionIncompatible(Box::new(
+            VersionIncompatibility {
+                field: "version".to_string(),
+                declared_version: safe_version,
+                since: Some(MIN_SUPPORTED.to_string()),
+                until: Some(MAX_SUPPORTED.to_string()),
+                message,
+            },
+        )));
     }
+    Ok(declared)
+}
+
+/// Run the version gate over a freshly deserialised config document.
+///
+/// Must run immediately after deserialisation: [`convert_wire_config`] moves
+/// fields out of `cfg`, after which the document cannot be checked as a whole.
+/// The supported-range check runs first, so a range violation is only reported
+/// for a supported version.
+fn gate_version(document: &serde_json::Value, version: Option<&str>) -> Result<(), WxcError> {
+    let declared = validate_schema_version(version)?;
+    let Some(root) = wire::MxcConfig::availability() else {
+        // Unreachable (`MxcConfig` derives it); fail closed rather than skip.
+        return Err(WxcError::ConfigParse(
+            "internal error: the wire model exposes no version-availability metadata".to_string(),
+        ));
+    };
+    // Untrusted input echoed into diagnostics; escape before use.
+    let safe_version = config_deserialize::escape_diagnostic_text(version.unwrap_or_default());
+    validate_document(document, declared, &safe_version, root)?;
     Ok(())
 }
 
@@ -746,10 +808,15 @@ fn convert_wire_config(
     // Backend sections present in the config (captured before fields move out).
     let present_backend_sections = present_backend_sections(&cfg);
 
+    // Belt-and-braces: the entry-point gate enforces ranges against the raw
+    // document, but this keeps "always carries a supported version" true for
+    // any future caller that bypasses it.
+    let declared = validate_schema_version(cfg.version.as_deref())?;
+    debug_assert!(
+        declared >= MIN_SUPPORTED && declared <= MAX_SUPPORTED,
+        "validate_schema_version returns only in-range versions"
+    );
     let schema_version = cfg.version.unwrap_or_default();
-
-    // Validate the schema version up front so an unsupported version fails fast.
-    validate_schema_version(&schema_version)?;
 
     let container_id = cfg.container_id.unwrap_or_default();
 
@@ -1312,6 +1379,13 @@ fn convert_wire_state_aware(
     let mut cfg: wire::MxcConfig = config_deserialize::from_str(&base_json)
         .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
+    // Gate the ORIGINAL document, not the experimental-masked copy: nothing
+    // under `experimental` is annotated today, but masking would silently make
+    // such a range unenforceable if one were added.
+    let document: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+    gate_version(&document, cfg.version.as_deref())?;
+
     // `phase` is the state-aware discriminator and is constrained by the wire
     // enum; absence here would be a logic error in the caller's discrimination.
     let phase = match cfg.phase.take() {
@@ -1532,7 +1606,7 @@ mod tests {
         // No process.commandLine in the policy — without the flag this would
         // be a parse error; with allow_missing_command set the parser yields
         // an empty script_code for the driver to fill in.
-        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"cwd": "C:\\tmp"}}"#;
         let opts = LoadOptions {
             is_base64: true,
             allow_missing_command: true,
@@ -1548,7 +1622,7 @@ mod tests {
 
     #[test]
     fn allow_missing_command_lets_one_shot_skip_process_block_entirely() {
-        let json = r#"{"containment": "processcontainer"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "containment": "processcontainer"}"#;
         let opts = LoadOptions {
             is_base64: true,
             allow_missing_command: true,
@@ -1561,7 +1635,7 @@ mod tests {
 
     #[test]
     fn allow_missing_command_lets_state_aware_exec_skip_command_line() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {"cwd": "C:\\tmp"}
@@ -1583,7 +1657,7 @@ mod tests {
     fn default_options_still_reject_missing_command_line() {
         // Sanity: without the flag, the legacy contract holds — missing
         // commandLine is a hard parse error.
-        let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"cwd": "C:\\tmp"}}"#;
         let opts = LoadOptions {
             is_base64: true,
             allow_missing_command: false,
@@ -1593,7 +1667,7 @@ mod tests {
 
     #[test]
     fn one_shot_routes_via_load_mxc_request() {
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}}"#;
         match load_mxc(json).unwrap() {
             MxcRequest::OneShot(req) => assert_eq!(req.script_code, "echo hello"),
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
@@ -1602,7 +1676,7 @@ mod tests {
 
     #[test]
     fn state_aware_provision_request_routes_to_state_aware_arm() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "filesystem": {"readwritePaths": ["C:\\workspace"]}
@@ -1623,7 +1697,7 @@ mod tests {
 
     #[test]
     fn state_aware_start_request_carries_sandbox_id_and_experimental() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {
@@ -1655,7 +1729,7 @@ mod tests {
         // populate the typed `experimental.telemetry` field (consumed the same
         // way as one-shot) while leaving the per-backend `experimental_raw`
         // block intact for dispatch.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"telemetry": {"enabled": true}}
@@ -1677,7 +1751,7 @@ mod tests {
 
     #[test]
     fn state_aware_without_telemetry_leaves_typed_field_unset() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
@@ -1692,7 +1766,7 @@ mod tests {
     fn state_aware_malformed_telemetry_is_rejected() {
         // A present-but-malformed telemetry block is a client error rejected at
         // parse time (surfaced as a state-aware envelope), not a silent disable.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"telemetry": 42}
@@ -1707,7 +1781,7 @@ mod tests {
         // diagnostic sink exactly once (routed centrally by the outer
         // `load_mxc_request` wrapper), never duplicated, and must never touch the
         // primary buffer/stdout that the state-aware JSON envelope owns.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"telemetry": 42}
@@ -1746,7 +1820,7 @@ mod tests {
         // path peels `experimental` off before typed deserialize, so it must
         // reject a non-object value explicitly to stay consistent rather than
         // silently ignoring it.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": 42
@@ -1759,7 +1833,7 @@ mod tests {
     fn state_aware_null_experimental_is_accepted() {
         // `null` maps to "absent" on both the one-shot and state-aware paths, so
         // it is accepted (leaving telemetry unset), unlike a non-object value.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": null
@@ -1772,7 +1846,7 @@ mod tests {
 
     #[test]
     fn state_aware_exec_request_requires_command_line() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "exec",
             "sandboxId": "iso:abcd1234",
             "process": {"commandLine": "echo hello"}
@@ -1789,14 +1863,14 @@ mod tests {
     #[test]
     fn state_aware_exec_without_process_is_rejected() {
         // Exec phase still requires the process.commandLine wire field.
-        let json = r#"{ "phase": "exec", "sandboxId": "iso:abcd1234" }"#;
+        let json = r#"{"version": "0.8.0-alpha",  "phase": "exec", "sandboxId": "iso:abcd1234" }"#;
         let r = load_mxc(json);
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
     }
 
     #[test]
     fn state_aware_unknown_phase_is_rejected() {
-        let json = r#"{"phase": "teleport"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "phase": "teleport"}"#;
         let error = match load_mxc(json) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
@@ -1807,7 +1881,7 @@ mod tests {
 
     #[test]
     fn present_null_phase_is_still_discriminated_as_state_aware() {
-        let error = match load_mxc(r#"{"phase": null}"#) {
+        let error = match load_mxc(r#"{"version": "0.8.0-alpha", "phase": null}"#) {
             Err(ParseError::StateAware(error)) => error,
             other => panic!("expected state-aware error, got {other:?}"),
         };
@@ -1817,7 +1891,7 @@ mod tests {
 
     #[test]
     fn state_aware_unknown_containment_is_rejected() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "totally_made_up"
         }"#;
@@ -1838,7 +1912,7 @@ mod tests {
 
     #[test]
     fn state_aware_mask_preserves_locations_after_multiline_experimental() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "experimental": {
                 "future_backend": {
@@ -1865,8 +1939,8 @@ mod tests {
     #[test]
     fn state_aware_mask_handles_empty_object_at_root_boundaries() {
         for json in [
-            r#"{"experimental":{},"phase":"provision"}"#,
-            r#"{"phase":"provision","experimental":{}}"#,
+            r#"{"version": "0.8.0-alpha", "experimental":{},"phase":"provision"}"#,
+            r#"{"version": "0.8.0-alpha", "phase":"provision","experimental":{}}"#,
         ] {
             let discriminator: RequestDiscriminator<'_> =
                 config_deserialize::from_str(json).unwrap();
@@ -1895,7 +1969,8 @@ mod tests {
 
     #[test]
     fn experimental_source_span_locates_the_borrowed_block() {
-        let json = r#"{"phase":"provision","experimental":{"a":{"b":1}}}"#;
+        let json =
+            r#"{"version": "0.8.0-alpha", "phase":"provision","experimental":{"a":{"b":1}}}"#;
         let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
         let raw = discriminator.experimental.unwrap().get();
 
@@ -1909,7 +1984,7 @@ mod tests {
     fn experimental_source_span_rejects_a_foreign_slice() {
         // A `raw` not borrowed from `json` must fail closed rather than compute
         // an out-of-range offset — the invariant guard the masking relies on.
-        let json = r#"{"experimental":{}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "experimental":{}}"#;
         let foreign = String::from("{}");
         let error = experimental_source_span(json, foreign.as_str()).unwrap_err();
         assert!(matches!(error, WxcError::ConfigParse(_)));
@@ -1941,7 +2016,9 @@ mod tests {
         // `state_aware_null_experimental_is_accepted`); only non-null,
         // non-object values are rejected.
         for value in [r#""oops""#, "42", "[]"] {
-            let json = format!(r#"{{"phase":"provision","experimental":{value}}}"#);
+            let json = format!(
+                r#"{{"version": "0.8.0-alpha", "phase":"provision","experimental":{value}}}"#
+            );
             let error = match load_mxc(&json) {
                 Err(ParseError::StateAware(error)) => error,
                 other => panic!("expected state-aware error for {value}, got {other:?}"),
@@ -1960,7 +2037,7 @@ mod tests {
     fn state_aware_provision_works_with_no_containment() {
         // Containment is optional at parse time; the dispatcher enforces it
         // (provision needs containment, non-provision uses sandbox_id prefix).
-        let json = r#"{"phase": "provision"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "phase": "provision"}"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Provision);
@@ -1972,7 +2049,7 @@ mod tests {
 
     #[test]
     fn minimal_config() {
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2007,7 +2084,7 @@ mod tests {
 
     #[test]
     fn missing_process_section() {
-        let json = r#"{"containment": "processcontainer"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "containment": "processcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2017,7 +2094,7 @@ mod tests {
 
     #[test]
     fn missing_command_line() {
-        let json = r#"{"process": {"cwd": "/tmp"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"cwd": "/tmp"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2027,7 +2104,7 @@ mod tests {
 
     #[test]
     fn empty_command_line() {
-        let json = r#"{"process": {"commandLine": ""}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": ""}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2037,7 +2114,7 @@ mod tests {
 
     #[test]
     fn malicious_command_line() {
-        let json = r#"{"process": {"commandLine": "echo hello\0world"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello\0world"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2047,7 +2124,7 @@ mod tests {
 
     #[test]
     fn full_config() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "containerId": "TestProfile",
             "containment": "processcontainer",
             "process": {
@@ -2098,8 +2175,7 @@ mod tests {
 
     #[test]
     fn invalid_network_policy() {
-        let json =
-            r#"{"process": {"commandLine": "echo x"}, "network": {"defaultPolicy": "invalid"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo x"}, "network": {"defaultPolicy": "invalid"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2117,7 +2193,7 @@ mod tests {
 
     #[test]
     fn wrong_value_type_reports_path_and_source_location() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {
                 "commandLine": "echo x",
                 "timeout": "soon"
@@ -2157,7 +2233,7 @@ mod tests {
         let log_path = directory.path().join("mxc.log");
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
-        let encoded = base64_encode(br#"{"phase":"teleport"}"#);
+        let encoded = base64_encode(br#"{"version": "0.8.0-alpha", "phase":"teleport"}"#);
 
         let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(matches!(result, Err(ParseError::StateAware(_))));
@@ -2174,8 +2250,7 @@ mod tests {
 
     #[test]
     fn out_of_range_value_reports_path() {
-        let json =
-            r#"{"process":{"commandLine":"echo x"},"network":{"proxy":{"localhost":70000}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"echo x"},"network":{"proxy":{"localhost":70000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2193,7 +2268,7 @@ mod tests {
 
     #[test]
     fn malformed_json_is_reported_as_syntax_not_policy_data() {
-        let json = r#"{"process":{"commandLine":"echo x"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"echo x"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2211,8 +2286,7 @@ mod tests {
 
     #[test]
     fn invalid_enforcement_mode() {
-        let json =
-            r#"{"process": {"commandLine": "echo x"}, "network": {"enforcementMode": "invalid"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo x"}, "network": {"enforcementMode": "invalid"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2228,7 +2302,11 @@ mod tests {
     fn load_from_file() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("config.json");
-        std::fs::write(&file_path, r#"{"process": {"commandLine": "whoami"}}"#).unwrap();
+        std::fs::write(
+            &file_path,
+            r#"{"version": "0.8.0-alpha", "process": {"commandLine": "whoami"}}"#,
+        )
+        .unwrap();
 
         let mut logger = test_logger();
         let req = load_request(file_path.to_str().unwrap(), &mut logger, false).unwrap();
@@ -2336,7 +2414,9 @@ mod tests {
         let log_path = directory.path().join("mxc.log");
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
-        let encoded = base64_encode(br#"{"phase":"provision","experimental":{"seatbelt":{}}}"#);
+        let encoded = base64_encode(
+            br#"{"version": "0.8.0-alpha", "phase":"provision","experimental":{"seatbelt":{}}}"#,
+        );
 
         let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(matches!(result, Err(ParseError::StateAware(_))));
@@ -2365,7 +2445,7 @@ mod tests {
 
     #[test]
     fn learning_mode_boolean_maps_to_deny_and_record_capability() {
-        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2390,7 +2470,7 @@ mod tests {
             "PERMISSIVELEARNINGMODE",
         ] {
             let json = format!(
-                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
+                r#"{{"version": "0.8.0-alpha", "process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
             );
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
@@ -2411,7 +2491,7 @@ mod tests {
             "internetClient,privateNetworkClientServer",
         ] {
             let json = format!(
-                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
+                r#"{{"version": "0.8.0-alpha", "process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
             );
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
@@ -2429,8 +2509,7 @@ mod tests {
 
     #[test]
     fn script_with_timeout() {
-        let json =
-            r#"{"process": {"commandLine": "import sys\nprint(sys.version)", "timeout": 60000}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "import sys\nprint(sys.version)", "timeout": 60000}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2440,7 +2519,7 @@ mod tests {
 
     #[test]
     fn process_container_capabilities() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {
@@ -2459,7 +2538,7 @@ mod tests {
 
     #[test]
     fn capture_denials_absent_leaves_policy_none() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {}
@@ -2472,7 +2551,7 @@ mod tests {
 
     #[test]
     fn capture_denials_presence_enables_capture_without_path() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {}}
@@ -2491,7 +2570,7 @@ mod tests {
 
     #[test]
     fn capture_denials_mode_block_is_parsed() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {"mode": "block"}}
@@ -2505,7 +2584,7 @@ mod tests {
 
     #[test]
     fn capture_denials_mode_allow_is_parsed() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {"mode": "allow"}}
@@ -2519,7 +2598,7 @@ mod tests {
 
     #[test]
     fn capture_denials_block_injects_learning_mode_logging_capability() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {"mode": "block"}}
@@ -2544,7 +2623,7 @@ mod tests {
 
     #[test]
     fn capture_denials_allow_injects_permissive_learning_mode_capability() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {"mode": "allow"}}
@@ -2563,7 +2642,7 @@ mod tests {
 
     #[test]
     fn capture_denials_default_injects_learning_mode_logging_capability() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {}}
@@ -2582,7 +2661,7 @@ mod tests {
 
     #[test]
     fn capture_denials_allow_overrides_learning_mode_boolean() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {
@@ -2620,7 +2699,7 @@ mod tests {
 
     #[test]
     fn capture_denials_unknown_mode_rejected() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {"mode": "audit"}}
@@ -2644,7 +2723,7 @@ mod tests {
         let path = dir.path().join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
-            r#"{{
+            r#"{{"version": "0.8.0-alpha", 
                 "process": {{"commandLine": "print('test')"}},
                 "containment": "processcontainer",
                 "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
@@ -2662,7 +2741,7 @@ mod tests {
 
     #[test]
     fn capture_denials_relative_output_path_rejected() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "processContainer": {"captureDenials": {"outputPath": "relative/denials.json"}}
@@ -2684,7 +2763,7 @@ mod tests {
         let path = dir.path().join("nonexistent").join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
-            r#"{{
+            r#"{{"version": "0.8.0-alpha", 
                 "process": {{"commandLine": "print('test')"}},
                 "containment": "processcontainer",
                 "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
@@ -2707,7 +2786,7 @@ mod tests {
         let root = if cfg!(windows) { "C:\\" } else { "/" };
         let root_json = serde_json::to_string(root).unwrap();
         let json = format!(
-            r#"{{
+            r#"{{"version": "0.8.0-alpha", 
                 "process": {{"commandLine": "print('test')"}},
                 "containment": "processcontainer",
                 "processContainer": {{"captureDenials": {{"outputPath": {root_json}}}}}
@@ -2728,7 +2807,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let path_json = serde_json::to_string(&dir.path().to_string_lossy()).unwrap();
         let json = format!(
-            r#"{{
+            r#"{{"version": "0.8.0-alpha", 
                 "process": {{"commandLine": "print('test')"}},
                 "containment": "processcontainer",
                 "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
@@ -2747,7 +2826,7 @@ mod tests {
 
     #[test]
     fn least_privilege_mode() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "containment": "processcontainer", "processContainer": {"leastPrivilege": true}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "print('test')"}, "containment": "processcontainer", "processContainer": {"leastPrivilege": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2757,7 +2836,7 @@ mod tests {
 
     #[test]
     fn network_default_policy_allow() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "allow"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "allow"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2767,7 +2846,7 @@ mod tests {
 
     #[test]
     fn network_default_policy_block() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "block"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "block"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2798,7 +2877,7 @@ mod tests {
 
     #[test]
     fn network_enforcement_mode_capabilities() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "capabilities"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "capabilities"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2811,7 +2890,7 @@ mod tests {
 
     #[test]
     fn network_enforcement_mode_firewall() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "firewall"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "firewall"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2824,7 +2903,7 @@ mod tests {
 
     #[test]
     fn network_enforcement_mode_both() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "both"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "both"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2837,7 +2916,7 @@ mod tests {
 
     #[test]
     fn network_hosts() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "network": {
                 "allowedHosts": ["example.com", "api.trusted.com"],
@@ -2858,7 +2937,7 @@ mod tests {
 
     #[test]
     fn network_allow_local_network() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "network": {"allowLocalNetwork": true}
         }"#;
@@ -2871,7 +2950,7 @@ mod tests {
 
     #[test]
     fn network_allow_local_network_defaults_false() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "network": {}
         }"#;
@@ -2884,7 +2963,7 @@ mod tests {
 
     #[test]
     fn filesystem_paths() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "filesystem": {
                 "readwritePaths": ["C:\\Users\\Public", "C:\\Temp\\Data"],
@@ -2905,7 +2984,7 @@ mod tests {
 
     #[test]
     fn block_evil_filesystem_paths() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "filesystem": {
                 "readwritePaths": ["C:\\My \"Evil\\Path"]
@@ -2920,7 +2999,7 @@ mod tests {
 
     #[test]
     fn base64_complex_config() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "containerId": "TestContainer",
             "containment": "processcontainer",
             "process": {
@@ -2943,7 +3022,7 @@ mod tests {
 
     #[test]
     fn invalid_json_syntax() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, INVALID_JSON}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "print('test')"}, INVALID_JSON}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2953,7 +3032,7 @@ mod tests {
 
     #[test]
     fn default_timeout_is_zero() {
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2963,7 +3042,7 @@ mod tests {
 
     #[test]
     fn allow_dacl_mutation_default_true() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
@@ -2972,7 +3051,7 @@ mod tests {
 
     #[test]
     fn allow_dacl_mutation_explicit_false() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "fallback": {"allowDaclMutation": false}
         }"#;
@@ -2984,7 +3063,7 @@ mod tests {
 
     #[test]
     fn allow_dacl_mutation_explicit_true() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "fallback": {"allowDaclMutation": true}
         }"#;
@@ -3000,7 +3079,7 @@ mod tests {
     fn default_containment_resolves_per_target() {
         // Omitted `containment` resolves to the OS-native process sandbox:
         // ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS.
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3016,8 +3095,7 @@ mod tests {
 
     #[test]
     fn explicit_processcontainer_containment() {
-        let json =
-            r#"{"process": {"commandLine": "echo hello"}, "containment": "processcontainer"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "processcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3031,7 +3109,7 @@ mod tests {
         // ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS.
         // Callers who want LXC (a full container) must request it explicitly
         // via `"containment": "lxc"`.
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "process"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "process"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3050,7 +3128,7 @@ mod tests {
         // Regression guard: making bubblewrap the Linux default for the
         // abstract `"process"` intent must NOT change how explicit `"lxc"`
         // resolves. LXC remains available to any caller that asks for it.
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "lxc"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "lxc"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3064,7 +3142,7 @@ mod tests {
         // `"bubblewrap"` should parse to the concrete backend on every
         // target without error. (Host availability is checked at runtime by
         // the runner, not here.)
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "bubblewrap"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "bubblewrap"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3076,7 +3154,7 @@ mod tests {
     fn hyperlight_containment_value_parses() {
         // Lock in that `"hyperlight"` is accepted by the parser (the
         // `map_wire_containment` arm handles both one-shot and state-aware).
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "hyperlight"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "hyperlight"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3090,7 +3168,7 @@ mod tests {
         // other targets there is no concrete VM backend yet, so the parser
         // returns the historical `Vm` placeholder variant which the host
         // binaries surface as a "not implemented" error.
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "vm"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "vm"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3104,8 +3182,7 @@ mod tests {
 
     #[test]
     fn sandbox_containment() {
-        let json =
-            r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "windows_sandbox"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3115,7 +3192,7 @@ mod tests {
 
     #[test]
     fn invalid_containment_value() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "docker"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "docker"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3129,7 +3206,7 @@ mod tests {
 
     #[test]
     fn sandbox_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hello"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3141,7 +3218,7 @@ mod tests {
 
     #[test]
     fn sandbox_config_custom_values() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hello"},
             "containment": "windows_sandbox",
             "experimental": {
@@ -3164,8 +3241,7 @@ mod tests {
 
     #[test]
     fn no_proxy_leaves_default() {
-        let json =
-            r#"{"process": {"commandLine": "echo test"}, "network": {"defaultPolicy": "block"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo test"}, "network": {"defaultPolicy": "block"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3175,7 +3251,7 @@ mod tests {
 
     #[test]
     fn proxy_localhost_port() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
             "network": {
@@ -3195,7 +3271,7 @@ mod tests {
 
     #[test]
     fn proxy_url_parsed() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
             "network": {
@@ -3214,7 +3290,7 @@ mod tests {
 
     #[test]
     fn proxy_url_non_localhost() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
             "network": {
@@ -3232,8 +3308,7 @@ mod tests {
 
     #[test]
     fn proxy_url_missing_port() {
-        let json =
-            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"url":"http://localhost"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"network":{"proxy":{"url":"http://localhost"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3243,7 +3318,7 @@ mod tests {
 
     #[test]
     fn proxy_url_ipv6_loopback() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
             "network": {
@@ -3261,7 +3336,7 @@ mod tests {
 
     #[test]
     fn proxy_with_firewall_fields() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
             "network": {
@@ -3283,7 +3358,7 @@ mod tests {
 
     #[test]
     fn proxy_rejected_with_non_processcontainer() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3293,7 +3368,7 @@ mod tests {
 
     #[test]
     fn proxy_rejects_port_zero() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"localhost":0}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"network":{"proxy":{"localhost":0}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3303,7 +3378,8 @@ mod tests {
 
     #[test]
     fn proxy_rejects_missing_localhost() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{}}}"#;
+        let json =
+            r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"network":{"proxy":{}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3313,7 +3389,8 @@ mod tests {
 
     #[test]
     fn proxy_rejects_non_object() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":true}}"#;
+        let json =
+            r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"network":{"proxy":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3323,7 +3400,7 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
             "network": {
@@ -3341,7 +3418,7 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejects_extra_keys() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3351,8 +3428,7 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejects_false() {
-        let json =
-            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":false}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":false}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3363,7 +3439,7 @@ mod tests {
     #[test]
     fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
         // lxc is not allowed -- proxy is gated to processcontainer + bubblewrap.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3798,7 +3874,7 @@ mod tests {
         // as HTTP(S)_PROXY, which fails open. Reject at parse time.
         for url in ["socks5://proxy.example:1080", "ftp://proxy.example:21"] {
             let json = format!(
-                r#"{{
+                r#"{{"version": "0.8.0-alpha", 
                     "process": {{"commandLine": "echo hi"}},
                     "containment": "processcontainer",
                     "network": {{"proxy": {{"url": "{url}"}}}}
@@ -3818,7 +3894,7 @@ mod tests {
     fn proxy_scheme_error_redacts_credentials() {
         // A rejected proxy URL must not echo embedded `user:password@`
         // userinfo into the error (which reaches the diagnostic/log stream).
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "containment": "processcontainer",
             "network": {"proxy": {"url": "socks5://alice:s3cr3t@proxy.example:1080"}}
@@ -3898,18 +3974,20 @@ mod tests {
 
     #[test]
     fn new_toplevel_fields_default_when_absent() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "");
+        // `version` is required, so it is never empty; only `containerId` still
+        // defaults.
+        assert_eq!(req.schema_version, "0.8.0-alpha");
         assert_eq!(req.container_id, "");
     }
 
     #[test]
     fn process_section_env_parsed() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {
                 "commandLine": "echo hi",
                 "env": ["FOO=bar", "BAZ=qux"]
@@ -3924,7 +4002,7 @@ mod tests {
 
     #[test]
     fn process_section_cwd_parsed() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {
                 "commandLine": "echo hi",
                 "cwd": "/workspace"
@@ -3939,7 +4017,7 @@ mod tests {
 
     #[test]
     fn process_section_timeout_parsed() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {
                 "commandLine": "echo hi",
                 "timeout": 9000
@@ -3954,7 +4032,7 @@ mod tests {
 
     #[test]
     fn containment_microvm_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "microvm"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3964,7 +4042,7 @@ mod tests {
 
     #[test]
     fn unknown_top_level_field_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "bogusField": true}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "bogusField": true}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3979,7 +4057,7 @@ mod tests {
     fn filesystem_typo_rejected() {
         // `fileSystem` (capital S) used to be silently dropped, so the policy
         // never applied. It must now be rejected as an unknown field.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "fileSystem": {"readwritePaths": ["C:\\x"]}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "fileSystem": {"readwritePaths": ["C:\\x"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3991,7 +4069,8 @@ mod tests {
     fn nested_unknown_field_rejected() {
         // The stable surface is closed at every level (deny_unknown_fields):
         // an unknown *nested* field must be rejected, not just top-level ones.
-        let json = r#"{"process": {"commandLine": "echo hi", "bogus": 1}}"#;
+        let json =
+            r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi", "bogus": 1}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4009,7 +4088,7 @@ mod tests {
 
     #[test]
     fn nested_proxy_unknown_field_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "network": {"proxy": {"localhost": 8080, "unexpected": true}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "processcontainer", "network": {"proxy": {"localhost": 8080, "unexpected": true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4024,7 +4103,7 @@ mod tests {
     #[test]
     fn invalid_clipboard_rejected() {
         // Strict enum: an out-of-range clipboard value is rejected at deserialize.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "bogus"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "ui": {"clipboard": "bogus"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4041,7 +4120,7 @@ mod tests {
         // The experimental surface is intentionally permissive (forward-compat):
         // an unknown field on a nested experimental struct must be tolerated and
         // the known fields preserved.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "futureField": "ignored"}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "futureField": "ignored"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4054,7 +4133,7 @@ mod tests {
 
     #[test]
     fn experimental_isolation_user_unknown_field_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4072,7 +4151,7 @@ mod tests {
     fn one_shot_rejects_phase_field() {
         // A state-aware-shaped payload (carries `phase`) sent to a one-shot
         // entry point must be rejected, not silently run as a one-shot.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "phase": "provision"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "phase": "provision"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4086,7 +4165,7 @@ mod tests {
 
     #[test]
     fn one_shot_rejects_sandbox_id_field() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "sandboxId": "abc"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "sandboxId": "abc"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4102,7 +4181,7 @@ mod tests {
     fn one_shot_rejects_correlation_vector_field() {
         // `correlationVector` is a state-aware-only relay field; a one-shot
         // payload carrying it must be rejected, mirroring `phase`/`sandboxId`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4118,7 +4197,7 @@ mod tests {
     fn top_level_macos_sandbox_alias_maps_to_seatbelt() {
         // The deprecated `macos_sandbox` section-key alias on the top-level
         // `seatbelt` field is still accepted and maps to `req.seatbelt`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "macos_sandbox": {"guiAccess": true}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt", "macos_sandbox": {"guiAccess": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4148,7 +4227,7 @@ mod tests {
 
     #[test]
     fn state_aware_unknown_top_level_field_rejected() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "bogusField": true
@@ -4165,7 +4244,7 @@ mod tests {
         // A state-aware request carrying a one-shot-only `seatbelt` policy must
         // be rejected, not silently discarded (the caller might believe the
         // hardening is in effect).
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "seatbelt",
             "seatbelt": {"guiAccess": true}
@@ -4182,7 +4261,7 @@ mod tests {
 
     #[test]
     fn state_aware_rejects_one_shot_lifecycle_section() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "lifecycle": {"destroyOnExit": false}
@@ -4199,7 +4278,7 @@ mod tests {
 
     #[test]
     fn state_aware_rejects_one_shot_processcontainer_section() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "processcontainer",
             "processContainer": {"leastPrivilege": true}
@@ -4216,7 +4295,7 @@ mod tests {
 
     #[test]
     fn state_aware_rejects_one_shot_lxc_section() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "lxc",
             "lxc": {"distribution": "alpine"}
@@ -4236,7 +4315,7 @@ mod tests {
         // `experimental.seatbelt` moved to the stable section; the state-aware
         // path must reject it with the migration message, not silently discard
         // it.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"seatbelt": {"guiAccess": true}}
@@ -4253,7 +4332,7 @@ mod tests {
 
     #[test]
     fn state_aware_rejects_experimental_macos_sandbox_alias() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {"macos_sandbox": {"guiAccess": true}}
@@ -4270,7 +4349,7 @@ mod tests {
 
     #[test]
     fn state_aware_top_level_annotation_allowed() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
             "phase": "provision",
             "containment": "isolation_session"
@@ -4285,7 +4364,7 @@ mod tests {
     fn state_aware_forwards_container_id() {
         // `containerId` is a documented top-level field and must be preserved
         // into the inner ExecutionRequest for state-aware requests, not dropped.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containerId": "sa-container-1",
             "containment": "isolation_session"
@@ -4379,13 +4458,305 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_absent_accepted() {
+    fn schema_version_absent_rejected() {
+        // `version` selects which fields are legal, so absence cannot default.
         let json = r#"{"process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "");
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let details = match &error {
+            WxcError::VersionIncompatible(details) => details,
+            other => panic!("expected VersionIncompatible, got {other:?}"),
+        };
+        assert_eq!(details.field, "version");
+        assert_eq!(details.declared_version, "");
+        assert!(
+            details.message.contains("Missing required field: version"),
+            "got: {}",
+            details.message
+        );
+    }
+
+    #[test]
+    fn schema_version_empty_string_rejected() {
+        // An empty string names no version, so it counts as absent.
+        let json = r#"{"version": "", "process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            matches!(error, WxcError::VersionIncompatible(_)),
+            "{error:?}"
+        );
+    }
+
+    // ---------- availability ranges ----------
+    //
+    // These drive the real parser over the real wire model, proving the
+    // production annotations are enforced. The mechanism itself (both
+    // directions, nesting, arrays, aliases) is covered in
+    // `crate::version_availability`.
+
+    fn version_error(json: &str) -> Box<VersionIncompatibility> {
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        match load_request(&encoded, &mut logger, true) {
+            Err(WxcError::VersionIncompatible(details)) => details,
+            other => panic!("expected a version incompatibility, got {other:?}"),
+        }
+    }
+
+    fn expect_accepted(json: &str) {
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        load_request(&encoded, &mut logger, true)
+            .unwrap_or_else(|err| panic!("expected accept for {json}, got {err:?}"));
+    }
+
+    #[test]
+    fn supported_bounds_match_the_range_string() {
+        // The CI gate parses `SUPPORTED_VERSION` textually; the comparison uses
+        // the consts. Pin them so raising one without the other is caught.
+        let req = semver::VersionReq::parse(SUPPORTED_VERSION).expect("range parses");
+        let inside = semver::Version::new(MIN_SUPPORTED.major, MIN_SUPPORTED.minor, 0);
+        let above = semver::Version::new(MAX_SUPPORTED.major, MAX_SUPPORTED.minor, 0);
+        assert!(
+            req.matches(&inside),
+            "min bound disagrees with {SUPPORTED_VERSION}"
+        );
+        assert!(
+            req.matches(&above),
+            "max bound disagrees with {SUPPORTED_VERSION}"
+        );
+        assert!(!req.matches(&semver::Version::new(
+            MIN_SUPPORTED.major,
+            MIN_SUPPORTED.minor - 1,
+            0
+        )));
+        assert!(!req.matches(&semver::Version::new(
+            MAX_SUPPORTED.major,
+            MAX_SUPPORTED.minor + 1,
+            0
+        )));
+    }
+
+    #[test]
+    fn seatbelt_section_rejected_below_its_availability() {
+        let details = version_error(
+            r#"{"version": "0.6.0-alpha", "process": {"commandLine": "echo hi"},
+                "seatbelt": {"guiAccess": true}}"#,
+        );
+        assert_eq!(details.field, "seatbelt");
+        assert_eq!(details.since.as_deref(), Some("0.7"));
+        assert_eq!(details.until, None);
+        assert_eq!(details.declared_version, "0.6.0-alpha");
+        assert!(
+            details.message.contains("introduced in schema version 0.7"),
+            "got: {}",
+            details.message
+        );
+    }
+
+    #[test]
+    fn seatbelt_section_accepted_at_and_above_its_availability() {
+        for version in ["0.7.0-alpha", "0.8.0-alpha"] {
+            expect_accepted(&format!(
+                r#"{{"version": "{version}", "containment": "seatbelt",
+                    "process": {{"commandLine": "echo hi"}},
+                    "seatbelt": {{"guiAccess": true}}}}"#
+            ));
+        }
+    }
+
+    #[test]
+    fn a_serde_alias_is_availability_checked_like_the_field_it_spells() {
+        // Checking only the canonical spelling would let the alias bypass.
+        let details = version_error(
+            r#"{"version": "0.6.0-alpha", "process": {"commandLine": "echo hi"},
+                "macos_sandbox": {"guiAccess": true}}"#,
+        );
+        assert_eq!(
+            details.field, "macos_sandbox",
+            "the message should name the spelling the config actually used"
+        );
+        assert_eq!(details.since.as_deref(), Some("0.7"));
+    }
+
+    #[test]
+    fn nested_availability_violation_names_the_full_path() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha"] {
+            let details = version_error(&format!(
+                r#"{{"version": "{version}", "containment": "processcontainer",
+                    "process": {{"commandLine": "echo hi"}},
+                    "processContainer": {{"captureDenials": {{"mode": "block"}}}}}}"#
+            ));
+            assert_eq!(details.field, "processContainer.captureDenials");
+            assert_eq!(details.since.as_deref(), Some("0.8"));
+        }
+    }
+
+    #[test]
+    fn nested_availability_field_accepted_at_its_version() {
+        expect_accepted(
+            r#"{"version": "0.8.0-alpha", "containment": "processcontainer",
+                "process": {"commandLine": "echo hi"},
+                "processContainer": {"learningMode": true}}"#,
+        );
+    }
+
+    #[test]
+    fn learning_mode_rejected_below_its_availability() {
+        let details = version_error(
+            r#"{"version": "0.7.0-alpha", "containment": "processcontainer",
+                "process": {"commandLine": "echo hi"},
+                "processContainer": {"learningMode": true}}"#,
+        );
+        assert_eq!(details.field, "processContainer.learningMode");
+        assert_eq!(details.since.as_deref(), Some("0.8"));
+    }
+
+    #[test]
+    fn unannotated_fields_are_valid_across_the_whole_supported_range() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            expect_accepted(&format!(
+                r#"{{"version": "{version}", "containerId": "abc",
+                    "process": {{"commandLine": "echo hi", "timeout": 1000}},
+                    "filesystem": {{"readonlyPaths": ["C:\\tmp"]}},
+                    "ui": {{"disable": true}}}}"#
+            ));
+        }
+    }
+
+    #[test]
+    fn the_experimental_block_carries_no_availability() {
+        // `experimental` was an open block before 0.8, so anything under it has
+        // always been accepted; a range derived from schema presence would
+        // reject configs that have always worked.
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            expect_accepted(&format!(
+                r#"{{"version": "{version}", "containment": "wslc",
+                    "process": {{"commandLine": "echo hi"}},
+                    "experimental": {{"wslc": {{"image": "python"}}}}}}"#
+            ));
+        }
+    }
+
+    #[test]
+    fn state_aware_requests_parse_at_the_version_the_sdk_emits() {
+        // The SDK stamps state-aware envelopes 0.6 while carrying
+        // `phase`/`sandboxId`, which only entered the schema at 0.8.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert_eq!(p.phase, Phase::Exec),
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_availability_violations_surface_as_typed_envelope_errors() {
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "phase": "provision",
+            "containment": "processcontainer",
+            "processContainer": {"learningMode": true}
+        }"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected a state-aware error, got {other:?}"),
+        };
+        assert_eq!(
+            error.code,
+            crate::mxc_error::MxcErrorCode::VersionIncompatible
+        );
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({
+                "field": "processContainer.learningMode",
+                "declaredVersion": "0.6.0-alpha",
+                "since": "0.8",
+                "until": null,
+            }))
+        );
+    }
+
+    #[test]
+    fn state_aware_missing_version_is_rejected() {
+        let json = r#"{"phase": "provision", "containment": "isolation_session"}"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected a state-aware error, got {other:?}"),
+        };
+        assert_eq!(
+            error.code,
+            crate::mxc_error::MxcErrorCode::VersionIncompatible
+        );
+    }
+
+    #[test]
+    fn the_supported_range_error_is_typed_and_carries_the_range() {
+        let details =
+            version_error(r#"{"version": "0.3.0-alpha", "process": {"commandLine": "echo hi"}}"#);
+        assert_eq!(details.field, "version");
+        assert_eq!(details.declared_version, "0.3.0-alpha");
+        assert_eq!(details.since.as_deref(), Some("0.6"));
+        assert_eq!(details.until.as_deref(), Some("0.8"));
+        assert!(details.message.contains("older than supported"));
+
+        let details =
+            version_error(r#"{"version": "9.9.0-alpha", "process": {"commandLine": "echo hi"}}"#);
+        assert_eq!(details.field, "version");
+        assert!(details.message.contains("newer than supported"));
+    }
+
+    #[test]
+    fn an_availability_violation_is_reported_before_backend_dispatch_concerns() {
+        // The gate runs before backend selection, so the version problem is
+        // reported even when the config is otherwise wrong too.
+        let details = version_error(
+            r#"{"version": "0.6.0-alpha", "containment": "lxc",
+                "process": {"commandLine": "echo hi"},
+                "seatbelt": {"guiAccess": true}}"#,
+        );
+        assert_eq!(details.field, "seatbelt");
+    }
+
+    #[test]
+    fn version_availabilitys_apply_to_the_in_process_value_entry_point_too() {
+        // The Rust SDK's path in; it must gate identically or it is a bypass.
+        let mut logger = test_logger();
+        let error = load_request_from_value(
+            serde_json::json!({
+                "version": "0.6.0-alpha",
+                "process": {"commandLine": "echo hi"},
+                "seatbelt": {"guiAccess": true},
+            }),
+            &mut logger,
+            false,
+        )
+        .unwrap_err();
+        match error {
+            WxcError::VersionIncompatible(details) => assert_eq!(details.field, "seatbelt"),
+            other => panic!("expected VersionIncompatible, got {other:?}"),
+        }
+
+        let mut logger = test_logger();
+        let error = load_request_from_value(
+            serde_json::json!({"process": {"commandLine": "echo hi"}}),
+            &mut logger,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, WxcError::VersionIncompatible(_)),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -4412,7 +4783,7 @@ mod tests {
     fn schema_version_error_escapes_control_characters() {
         // The invalid version is free-form user input echoed into a manual
         // (non-serde) diagnostic; it must not carry raw ESC / newline bytes.
-        let error = validate_schema_version("1.\u{1b}[31m0\nX").unwrap_err();
+        let error = validate_schema_version(Some("1.\u{1b}[31m0\nX")).unwrap_err();
         let message = error.to_string();
         assert!(!message.contains('\u{1b}'), "got: {message}");
         assert!(!message.contains('\n'), "got: {message}");
@@ -4447,7 +4818,7 @@ mod tests {
 
     #[test]
     fn sandbox_idle_timeout_ms_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4460,7 +4831,7 @@ mod tests {
 
     #[test]
     fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4473,7 +4844,7 @@ mod tests {
 
     #[test]
     fn container_id_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containerId": "my-container"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containerId": "my-container"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4483,8 +4854,7 @@ mod tests {
 
     #[test]
     fn lifecycle_destroy_on_exit_parsed() {
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "lifecycle": {"destroyOnExit": false}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "lifecycle": {"destroyOnExit": false}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4494,8 +4864,7 @@ mod tests {
 
     #[test]
     fn lifecycle_preserve_policy_parsed() {
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "lifecycle": {"preservePolicy": true}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "lifecycle": {"preservePolicy": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4505,7 +4874,7 @@ mod tests {
 
     #[test]
     fn lifecycle_defaults_when_absent() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4516,7 +4885,7 @@ mod tests {
 
     #[test]
     fn wslc_section_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4528,7 +4897,7 @@ mod tests {
 
     #[test]
     fn wslc_image_tar_path_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "my-image:latest", "imageTarPath": "C:\\images\\alpine.tar"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "my-image:latest", "imageTarPath": "C:\\images\\alpine.tar"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4543,7 +4912,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_basic_tcp_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4557,7 +4926,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mappings_default_protocol_is_tcp() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4571,7 +4940,7 @@ mod tests {
         // Strict enums are case-sensitive: "TCP" is not the lowercase wire
         // value "tcp", so it is rejected at deserialize as an unknown variant.
         // Only lowercase "tcp" is accepted (see wslc_port_mapping_basic_tcp_parsed).
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "TCP"}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "TCP"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4588,7 +4957,7 @@ mod tests {
         // The wire model's TransportProtocol is tcp-only (the WSLC SDK runtime
         // returns E_NOTIMPL for UDP), so "udp" is rejected at
         // deserialize as an unknown enum variant.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4602,7 +4971,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_missing_windows_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"containerPort": 80}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"containerPort": 80}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4616,7 +4985,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_missing_container_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4630,7 +4999,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_zero_windows_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 0, "containerPort": 80}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 0, "containerPort": 80}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4644,7 +5013,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_zero_container_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 0}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 0}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4660,7 +5029,7 @@ mod tests {
     fn wslc_port_mapping_unsupported_protocol_rejected() {
         // An unknown protocol like "sctp" is rejected at deserialize: the
         // tcp-only TransportProtocol enum has no matching variant.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4674,7 +5043,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_duplicate_host_port_same_protocol_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}, {"windowsPort": 8080, "containerPort": 81}]}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}, {"windowsPort": 8080, "containerPort": 81}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4688,7 +5057,7 @@ mod tests {
 
     #[test]
     fn wslc_port_mapping_empty_list_default() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4701,7 +5070,7 @@ mod tests {
 
     #[test]
     fn experimental_section_parsed_when_present() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "world"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "world"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4712,7 +5081,7 @@ mod tests {
 
     #[test]
     fn experimental_section_absent_is_ok() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4722,7 +5091,7 @@ mod tests {
 
     #[test]
     fn experimental_enabled_defaults_to_false() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4732,7 +5101,7 @@ mod tests {
 
     #[test]
     fn unknown_experimental_fields_ignored() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"futureFeature": {"x": 1}, "test": {"message": "hi"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "experimental": {"futureFeature": {"x": 1}, "test": {"message": "hi"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4742,7 +5111,7 @@ mod tests {
 
     #[test]
     fn experimental_test_message_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "greetings"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "greetings"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4753,7 +5122,7 @@ mod tests {
 
     #[test]
     fn experimental_test_default_message() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "experimental": {"test": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4764,7 +5133,7 @@ mod tests {
 
     #[test]
     fn ui_section_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"disable": false, "clipboard": "read", "injection": true}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "ui": {"disable": false, "clipboard": "read", "injection": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4776,7 +5145,7 @@ mod tests {
 
     #[test]
     fn ui_section_defaults_when_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4788,7 +5157,7 @@ mod tests {
 
     #[test]
     fn ui_clipboard_all_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "all"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "ui": {"clipboard": "all"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4800,7 +5169,7 @@ mod tests {
 
     #[test]
     fn containment_isolation_session_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4810,7 +5179,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4824,7 +5193,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4838,7 +5207,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_medium() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4852,7 +5221,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_large() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4866,7 +5235,7 @@ mod tests {
 
     #[test]
     fn isolation_session_config_composable() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4882,7 +5251,7 @@ mod tests {
     fn isolation_session_config_unknown_is_rejected() {
         // Strict enums: an unrecognized configurationId is rejected at
         // deserialize time rather than silently defaulting to `composable`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4896,7 +5265,7 @@ mod tests {
 
     #[test]
     fn isolation_session_absent_from_experimental() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "experimental": {}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4906,7 +5275,7 @@ mod tests {
 
     #[test]
     fn isolation_session_user_field_round_trips_through_one_shot_parser() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4921,7 +5290,7 @@ mod tests {
 
     #[test]
     fn isolation_session_user_absent_when_field_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4932,7 +5301,7 @@ mod tests {
 
     #[test]
     fn containment_seatbelt_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4943,7 +5312,7 @@ mod tests {
     #[test]
     fn seatbelt_config_defaults() {
         // When no seatbelt block is provided the parser leaves it unset.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4953,7 +5322,7 @@ mod tests {
 
     #[test]
     fn seatbelt_profile_override_passed_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(deny default)"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(deny default)"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4969,8 +5338,7 @@ mod tests {
     fn seatbelt_nested_pty_defaults_to_true_when_block_present_but_field_absent() {
         // seatbelt block is present but nestedPty is not specified;
         // the parser should fill in true to match the schema default.
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4982,7 +5350,7 @@ mod tests {
 
     #[test]
     fn seatbelt_nested_pty_and_keychain_access_pass_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -4994,7 +5362,7 @@ mod tests {
 
     #[test]
     fn top_level_seatbelt_config_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5007,7 +5375,7 @@ mod tests {
     #[test]
     fn experimental_seatbelt_errors_with_migration_message() {
         // After promotion, configs using experimental.seatbelt must error.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": true}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5029,7 +5397,7 @@ mod tests {
 
     #[test]
     fn legacy_appcontainer_wire_value_aliases_processcontainer() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "appcontainer"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "appcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5039,7 +5407,7 @@ mod tests {
 
     #[test]
     fn legacy_macos_sandbox_wire_value_aliases_seatbelt() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5052,7 +5420,7 @@ mod tests {
         // The `appContainer` JSON key is a deprecated spelling; serde's alias
         // routes it to the same `processContainer` parsing path regardless of
         // the declared schema version.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
             "appContainer": {
@@ -5072,7 +5440,7 @@ mod tests {
     fn legacy_experimental_macos_sandbox_subblock_alias_rejected() {
         // `experimental.macos_sandbox` is the pre-rename key; after promotion
         // it should be rejected with a migration error.
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "containment": "macos_sandbox",
             "experimental": {"macos_sandbox": {"profileOverride": "(version 1)(allow default)"}}
@@ -5093,7 +5461,7 @@ mod tests {
 
     fn make_multi_backend_config(containment: &str, extra_json: &str) -> String {
         let json = format!(
-            r#"{{ "containment": "{containment}", "process": {{"commandLine": "echo hi"}}, {extra_json} }}"#
+            r#"{{"version": "0.8.0-alpha",  "containment": "{containment}", "process": {{"commandLine": "echo hi"}}, {extra_json} }}"#
         );
         base64_encode(json.as_bytes())
     }
@@ -5204,7 +5572,7 @@ mod tests {
     // one-shot path.
     #[test]
     fn state_aware_foreign_experimental_backend_rejected() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "phase": "provision",
             "containment": "isolation_session",
             "experimental": {
@@ -5234,7 +5602,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn abstract_process_with_process_container_accepted_on_windows() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "containment": "process",
             "processContainer": {}
@@ -5248,7 +5616,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn abstract_process_with_seatbelt_accepted_on_macos() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "containment": "process",
             "seatbelt": {}
@@ -5261,7 +5629,7 @@ mod tests {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn abstract_process_with_process_container_rejected_off_windows() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "containment": "process",
             "processContainer": {}
@@ -5275,7 +5643,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn abstract_vm_with_windows_sandbox_accepted_on_windows() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "containment": "vm",
             "experimental": {"windows_sandbox": {}}
@@ -5289,7 +5657,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn abstract_vm_with_windows_sandbox_rejected_off_windows() {
-        let json = r#"{
+        let json = r#"{"version": "0.8.0-alpha", 
             "process": {"commandLine": "echo hi"},
             "containment": "vm",
             "experimental": {"windows_sandbox": {}}
@@ -5303,7 +5671,7 @@ mod tests {
 
     #[test]
     fn same_path_in_readwrite_and_denied_becomes_denied() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "deniedPaths": ["C:\\workspace"]}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "deniedPaths": ["C:\\workspace"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5317,7 +5685,7 @@ mod tests {
 
     #[test]
     fn same_path_in_readwrite_and_readonly_becomes_readonly() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\workspace"]}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\workspace"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5331,7 +5699,7 @@ mod tests {
 
     #[test]
     fn same_path_in_readonly_and_denied_becomes_denied() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\tools"]}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\tools"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5345,7 +5713,7 @@ mod tests {
 
     #[test]
     fn same_path_in_all_three_lists_becomes_denied() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\x"], "readonlyPaths": ["C:\\x"], "deniedPaths": ["C:\\x"]}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\x"], "readonlyPaths": ["C:\\x"], "deniedPaths": ["C:\\x"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5357,7 +5725,7 @@ mod tests {
 
     #[test]
     fn distinct_paths_across_lists_preserved() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\secrets"]}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\secrets"]}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5370,7 +5738,7 @@ mod tests {
 
     #[test]
     fn empty_filesystem_lists_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": [], "readonlyPaths": [], "deniedPaths": []}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": [], "readonlyPaths": [], "deniedPaths": []}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -5381,7 +5749,7 @@ mod tests {
 
     #[test]
     fn telemetry_not_set() {
-        let json = r#"{"process":{"commandLine":"echo hi"}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
@@ -5390,7 +5758,7 @@ mod tests {
 
     #[test]
     fn telemetry_enabled_true() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":true}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
@@ -5400,7 +5768,7 @@ mod tests {
 
     #[test]
     fn telemetry_enabled_false() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":false}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"echo hi"},"experimental":{"telemetry":{"enabled":false}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
@@ -5410,7 +5778,7 @@ mod tests {
 
     #[test]
     fn telemetry_empty_object() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"experimental":{"telemetry":{}}}"#;
+        let json = r#"{"version": "0.8.0-alpha", "process":{"commandLine":"echo hi"},"experimental":{"telemetry":{}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
