@@ -14,7 +14,8 @@
 //!    `CreateProcessW` (**runner's job**; the session exposes the handle via
 //!    [`CaptureSession::environment`])
 //! 4. wait for the child to exit
-//! 5. `StopLearningModeTrace(trace, outputPath)` → sealed ETL (retryable delivery)
+//! 5. `StopLearningModeTrace(trace, outputPath)` → sealed ETL (bounded retries
+//!    for transient delivery failures)
 //! 6. `CloseLearningModeTrace(trace)` → release broker state and staged ETL
 //! 7. `CloseProcessSecurityEnvironment(env)` → teardown
 //!
@@ -101,15 +102,17 @@ impl CaptureSession {
         }
     }
 
-    /// Stop the trace and deliver it to `output_path` (or skip delivery when `None`),
-    /// close the trace, then close the security environment. Call **after** the child
-    /// has exited.
+    /// Stop the trace and deliver it to `output_path` (or skip delivery when
+    /// `None`), retry transient delivery failures, close the trace, then close
+    /// the security environment. Call **after** the child has exited.
     ///
     /// # Errors
     /// - [`LearningModeError::HResultCall`] from `StopLearningModeTrace`.
     pub fn finish(mut self, output_path: Option<&Path>) -> Result<(), LearningModeError> {
         let stop_result = match self.trace.as_ref() {
-            Some(trace) => self.learning_mode_api.stop_trace(trace, output_path),
+            Some(trace) => self
+                .learning_mode_api
+                .stop_trace_with_retry(trace, output_path),
             None => Ok(()),
         };
         if let Some(trace) = self.trace.take() {

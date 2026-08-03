@@ -11,8 +11,12 @@
 
 use std::path::Path;
 use std::ptr;
+use std::time::Duration;
 
-use windows::Win32::Foundation::{GetLastError, HANDLE, HMODULE};
+use windows::Win32::Foundation::{
+    GetLastError, ERROR_BUSY, ERROR_LOCK_VIOLATION, ERROR_RETRY, ERROR_SHARING_VIOLATION, HANDLE,
+    HMODULE,
+};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
@@ -111,6 +115,9 @@ impl std::fmt::Debug for LearningModeApi {
 }
 
 impl LearningModeApi {
+    const STOP_DELIVERY_ATTEMPTS: usize = 3;
+    const STOP_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(25), Duration::from_millis(75)];
+
     /// Load `processmodel.dll` and resolve the Learning Mode trace exports.
     ///
     /// # Errors
@@ -195,6 +202,28 @@ impl LearningModeApi {
         self.stop_trace_encoded(trace, wide_path.as_deref())
     }
 
+    /// Stop and deliver the trace, retrying only transient output-delivery
+    /// failures. The trace remains live throughout the attempts and is still
+    /// owned by the caller when this method returns.
+    pub(crate) fn stop_trace_with_retry(
+        &self,
+        trace: &LearningModeTraceHandle,
+        output_path: Option<&Path>,
+    ) -> Result<(), LearningModeError> {
+        for attempt in 0..Self::STOP_DELIVERY_ATTEMPTS {
+            match self.stop_trace(trace, output_path) {
+                Err(error)
+                    if attempt + 1 < Self::STOP_DELIVERY_ATTEMPTS
+                        && is_retryable_stop_error(&error) =>
+                {
+                    std::thread::sleep(Self::STOP_RETRY_DELAYS[attempt]);
+                }
+                result => return result,
+            }
+        }
+        unreachable!("STOP_DELIVERY_ATTEMPTS is non-zero")
+    }
+
     fn stop_trace_encoded(
         &self,
         trace: &LearningModeTraceHandle,
@@ -215,6 +244,25 @@ impl LearningModeApi {
         }
         Ok(())
     }
+}
+
+fn is_retryable_stop_error(error: &LearningModeError) -> bool {
+    let LearningModeError::HResultCall {
+        function: "StopLearningModeTrace",
+        code,
+    } = error
+    else {
+        return false;
+    };
+
+    [
+        ERROR_SHARING_VIOLATION,
+        ERROR_LOCK_VIOLATION,
+        ERROR_BUSY,
+        ERROR_RETRY,
+    ]
+    .into_iter()
+    .any(|win32| *code == HRESULT::from_win32(win32.0).0)
 }
 
 fn encode_output_path(output_path: Option<&Path>) -> Result<Option<Vec<u16>>, LearningModeError> {
@@ -281,6 +329,8 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     static START_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
     static STOP_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
+    static STOP_FAILURE_RESULT: AtomicI32 = AtomicI32::new(E_FAIL.0);
+    static STOP_FAILURES_REMAINING: AtomicUsize = AtomicUsize::new(0);
     static STOP_CALLS: AtomicUsize = AtomicUsize::new(0);
     static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -296,6 +346,14 @@ mod tests {
 
     unsafe extern "system" fn fake_stop(_: HANDLE, _: *const u16) -> HRESULT {
         STOP_CALLS.fetch_add(1, Ordering::SeqCst);
+        if STOP_FAILURES_REMAINING
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return HRESULT(STOP_FAILURE_RESULT.load(Ordering::SeqCst));
+        }
         HRESULT(STOP_RESULT.load(Ordering::SeqCst))
     }
 
@@ -318,6 +376,8 @@ mod tests {
     fn reset_fakes() {
         START_RESULT.store(S_OK.0, Ordering::SeqCst);
         STOP_RESULT.store(S_OK.0, Ordering::SeqCst);
+        STOP_FAILURE_RESULT.store(E_FAIL.0, Ordering::SeqCst);
+        STOP_FAILURES_REMAINING.store(0, Ordering::SeqCst);
         STOP_CALLS.store(0, Ordering::SeqCst);
         CLOSE_CALLS.store(0, Ordering::SeqCst);
     }
@@ -415,6 +475,70 @@ mod tests {
 
         drop(trace);
         assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn transient_stop_failure_is_retried() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_fakes();
+        STOP_FAILURE_RESULT.store(
+            HRESULT::from_win32(ERROR_SHARING_VIOLATION.0).0,
+            Ordering::SeqCst,
+        );
+        STOP_FAILURES_REMAINING.store(2, Ordering::SeqCst);
+        let api = fake_api();
+        let trace = unsafe { api.start_trace(fake_environment()).unwrap() };
+
+        api.stop_trace_with_retry(&trace, None).unwrap();
+
+        assert_eq!(STOP_CALLS.load(Ordering::SeqCst), 3);
+        trace.close();
+        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn permanent_stop_failure_is_not_retried() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_fakes();
+        STOP_RESULT.store(E_FAIL.0, Ordering::SeqCst);
+        let api = fake_api();
+        let trace = unsafe { api.start_trace(fake_environment()).unwrap() };
+
+        let error = api.stop_trace_with_retry(&trace, None).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LearningModeError::HResultCall {
+                function: "StopLearningModeTrace",
+                code
+            } if code == E_FAIL.0
+        ));
+        assert_eq!(STOP_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn exhausted_transient_stop_retries_preserve_hresult() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_fakes();
+        let retry_hresult = HRESULT::from_win32(ERROR_LOCK_VIOLATION.0).0;
+        STOP_FAILURE_RESULT.store(retry_hresult, Ordering::SeqCst);
+        STOP_FAILURES_REMAINING.store(3, Ordering::SeqCst);
+        let api = fake_api();
+        let trace = unsafe { api.start_trace(fake_environment()).unwrap() };
+
+        let error = api.stop_trace_with_retry(&trace, None).unwrap_err();
+
+        assert!(matches!(
+            error,
+            LearningModeError::HResultCall {
+                function: "StopLearningModeTrace",
+                code
+            } if code == retry_hresult
+        ));
+        assert_eq!(
+            STOP_CALLS.load(Ordering::SeqCst),
+            LearningModeApi::STOP_DELIVERY_ATTEMPTS
+        );
     }
 
     #[test]
