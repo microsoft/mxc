@@ -37,10 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.windows) }}
-    runs-on:
-      - self-hosted
-      - "1ES.Pool=${{ matrix.pool }}"
-      - "JobId=mxc-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
+    runs-on: ${{ matrix.pool }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -97,10 +94,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.linux) }}
-    runs-on:
-      - self-hosted
-      - "1ES.Pool=${{ matrix.pool }}"
-      - "JobId=mxc-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
+    runs-on: ${{ matrix.pool }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
