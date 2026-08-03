@@ -226,6 +226,11 @@ const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 const SANDBOX_CAP_FS_DENY: u64 = 0x0000_0000_0000_0002;
 const CAPTURE_API_AVAILABLE_LOG: &str =
     "captureDenials: learning-mode trace API available (processmodel.dll)";
+const CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG: &str =
+    "processContainer.captureDenials with filesystem.deniedPaths requires \
+     QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_DENY; \
+     this OS build does not support that policy, and capture cannot fall back \
+     to AppContainer or host-DACL enforcement";
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
@@ -1685,9 +1690,9 @@ impl SandboxBackend for BaseContainerRunner {
                  proxy AppContainer peer identity",
             ));
         }
-        // deniedPaths reaches the OS via the SandboxSpec `fs_deny` field, honored
-        // only when the OS advertises SANDBOX_CAP_FS_DENY. The dispatcher only
-        // routes deny here when supported; fail closed for direct callers.
+        // deniedPaths reaches ordinary BaseContainer through SBOX and capture
+        // through PSEC. Each path has a distinct support query; fail closed
+        // rather than silently dropping the deny policy.
         if !request.policy.denied_paths.is_empty() {
             let deny_supported = if capture_denials {
                 let api = SecurityEnvironmentApi::load().map_err(|error| ScriptResponse {
@@ -1706,9 +1711,14 @@ impl SandboxBackend for BaseContainerRunner {
                 crate::fallback_detector::base_container_supports_deny_paths()
             };
             if !deny_supported {
-                return Err(ScriptResponse::error(
-                    wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG,
-                ));
+                return Err(if capture_denials {
+                    ScriptResponse {
+                        failure_phase: FailurePhase::BackendUnavailable,
+                        ..ScriptResponse::error(CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG)
+                    }
+                } else {
+                    ScriptResponse::error(wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG)
+                });
             }
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
@@ -2980,6 +2990,16 @@ mod tests {
         if BaseContainerRunner::is_base_container_api_present().is_ok() {
             assert!(runner.validate(&request).is_ok());
         }
+    }
+
+    #[test]
+    fn capture_denied_paths_error_names_v2_capability() {
+        assert!(
+            CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG.contains("QueryProcessSecurityEnvironmentSupport")
+        );
+        assert!(CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG.contains("PSE_SUPPORT_FS_DENY"));
+        assert!(!CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG.contains("Experimental_QuerySandboxSupport"));
+        assert!(CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG.contains("cannot fall back to AppContainer"));
     }
 
     #[test]
