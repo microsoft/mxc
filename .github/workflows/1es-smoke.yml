@@ -4,13 +4,10 @@
 #
 # THROWAWAY / PROOF workflow. Not part of the real CI matrix (Build.yml).
 #
-# IMPORTANT: this pool has tag UseScaleSet=true, so it uses the 1ES **Scale Set
-# API** integration (NOT webhooks). Per the 1ES docs, scale-set pools are
-# targeted by the POOL NAME ALONE — no "self-hosted", no "1ES.Pool=", no
-# "JobId=" labels (those are the webhook-mode format and DO NOT MATCH a
-# scale-set pool, leaving the job queued forever).
-#
-#   runs-on: <PoolName>
+# Pool is in WEBHOOK mode (UseScaleSet tag removed), so it uses the standard
+# multi-label targeting that every working example (SbomToolkit, ebpf, vscode,
+# openvmm) uses. Benchmark: ebpf's 1ES pool picks up jobs in ~2.5-3 min, so a
+# healthy pickup here should occur well under ~3-4 min.
 #
 # Pool: 1es-mxc-e2e-windows-25h2-pro-x64
 # ============================================================================
@@ -27,8 +24,10 @@ permissions:
 jobs:
   smoke:
     name: 1ES pickup
-    # Scale-set pool → target by pool name ONLY (no other labels).
-    runs-on: 1es-mxc-e2e-windows-25h2-pro-x64
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=1es-mxc-e2e-windows-25h2-pro-x64"
+      - "JobId=smoke-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     timeout-minutes: 15
 
     steps:
