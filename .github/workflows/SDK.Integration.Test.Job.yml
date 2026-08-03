@@ -33,16 +33,16 @@ jobs:
       # `.azure-pipelines/templates/SDK.Integration.Test.Job.yml`.
       MXC_SKIP_LXC_NETWORK_TESTS: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: sdk/node/tests/integration/package-lock.json
 
       - name: Download SDK package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: npm-packages
           path: sdk-pkg
@@ -81,7 +81,7 @@ jobs:
       - name: Install bubblewrap + LXC stack (Linux only, cached)
         if: matrix.os_label == 'linux'
         continue-on-error: true
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           # Installs the LXC + Bubblewrap substrate the SDK integration
           # tests need. Capability probe 27576588204 confirmed these
