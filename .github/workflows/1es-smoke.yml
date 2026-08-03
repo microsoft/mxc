@@ -1,19 +1,18 @@
 # ============================================================================
 # 1ES connectivity smoke test — proves microsoft/mxc can dispatch a job to the
-# 1ES Hosted GitHub Runner pool and that its runner group grants this repo.
+# 1ES Hosted GitHub Runner pool.
 #
 # THROWAWAY / PROOF workflow. Not part of the real CI matrix (Build.yml).
 #
-# Design notes:
-#   * Triggers ONLY on push to this throwaway branch (NOT pull_request), so it
-#     does not re-run the full mxc CI matrix on every push.
-#   * 1ES.ImageOverride is intentionally OMITTED. The pool has a single image
-#     (windows-25h2-pro-x64), so it defaults. If the job now picks up, an image
-#     override was the culprit; if it still queues, the cause is org-level
-#     authorization (1ES GitHub App repo access and/or runner-group grant for a
-#     PUBLIC repo) or the 1ES scaler — NOT the labels.
+# IMPORTANT: this pool has tag UseScaleSet=true, so it uses the 1ES **Scale Set
+# API** integration (NOT webhooks). Per the 1ES docs, scale-set pools are
+# targeted by the POOL NAME ALONE — no "self-hosted", no "1ES.Pool=", no
+# "JobId=" labels (those are the webhook-mode format and DO NOT MATCH a
+# scale-set pool, leaving the job queued forever).
 #
-# Pool: 1es-mxc-e2e-windows-25h2-pro-x64  (org-level, runner group 145)
+#   runs-on: <PoolName>
+#
+# Pool: 1es-mxc-e2e-windows-25h2-pro-x64
 # ============================================================================
 name: 1ES Connectivity Smoke
 
@@ -28,10 +27,8 @@ permissions:
 jobs:
   smoke:
     name: 1ES pickup
-    runs-on:
-      - self-hosted
-      - "1ES.Pool=1es-mxc-e2e-windows-25h2-pro-x64"
-      - "JobId=smoke-${{ github.run_id }}-${{ github.run_attempt }}"
+    # Scale-set pool → target by pool name ONLY (no other labels).
+    runs-on: 1es-mxc-e2e-windows-25h2-pro-x64
     timeout-minutes: 15
 
     steps:
