@@ -2009,9 +2009,17 @@ mod tests {
         logger.warnings().join("\n")
     }
 
+    /// Parse a config and return the boundary-relaxation audit lines.
+    ///
+    /// Tests that exercise a backend-scoped section must set `containment`
+    /// explicitly: an absent value resolves per host (`Process` → Seatbelt on
+    /// macOS, Bubblewrap on Linux, ProcessContainer on Windows), and a
+    /// `processContainer`/`seatbelt` section that does not match the resolved
+    /// backend is rejected as a cross-backend config.
     fn parse_relaxations(json: &str) -> String {
         let mut logger = test_logger();
-        load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
+        load_request(&base64_encode(json.as_bytes()), &mut logger, true)
+            .unwrap_or_else(|e| panic!("config should parse, got: {e}\nconfig: {json}"));
         assert!(
             !logger.get_buffer().contains("boundary relaxed"),
             "audit lines must not be confined to the debug buffer"
@@ -2129,7 +2137,7 @@ mod tests {
         // is free-form, and an unrecognized value falls through to the same
         // default-deny arm as "none" in `ui_policy::resolve_ui_restrictions`.
         let out = parse_relaxations(
-            r#"{"process": {"commandLine": "echo hi"}, "network": {"allowLocalNetwork": true}, "ui": {"disable": false}, "processContainer": {"ui": {"systemSettings": "bogus"}}}"#,
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "network": {"allowLocalNetwork": true}, "ui": {"disable": false}, "processContainer": {"ui": {"systemSettings": "bogus"}}}"#,
         );
         assert!(
             out.contains("SECURITY: boundary relaxed: network.allowLocalNetwork=true"),
@@ -2142,7 +2150,7 @@ mod tests {
 
         // A recognized value does relax enforcement and must be reported.
         let effective = parse_relaxations(
-            r#"{"process": {"commandLine": "echo hi"}, "ui": {"disable": false}, "processContainer": {"ui": {"systemSettings": "all"}}}"#,
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "ui": {"disable": false}, "processContainer": {"ui": {"systemSettings": "all"}}}"#,
         );
         assert!(
             effective.contains("processContainer.ui.systemSettings=\"all\""),
@@ -2156,7 +2164,7 @@ mod tests {
         // policy.capabilities purely to emit denial telemetry; enforcement is
         // unchanged, so it must not be counted as a caller-requested capability.
         let out = parse_relaxations(
-            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"learningMode": true}}"#,
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#,
         );
         assert!(
             !out.contains("capabilities"),
@@ -2165,7 +2173,7 @@ mod tests {
 
         // The same holds for the default (block) captureDenials injection.
         let capture = parse_relaxations(
-            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"captureDenials": {}}}"#,
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "processContainer": {"captureDenials": {}}}"#,
         );
         assert!(
             !capture.contains("capabilities"),
@@ -2175,7 +2183,7 @@ mod tests {
         // A genuinely caller-requested capability is still counted, and the
         // injected one is excluded from the count.
         let requested = parse_relaxations(
-            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"learningMode": true, "capabilities": ["internetClient"]}}"#,
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "processContainer": {"learningMode": true, "capabilities": ["internetClient"]}}"#,
         );
         assert!(
             requested.contains("processContainer.capabilities (1 cap(s))"),
@@ -2189,7 +2197,7 @@ mod tests {
         // `permissiveLearningMode`, which permits what it records. That is a real
         // relaxation and is reported under its own name rather than as a count.
         let out = parse_relaxations(
-            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"captureDenials": {"mode": "allow"}}}"#,
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "processContainer": {"captureDenials": {"mode": "allow"}}}"#,
         );
         assert!(
             out.contains("SECURITY: boundary relaxed: processContainer.captureDenials.mode=allow"),
