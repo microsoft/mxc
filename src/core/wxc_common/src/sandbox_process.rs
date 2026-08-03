@@ -20,6 +20,7 @@ use std::io::{Read, Write};
 use crate::logger::Logger;
 use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
 use crate::script_runner::ScriptRunner;
+use crate::validator::validate_common;
 
 /// A handle to a running sandboxed process.
 ///
@@ -367,6 +368,20 @@ pub trait SandboxBackend {
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse>;
 
+    /// Spawn after [`validate`](SandboxBackend::validate) and shared validation
+    /// have already succeeded. The run-to-completion bridge uses this hook to
+    /// avoid repeating expensive validation. Backends whose `spawn` does not
+    /// revalidate can use the default implementation.
+    #[doc(hidden)]
+    fn spawn_validated(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        self.spawn(request, logger, stdio)
+    }
+
     /// Optional post-exit diagnostics for the run-to-completion (binary) path:
     /// when the child exits non-zero, return a more actionable error message
     /// (e.g. a known AppContainer filesystem-permission failure). Default: none.
@@ -398,16 +413,27 @@ impl<B> Runner<B> {
     }
 }
 
-impl<B: SandboxBackend> ScriptRunner for Runner<B> {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        self.0.validate(request)
+impl<B: SandboxBackend> Runner<B> {
+    fn execute_validated(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
+        let child = self.0.spawn_validated(request, logger, StdioMode::Inherit);
+        self.wait_for_child(request, logger, child)
     }
 
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        let mut child = match self.0.spawn(request, logger, StdioMode::Inherit) {
+    fn wait_for_child(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        child: Result<Box<dyn SandboxProcess>, ScriptResponse>,
+    ) -> ScriptResponse {
+        let mut child = match child {
             Ok(child) => child,
             Err(response) => return response,
         };
+
         match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
@@ -445,6 +471,186 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
                 response
             }
         }
+    }
+}
+
+impl<B: SandboxBackend> ScriptRunner for Runner<B> {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        self.0.validate(request)
+    }
+
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        // Direct callers have not passed through ScriptRunner::run, so use the
+        // backend's validation-safe public spawn path.
+        let child = self.0.spawn(request, logger, StdioMode::Inherit);
+        self.wait_for_child(request, logger, child)
+    }
+
+    fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        // Keep this validation and dry-run sequence aligned with the trait
+        // default; only the final dispatch differs to avoid revalidation.
+        if let Err(response) = validate_common(request) {
+            return response;
+        }
+
+        if let Err(response) = self.validate_runner(request) {
+            return response;
+        }
+
+        if request.dry_run {
+            return ScriptResponse {
+                exit_code: 0,
+                ..Default::default()
+            };
+        }
+
+        self.execute_validated(request, logger)
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::logger::Mode;
+
+    use super::*;
+
+    struct CompletedProcess;
+
+    impl SandboxProcess for CompletedProcess {
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(Some(0))
+        }
+
+        fn id(&self) -> u32 {
+            0
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
+    }
+
+    struct CountingBackend {
+        validations: Arc<AtomicUsize>,
+        direct_spawns: Arc<AtomicUsize>,
+        validated_spawns: Arc<AtomicUsize>,
+    }
+
+    impl SandboxBackend for CountingBackend {
+        fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+            self.validations.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn spawn(
+            &mut self,
+            request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            validate_common(request)?;
+            self.validate(request)?;
+            self.direct_spawns.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(CompletedProcess))
+        }
+
+        fn spawn_validated(
+            &mut self,
+            _request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            self.validated_spawns.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(CompletedProcess))
+        }
+    }
+
+    #[test]
+    fn runner_execute_validates_direct_callers() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let validated_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            validated_spawns: Arc::clone(&validated_spawns),
+        });
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(validations.load(Ordering::Relaxed), 1);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 1);
+        assert_eq!(validated_spawns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn runner_execute_applies_shared_validation() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let validated_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            validated_spawns: Arc::clone(&validated_spawns),
+        });
+        let request = ExecutionRequest::default();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.execute(&request, &mut logger);
+
+        assert_eq!(response.exit_code, -1);
+        assert_eq!(validations.load(Ordering::Relaxed), 0);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 0);
+        assert_eq!(validated_spawns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn runner_run_does_not_repeat_backend_validation() {
+        let validations = Arc::new(AtomicUsize::new(0));
+        let direct_spawns = Arc::new(AtomicUsize::new(0));
+        let validated_spawns = Arc::new(AtomicUsize::new(0));
+        let mut runner = Runner::new(CountingBackend {
+            validations: Arc::clone(&validations),
+            direct_spawns: Arc::clone(&direct_spawns),
+            validated_spawns: Arc::clone(&validated_spawns),
+        });
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(validations.load(Ordering::Relaxed), 1);
+        assert_eq!(direct_spawns.load(Ordering::Relaxed), 0);
+        assert_eq!(validated_spawns.load(Ordering::Relaxed), 1);
     }
 }
 
