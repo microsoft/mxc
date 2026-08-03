@@ -447,6 +447,24 @@ pub enum ClipboardPolicy {
     All,
 }
 
+impl ClipboardPolicy {
+    /// The stable lowercase wire token for this policy (`none` / `read` /
+    /// `write` / `all`), matching the `serde(rename_all = "lowercase")` form
+    /// callers write in config.
+    ///
+    /// Security diagnostics must quote the caller's own vocabulary rather than
+    /// the `Debug` variant name, so the audit stream stays stable across an
+    /// internal variant rename and is greppable against the source config.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::All => "all",
+        }
+    }
+}
+
 impl From<crate::wire::ClipboardPolicy> for ClipboardPolicy {
     fn from(c: crate::wire::ClipboardPolicy) -> Self {
         match c {
