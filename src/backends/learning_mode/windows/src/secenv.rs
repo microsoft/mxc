@@ -10,8 +10,8 @@
 //! resolves it to the target AppContainer SID server-side). Neither of MXC's existing
 //! launch paths yields that handle — classic AppContainer uses `CreateProcess` +
 //! `SECURITY_CAPABILITIES`, and BaseContainer uses the one-shot RPC-brokered
-//! `Experimental_CreateProcessInSandbox`. To capture denials, MXC adopts the flat
-//! 2-phase model exported by the same `processmodel.dll`:
+//! `Experimental_CreateProcessInSandbox`. To capture denials, MXC uses the
+//! official process security-environment model exported by `processmodel.dll`:
 //!
 //! ```c
 //! HRESULT CreateProcessSecurityEnvironment(
@@ -284,9 +284,7 @@ impl Drop for SecurityEnvironmentStartupInfo {
     }
 }
 
-/// Which candidate export name resolved for each function on this machine — a
-/// diagnostic used by the capability probe to report the exact live surface (plain vs
-/// `Experimental_`).
+/// Which official export resolved for each function on this machine.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SecurityEnvironmentExportReport {
     /// Resolved name of the create export, if present.
@@ -468,9 +466,8 @@ fn last_error() -> u32 {
     unsafe { GetLastError().0 }
 }
 
-/// Diagnostic probe reporting which security-environment export name resolved for each
-/// function (plain vs `Experimental_`). Returns an all-`None` report if the DLL itself
-/// cannot be loaded.
+/// Diagnostic probe reporting which official security-environment exports
+/// resolved. Returns an all-`None` report if the DLL itself cannot be loaded.
 #[must_use]
 pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
     let dll = string_util::to_wide(PROCESSMODEL_DLL);
