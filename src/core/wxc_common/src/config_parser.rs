@@ -717,8 +717,14 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
 ///
 /// Free-form config values reach the security log verbatim, so an embedded
 /// newline would let a caller forge additional `SECURITY: boundary relaxed:`
-/// entries and poison the audit stream. Control characters are escaped and the
-/// value is truncated so one field cannot dominate the log.
+/// entries and poison the audit stream. Line-breaking characters are escaped and
+/// the value is truncated so one field cannot dominate the log.
+///
+/// `char::is_control` only covers Unicode category Cc, so U+2028 (LINE
+/// SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) must be escaped explicitly:
+/// they are not control characters but *are* line terminators for common log
+/// consumers (Python's `str.splitlines`, JavaScript source/JSON parsers), which
+/// is exactly the forging primitive this function exists to deny.
 fn sanitize_log_value(value: &str) -> String {
     const MAX: usize = 128;
     let mut out = String::with_capacity(value.len().min(MAX) + 2);
@@ -730,7 +736,9 @@ fn sanitize_log_value(value: &str) -> String {
             '\t' => out.push_str("\\t"),
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c.is_control() => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => {
+                out.push_str(&format!("\\u{{{:04x}}}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -741,42 +749,94 @@ fn sanitize_log_value(value: &str) -> String {
     out
 }
 
+/// Capability names the parser injects on the caller's behalf to drive
+/// learning-mode denial telemetry. `learningModeLogging` is observability-only:
+/// enforcement is unchanged and denials are merely recorded, so it must never be
+/// counted as a caller-requested capability relaxation.
+/// `permissiveLearningMode` *is* a relaxation (it allows what it records) and is
+/// reported under its own name rather than folded into the capability count.
+const LEARNING_MODE_LOGGING_CAPABILITY: &str = "learningModeLogging";
+const PERMISSIVE_LEARNING_MODE_CAPABILITY: &str = "permissiveLearningMode";
+
 /// Emit a standardized, deterministic warning for each setting that opens a
 /// security boundary beyond the secure default, so relaxations are loud and
 /// auditable in the diagnostic log rather than silently honored. Logging only —
 /// never changes behavior. Filesystem grants and the seatbelt pty baseline are
 /// out of scope (they are the request's primary purpose, not a relaxation).
+///
+/// Warnings go through [`Logger::warning_line`], not `log_line`: in `Mode::Buffer`
+/// (the CLI default without `--debug`) `log_line` only fills a buffer that is
+/// printed on error paths, so a *successful* run would silently discard the whole
+/// audit stream. `warning_line` always reaches stderr and is retained for
+/// in-process callers.
+///
+/// `containment` gates the backend-scoped sections so the audit stream describes
+/// the sandbox that will actually run: only the Seatbelt runner reads the
+/// `seatbelt` section, and only Windows ProcessContainer reads `capabilities` and
+/// `processContainer.ui`. Cross-backend policy (`network`, `ui`) is always
+/// evaluated. A precise per-backend honor matrix for the cross-backend sections
+/// is deliberately left to the trust-model documentation rather than encoded here.
 fn log_boundary_relaxations(
     policy: &ContainerPolicy,
     seatbelt: Option<&SeatbeltConfig>,
+    containment: &ContainmentBackend,
     logger: &mut Logger,
 ) {
     const P: &str = "SECURITY: boundary relaxed:";
 
+    let is_process_container = matches!(containment, ContainmentBackend::ProcessContainer);
+    let is_seatbelt = matches!(containment, ContainmentBackend::Seatbelt);
+
     // Network
     if policy.default_network_policy == NetworkPolicy::Allow {
-        logger.log_line(&format!(
+        logger.warning_line(&format!(
             "{P} network.defaultPolicy=allow (network open by default)"
         ));
     }
     if policy.allow_local_network {
-        logger.log_line(&format!("{P} network.allowLocalNetwork=true"));
+        logger.warning_line(&format!("{P} network.allowLocalNetwork=true"));
     }
     if !policy.allowed_hosts.is_empty() {
-        logger.log_line(&format!(
+        logger.warning_line(&format!(
             "{P} network.allowedHosts ({} host(s))",
             policy.allowed_hosts.len()
         ));
     }
-    // blockedHosts is intentionally not reported: it only subtracts
-    // connectivity, so it never relaxes the boundary.
+    // blockedHosts normally only subtracts connectivity, and on most backends it
+    // genuinely does: LXC/Bubblewrap append `defaultPolicy` as the terminal
+    // iptables action independently of the host lists, and Windows
+    // ProcessContainer rejects host lists outright. On the micro-VM backends,
+    // though, the mere presence of a host list turns host networking on, so a
+    // blocklist under deny-by-default flips the sandbox from "no network" to
+    // "allow-by-default minus these hosts" — a large relaxation. See
+    // `nanvix_runner::host_networking_enabled` (a list implies networking
+    // "regardless of defaultPolicy") and `hyperlight_common::
+    // network_policy_from_request`, whose blocklist branch returns BlockList
+    // ("rest allowed") before the deny-by-default branch that would otherwise
+    // disable networking.
+    let list_implies_networking = matches!(
+        containment,
+        ContainmentBackend::MicroVm | ContainmentBackend::Hyperlight
+    );
+    if list_implies_networking
+        && !policy.blocked_hosts.is_empty()
+        && policy.default_network_policy == NetworkPolicy::Block
+    {
+        logger.warning_line(&format!(
+            "{P} network.blockedHosts under defaultPolicy=block ({} host(s); on \
+             this backend a host list enables networking, leaving all unlisted \
+             hosts reachable)",
+            policy.blocked_hosts.len()
+        ));
+    }
     if policy.network_proxy.is_enabled() {
-        logger.log_line(&format!("{P} network.proxy enabled"));
+        logger.warning_line(&format!("{P} network.proxy enabled"));
     }
 
-    // UI. Clipboard, injection, windows, and the BaseProcess desktop knobs are
-    // inert while UI is disabled; only warn when ui.disable=false opens them.
-    // `ime` and capabilities stay effective regardless and are reported below.
+    // UI. Injection, windows, and the BaseProcess desktop knobs are inert while
+    // UI is disabled; only warn when ui.disable=false opens them. Clipboard (see
+    // below), `ime`, and capabilities stay effective regardless and are reported
+    // unconditionally.
     let ui = &policy.base_process_ui;
     // Clipboard is NOT gated on ui.disable: the Seatbelt profile builder emits
     // the pasteboard mach-lookup grant purely from ui.clipboard, outside its
@@ -785,64 +845,98 @@ fn log_boundary_relaxations(
     // redundant on Windows (where UI-disabled forces clipboard blocks) but never
     // misses a real relaxation.
     if policy.ui.clipboard != ClipboardPolicy::None {
-        logger.log_line(&format!("{P} ui.clipboard={:?}", policy.ui.clipboard));
+        logger.warning_line(&format!(
+            "{P} ui.clipboard={}",
+            policy.ui.clipboard.wire_name()
+        ));
     }
     if !policy.ui.disable {
-        logger.log_line(&format!("{P} ui.disable=false (windows allowed)"));
+        logger.warning_line(&format!("{P} ui.disable=false (windows allowed)"));
         if policy.ui.injection {
-            logger.log_line(&format!("{P} ui.injection=true"));
+            logger.warning_line(&format!("{P} ui.injection=true"));
         }
-        if ui.isolation != "container" {
-            logger.log_line(&format!(
-                "{P} processContainer.ui.isolation={}",
-                ui.isolation
-            ));
+        if is_process_container {
+            // `isolation` is a typed wire enum, so every non-default value is a
+            // real relaxation; `systemSettings` is a free-form string whose
+            // unrecognized values fall through to the same default-deny arm as
+            // "none" in `ui_policy::resolve_ui_restrictions`, so only the three
+            // recognized values actually relax anything.
+            if ui.isolation != "container" {
+                logger.warning_line(&format!(
+                    "{P} processContainer.ui.isolation={}",
+                    ui.isolation
+                ));
+            }
+            if ui.desktop_system_control {
+                logger.warning_line(&format!(
+                    "{P} processContainer.ui.desktopSystemControl=true"
+                ));
+            }
+            if matches!(
+                ui.system_settings.as_str(),
+                "all" | "parameters" | "display"
+            ) {
+                logger.warning_line(&format!(
+                    "{P} processContainer.ui.systemSettings={}",
+                    sanitize_log_value(&ui.system_settings)
+                ));
+            }
         }
-        if ui.desktop_system_control {
-            logger.log_line(&format!(
-                "{P} processContainer.ui.desktopSystemControl=true"
-            ));
+        if is_seatbelt && seatbelt.is_some_and(|sb| sb.gui_access) {
+            logger.warning_line(&format!("{P} seatbelt.guiAccess=true"));
         }
-        if ui.system_settings != "none" {
-            logger.log_line(&format!(
-                "{P} processContainer.ui.systemSettings={}",
-                sanitize_log_value(&ui.system_settings)
-            ));
-        }
-        if seatbelt.is_some_and(|sb| sb.gui_access) {
-            logger.log_line(&format!("{P} seatbelt.guiAccess=true"));
-        }
-    }
-    if ui.ime {
-        logger.log_line(&format!("{P} processContainer.ui.ime=true"));
     }
 
-    // ProcessContainer capabilities (effective regardless of ui.disable).
-    if !policy.capabilities.is_empty() {
-        logger.log_line(&format!(
-            "{P} processContainer.capabilities ({} cap(s))",
-            policy.capabilities.len()
-        ));
+    // ProcessContainer capabilities and IME (effective regardless of ui.disable).
+    if is_process_container {
+        if ui.ime {
+            logger.warning_line(&format!("{P} processContainer.ui.ime=true"));
+        }
+        // Report the parser-injected learning-mode capabilities by name, and
+        // count only what the caller actually asked for.
+        if policy
+            .capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(PERMISSIVE_LEARNING_MODE_CAPABILITY))
+        {
+            logger.warning_line(&format!(
+                "{P} processContainer.captureDenials.mode=allow (denied accesses \
+                 are recorded and permitted instead of blocked)"
+            ));
+        }
+        let requested_capabilities = policy
+            .capabilities
+            .iter()
+            .filter(|c| {
+                !c.eq_ignore_ascii_case(LEARNING_MODE_LOGGING_CAPABILITY)
+                    && !c.eq_ignore_ascii_case(PERMISSIVE_LEARNING_MODE_CAPABILITY)
+            })
+            .count();
+        if requested_capabilities > 0 {
+            logger.warning_line(&format!(
+                "{P} processContainer.capabilities ({requested_capabilities} cap(s))"
+            ));
+        }
     }
 
     // Seatbelt non-UI relaxations (independent of ui.disable).
-    if let Some(sb) = seatbelt {
+    if let Some(sb) = seatbelt.filter(|_| is_seatbelt) {
         if matches!(sb.launch_method, LaunchMethod::Open) {
-            logger.log_line(&format!(
+            logger.warning_line(&format!(
                 "{P} seatbelt.launchMethod=open (sandbox applies to the inner \
                  command, not the launched app)"
             ));
         }
         if sb.profile_override.is_some() {
-            logger.log_line(&format!(
+            logger.warning_line(&format!(
                 "{P} seatbelt.profileOverride (generated profile bypassed)"
             ));
         }
         if sb.keychain_access {
-            logger.log_line(&format!("{P} seatbelt.keychainAccess=true"));
+            logger.warning_line(&format!("{P} seatbelt.keychainAccess=true"));
         }
         if !sb.extra_mach_lookups.is_empty() {
-            logger.log_line(&format!(
+            logger.warning_line(&format!(
                 "{P} seatbelt.extraMachLookups ({} service(s))",
                 sb.extra_mach_lookups.len()
             ));
@@ -1398,7 +1492,7 @@ fn convert_wire_config(
         };
     }
 
-    log_boundary_relaxations(&policy, seatbelt.as_ref(), logger);
+    log_boundary_relaxations(&policy, seatbelt.as_ref(), &containment, logger);
 
     Ok(ExecutionRequest {
         schema_version,
@@ -1908,14 +2002,30 @@ mod tests {
         }
     }
 
+    /// The boundary-relaxation audit stream goes to `Logger::warning_line`, which
+    /// retains lines for in-process callers rather than filling the debug buffer,
+    /// so tests assert against `warnings()` (and the buffer must stay clean).
+    fn relaxations(logger: &Logger) -> String {
+        logger.warnings().join("\n")
+    }
+
+    fn parse_relaxations(json: &str) -> String {
+        let mut logger = test_logger();
+        load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
+        assert!(
+            !logger.get_buffer().contains("boundary relaxed"),
+            "audit lines must not be confined to the debug buffer"
+        );
+        relaxations(&logger)
+    }
+
     #[test]
     fn boundary_relaxation_logged_for_network_and_ui() {
         // A config that opens network + UI boundaries logs loud SECURITY lines;
         // a secure-default config must not.
-        let relaxed = r#"{"process": {"commandLine": "echo hi"}, "network": {"defaultPolicy": "allow"}, "ui": {"disable": false, "injection": true}}"#;
-        let mut logger = test_logger();
-        load_request(&base64_encode(relaxed.as_bytes()), &mut logger, true).unwrap();
-        let out = logger.get_buffer();
+        let out = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "network": {"defaultPolicy": "allow"}, "ui": {"disable": false, "injection": true}}"#,
+        );
         assert!(
             out.contains("SECURITY: boundary relaxed: network.defaultPolicy=allow"),
             "got: {out}"
@@ -1923,25 +2033,60 @@ mod tests {
         assert!(out.contains("ui.disable=false"));
         assert!(out.contains("ui.injection=true"));
 
-        let secure = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let mut logger2 = test_logger();
-        load_request(&base64_encode(secure.as_bytes()), &mut logger2, true).unwrap();
+        let secure = parse_relaxations(r#"{"process": {"commandLine": "echo hi"}}"#);
         assert!(
-            !logger2.get_buffer().contains("boundary relaxed"),
-            "secure defaults should not warn"
+            !secure.contains("boundary relaxed"),
+            "secure defaults should not warn, got: {secure}"
         );
 
-        // blockedHosts under deny-by-default is inert and must NOT warn.
         // Injection is inert while ui.disable=true (Seatbelt only omits an
         // explicit HID deny, which deny-default already covers), so it is
-        // suppressed too.
-        let inert = r#"{"process": {"commandLine": "echo hi"}, "network": {"blockedHosts": ["evil.test"]}, "ui": {"injection": true}}"#;
-        let mut logger3 = test_logger();
-        load_request(&base64_encode(inert.as_bytes()), &mut logger3, true).unwrap();
+        // suppressed.
+        let inert = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "ui": {"injection": true}}"#,
+        );
         assert!(
-            !logger3.get_buffer().contains("boundary relaxed"),
-            "inert blockedHosts + UI-disabled injection should not warn, got: {}",
-            logger3.get_buffer()
+            !inert.contains("boundary relaxed"),
+            "UI-disabled injection should not warn, got: {inert}"
+        );
+    }
+
+    #[test]
+    fn blocked_hosts_warn_only_under_deny_by_default() {
+        // A blocklist normally only subtracts connectivity, but on the micro-VM
+        // backends the presence of a host list is what enables networking:
+        // NanVix's `host_networking_enabled` returns true for a non-empty
+        // blocklist "regardless of defaultPolicy", and Hyperlight's blocklist
+        // branch returns BlockList ("rest allowed") before the deny-by-default
+        // branch that would disable networking. That flips the sandbox from
+        // no-network to allow-by-default, so it must be reported.
+        let flipped = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm", "network": {"blockedHosts": ["evil.test"]}}"#,
+        );
+        assert!(
+            flipped.contains("SECURITY: boundary relaxed: network.blockedHosts"),
+            "blocklist under deny-by-default must warn on micro-VM, got: {flipped}"
+        );
+
+        // Under defaultPolicy=allow the network is already open, so a blocklist
+        // genuinely only subtracts and must stay silent.
+        let subtractive = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm", "network": {"defaultPolicy": "allow", "blockedHosts": ["evil.test"]}}"#,
+        );
+        assert!(
+            !subtractive.contains("blockedHosts"),
+            "a blocklist under an already-open policy must stay silent, got: {subtractive}"
+        );
+
+        // LXC appends `defaultPolicy` as the terminal iptables action regardless
+        // of the host lists, so a blocklist there is purely subtractive.
+        let subtractive_backend = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "lxc", "network": {"blockedHosts": ["evil.test"]}}"#,
+        );
+        assert!(
+            !subtractive_backend.contains("blockedHosts"),
+            "a blocklist on a backend that honors defaultPolicy independently must \
+             stay silent, got: {subtractive_backend}"
         );
     }
 
@@ -1955,9 +2100,11 @@ mod tests {
         let mut logger = test_logger();
         let req = load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
         assert!(req.policy.ui.disable, "ui.disable defaults to true");
-        let out = logger.get_buffer();
+        let out = relaxations(&logger);
+        // The audit line quotes the stable lowercase wire token the caller wrote,
+        // not the Debug variant name.
         assert!(
-            out.contains("SECURITY: boundary relaxed: ui.clipboard=All"),
+            out.contains("SECURITY: boundary relaxed: ui.clipboard=all"),
             "clipboard must warn while ui.disable=true, got: {out}"
         );
     }
@@ -1966,10 +2113,9 @@ mod tests {
     fn seatbelt_launch_method_open_warns() {
         // launchMethod=open sandboxes the inner command rather than the launched
         // app, which moves the trust boundary and must be reported.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"launchMethod": "open"}}"#;
-        let mut logger = test_logger();
-        load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
-        let out = logger.get_buffer();
+        let out = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"launchMethod": "open"}}"#,
+        );
         assert!(
             out.contains("SECURITY: boundary relaxed: seatbelt.launchMethod=open"),
             "got: {out}"
@@ -1979,18 +2125,115 @@ mod tests {
     #[test]
     fn mixed_policy_suppresses_only_the_inert_field() {
         // Suppression must be field-specific: an inert setting stays silent while
-        // an effective relaxation in the same config still warns.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "network": {"blockedHosts": ["evil.test"], "allowLocalNetwork": true}}"#;
-        let mut logger = test_logger();
-        load_request(&base64_encode(json.as_bytes()), &mut logger, true).unwrap();
-        let out = logger.get_buffer();
+        // an effective relaxation in the same config still warns. `systemSettings`
+        // is free-form, and an unrecognized value falls through to the same
+        // default-deny arm as "none" in `ui_policy::resolve_ui_restrictions`.
+        let out = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "network": {"allowLocalNetwork": true}, "ui": {"disable": false}, "processContainer": {"ui": {"systemSettings": "bogus"}}}"#,
+        );
         assert!(
             out.contains("SECURITY: boundary relaxed: network.allowLocalNetwork=true"),
             "effective relaxation must still warn, got: {out}"
         );
         assert!(
-            !out.contains("blockedHosts"),
-            "blockedHosts must stay silent, got: {out}"
+            !out.contains("systemSettings"),
+            "an unrecognized systemSettings value is inert and must stay silent, got: {out}"
+        );
+
+        // A recognized value does relax enforcement and must be reported.
+        let effective = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "ui": {"disable": false}, "processContainer": {"ui": {"systemSettings": "all"}}}"#,
+        );
+        assert!(
+            effective.contains("processContainer.ui.systemSettings=\"all\""),
+            "a recognized systemSettings value must warn, got: {effective}"
+        );
+    }
+
+    #[test]
+    fn injected_learning_mode_capability_is_not_a_relaxation() {
+        // `processContainer.learningMode=true` injects `learningModeLogging` into
+        // policy.capabilities purely to emit denial telemetry; enforcement is
+        // unchanged, so it must not be counted as a caller-requested capability.
+        let out = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"learningMode": true}}"#,
+        );
+        assert!(
+            !out.contains("capabilities"),
+            "observability-only capability injection must not warn, got: {out}"
+        );
+
+        // The same holds for the default (block) captureDenials injection.
+        let capture = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"captureDenials": {}}}"#,
+        );
+        assert!(
+            !capture.contains("capabilities"),
+            "block-mode capture injection must not warn, got: {capture}"
+        );
+
+        // A genuinely caller-requested capability is still counted, and the
+        // injected one is excluded from the count.
+        let requested = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"learningMode": true, "capabilities": ["internetClient"]}}"#,
+        );
+        assert!(
+            requested.contains("processContainer.capabilities (1 cap(s))"),
+            "caller capabilities must be counted without the injected one, got: {requested}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_mode_warns_by_name() {
+        // `captureDenials.mode=allow` swaps deny-and-record for
+        // `permissiveLearningMode`, which permits what it records. That is a real
+        // relaxation and is reported under its own name rather than as a count.
+        let out = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "processContainer": {"captureDenials": {"mode": "allow"}}}"#,
+        );
+        assert!(
+            out.contains("SECURITY: boundary relaxed: processContainer.captureDenials.mode=allow"),
+            "permissive capture must warn, got: {out}"
+        );
+        assert!(
+            !out.contains("capabilities"),
+            "the injected capability must not also appear as a count, got: {out}"
+        );
+    }
+
+    #[test]
+    fn relaxations_are_gated_on_the_active_containment_backend() {
+        // Only the Seatbelt runner reads the `seatbelt` section, so a
+        // ProcessContainer config must not claim a Seatbelt relaxation.
+        let process_container = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "processContainer": {"capabilities": ["internetClient"]}}"#,
+        );
+        assert!(
+            process_container.contains("processContainer.capabilities"),
+            "the active backend's relaxations must be reported, got: {process_container}"
+        );
+
+        // Conversely, ProcessContainer capabilities are never applied under
+        // Seatbelt, so they must not appear in a Seatbelt audit stream.
+        let seatbelt = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"keychainAccess": true}}"#,
+        );
+        assert!(
+            seatbelt.contains("seatbelt.keychainAccess=true"),
+            "got: {seatbelt}"
+        );
+        assert!(
+            !seatbelt.contains("processContainer"),
+            "ProcessContainer relaxations must not be reported for Seatbelt, got: {seatbelt}"
+        );
+
+        // Cross-backend policy is still evaluated for every backend.
+        let network = parse_relaxations(
+            r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "network": {"defaultPolicy": "allow"}}"#,
+        );
+        assert!(
+            network.contains("network.defaultPolicy=allow"),
+            "cross-backend policy must be reported for any backend, got: {network}"
         );
     }
 
@@ -2004,6 +2247,21 @@ mod tests {
             "newline must be escaped, got: {forged}"
         );
         assert!(forged.contains("\\n"), "got: {forged}");
+
+        // `char::is_control` is Cc-only, so the Unicode line/paragraph separators
+        // need explicit escaping: they are line terminators for common log
+        // consumers (Python `str.splitlines`, JavaScript parsers) and would
+        // otherwise reopen the forging primitive above.
+        let unicode_break = sanitize_log_value("custom\u{2028}forged\u{2029}too");
+        assert!(
+            !unicode_break.contains('\u{2028}') && !unicode_break.contains('\u{2029}'),
+            "U+2028/U+2029 must be escaped, got: {unicode_break}"
+        );
+        assert!(
+            unicode_break.contains("\\u{2028}") && unicode_break.contains("\\u{2029}"),
+            "got: {unicode_break}"
+        );
+
         // Long values are truncated so one field cannot dominate the log.
         let long = sanitize_log_value(&"a".repeat(500));
         assert!(
