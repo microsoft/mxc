@@ -134,6 +134,11 @@ struct WslcSandboxProcess {
 // `WslcProcessGuard` handles it owns. No apartment state or interface pointer
 // is cached across calls, so setup and teardown may run on different threads.
 //
+// The invariant holds with no exception: where an apartment cannot be
+// established at all, every one of those paths declines to call the SDK rather
+// than proceeding without one — leaking the handle (the guards, which have no
+// error channel) or reporting the failure (`destroy`).
+//
 // The handle is *moved* between threads, never shared (`Sync` is deliberately
 // not claimed), so at most one thread calls into the SDK at a time.
 unsafe impl Send for WslcSandboxProcess {}

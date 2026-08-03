@@ -1930,12 +1930,21 @@ impl StartedContainer {
     /// not stop or delete still holds a VM-backed sandbox, which the streaming
     /// path turns into a retry from `Drop` instead of a silent leak.
     pub(crate) fn destroy(&self, logger: &mut Logger) -> Result<(), String> {
-        // Teardown also runs from `Drop`, which has no error channel, and
-        // leaking a live container is worse than a doomed SDK call — so a
-        // failed apartment is logged and teardown attempted anyway.
-        let _com = ComApartment::enter().inspect_err(|e| {
-            let _ = writeln!(logger, "[WSLC] {e}; attempting teardown anyway");
-        });
+        // No apartment, no SDK calls — the same rule the handle guards' `Drop`
+        // impls follow. Stopping the container matters (it is a live VM, not
+        // just an in-process handle), but calling the SDK apartment-less is
+        // precisely what the `Send` soundness argument rules out, and it would
+        // most likely fail anyway. Reported so the caller learns the container
+        // leaked rather than believing it was destroyed.
+        let _com = match ComApartment::enter() {
+            Ok(com) => com,
+            Err(e) => {
+                let msg =
+                    format!("{e}; skipped container teardown to avoid an apartment-less SDK call");
+                let _ = writeln!(logger, "[WSLC] Cleanup failed: {msg}");
+                return Err(msg);
+            }
+        };
         let mut failure: Option<String> = None;
         if self.destroy_on_exit {
             // SAFETY: the guards hold live handles for `self`'s lifetime and

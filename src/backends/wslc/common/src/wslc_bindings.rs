@@ -361,20 +361,26 @@ impl WslcSessionGuard {
 
 impl Drop for WslcSessionGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            // Joins the MTA for the release, like every other SDK entry point:
-            // these guards hang off a `Send` handle, so they can drop on a
-            // thread that never entered the apartment (a `spawn_blocking` pool,
-            // say). A failure is ignored rather than propagated — there is no
-            // channel for it in `Drop`, and releasing apartment-less is still
-            // better than leaking the session.
-            let _com = ComApartment::enter();
-            // SAFETY: the handle is non-null and owned by this guard, so it is
-            // terminated and released exactly once.
-            unsafe {
-                let _ = (self.terminate_fn)(self.handle);
-                (self.release_fn)(self.handle);
-            }
+        if self.handle.is_null() {
+            return;
+        }
+        // Joins the MTA for the release, like every other SDK entry point:
+        // these guards hang off a `Send` handle, so they can drop on a thread
+        // that never entered the apartment (a `spawn_blocking` pool, say).
+        //
+        // If no apartment can be established, the handle is deliberately
+        // **leaked**: calling into the SDK apartment-less is the one thing the
+        // `Send` soundness argument (and #721) exists to prevent, and a leaked
+        // in-process handle is the strictly safer of the two failures. There is
+        // no error channel in `Drop` to report it through either way.
+        let Ok(_com) = ComApartment::enter() else {
+            return;
+        };
+        // SAFETY: the handle is non-null and owned by this guard, so it is
+        // terminated and released exactly once.
+        unsafe {
+            let _ = (self.terminate_fn)(self.handle);
+            (self.release_fn)(self.handle);
         }
     }
 }
@@ -403,14 +409,18 @@ impl WslcContainerGuard {
 
 impl Drop for WslcContainerGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            // Joins the MTA for the release — see `WslcSessionGuard`'s `Drop`.
-            let _com = ComApartment::enter();
-            // SAFETY: the handle is non-null and owned by this guard, so it is
-            // released exactly once.
-            unsafe {
-                (self.release_fn)(self.handle);
-            }
+        if self.handle.is_null() {
+            return;
+        }
+        // Joins the MTA for the release, and leaks the handle rather than
+        // calling the SDK without one — see `WslcSessionGuard`'s `Drop`.
+        let Ok(_com) = ComApartment::enter() else {
+            return;
+        };
+        // SAFETY: the handle is non-null and owned by this guard, so it is
+        // released exactly once.
+        unsafe {
+            (self.release_fn)(self.handle);
         }
     }
 }
@@ -439,14 +449,18 @@ impl WslcProcessGuard {
 
 impl Drop for WslcProcessGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            // Joins the MTA for the release — see `WslcSessionGuard`'s `Drop`.
-            let _com = ComApartment::enter();
-            // SAFETY: the handle is non-null and owned by this guard, so it is
-            // released exactly once.
-            unsafe {
-                (self.release_fn)(self.handle);
-            }
+        if self.handle.is_null() {
+            return;
+        }
+        // Joins the MTA for the release, and leaks the handle rather than
+        // calling the SDK without one — see `WslcSessionGuard`'s `Drop`.
+        let Ok(_com) = ComApartment::enter() else {
+            return;
+        };
+        // SAFETY: the handle is non-null and owned by this guard, so it is
+        // released exactly once.
+        unsafe {
+            (self.release_fn)(self.handle);
         }
     }
 }
