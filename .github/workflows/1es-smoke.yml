@@ -1,20 +1,26 @@
 # ============================================================================
 # 1ES connectivity smoke test — proves microsoft/mxc can dispatch a job to the
-# 1ES Hosted GitHub Runner pool and that runner group 145 grants this repo.
+# 1ES Hosted GitHub Runner pool and that its runner group grants this repo.
 #
 # THROWAWAY / PROOF workflow. Not part of the real CI matrix (Build.yml).
-# Nested-virt/WHP checks intentionally omitted — this ONLY verifies pickup.
 #
-# Pool values from the created pool:
-#   1ES.Pool          = 1es-mxc-e2e-windows-25h2-pro-x64
-#   1ES.ImageOverride = windows-25h2-pro-x64
+# Design notes:
+#   * Triggers ONLY on push to this throwaway branch (NOT pull_request), so it
+#     does not re-run the full mxc CI matrix on every push.
+#   * 1ES.ImageOverride is intentionally OMITTED. The pool has a single image
+#     (windows-25h2-pro-x64), so it defaults. If the job now picks up, an image
+#     override was the culprit; if it still queues, the cause is org-level
+#     authorization (1ES GitHub App repo access and/or runner-group grant for a
+#     PUBLIC repo) or the 1ES scaler — NOT the labels.
+#
+# Pool: 1es-mxc-e2e-windows-25h2-pro-x64  (org-level, runner group 145)
 # ============================================================================
 name: 1ES Connectivity Smoke
 
 on:
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+  push:
+    branches:
+      - user/modanish/1es-github-runner-e2e
 
 permissions:
   contents: read
@@ -25,7 +31,6 @@ jobs:
     runs-on:
       - self-hosted
       - "1ES.Pool=1es-mxc-e2e-windows-25h2-pro-x64"
-      - "1ES.ImageOverride=windows-25h2-pro-x64"
     timeout-minutes: 15
 
     steps:
