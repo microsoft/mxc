@@ -379,7 +379,7 @@ export interface Seatbelt {
    */
   nestedPty?: boolean | null;
   /**
-   * Replace the generated profile entirely (advanced/testing escape hatch).
+   * Replace the generated profile entirely (dev-only escape hatch; rejected by release builds).
    */
   profileOverride?: string | null;
 }
