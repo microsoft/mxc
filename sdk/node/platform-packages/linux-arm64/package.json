@@ -1,0 +1,28 @@
+{
+  "name": "@microsoft/mxc-sdk-linux-arm64",
+  "version": "0.7.0",
+  "description": "MXC SDK native binaries for linux-arm64 (aarch64-unknown-linux-gnu).",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "lxc-exec",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node -e \"if(!require('fs').existsSync('lxc-exec')){console.error('prepack: lxc-exec not staged; refusing to pack an empty platform package');process.exit(1)}\""
+  },
+  "license": "MIT",
+  "author": "Microsoft Corporation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/mxc.git",
+    "directory": "sdk/node/platform-packages/linux-arm64"
+  }
+}

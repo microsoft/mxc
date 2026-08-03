@@ -96,9 +96,8 @@ echo ""
 echo "=== Building mxc-exec-mac ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
-# mxc-exec-mac is the seatbelt executor. unix-test-proxy is the bundled,
-# testing-only HTTP proxy that backs `network.proxy.builtinTestServer`; it is
-# spawned as a sibling of mxc-exec-mac by the proxy coordinator.
+# mxc-exec-mac is the seatbelt executor. unix-test-proxy is testing-only and
+# remains in src/target for integration tests; it is not staged for publishing.
 CARGO_FLAGS=("-p" "mxc_darwin" "-p" "unix_test_proxy")
 if [ "$BUILD_TYPE" = "release" ]; then
     CARGO_FLAGS+=("--release")
@@ -111,7 +110,7 @@ done
 
 echo "Rust build complete."
 
-# Copy binaries to SDK bin directory.
+# Copy binaries into the per-platform SDK packages.
 copy_binary_for_target() {
     local triple="$1"
     local sdk_arch
@@ -121,28 +120,28 @@ copy_binary_for_target() {
         *) echo "Skipping unknown triple $triple"; return ;;
     esac
 
-    local bin_dir="$SDK_DIR/bin/$sdk_arch"
-    mkdir -p "$bin_dir"
+    local bin_dir="$SDK_DIR/platform-packages/darwin-$sdk_arch"
+
+    # Only stage into shipped platform packages. darwin-x64 (Intel) is not a
+    # shipped package (no manifest); its binary stays in src/target for local
+    # dev resolution via the monorepo fallback.
+    if [ ! -f "$bin_dir/package.json" ]; then
+        echo "Skipping darwin-$sdk_arch: no platform package; binary remains in src/target."
+        return
+    fi
+
+    # Clean previously-staged binaries so stale artifacts never persist into the
+    # package; keep only the tracked metadata files.
+    find "$bin_dir" -mindepth 1 ! -name package.json ! -name README.md -delete
 
     local src="$SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-mac"
-    if [ -f "$src" ]; then
-        cp "$src" "$bin_dir/mxc-exec-mac"
-        chmod +x "$bin_dir/mxc-exec-mac"
-        echo "Copied $src -> $bin_dir/mxc-exec-mac"
-    else
-        echo "Warning: $src not found, skipping copy"
+    if [ ! -f "$src" ]; then
+        echo "Error: mxc-exec-mac not found at $src — cannot stage an incomplete darwin-$sdk_arch package." >&2
+        exit 1
     fi
-
-    # unix-test-proxy backs network.proxy.builtinTestServer (testing only).
-    # It must sit next to mxc-exec-mac so the proxy coordinator can resolve it.
-    local proxy_src="$SRC_DIR/target/$triple/$BUILD_TYPE/unix-test-proxy"
-    if [ -f "$proxy_src" ]; then
-        cp "$proxy_src" "$bin_dir/unix-test-proxy"
-        chmod +x "$bin_dir/unix-test-proxy"
-        echo "Copied $proxy_src -> $bin_dir/unix-test-proxy"
-    else
-        echo "Warning: $proxy_src not found, skipping copy"
-    fi
+    cp "$src" "$bin_dir/mxc-exec-mac"
+    chmod +x "$bin_dir/mxc-exec-mac"
+    echo "Copied $src -> $bin_dir/mxc-exec-mac"
 }
 
 for triple in "${TARGETS[@]}"; do
@@ -153,6 +152,13 @@ done
 if [ "$BUILD_SDK" = true ]; then
     echo ""
     echo "=== Building TypeScript SDK ==="
+    if [ -n "${CI:-}" ]; then
+        echo "Checking platform package versions (CI)..."
+        node "$SCRIPT_DIR/scripts/sync-platform-package-versions.js" --check
+    else
+        echo "Stamping platform package versions..."
+        node "$SCRIPT_DIR/scripts/sync-platform-package-versions.js"
+    fi
     cd "$SDK_DIR"
     npm install --ignore-scripts
     npm run build
