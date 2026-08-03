@@ -31,6 +31,7 @@ jobs:
     runs-on:
       - self-hosted
       - "1ES.Pool=1es-mxc-e2e-windows-25h2-pro-x64"
+      - "JobId=smoke-${{ github.run_id }}-${{ github.run_attempt }}"
     timeout-minutes: 15
 
     steps:
