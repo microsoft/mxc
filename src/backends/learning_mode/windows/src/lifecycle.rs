@@ -10,8 +10,9 @@
 //! 1. `CreateProcessSecurityEnvironment(spec)` → env handle
 //! 2. `StartLearningModeTrace(env)` → trace handle (**before** the child launches, so no
 //!    early denials are missed)
-//! 3. `CreateProcessAsUserInsideSecurityEnvironment(env, …)` → child (**runner's job**;
-//!    the session exposes the env handle for it via [`CaptureSession::environment`])
+//! 3. attach `env` as `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`, then call
+//!    `CreateProcessW` (**runner's job**; the session exposes the handle via
+//!    [`CaptureSession::environment`])
 //! 4. wait for the child to exit
 //! 5. `StopLearningModeTrace(trace, outputPath)` → sealed ETL (NULL path discards)
 //! 6. `CloseProcessSecurityEnvironment(env)` → teardown
@@ -91,7 +92,7 @@ impl CaptureSession {
     }
 
     /// The `HPROCESS_SECURITY_ENVIRONMENT` handle to pass to
-    /// `CreateProcessAsUserInsideSecurityEnvironment`.
+    /// [`crate::SecurityEnvironmentStartupInfo`].
     ///
     /// # Panics
     /// Panics only on an internal invariant violation — the environment is present for

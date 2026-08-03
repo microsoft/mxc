@@ -9,8 +9,9 @@
 //! 1. build a minimal FlatBuffer sandbox spec with the `permissiveLearningMode`
 //!    capability (the token the OS learning-mode path recognises),
 //! 2. [`CaptureSession::begin`] — create the security environment + start the trace,
-//! 3. launch `cmd.exe` inside the environment via
-//!    `CreateProcessAsUserInsideSecurityEnvironment`,
+//! 3. attach the environment handle through
+//!    `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT` and launch `cmd.exe` with
+//!    `CreateProcessW`,
 //! 4. wait for it to exit,
 //! 5. [`CaptureSession::finish`] — seal the ETL to a temp path + close the environment,
 //! 6. assert the ETL file was produced (non-empty).
@@ -41,7 +42,7 @@ mod windows_impl {
 
     use flatbuffers::FlatBufferBuilder;
     use learning_mode_windows::{
-        CaptureSession, LearningModeApi, SecurityEnvironmentApi,
+        CaptureSession, LearningModeApi, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
         PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     };
     use sandbox_spec::base_container_layout::{
@@ -49,8 +50,10 @@ mod windows_impl {
     };
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        GetExitCodeProcess, WaitForSingleObject, INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+        CreateProcessW, GetExitCodeProcess, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
+        INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
     };
+    use windows_core::{PCWSTR, PWSTR};
 
     /// Matches the schema version BaseContainer embeds in every spec payload.
     const SANDBOX_SPEC_VERSION: &str = "0.1.0";
@@ -118,7 +121,7 @@ mod windows_impl {
         };
         println!("CaptureSession::begin OK — environment + trace live");
 
-        let exit_code = match launch_and_wait(&secenv_api, session.environment()) {
+        let exit_code = match launch_and_wait(session.environment()) {
             Ok(code) => {
                 println!("child exited with code {code}");
                 code
@@ -161,11 +164,7 @@ mod windows_impl {
 
     /// Launch the child inside `environment` and wait for it to exit, returning its exit
     /// code.
-    fn launch_and_wait(
-        secenv_api: &SecurityEnvironmentApi,
-        environment: HANDLE,
-    ) -> Result<u32, String> {
-        let launch = secenv_api.launch_fn();
+    fn launch_and_wait(environment: HANDLE) -> Result<u32, String> {
         let mut cmd = wide_command_line();
 
         // SAFETY: a zeroed STARTUPINFOW with only `cb` set is valid; the child inherits
@@ -173,33 +172,28 @@ mod windows_impl {
         let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup_info.cb = u32::try_from(std::mem::size_of::<STARTUPINFOW>())
             .map_err(|_| "STARTUPINFOW size overflow".to_string())?;
+        let extended_startup = SecurityEnvironmentStartupInfo::new(startup_info, environment, &[])
+            .map_err(|error| error.to_string())?;
         let mut process_information: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-        // SAFETY: `launch` was resolved from processmodel.dll and matches the declared C
-        // signature. `cmd` is a mutable, null-terminated UTF-16 buffer; `startup_info`
-        // and `process_information` are valid; `environment` is the live handle from the
-        // session. `lpEnvironment` is null, so CREATE_UNICODE_ENVIRONMENT is not needed.
-        let ok = unsafe {
-            launch(
-                HANDLE(std::ptr::null_mut()), // userToken: caller context
-                std::ptr::null(),             // applicationName (from command line)
-                cmd.as_mut_ptr(),             // commandLine
-                0,                            // creationFlags
-                std::ptr::null(),             // environment
-                std::ptr::null(),             // currentDirectory
-                &startup_info,
-                environment,
+        // SAFETY: `cmd` is mutable and null-terminated; `extended_startup`
+        // owns a valid attribute list containing the live environment handle;
+        // `process_information` is a valid output buffer.
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(),
+                Some(PWSTR(cmd.as_mut_ptr())),
+                None,
+                None,
+                false,
+                EXTENDED_STARTUPINFO_PRESENT,
+                None,
+                PCWSTR::null(),
+                &extended_startup.startup_info().StartupInfo,
                 &mut process_information,
             )
-        };
-        if ok == 0 {
-            // SAFETY: reads the calling thread's last-error slot.
-            let err = unsafe { windows::Win32::Foundation::GetLastError() };
-            return Err(format!(
-                "CreateProcessAsUserInsideSecurityEnvironment failed (GetLastError = {})",
-                err.0
-            ));
         }
+        .map_err(|error| format!("CreateProcessW failed: {error}"))?;
 
         // SAFETY: `hProcess` is a valid process handle returned by the launch.
         let wait = unsafe { WaitForSingleObject(process_information.hProcess, INFINITE) };

@@ -99,6 +99,8 @@ The handle is modelled on [`std::process::Child`]:
 - `try_wait()` for a non-blocking exit check.
 - `warnings()` returns policy security warnings detected while spawning the
   sandbox, such as `permissiveLearningMode` weakening deny-by-default.
+- `output_metadata()` returns structured feature outputs after a terminal wait.
+  For `captureDenials`, it contains the generated JSON file path and summary.
 - `kill()` terminates the sandboxed process **and its descendants** (a
   process-tree kill): on Unix the child leads its own process group and the
   whole group is signalled (an immediate `SIGKILL`, no graceful `SIGTERM`);
@@ -110,6 +112,8 @@ The handle is modelled on [`std::process::Child`]:
   actual OS/wait failure).
 - `wait_with_output()` consumes the handle and returns an `Output` with the
   `WaitOutcome`, policy security `warnings`, and captured `stdout`/`stderr` — it
+  also includes structured `output_metadata` produced during backend teardown.
+  The method
   drains both streams concurrently for you, the safe alternative to
   `take_stdout()` + `take_stderr()` (reading one to EOF before the other can
   deadlock an output-heavy child).
