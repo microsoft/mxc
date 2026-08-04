@@ -17,8 +17,8 @@ use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, GetLengthSid, PSID};
 
 use crate::extractors::{
-    DecodedEventParts, RawDenial, ACCESS_CHECK_EVENT_ID, PRIVACY_ACCESS_CHECK_EVENT_ID,
-    PRIVACY_LEARNING_MODE_PROVIDER,
+    DecodedEventParts, RawDenial, ACCESS_CHECK_EVENT_ID, KERNEL_GENERAL_PROVIDER,
+    PRIVACY_ACCESS_CHECK_EVENT_ID, PRIVACY_LEARNING_MODE_PROVIDER,
 };
 
 const ACE_TYPE_ACCESS_ALLOWED: u8 = 0;
@@ -163,6 +163,19 @@ const KNOWN_CAPABILITIES: &[&str] = &[
     "cortanaSpeechAccessory",
 ];
 
+// ID_CAP_LOCATION predates the manifest capability named `location` and has
+// fixed app/group SIDs that DeriveCapabilitySidsFromName does not reproduce.
+const LEGACY_CAPABILITY_SIDS: &[(&str, &str)] = &[
+    (
+        "location",
+        "S-1-15-3-1024-2158456844-3754929254-744589270-3611187126-2481208986-30837703-3416168463-2437063433",
+    ),
+    (
+        "location",
+        "S-1-5-32-2158456844-3754929254-744589270-3611187126-2481208986-30837703-3416168463-2437063433",
+    ),
+];
+
 #[derive(Debug, thiserror::Error)]
 enum DaclDecodeError {
     #[error("DACL property is not valid hexadecimal")]
@@ -175,12 +188,29 @@ enum DaclDecodeError {
 
 struct CapabilityIndex {
     by_sid: HashMap<Vec<u8>, &'static str>,
+    by_sid_string: HashMap<String, &'static str>,
 }
 
 impl CapabilityIndex {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             by_sid: HashMap::with_capacity(capacity),
+            by_sid_string: HashMap::with_capacity(capacity),
+        }
+    }
+
+    fn insert(&mut self, sid: Vec<u8>, name: &'static str, overwrite: bool) {
+        let sid_string = format_sid(&sid);
+        if overwrite {
+            self.by_sid.insert(sid, name);
+            if let Some(sid_string) = sid_string {
+                self.by_sid_string.insert(sid_string, name);
+            }
+        } else {
+            self.by_sid.entry(sid).or_insert(name);
+            if let Some(sid_string) = sid_string {
+                self.by_sid_string.entry(sid_string).or_insert(name);
+            }
         }
     }
 
@@ -188,11 +218,15 @@ impl CapabilityIndex {
         self.by_sid.get(sid).copied()
     }
 
+    fn resolve_string(&self, sid: &str) -> Option<&'static str> {
+        self.by_sid_string.get(sid).copied()
+    }
+
     #[cfg(test)]
     fn for_test(entries: &[(&'static str, &[u8])]) -> Self {
         let mut index = Self::with_capacity(entries.len());
         for &(name, sid) in entries {
-            index.by_sid.insert(sid.to_vec(), name);
+            index.insert(sid.to_vec(), name, true);
         }
         index
     }
@@ -205,12 +239,14 @@ pub(crate) fn extract_denials(
     pid: u32,
     filetime: u64,
 ) -> Vec<RawDenial> {
-    if parts.provider != PRIVACY_LEARNING_MODE_PROVIDER
-        || !matches!(
-            parts.event_id,
-            ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID
-        )
-    {
+    let is_supported_event = (parts.provider == KERNEL_GENERAL_PROVIDER
+        && parts.event_id == ACCESS_CHECK_EVENT_ID)
+        || (parts.provider == PRIVACY_LEARNING_MODE_PROVIDER
+            && matches!(
+                parts.event_id,
+                ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID
+            ));
+    if !is_supported_event {
         return Vec::new();
     }
 
@@ -229,6 +265,7 @@ pub(crate) fn extract_denials(
 }
 
 fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> HashSet<&'a str> {
+    let mut names = extract_flattened_dacl_names(parts, index);
     let mut explicit: Vec<&str> = parts
         .props
         .iter()
@@ -257,7 +294,6 @@ fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> H
         explicit
     };
 
-    let mut names = HashSet::new();
     for candidate in candidates {
         let Ok(decoded) = decode_hex(candidate) else {
             continue;
@@ -266,6 +302,49 @@ fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> H
             continue;
         };
         names.extend(found);
+    }
+    names
+}
+
+fn extract_flattened_dacl_names<'a>(
+    parts: &DecodedEventParts,
+    index: &'a CapabilityIndex,
+) -> HashSet<&'a str> {
+    let mut names = HashSet::new();
+    let mut in_dacl = false;
+    let mut ace_type = None;
+    let mut access_mask = None;
+
+    for (property, value) in &parts.props {
+        if property.eq_ignore_ascii_case("DaclAce") {
+            in_dacl = true;
+            ace_type = None;
+            access_mask = None;
+            continue;
+        }
+        if !in_dacl {
+            continue;
+        }
+        if property.eq_ignore_ascii_case("SaclRevision") || property.eq_ignore_ascii_case("SaclAce")
+        {
+            break;
+        }
+
+        if property.eq_ignore_ascii_case("AceType") {
+            ace_type = parse_u32(value);
+        } else if property.eq_ignore_ascii_case("AccessMask") {
+            access_mask = parse_u32(value);
+        } else if property.eq_ignore_ascii_case("Sid") {
+            if ace_type == Some(ACE_TYPE_ACCESS_ALLOWED as u32)
+                && access_mask.is_some_and(|mask| mask != 0)
+            {
+                if let Some(name) = index.resolve_string(value.trim_matches('"')) {
+                    names.insert(name);
+                }
+            }
+            ace_type = None;
+            access_mask = None;
+        }
     }
     names
 }
@@ -305,6 +384,63 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, DaclDecodeError> {
         return Err(DaclDecodeError::InvalidHex);
     }
     Ok(bytes)
+}
+
+fn parse_u32(value: &str) -> Option<u32> {
+    let value = value.trim().trim_matches('"');
+    value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+        .or_else(|| value.parse().ok())
+}
+
+fn format_sid(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < SID_FIXED_HEADER_SIZE || bytes[0] != 1 {
+        return None;
+    }
+    let sub_authority_count = bytes[1] as usize;
+    let expected = SID_FIXED_HEADER_SIZE + SID_SUB_AUTHORITY_SIZE * sub_authority_count;
+    if bytes.len() != expected {
+        return None;
+    }
+    let authority = bytes[2..8]
+        .iter()
+        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+    let mut sid = format!("S-1-{authority}");
+    for chunk in bytes[8..].chunks_exact(4) {
+        let sub_authority = u32::from_le_bytes(chunk.try_into().ok()?);
+        sid.push('-');
+        sid.push_str(&sub_authority.to_string());
+    }
+    Some(sid)
+}
+
+fn parse_sid(value: &str) -> Option<Vec<u8>> {
+    let mut parts = value.split('-');
+    if parts.next()? != "S" {
+        return None;
+    }
+    let revision: u8 = parts.next()?.parse().ok()?;
+    if revision != 1 {
+        return None;
+    }
+    let authority: u64 = parts.next()?.parse().ok()?;
+    if authority > 0x0000_ffff_ffff_ffff {
+        return None;
+    }
+    let sub_authorities: Vec<u32> = parts.map(str::parse).collect::<Result<_, _>>().ok()?;
+    let count: u8 = sub_authorities.len().try_into().ok()?;
+
+    let mut bytes =
+        Vec::with_capacity(SID_FIXED_HEADER_SIZE + SID_SUB_AUTHORITY_SIZE * count as usize);
+    bytes.push(revision);
+    bytes.push(count);
+    bytes.extend_from_slice(&authority.to_be_bytes()[2..]);
+    for sub_authority in sub_authorities {
+        bytes.extend_from_slice(&sub_authority.to_le_bytes());
+    }
+    Some(bytes)
 }
 
 fn walk_aces<'a>(
@@ -376,7 +512,8 @@ fn walk_aces<'a>(
 }
 
 fn build_capability_index() -> CapabilityIndex {
-    let mut index = CapabilityIndex::with_capacity(KNOWN_CAPABILITIES.len() * 2);
+    let mut index =
+        CapabilityIndex::with_capacity(KNOWN_CAPABILITIES.len() * 2 + LEGACY_CAPABILITY_SIDS.len());
     for &name in KNOWN_CAPABILITIES {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let mut group_sids: *mut PSID = std::ptr::null_mut();
@@ -395,16 +532,21 @@ fn build_capability_index() -> CapabilityIndex {
         };
         if result.is_ok() {
             if let Some(sid) = unsafe { first_sid(capability_sids, capability_count) } {
-                index.by_sid.insert(sid, name);
+                index.insert(sid, name, true);
             }
             if let Some(sid) = unsafe { first_sid(group_sids, group_count) } {
-                index.by_sid.entry(sid).or_insert(name);
+                index.insert(sid, name, false);
             }
         }
 
         unsafe {
             free_sid_array(capability_sids, capability_count);
             free_sid_array(group_sids, group_count);
+        }
+    }
+    for &(name, sid) in LEGACY_CAPABILITY_SIDS {
+        if let Some(sid) = parse_sid(sid) {
+            index.insert(sid, name, true);
         }
     }
     index
@@ -506,6 +648,33 @@ mod tests {
     }
 
     #[test]
+    fn extracts_capability_from_tdh_flattened_dacl() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let mut event = parts("DaclAce", "<struct>".to_string());
+        event.props.extend([
+            ("AceType".to_string(), "0".to_string()),
+            ("AceFlags".to_string(), "0x0".to_string()),
+            ("AccessMask".to_string(), "0x1".to_string()),
+            ("Sid".to_string(), "S-1-1-0".to_string()),
+            ("SaclRevision".to_string(), "0".to_string()),
+        ]);
+        let names = extract_names(&event, &index);
+        assert_eq!(names, HashSet::from(["internetClient"]));
+    }
+
+    #[test]
+    fn ignores_token_capability_sid_outside_dacl() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let mut event = parts("TokenCapabilities", "<struct>".to_string());
+        event
+            .props
+            .push(("CapabilitySid".to_string(), "S-1-1-0".to_string()));
+        assert!(extract_names(&event, &index).is_empty());
+    }
+
+    #[test]
     fn unidentified_capability_falls_back_to_unnamed_binary_property() {
         let sid = sid();
         let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
@@ -570,5 +739,43 @@ mod tests {
         assert_eq!(denials[0].resource_type, ResourceType::Capability);
         assert_eq!(denials[0].object_name, "internetClient");
         assert_eq!(denials[0].pid, 5900);
+    }
+
+    #[test]
+    fn kernel_general_event_recovers_legacy_location_capability() {
+        let mut event = parts("DaclAce", "<struct>".to_string());
+        event.provider = KERNEL_GENERAL_PROVIDER;
+        event.props.extend([
+            ("AceType".to_string(), "0".to_string()),
+            ("AceFlags".to_string(), "0x0".to_string()),
+            ("AccessMask".to_string(), "0x20a10".to_string()),
+            ("Sid".to_string(), LEGACY_CAPABILITY_SIDS[0].1.to_string()),
+            ("SaclRevision".to_string(), "0".to_string()),
+        ]);
+
+        let denials = extract_denials(&event, 1264, 42);
+        assert_eq!(denials.len(), 1);
+        assert_eq!(denials[0].resource_type, ResourceType::Capability);
+        assert_eq!(denials[0].object_name, "location");
+    }
+
+    #[test]
+    fn formats_sid_bytes_for_flattened_lookup() {
+        assert_eq!(
+            format_sid(&internet_client_sid()).as_deref(),
+            Some("S-1-15-3-1")
+        );
+        assert!(format_sid(&[1, 2, 0]).is_none());
+    }
+
+    #[test]
+    fn resolves_legacy_location_sid() {
+        let index = build_capability_index();
+        let sid = LEGACY_CAPABILITY_SIDS[0].1;
+        assert_eq!(index.resolve_string(sid), Some("location"));
+        assert_eq!(
+            parse_sid(sid).and_then(|sid| index.resolve(&sid)),
+            Some("location")
+        );
     }
 }
