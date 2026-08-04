@@ -17,6 +17,37 @@ use super::policy::validate_provision_policy;
 use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
 
+/// Refuses the `lifecycle` settings the backend cannot honor.
+///
+/// Value-based rather than presence-based (unlike `ui`), because the defaults
+/// genuinely match the behavior: the in-proc API exposes no session-lifetime
+/// knob, so one-shot always stops the session and removes the agent user before
+/// returning — exactly what `destroyOnExit: true` asks for. Only the values the
+/// backend cannot deliver are refused:
+///
+/// * `destroyOnExit: false` asks the session to outlive the call. It cannot.
+/// * `preservePolicy: true` asks for filesystem/network policy to be retained
+///   past the run. This backend installs no persistent filesystem or network
+///   enforcement — filesystem policy is refused outright, and the accepted
+///   network policy is an acknowledgment of an unrestricted posture rather than
+///   anything applied — so there is nothing to retain.
+fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    if !request.lifecycle.destroy_on_exit {
+        return Err(ScriptResponse::error(
+            "lifecycle.destroyOnExit=false is not supported by the isolation session backend; \
+             the session is always stopped and the agent user removed before the call returns",
+        ));
+    }
+    if request.lifecycle.preserve_policy {
+        return Err(ScriptResponse::error(
+            "lifecycle.preservePolicy=true is not supported by the isolation session backend; \
+             it installs no persistent filesystem or network enforcement, so there is none \
+             to preserve",
+        ));
+    }
+    Ok(())
+}
+
 impl ScriptRunner for IsolationSessionRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // One-shot runs the full provision → start → exec → stop →
@@ -29,6 +60,7 @@ impl ScriptRunner for IsolationSessionRunner {
                 ));
             }
         }
+        reject_unsupported_lifecycle(request)?;
         validate_provision_policy(request).map_err(ScriptResponse::from)
     }
 
@@ -114,7 +146,7 @@ mod tests {
     use super::*;
     use wxc_common::models::{
         ContainerPolicy, ExperimentalConfig, IsolationSessionConfig, IsolationSessionUser,
-        NetworkPolicy,
+        LifecycleConfig, NetworkPolicy,
     };
 
     fn well_formed_user() -> IsolationSessionUser {
@@ -174,6 +206,78 @@ mod tests {
         let resp = runner.validate_runner(&req).unwrap_err();
         assert!(
             resp.error_message.contains("network"),
+            "got {}",
+            resp.error_message
+        );
+    }
+
+    // ====== lifecycle (value-based: defaults match actual behavior) ======
+
+    fn canonical_request() -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_runner_one_shot_rejects_destroy_on_exit_false() {
+        // The in-proc API has no session-lifetime knob; one-shot always tears
+        // the session down, so this asks for something the backend cannot do.
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            lifecycle: LifecycleConfig {
+                destroy_on_exit: false,
+                preserve_policy: false,
+            },
+            ..canonical_request()
+        };
+        let resp = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            resp.error_message.contains("lifecycle.destroyOnExit=false"),
+            "got {}",
+            resp.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_one_shot_rejects_preserve_policy_true() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            lifecycle: LifecycleConfig {
+                destroy_on_exit: true,
+                preserve_policy: true,
+            },
+            ..canonical_request()
+        };
+        let resp = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            resp.error_message.contains("lifecycle.preservePolicy=true"),
+            "got {}",
+            resp.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_one_shot_accepts_default_lifecycle() {
+        // `destroyOnExit: true` (the default) is exactly what the backend does,
+        // so it must not be refused — the gate is value-based for this reason.
+        let runner = IsolationSessionRunner::new();
+        runner.validate_runner(&canonical_request()).unwrap();
+    }
+
+    #[test]
+    fn validate_runner_one_shot_rejects_supplied_ui() {
+        let runner = IsolationSessionRunner::new();
+        let mut req = canonical_request();
+        req.policy.ui_specified = true;
+        let resp = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            resp.error_message.contains("UI policy is not supported"),
             "got {}",
             resp.error_message
         );

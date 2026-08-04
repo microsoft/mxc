@@ -311,6 +311,24 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_netwo
     -ExpectedExit -1 `
     -OutputContains @("network is unrestricted")))
 
+# One-shot UI rejection: the isolation session is a separate OS session, which
+# isolates the host's UI from the contained code but does not deny it UI
+# capabilities -- window creation, GDI and the session's own clipboard all work
+# inside it. A `ui` policy therefore cannot be honored and is refused rather
+# than accepted and dropped. Presence drives the refusal (UiPolicy's default is
+# full lockdown, so an explicit lockdown `ui` is indistinguishable by value).
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_ui_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("UI policy is not supported")))
+
+# One-shot lifecycle rejection: the in-proc API exposes no session-lifetime
+# knob, so one-shot always stops the session and removes the agent user before
+# returning. `destroyOnExit: true` (the default) matches that and is accepted;
+# `false` asks for something the backend cannot deliver.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_lifecycle_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("lifecycle.destroyOnExit=false")))
+
 # ---------------- Concurrent one-shot test ----------------
 #
 # Three wxc-exec processes (A, B, C) run a per-agent PowerShell script
