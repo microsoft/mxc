@@ -183,6 +183,38 @@ describe('parseNonExecResponse', () => {
     });
   });
 
+  it('surfaces the structured failure fields from the wire envelope', () => {
+    const stdout = JSON.stringify({
+      error: {
+        code: 'stale_id',
+        message: 'agent user not found',
+        operation: 'IsoSessionOps.StopSessionAsync',
+        nativeCode: '0x80070490',
+        remediation: 'Re-provision the sandbox.',
+      },
+    });
+    assert.throws(() => parseNonExecResponse(stdout), (err: unknown) => {
+      return err instanceof MxcError &&
+        err.code === 'stale_id' &&
+        err.message === 'agent user not found' &&
+        err.operation === 'IsoSessionOps.StopSessionAsync' &&
+        err.nativeCode === '0x80070490' &&
+        err.remediation === 'Re-provision the sandbox.';
+    });
+  });
+
+  // An MXC-side rejection has no API call in flight, so the structured
+  // fields must stay absent rather than arriving as empty strings.
+  it('leaves the structured fields undefined when the envelope omits them', () => {
+    const stdout = JSON.stringify({ error: { code: 'policy_validation', message: 'bad policy' } });
+    assert.throws(() => parseNonExecResponse(stdout), (err: unknown) => {
+      return err instanceof MxcError &&
+        err.operation === undefined &&
+        err.nativeCode === undefined &&
+        err.remediation === undefined;
+    });
+  });
+
   it('throws a plain Error on unparseable stdout', () => {
     assert.throws(() => parseNonExecResponse('not json'), (err: unknown) => {
       return err instanceof Error && !(err instanceof MxcError);

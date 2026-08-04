@@ -9,7 +9,7 @@ import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
-import { MxcError, mxcErrorFromCode } from './errors.js';
+import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
 const SUPPORTED_VERSION = '0.8.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
@@ -732,7 +732,7 @@ function tryParseErrorEnvelopeFromLines(output: string): MxcError | null {
       if (parsed && typeof parsed === 'object' && 'error' in parsed) {
         const env = parsed.error;
         if (env && typeof env.code === 'string' && typeof env.message === 'string') {
-          return mxcErrorFromCode(env.code, env.message, env.details);
+          return mxcErrorFromEnvelope(env);
         }
       }
     } catch {

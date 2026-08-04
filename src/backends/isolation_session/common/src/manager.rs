@@ -11,7 +11,7 @@ use wxc_common::process_util::OwnedHandle;
 use isolation_session_bindings::bindings::{
     IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult, IsoSessionUserResult,
 };
-use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, HANDLE, REGDB_E_CLASSNOTREG};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
@@ -20,32 +20,24 @@ use windows_core::{HSTRING, PCWSTR};
 
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
-use super::error::{check_result, format_iso_error, lifecycle_err, IsolationSessionError};
+use super::error::{
+    activation_error, check_result, format_iso_error, lifecycle_err, op, transport_err,
+    IsolationSessionError, StalePromotion,
+};
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, PipeRelayParams, PipeRelayWithStopParams,
 };
 use super::process_options::{build_iso_process_options, ProcessOptions};
 
-/// Activates the in-proc `IsoSessionOps` factory and returns the instance.
+/// Activates the in-proc IsolationSession runtime factory and returns the
+/// instance.
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
     match IsoSessionOps::new() {
         Ok(ops) => Ok(ops),
-        Err(e) => {
-            let code = e.code();
-            if code == CLASS_E_CLASSNOTAVAILABLE || code == REGDB_E_CLASSNOTREG {
-                Err(IsolationSessionError::ServiceUnavailable(format!(
-                    "in-proc Windows.AI.IsolationSession.Preview IsoSessionOps API is not \
-                     available on this OS build (HRESULT: {:#010x}). Ensure the OS feature \
-                     gate is enabled and the platform supports isolation sessions.",
-                    code.0 as u32
-                )))
-            } else {
-                Err(IsolationSessionError::ServiceUnavailable(format!(
-                    "IsoSessionOps activation failed (HRESULT: {:#010x}): {}",
-                    code.0 as u32, e
-                )))
-            }
-        }
+        // The HRESULT→error mapping lives in `activation_error` so it stays
+        // testable without depending on whether this host can activate the
+        // API at all.
+        Err(e) => Err(activation_error(e.code().0 as u32, &e.message())),
     }
 }
 
@@ -110,33 +102,36 @@ impl IsolationSessionManager {
                 &HSTRING::from(opt_entra_account_name),
                 &HSTRING::from(opt_wam_token),
             )
-            .map_err(|e| lifecycle_err(format!("AddUserAsync call failed: {}", e)))?;
+            .map_err(|e| transport_err(op::ADD_USER, "call failed", &e))?;
         let user_result: IsoSessionUserResult = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync wait failed: {}", e)))?;
+            .map_err(|e| transport_err(op::ADD_USER, "wait failed", &e))?;
 
         let err = user_result
             .Error()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get Error failed: {}", e)))?;
+            .map_err(|e| transport_err(op::ADD_USER, "get Error failed", &e))?;
         let is_error = err
             .IsError()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get IsError failed: {}", e)))?;
+            .map_err(|e| transport_err(op::ADD_USER, "get IsError failed", &e))?;
         if is_error {
-            return Err(format_iso_error("AddUserAsync", &err));
+            // Provision mints the agent user, so `ERROR_NOT_FOUND` here can
+            // never mean "the sandbox is gone" — there is no sandbox id yet.
+            return Err(format_iso_error(
+                op::ADD_USER,
+                &err,
+                StalePromotion::NotEligible,
+            ));
         }
 
         let agent_user_name = user_result
             .AgentUserName()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserName failed: {}", e)))?;
+            .map_err(|e| transport_err(op::ADD_USER, "get AgentUserName failed", &e))?;
         let agent_user_sid = user_result
             .AgentUserSid()
-            .map_err(|e| lifecycle_err(format!("AddUserAsync: get AgentUserSid failed: {}", e)))?;
-        let ephemeral_workspace_path = user_result.EphemeralWorkspacePath().map_err(|e| {
-            lifecycle_err(format!(
-                "AddUserAsync: get EphemeralWorkspacePath failed: {}",
-                e
-            ))
-        })?;
+            .map_err(|e| transport_err(op::ADD_USER, "get AgentUserSid failed", &e))?;
+        let ephemeral_workspace_path = user_result
+            .EphemeralWorkspacePath()
+            .map_err(|e| transport_err(op::ADD_USER, "get EphemeralWorkspacePath failed", &e))?;
 
         Ok(ProvisionedUser {
             agent_user_name: agent_user_name.to_string(),
@@ -153,11 +148,11 @@ impl IsolationSessionManager {
         let async_op = self
             .ops
             .StartSessionAsync(&self.agent_user_name, &HSTRING::from(opt_wam_token))
-            .map_err(|e| lifecycle_err(format!("StartSessionAsync call failed: {}", e)))?;
+            .map_err(|e| transport_err(op::START_SESSION, "call failed", &e))?;
         let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("StartSessionAsync wait failed: {}", e)))?;
-        check_result(&result, "StartSessionAsync")
+            .map_err(|e| transport_err(op::START_SESSION, "wait failed", &e))?;
+        check_result(&result, op::START_SESSION, StalePromotion::Eligible)
     }
 
     /// Step 3: Create a process inside the started isolation session.
@@ -177,33 +172,28 @@ impl IsolationSessionManager {
                 &HSTRING::from(&options.arguments),
                 &proc_options,
             )
-            .map_err(|e| lifecycle_err(format!("RunProcessWithOptionsAsync call failed: {}", e)))?;
+            .map_err(|e| transport_err(op::RUN_PROCESS, "call failed", &e))?;
         let result: IsoSessionProcessResult = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("RunProcessWithOptionsAsync wait failed: {}", e)))?;
+            .map_err(|e| transport_err(op::RUN_PROCESS, "wait failed", &e))?;
 
-        let err = result.Error().map_err(|e| {
-            lifecycle_err(format!(
-                "RunProcessWithOptionsAsync: get Error failed: {}",
-                e
-            ))
-        })?;
-        let is_error = err.IsError().map_err(|e| {
-            lifecycle_err(format!(
-                "RunProcessWithOptionsAsync: get IsError failed: {}",
-                e
-            ))
-        })?;
+        let err = result
+            .Error()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get Error failed", &e))?;
+        let is_error = err
+            .IsError()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get IsError failed", &e))?;
         if is_error {
-            return Err(format_iso_error("RunProcessWithOptionsAsync", &err));
+            return Err(format_iso_error(
+                op::RUN_PROCESS,
+                &err,
+                StalePromotion::Eligible,
+            ));
         }
 
-        let process: IsoSessionProcess = result.Process().map_err(|e| {
-            lifecycle_err(format!(
-                "RunProcessWithOptionsAsync: get Process failed: {}",
-                e
-            ))
-        })?;
+        let process: IsoSessionProcess = result
+            .Process()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get Process failed", &e))?;
 
         // Three pipe relay threads bridge wxc-exec's stdio with the pipe
         // handles owned by `IsoSessionProcess`, crossing the desktop-session
@@ -227,24 +217,15 @@ impl IsolationSessionManager {
         // propagate it rather than coercing to 0, which downstream treats as
         // "no handle" and silently skips the corresponding stdio relay. A
         // genuinely returned 0 still means absent and is preserved.
-        let stdout_handle_val = process.OutputHandle().map_err(|e| {
-            lifecycle_err(format!(
-                "RunProcessWithOptionsAsync: get OutputHandle failed: {}",
-                e
-            ))
-        })?;
-        let stderr_handle_val = process.ErrorHandle().map_err(|e| {
-            lifecycle_err(format!(
-                "RunProcessWithOptionsAsync: get ErrorHandle failed: {}",
-                e
-            ))
-        })?;
-        let stdin_handle_val = process.InputHandle().map_err(|e| {
-            lifecycle_err(format!(
-                "RunProcessWithOptionsAsync: get InputHandle failed: {}",
-                e
-            ))
-        })?;
+        let stdout_handle_val = process
+            .OutputHandle()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get OutputHandle failed", &e))?;
+        let stderr_handle_val = process
+            .ErrorHandle()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get ErrorHandle failed", &e))?;
+        let stdin_handle_val = process
+            .InputHandle()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get InputHandle failed", &e))?;
 
         let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
             .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;
@@ -385,7 +366,7 @@ impl IsolationSessionManager {
         // code.
         let _ = process
             .WaitForExit(options.timeout_ms)
-            .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
+            .map_err(|e| transport_err(op::RUN_PROCESS, "WaitForExit failed", &e))?;
 
         let exit_code = wait_with_graceful_shutdown(&process)?;
 
@@ -425,11 +406,11 @@ impl IsolationSessionManager {
         let async_op = self
             .ops
             .StopSessionAsync(&self.agent_user_name)
-            .map_err(|e| lifecycle_err(format!("StopSessionAsync call failed: {}", e)))?;
+            .map_err(|e| transport_err(op::STOP_SESSION, "call failed", &e))?;
         let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("StopSessionAsync wait failed: {}", e)))?;
-        check_result(&result, "StopSessionAsync")
+            .map_err(|e| transport_err(op::STOP_SESSION, "wait failed", &e))?;
+        check_result(&result, op::STOP_SESSION, StalePromotion::Eligible)
     }
 
     /// Step 5: Deprovision the agent user.
@@ -437,11 +418,11 @@ impl IsolationSessionManager {
         let async_op = self
             .ops
             .RemoveUserAsync(&self.agent_user_name)
-            .map_err(|e| lifecycle_err(format!("RemoveUserAsync call failed: {}", e)))?;
+            .map_err(|e| transport_err(op::REMOVE_USER, "call failed", &e))?;
         let result = async_op
             .join()
-            .map_err(|e| lifecycle_err(format!("RemoveUserAsync wait failed: {}", e)))?;
-        check_result(&result, "RemoveUserAsync")
+            .map_err(|e| transport_err(op::REMOVE_USER, "wait failed", &e))?;
+        check_result(&result, op::REMOVE_USER, StalePromotion::Eligible)
     }
 }
 
@@ -464,7 +445,7 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
     const STILL_ACTIVE: i32 = STATUS_PENDING.0;
     let mut exit_code = process
         .ExitCode()
-        .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
+        .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))?;
     if exit_code != STILL_ACTIVE {
         return Ok(exit_code);
     }
@@ -508,13 +489,20 @@ mod tests {
                 // with the feature enabled). The test is not applicable
                 // — skip.
             }
-            Err(IsolationSessionError::ServiceUnavailable(msg)) => {
+            Err(IsolationSessionError::ServiceUnavailable(failure)) => {
                 // Service is NOT available. Verify the error is clean and
-                // descriptive (not a panic or cryptic COM error).
+                // descriptive (not a panic or cryptic COM error), and that
+                // it names the activation operation it failed on.
                 assert!(
-                    msg.contains("not available") || msg.contains("activation failed"),
+                    failure.message.contains("not available")
+                        || failure.message.contains("activation failed"),
                     "Expected descriptive error message, got: {}",
-                    msg
+                    failure.message
+                );
+                assert_eq!(failure.operation, op::ACTIVATE);
+                assert!(
+                    failure.code.is_some(),
+                    "activation failure carries no HRESULT"
                 );
             }
             Err(other) => {
