@@ -45,6 +45,8 @@ mod extractors;
 mod path_norm;
 #[cfg(target_os = "windows")]
 mod tdh_decode;
+#[cfg(target_os = "windows")]
+mod ui;
 
 #[cfg(target_os = "windows")]
 pub use etl_decode::{visit_raw_events, EtlDenialAnalyzer};
