@@ -20,9 +20,13 @@ jobs:
   linux:
     uses: ./.github/workflows/Build.Linux.Job.yml
 
+  macos:
+    uses: ./.github/workflows/Build.MacOS.Job.yml
+
   test:
-    needs: [windows, linux]
+    needs: [windows, linux, macos]
     uses: ./.github/workflows/Test.Matrix.Job.yml
     with:
-      # The resolver selects only explicitly enabled entries in the PR trigger.
-      plan: pr
+      # Exercise every combination currently rolled out, independent of its
+      # normal PR/nightly/weekly schedule.
+      plan: enabled

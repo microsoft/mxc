@@ -66,16 +66,20 @@ jobs:
           cargo build --locked --release --target "${{ matrix.target }}" \
             --no-default-features "${features[@]}"
 
-      # - name: Test lxc
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     features=()
-      #     if [[ -n "${{ matrix.features }}" ]]; then
-      #       features=(--features "${{ matrix.features }}")
-      #     fi
-      #     cargo test --locked --release --target "${{ matrix.target }}" \
-      #       --no-default-features "${features[@]}"
+      - name: Test lxc
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ -n "${{ matrix.features }}" ]]; then
+            features=(--features "${{ matrix.features }}")
+          fi
+          cargo test --locked --release --target "${{ matrix.target }}" \
+            --no-default-features "${features[@]}"
+
+      ####################
+      # E2E Tests are being moved to the Test.Matrix.Job.yml workflow, which runs cross-platform validation
+      ###############
 
       # Bubblewrap is required to run the executor characterization tests in
       # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
@@ -98,6 +102,9 @@ jobs:
       #   run: cargo test --locked --release --target ${{ matrix.target }}
       #        -p wxc_e2e_tests
 
+      ###############
+      ####################
+
       # PLM (Permissive Learning Mode) is functionally Windows-only, but the
       # crate builds cross-platform: the lib's helper modules compile on every
       # target, and the binary has a no-op stub `fn main()` for non-Windows so
@@ -109,9 +116,9 @@ jobs:
         working-directory: src
         run: cargo build --locked --release --target ${{ matrix.target }} -p plm
 
-      # - name: Test plm (cross-platform modules)
-      #   working-directory: src
-      #   run: cargo test --locked --release --target ${{ matrix.target }} -p plm
+      - name: Test plm (cross-platform modules)
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
 
       # unix_test_proxy is a separate workspace member, not a dep of lxc.
       - name: Build unix-test-proxy

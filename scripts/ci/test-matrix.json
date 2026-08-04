@@ -290,7 +290,7 @@
         "arm64": {
           "target": "aarch64-apple-darwin",
           "artifact": "mxc-binaries-aarch64-apple-darwin",
-          "runner": "macos-26-xlarge",
+          "runner": "macos-26",
           "backends": [
             "seatbelt"
           ]
@@ -305,7 +305,7 @@
         "arm64": {
           "target": "aarch64-apple-darwin",
           "artifact": "mxc-binaries-aarch64-apple-darwin",
-          "runner": "macos-15-xlarge",
+          "runner": "macos-15",
           "backends": [
             "seatbelt"
           ]
@@ -364,7 +364,8 @@
     },
     "macos": {
       "seatbelt": {
-        "status": "placeholder"
+        "command": "seatbelt",
+        "status": "wired"
       }
     }
   },
@@ -536,6 +537,24 @@
       "os": "ubuntu-26.04",
       "architecture": "x64",
       "backend": "bubblewrap"
+    },
+    {
+      "plan": "pr",
+      "os": "macos-26",
+      "architecture": "arm64",
+      "backend": "seatbelt"
+    },
+    {
+      "plan": "nightly",
+      "os": "macos-26",
+      "architecture": "arm64",
+      "backend": "seatbelt"
+    },
+    {
+      "plan": "weekly",
+      "os": "macos-15",
+      "architecture": "arm64",
+      "backend": "seatbelt"
     }
   ]
 }

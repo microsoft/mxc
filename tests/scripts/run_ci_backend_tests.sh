@@ -21,8 +21,6 @@ repo_root="$(cd "$script_root/../.." && pwd)"
 release_directory="$repo_root/src/target/release"
 
 case "$backend" in
-    bubblewrap|lxc)
-        ;;
     microvm)
         echo "The MicroVM CI handler is not wired to an artifact-only Linux test entry point yet." >&2
         exit 2
@@ -31,29 +29,30 @@ case "$backend" in
         echo "The Hyperlight CI handler is not wired to an existing backend test entry point yet." >&2
         exit 2
         ;;
+    bubblewrap)
+        # Existing Linux shell tests locate binaries under src/target/release.
+        test -x "$binary_directory/lxc-exec"
+        test -f "$binary_directory/unix-test-proxy"
+        mkdir -p "$release_directory"
+        cp -a "$binary_directory/." "$release_directory/"
+        chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
+        bash "$script_root/run_bwrap_all_tests.sh"
+        ;;
+    lxc)
+        test -x "$binary_directory/lxc-exec"
+        test -f "$binary_directory/unix-test-proxy"
+        mkdir -p "$release_directory"
+        cp -a "$binary_directory/." "$release_directory/"
+        chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
+        bash "$script_root/run_lxc_all_tests.sh"
+        ;;
     seatbelt)
-        echo "The Seatbelt CI handler is not wired to an existing backend test entry point yet." >&2
-        exit 2
+        test -x "$binary_directory/mxc-exec-mac"
+        test -x "$binary_directory/unix-test-proxy"
+        bash "$script_root/run_seatbelt_all_tests.sh" "$binary_directory"
         ;;
     *)
         usage
         exit 2
-        ;;
-esac
-
-# Existing shell tests locate binaries under src/target/release. Recreate that
-# layout from the downloaded artifact, including adjacent runtime assets.
-test -x "$binary_directory/lxc-exec"
-test -f "$binary_directory/unix-test-proxy"
-mkdir -p "$release_directory"
-cp -a "$binary_directory/." "$release_directory/"
-chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
-
-case "$backend" in
-    bubblewrap)
-        bash "$script_root/run_bwrap_all_tests.sh"
-        ;;
-    lxc)
-        bash "$script_root/run_lxc_all_tests.sh"
         ;;
 esac

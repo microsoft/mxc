@@ -28,14 +28,51 @@ test('catalog validates and contains all five build targets', () => {
   assert.doesNotThrow(() => validateCatalog(catalog()));
 });
 
-test('current rollout enables two PR jobs and no scheduled jobs', () => {
+test('current rollout enables three PR jobs and scheduled macOS coverage', () => {
   const pr = resolvePlan(catalog(), 'pr');
   const nightly = resolvePlan(catalog(), 'nightly');
   const weekly = resolvePlan(catalog(), 'weekly');
 
-  assert.equal(pr.windows.length + pr.linux.length + pr.macos.length, 2);
-  assert.equal(nightly.windows.length + nightly.linux.length + nightly.macos.length, 0);
-  assert.equal(weekly.windows.length + weekly.linux.length + weekly.macos.length, 0);
+  assert.equal(pr.windows.length + pr.linux.length + pr.macos.length, 3);
+  assert.equal(nightly.windows.length + nightly.linux.length + nightly.macos.length, 1);
+  assert.equal(weekly.windows.length + weekly.linux.length + weekly.macos.length, 2);
+});
+
+test('macOS rollout uses 26 for PR and nightly with 15 added weekly', () => {
+  const project = entry => ({
+    plan: entry.plan,
+    os: entry.os,
+    runner: entry.runner,
+    backend: entry.backend
+  });
+
+  assert.deepEqual(resolvePlan(catalog(), 'pr').macos.map(project), [
+    { plan: 'pr', os: 'macos-26', runner: 'macos-26', backend: 'seatbelt' }
+  ]);
+  assert.deepEqual(resolvePlan(catalog(), 'nightly').macos.map(project), [
+    { plan: 'nightly', os: 'macos-26', runner: 'macos-26', backend: 'seatbelt' }
+  ]);
+  assert.deepEqual(resolvePlan(catalog(), 'weekly').macos.map(project), [
+    { plan: 'weekly', os: 'macos-15', runner: 'macos-15', backend: 'seatbelt' },
+    { plan: 'nightly', os: 'macos-26', runner: 'macos-26', backend: 'seatbelt' }
+  ]);
+});
+
+test('enabled plan deduplicates and runs both macOS versions', () => {
+  const enabled = resolvePlan(catalog(), 'enabled');
+  assert.equal(enabled.windows.length + enabled.linux.length + enabled.macos.length, 4);
+  assert.deepEqual(
+    enabled.macos.map(entry => ({
+      plan: entry.plan,
+      os: entry.os,
+      runner: entry.runner,
+      backend: entry.backend
+    })),
+    [
+      { plan: 'enabled', os: 'macos-15', runner: 'macos-15', backend: 'seatbelt' },
+      { plan: 'enabled', os: 'macos-26', runner: 'macos-26', backend: 'seatbelt' }
+    ]
+  );
 });
 
 test('weekly includes all enabled nightly combinations', () => {
@@ -78,13 +115,12 @@ test('arm64 never expands Hyperlight or MicroVM', () => {
 });
 
 test('enabled placeholder handlers are rejected', () => {
-  // Seatbelt is declared in the capability map but intentionally not wired yet.
   const modified = clone(catalog());
   modified.enabled.push({
     plan: 'weekly',
-    os: 'macos-15',
-    architecture: 'arm64',
-    backend: 'seatbelt'
+    os: 'ubuntu-24.04',
+    architecture: 'x64',
+    backend: 'hyperlight'
   });
   assert.throws(
     () => validateCatalog(modified),

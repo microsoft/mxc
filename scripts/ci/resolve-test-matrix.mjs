@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const FAMILIES = ['windows', 'linux', 'macos'];
 const PLANS = ['pr', 'nightly', 'weekly'];
+const RESOLUTION_PLANS = [...PLANS, 'enabled'];
 const ARM64_UNSUPPORTED_BACKENDS = new Set(['hyperlight', 'microvm']);
 
 function combinationKey(plan, os, architecture, backend) {
@@ -208,6 +209,43 @@ export function expandPlan(catalog, plan) {
 }
 
 export function resolvePlan(catalog, plan) {
+  if (!RESOLUTION_PLANS.includes(plan)) {
+    throw new Error(`unsupported plan: ${plan}`);
+  }
+
+  if (plan === 'enabled') {
+    const { platforms } = validateCatalog(catalog);
+    const matrices = Object.fromEntries(FAMILIES.map(family => [family, []]));
+    const seen = new Set();
+
+    for (const entry of catalog.enabled ?? []) {
+      const key = `${entry.os}|${entry.architecture}|${entry.backend}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      const platform = platforms.get(entry.os);
+      const details = platform.architectures[entry.architecture];
+      const handler = catalog.handlers[platform.family][entry.backend];
+      matrices[platform.family].push({
+        plan,
+        os: platform.id,
+        os_name: platform.displayName,
+        architecture: entry.architecture,
+        target: details.target,
+        artifact: details.artifact,
+        pool: details.pool,
+        runner: details.runner,
+        backend: entry.backend,
+        command: handler.command
+      });
+    }
+
+    sortMatrices(matrices);
+    return matrices;
+  }
+
   const { enabled } = validateCatalog(catalog);
   const matrices = Object.fromEntries(FAMILIES.map(family => [family, []]));
 
@@ -226,6 +264,11 @@ export function resolvePlan(catalog, plan) {
     }
   }
 
+  sortMatrices(matrices);
+  return matrices;
+}
+
+function sortMatrices(matrices) {
   for (const family of FAMILIES) {
     // Stable ordering keeps local output and workflow diagnostics reproducible.
     matrices[family].sort((left, right) => (
@@ -233,7 +276,6 @@ export function resolvePlan(catalog, plan) {
         .localeCompare(`${right.os}|${right.architecture}|${right.backend}`)
     ));
   }
-  return matrices;
 }
 
 function parseArguments(argv) {

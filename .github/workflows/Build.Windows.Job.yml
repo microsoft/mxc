@@ -66,10 +66,10 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
-      # - name: Test
-      #   run: cargo test --locked --release --target ${{ matrix.target }}
-      #        --no-default-features
-      #        --features "${{ matrix.features }}"
+      - name: Test
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             --no-default-features
+             --features "${{ matrix.features }}"
 
       - name: Verify artifact payload
         shell: pwsh

@@ -5,9 +5,13 @@ name: Build
 
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
     branches: [main]
 
   pull_request:
+    paths-ignore:
+      - 'docs/**'
     branches: [main, 'feature/*', 'user/*']
 
   workflow_call:
@@ -22,36 +26,6 @@ permissions:
   contents: read
 
 jobs:
-  pr-test-eligibility:
-    name: Check PR test eligibility
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    runs-on: ubuntu-latest
-    outputs:
-      should_run: ${{ steps.changes.outputs.should_run }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check for non-documentation changes
-        id: changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          should_run=false
-          while IFS= read -r file; do
-            case "$file" in
-              docs/*|*.md) ;;
-              *)
-                should_run=true
-                break
-                ;;
-            esac
-          done < <(git diff --name-only \
-            '${{ github.event.pull_request.base.sha }}' \
-            '${{ github.event.pull_request.head.sha }}')
-          echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
-
   # Dependency feed check: resolve the locked graph through the public MxcDependencies
   # feed so a crate not yet in the feed fails at PR time.
   dependency-feed-check:
@@ -76,9 +50,9 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
-  pr-test-matrix:
-    needs: [pr-test-eligibility, windows, linux, macos]
-    if: needs.pr-test-eligibility.outputs.should_run == 'true'
+  pr-e2e-test-matrix:
+    needs: [windows, linux, macos]
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     uses: ./.github/workflows/Test.Matrix.Job.yml
     with:
       plan: pr
