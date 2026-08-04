@@ -27,6 +27,7 @@ members = [
     "backends/lxc/common",
     "backends/bubblewrap/common",
     "backends/wslc/common",
+    "backends/wslc/daemon",
     "backends/seatbelt/common",
     "host/wxc_host_prep",
     "host/wxc_winhttp_proxy_shim",

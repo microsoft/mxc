@@ -13,6 +13,10 @@
 //! `wxc-exec`) and streaming (`SandboxBackend`, in [`sandbox`], used by the
 //! Rust SDK).
 
+pub mod container_steps;
+pub mod daemon_client;
+pub mod daemon_protocol;
+pub mod daemon_record;
 pub mod policy_mapping;
 pub mod sandbox;
 mod stream_buffer;

@@ -468,8 +468,8 @@ impl WSLContainerRunner {
     /// Supports both rootfs tars (`docker export`) and Docker image archives
     /// (`docker save`). The format is auto-detected via `detect_tar_format`.
     /// Returns `Ok(())` on success or `Err(ScriptResponse)` on failure.
-    unsafe fn import_image_from_tar(
-        sdk: &'static WslcSdk,
+    pub(crate) unsafe fn import_image_from_tar(
+        sdk: &WslcSdk,
         session: WslcSession,
         image_name: &str,
         tar_path: &str,
@@ -607,7 +607,7 @@ fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
 /// reports as missing. `missing` may combine multiple bits, and the guidance is branched
 /// per-component so a user missing only `VirtualMachinePlatform` isn't told to update WSL
 /// (which doesn't enable that Windows optional feature), and vice versa.
-fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
+pub(crate) fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
     let needs_vmp =
         missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM.0 != 0;
     let needs_wsl_package = missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.0 != 0;
