@@ -132,20 +132,33 @@ export interface IsolationSession {
   /**
    * State-aware provision-phase configuration.
    */
-  provision?: IsolationSessionPhase | null;
+  provision?: IsolationSessionProvisionPhase | null;
   /**
    * State-aware start-phase configuration.
    */
-  start?: IsolationSessionPhase | null;
+  start?: IsolationSessionStartPhase | null;
   [k: string]: unknown;
 }
 
 /**
- * Per-phase IsolationSession configuration (state-aware lifecycle).
+ * Provision-phase IsolationSession configuration (state-aware lifecycle).
+ * 
+ * Split from the start phase rather than shared: the two phases accept different fields, and a shared type would advertise every field on both in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
  */
-export interface IsolationSessionPhase {
+export interface IsolationSessionProvisionPhase {
   /**
    * Entra cloud-agent user bundle for this phase.
+   */
+  user?: IsolationUser | null;
+  [k: string]: unknown;
+}
+
+/**
+ * Start-phase IsolationSession configuration (state-aware lifecycle).
+ */
+export interface IsolationSessionStartPhase {
+  /**
+   * Entra cloud-agent user bundle for this phase. Re-supplied at start because the `sandboxId` payload does not carry the WAM token.
    */
   user?: IsolationUser | null;
   [k: string]: unknown;

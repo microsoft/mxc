@@ -121,12 +121,15 @@ emitter about it.
 The conformance check covers both SDK surfaces: `wire-conformance.test.ts` pins
 the one-shot public types in `sdk/node/src/types.ts`, and
 `wire-conformance-state-aware.test.ts` pins the state-aware lifecycle types in
-`sdk/node/src/state-aware-types.ts` (the `Phase` and sizing-profile enums, the Entra
-user bundle, and the per-phase `IsolationSessionPhase` field set) against the
-same generated wire defs. Both share the assertion helpers in
-`sdk/node/tests/unit/conformance-helpers.ts` and check drift in both directions
-(public→wire and wire→public) so a new wire field the SDK forgets to expose also
-fails the build.
+`sdk/node/src/state-aware-types.ts` (the `Phase` enum, the Entra user bundle,
+and each phase's own wire field set — provision and start are compared against
+their separate wire types, and the phases that take no wire object must expose
+no backend-specific field) against the same generated wire defs. Both share the
+assertion helpers in `sdk/node/tests/unit/conformance-helpers.ts` and check
+drift in both directions (public→wire and wire→public) so a new wire field the
+SDK forgets to expose also fails the build. The state-aware file additionally
+pins the derived key sets to their expected contents, so a mistake in the
+derivation fails loudly instead of quietly making the assertions vacuous.
 
 ### Why a hand-written emitter (alternatives considered)
 

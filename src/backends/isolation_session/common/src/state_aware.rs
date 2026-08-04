@@ -398,28 +398,34 @@ mod tests {
         type ProvisionConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ProvisionConfig;
         type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;
 
-        // Derive the payload from the wire type instead of a JSON literal: the
-        // wire model is only the schema source on this path, so a serde rename
-        // on either side would go unnoticed. Both config types are
-        // `#[serde(default)]` with no `deny_unknown_fields`, so a renamed key
-        // does not error — it drops the bundle and provisions a local sandbox
-        // for a caller who asked for an Entra one.
-        let phase = wxc_common::wire::IsolationSessionPhase {
-            user: Some(wxc_common::wire::IsolationUser {
-                upn: "alice@contoso.com".to_string(),
-                wam_token: "tok".to_string(),
-            }),
+        // Derive each payload from its own wire type instead of a JSON
+        // literal: the wire model is only the schema source on this path, so a
+        // serde rename on either side would go unnoticed. Both config types
+        // are `#[serde(default)]` with no `deny_unknown_fields`, so a renamed
+        // key does not error — it drops the bundle and provisions a local
+        // sandbox for a caller who asked for an Entra one. The phases have
+        // separate wire types, so both directions are pinned separately.
+        let wire_user = || wxc_common::wire::IsolationUser {
+            upn: "alice@contoso.com".to_string(),
+            wam_token: "tok".to_string(),
         };
-        let payload = serde_json::to_value(&phase).unwrap();
 
-        let provision: ProvisionConfig = serde_json::from_value(payload.clone()).unwrap();
+        let provision_phase = wxc_common::wire::IsolationSessionProvisionPhase {
+            user: Some(wire_user()),
+        };
+        let provision: ProvisionConfig =
+            serde_json::from_value(serde_json::to_value(&provision_phase).unwrap()).unwrap();
         let u = provision
             .user
             .expect("provision dropped the wire user bundle");
         assert_eq!(u.upn, "alice@contoso.com");
         assert_eq!(u.wam_token, "tok");
 
-        let start: StartConfig = serde_json::from_value(payload).unwrap();
+        let start_phase = wxc_common::wire::IsolationSessionStartPhase {
+            user: Some(wire_user()),
+        };
+        let start: StartConfig =
+            serde_json::from_value(serde_json::to_value(&start_phase).unwrap()).unwrap();
         let u = start.user.expect("start dropped the wire user bundle");
         assert_eq!(u.upn, "alice@contoso.com");
         assert_eq!(u.wam_token, "tok");

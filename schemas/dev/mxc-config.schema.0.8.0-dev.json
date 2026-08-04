@@ -309,7 +309,7 @@
         "provision": {
           "anyOf": [
             {
-              "$ref": "#/definitions/IsolationSessionPhase"
+              "$ref": "#/definitions/IsolationSessionProvisionPhase"
             },
             {
               "type": "null"
@@ -320,7 +320,7 @@
         "start": {
           "anyOf": [
             {
-              "$ref": "#/definitions/IsolationSessionPhase"
+              "$ref": "#/definitions/IsolationSessionStartPhase"
             },
             {
               "type": "null"
@@ -331,8 +331,8 @@
       },
       "type": "object"
     },
-    "IsolationSessionPhase": {
-      "description": "Per-phase IsolationSession configuration (state-aware lifecycle).",
+    "IsolationSessionProvisionPhase": {
+      "description": "Provision-phase IsolationSession configuration (state-aware lifecycle).\n\nSplit from the start phase rather than shared: the two phases accept different fields, and a shared type would advertise every field on both in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.",
       "properties": {
         "user": {
           "anyOf": [
@@ -344,6 +344,23 @@
             }
           ],
           "description": "Entra cloud-agent user bundle for this phase."
+        }
+      },
+      "type": "object"
+    },
+    "IsolationSessionStartPhase": {
+      "description": "Start-phase IsolationSession configuration (state-aware lifecycle).",
+      "properties": {
+        "user": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IsolationUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Entra cloud-agent user bundle for this phase. Re-supplied at start because the `sandboxId` payload does not carry the WAM token."
         }
       },
       "type": "object"

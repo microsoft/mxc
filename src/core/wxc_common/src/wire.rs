@@ -552,17 +552,32 @@ pub enum TransportProtocol {
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
     /// State-aware provision-phase configuration.
-    pub provision: Option<IsolationSessionPhase>,
+    pub provision: Option<IsolationSessionProvisionPhase>,
     /// State-aware start-phase configuration.
-    pub start: Option<IsolationSessionPhase>,
+    pub start: Option<IsolationSessionStartPhase>,
 }
 
-/// Per-phase IsolationSession configuration (state-aware lifecycle).
+/// Provision-phase IsolationSession configuration (state-aware lifecycle).
+///
+/// Split from the start phase rather than shared: the two phases accept
+/// different fields, and a shared type would advertise every field on both in
+/// the generated schema. The domain configs and the SDK types are already
+/// split per phase; this keeps the wire model aligned with them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct IsolationSessionPhase {
+pub struct IsolationSessionProvisionPhase {
     /// Entra cloud-agent user bundle for this phase.
+    pub user: Option<IsolationUser>,
+}
+
+/// Start-phase IsolationSession configuration (state-aware lifecycle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationSessionStartPhase {
+    /// Entra cloud-agent user bundle for this phase. Re-supplied at start
+    /// because the `sandboxId` payload does not carry the WAM token.
     pub user: Option<IsolationUser>,
 }
 
