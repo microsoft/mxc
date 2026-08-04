@@ -26,7 +26,7 @@ jobs:
     name: 1ES pickup
     runs-on:
       - self-hosted
-      - "1ES.Pool=1es-mxc-e2e-windows-25h2-pro-x64-wh"
+      - "1ES.Pool=1es-mxc-test-2"
       - "JobId=smoke-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     timeout-minutes: 15
 
