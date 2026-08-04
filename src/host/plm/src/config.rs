@@ -1,8 +1,8 @@
 //! Port of the config-update logic from `stop_plm_logging.ps1`.
 //!
-//! Reads an MXC container config (JSON) and merges discovered
-//! file-access paths and AppContainer capabilities into it, then writes
-//! the result out as `Adjusted_*.json`.
+//! Reads an MXC container config (JSON), merges discovered file-access
+//! paths and capabilities into it, and writes an `Adjusted_*.json` next
+//! to it.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -530,13 +530,13 @@ pub fn update_from_access_events(
             }
         };
 
-        // Self-access filter: events whose path equals the audited
-        // application's binary (in any spelling — raw, verbatim,
-        // lower/upper case) are noise and skipped. The verbatim-prefixed
-        // variant matters because `stop.rs` canonicalises bin_path via
-        // `canonicalize()`, which on Windows returns the `\\?\C:\…` form
-        // while ETW reports the plain `C:\…` form; comparing only the
-        // raw strings let the binary path leak into the output
+        // Self-access filter: events whose path equals the wxc-exec
+        // binary (in any spelling — raw, verbatim, lower/upper case)
+        // are noise and skipped. The verbatim-prefixed variant matters
+        // because `stop.rs` canonicalises bin_path via `canonicalize()`,
+        // which on Windows returns the `\\?\C:\…` form while ETW
+        // reports the plain `C:\…` form; comparing only the raw strings
+        // let the binary path leak into the output
         // config as a readonly entry.
         let is_self_event = ev.file_path.eq_ignore_ascii_case(bin_path)
             || bin_path_norm
@@ -674,25 +674,249 @@ pub fn update_from_access_events(
     })
 }
 
-pub fn write_added_paths_summary(added: &AddedPaths, verbose: bool) {
-    // The added-paths summary is diagnostic chatter on stdout; only emit
-    // it when the caller asked for verbose output so a normal run leaves
-    // stdout for the generated config alone.
-    if !verbose {
-        return;
+/// Mirror of `Set-UISubsystemEnabled` in the PowerShell version.
+pub fn set_ui_subsystem_enabled(config: &mut Value) -> Result<()> {
+    let obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
+    if !obj.contains_key("ui") {
+        obj.insert("ui".into(), json!({}));
     }
-    println!();
-    if !added.readwrite.is_empty() {
-        println!("Added to readwritePaths ({}):", added.readwrite.len());
-        for p in &added.readwrite {
-            println!("  + {p}");
+    let ui = obj
+        .get_mut("ui")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("`ui` must be a JSON object"))?;
+    // CONVERT_TO_GUI violations mean the contained process needed the
+    // Win32k GUI subsystem. Set `ui.disable = false` unconditionally so
+    // the next run grants access (regardless of whether the key was
+    // present before).
+    ui.insert("disable".into(), Value::Bool(false));
+    println!("Enabling access to GUI subsystem ");
+    Ok(())
+}
+
+/// Apply the relaxations implied by the OR of `JOB_OBJECT_UILIMIT_*` bits
+/// observed in `UI_OPERATION` violations. Each bit names a UI limit the
+/// contained process tripped; the corresponding `ui.*` or
+/// `processContainer.ui.*` field is widened just enough to let the
+/// operation succeed next time.
+///
+/// Per `docs/process-container/UIPolicy_Schema.md` and the 0.7-alpha
+/// schema, cross-platform fields live at top-level `ui` while backend-
+/// specific fields live under `processContainer.ui`:
+///
+/// Top-level `ui` (cross-platform):
+/// * `READCLIPBOARD` / `WRITECLIPBOARD`  -> `ui.clipboard`
+/// * `INJECTION` -> `ui.injection = true`
+/// * `disable` is also cleared at top-level when any flag is applied.
+///
+/// `processContainer.ui` (Windows / process-container only):
+/// * `SYSTEMPARAMETERS` / `DISPLAYSETTINGS` -> `processContainer.ui.systemSettings`
+/// * `HANDLES` / `GLOBALATOMS` -> `processContainer.ui.isolation`
+/// * `DESKTOP` / `EXITWINDOWS` -> `processContainer.ui.desktopSystemControl = true`
+/// * `IME` -> `processContainer.ui.ime = true`
+///
+/// The function is additive: when a field already grants the requested
+/// operation it is left alone; when it grants the complementary half (e.g.
+/// existing `clipboard: "read"` plus a fresh `WRITECLIPBOARD` violation)
+/// the value is widened to `"all"`.
+pub fn apply_ui_operation_flags(config: &mut Value, flags: u32) -> Result<()> {
+    use crate::ui_limits::{
+        JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+        JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
+        JOB_OBJECT_UILIMIT_IME, JOB_OBJECT_UILIMIT_INJECTION, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+        JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    };
+
+    if flags == 0 {
+        return Ok(());
+    }
+
+    // Pre-compute which sub-trees we need to touch so each block can
+    // bail out early when its bits aren't set. Shape validation still
+    // happens inside each block, not up-front — callers that pass a
+    // malformed `processContainer` may see top-level `ui` already
+    // mutated when the inner branch errors out. Both callers
+    // (`log::run`, `stop::run`) propagate with `?` and discard the
+    // half-mutated value, so this is safe in practice.
+    let need_top_ui = flags
+        & (JOB_OBJECT_UILIMIT_READCLIPBOARD
+            | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+            | JOB_OBJECT_UILIMIT_INJECTION)
+        != 0
+        || flags != 0; // `disable: false` always written when flags != 0
+    let need_pc_ui = flags
+        & (JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+            | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+            | JOB_OBJECT_UILIMIT_HANDLES
+            | JOB_OBJECT_UILIMIT_GLOBALATOMS
+            | JOB_OBJECT_UILIMIT_DESKTOP
+            | JOB_OBJECT_UILIMIT_EXITWINDOWS
+            | JOB_OBJECT_UILIMIT_IME)
+        != 0;
+
+    let obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root must be a JSON object"))?;
+
+    // -- top-level `ui` (clipboard / injection / disable) -----------------
+    if need_top_ui {
+        if !obj.contains_key("ui") {
+            obj.insert("ui".into(), json!({}));
+        }
+        let ui = obj
+            .get_mut("ui")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| anyhow::anyhow!("`ui` must be a JSON object"))?;
+
+        let need_read = flags & JOB_OBJECT_UILIMIT_READCLIPBOARD != 0;
+        let need_write = flags & JOB_OBJECT_UILIMIT_WRITECLIPBOARD != 0;
+        if need_read || need_write {
+            let current = ui
+                .get("clipboard")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let (cur_r, cur_w) = clipboard_capabilities(&current);
+            let new = pick_clipboard(cur_r || need_read, cur_w || need_write);
+            ui.insert("clipboard".into(), Value::String(new.into()));
+        }
+
+        if flags & JOB_OBJECT_UILIMIT_INJECTION != 0 {
+            ui.insert("injection".into(), Value::Bool(true));
+        }
+
+        // A non-empty `ui.*` policy only makes sense with the GUI subsystem on.
+        // The schema default for `ui.disable` is `true`, in which case the
+        // runner silently ignores every other `ui.*` field — so when we are
+        // applying ANY relaxation (`flags != 0`), unconditionally insert
+        // `disable: false`. Without this, a UI_OPERATION-only trace (e.g.
+        // GLOBALATOMS-only, which doesn't co-fire CONVERT_TO_GUI) writes
+        // a config the runner discards — meaning the trace never converges.
+        ui.insert("disable".into(), Value::Bool(false));
+    }
+
+    // -- processContainer.ui (Windows backend-specific) -------------------
+    if need_pc_ui {
+        if !obj.contains_key("processContainer") {
+            obj.insert("processContainer".into(), json!({}));
+        }
+        let pc = obj
+            .get_mut("processContainer")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| anyhow::anyhow!("`processContainer` must be a JSON object"))?;
+        if !pc.contains_key("ui") {
+            pc.insert("ui".into(), json!({}));
+        }
+        let pc_ui = pc
+            .get_mut("ui")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| anyhow::anyhow!("`processContainer.ui` must be a JSON object"))?;
+
+        // -- systemSettings -----------------------------------------------
+        let need_params = flags & JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS != 0;
+        let need_display = flags & JOB_OBJECT_UILIMIT_DISPLAYSETTINGS != 0;
+        if need_params || need_display {
+            let current = pc_ui
+                .get("systemSettings")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let (cur_p, cur_d) = system_settings_capabilities(&current);
+            let new = pick_system_settings(cur_p || need_params, cur_d || need_display);
+            pc_ui.insert("systemSettings".into(), Value::String(new.into()));
+        }
+
+        // -- isolation ----------------------------------------------------
+        let need_other_handles = flags & JOB_OBJECT_UILIMIT_HANDLES != 0;
+        let need_global_atoms = flags & JOB_OBJECT_UILIMIT_GLOBALATOMS != 0;
+        if need_other_handles || need_global_atoms {
+            let current = pc_ui
+                .get("isolation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("container")
+                .to_string();
+            let (cur_h, cur_a) = isolation_restrictions(&current);
+            let new_h = cur_h && !need_other_handles;
+            let new_a = cur_a && !need_global_atoms;
+            let new = pick_isolation(new_h, new_a);
+            pc_ui.insert("isolation".into(), Value::String(new.into()));
+        }
+
+        // -- desktopSystemControl (DESKTOP + EXITWINDOWS) -----------------
+        if flags & (JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_EXITWINDOWS) != 0 {
+            pc_ui.insert("desktopSystemControl".into(), Value::Bool(true));
+        }
+
+        // -- ime ----------------------------------------------------------
+        if flags & JOB_OBJECT_UILIMIT_IME != 0 {
+            pc_ui.insert("ime".into(), Value::Bool(true));
         }
     }
-    if !added.readonly.is_empty() {
-        println!("Added to readonlyPaths ({}):", added.readonly.len());
-        for p in &added.readonly {
-            println!("  + {p}");
-        }
+
+    Ok(())
+}
+
+fn clipboard_capabilities(value: &str) -> (bool, bool) {
+    // (can_read, can_write)
+    match value {
+        "all" => (true, true),
+        "read" => (true, false),
+        "write" => (false, true),
+        _ => (false, false), // "none" or anything unrecognised
+    }
+}
+
+fn pick_clipboard(read: bool, write: bool) -> &'static str {
+    match (read, write) {
+        (true, true) => "all",
+        (true, false) => "read",
+        (false, true) => "write",
+        (false, false) => "none",
+    }
+}
+
+fn system_settings_capabilities(value: &str) -> (bool, bool) {
+    // (can_params, can_display)
+    match value {
+        "all" => (true, true),
+        "parameters" => (true, false),
+        "display" => (false, true),
+        _ => (false, false),
+    }
+}
+
+fn pick_system_settings(params: bool, display: bool) -> &'static str {
+    match (params, display) {
+        (true, true) => "all",
+        (true, false) => "parameters",
+        (false, true) => "display",
+        (false, false) => "none",
+    }
+}
+
+fn isolation_restrictions(value: &str) -> (bool, bool) {
+    // (handles_restricted, atoms_restricted) for each isolation value.
+    // Per UIPolicy_Schema.md:
+    //   container = HANDLES + GLOBALATOMS
+    //   handles   = HANDLES
+    //   atoms     = GLOBALATOMS
+    //   desktop   = neither
+    match value {
+        "container" => (true, true),
+        "handles" => (true, false),
+        "atoms" => (false, true),
+        "desktop" => (false, false),
+        _ => (true, true),
+    }
+}
+
+fn pick_isolation(handles_restricted: bool, atoms_restricted: bool) -> &'static str {
+    match (handles_restricted, atoms_restricted) {
+        (true, true) => "container",
+        (true, false) => "handles",
+        (false, true) => "atoms",
+        (false, false) => "desktop",
     }
 }
 
@@ -758,9 +982,10 @@ pub fn save_adjusted_config(config: &Value, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Decode a Windows file access mask into a |-separated list of the
-/// mnemonic flag names PLM cares about. Unknown bits are reported as a
-/// trailing OTHER(0x...) token so nothing is silently dropped.
+/// Decode a Windows file access mask into a `|`-separated list of the
+/// mnemonic flag names PLM cares about (the same constants used to
+/// classify read vs. write above). Unknown bits are reported as a
+/// trailing `OTHER(0x...)` token so nothing is silently dropped.
 fn decode_access_mask(mask: u32) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let mut covered: u32 = 0;
@@ -772,6 +997,8 @@ fn decode_access_mask(mask: u32) -> String {
     }
     let leftover = mask & !covered;
     if leftover != 0 {
+        // Render leftover bits as a hex token; allocate into a static-
+        // lifetime-free string by appending after join.
         let joined = parts.join("|");
         if joined.is_empty() {
             return format!("OTHER(0x{leftover:X})");
@@ -796,10 +1023,17 @@ fn classify_mask(mask: u32) -> &'static str {
     }
 }
 
-/// Print every unique file path observed in vents with the OR-ed
+/// Print every unique file path observed in `events` with the OR-ed
 /// access mask requested against it, plus the set of capabilities
-/// discovered in the trace. UI-violation summary lands in a later PR.
-pub fn write_detection_summary(events: &[LearningModeAccessEvent], capabilities: &HashSet<String>) {
+/// discovered in the trace. Always emitted (independent of verbose).
+pub fn write_detection_summary(
+    events: &[LearningModeAccessEvent],
+    capabilities: &HashSet<String>,
+    ui_event_count: u32,
+    ui_events: &[crate::ui_limits::UiEvent],
+    ui_operation_flags: u32,
+) {
+    use crate::ui_limits::{ui_limit_name, CONVERT_TO_GUI, UI_OPERATION};
     use std::collections::BTreeMap;
 
     let mut per_path: BTreeMap<&str, u32> = BTreeMap::new();
@@ -824,6 +1058,78 @@ pub fn write_detection_summary(events: &[LearningModeAccessEvent], capabilities:
     }
 
     println!();
+    println!(
+        "Detected UI injection events ({ui_event_count}, parsed {}):",
+        ui_events.len()
+    );
+    if ui_event_count == 0 {
+        println!("  (none)");
+    } else {
+        let mut convert_to_gui = 0u32;
+        let mut ui_operation = 0u32;
+        if ui_events.is_empty() {
+            println!("  (no payloads could be decoded)");
+        } else {
+            for ui in ui_events {
+                let denied = match ui.denied {
+                    Some(true) => "denied",
+                    Some(false) => "allowed",
+                    None => "denied=(absent)",
+                };
+                let category_name = match ui.category {
+                    CONVERT_TO_GUI => "CONVERT_TO_GUI",
+                    UI_OPERATION => "UI_OPERATION",
+                    _ => "UNKNOWN",
+                };
+                let detail_name = if ui.category == UI_OPERATION {
+                    ui_limit_name(ui.detail).unwrap_or("UNKNOWN")
+                } else {
+                    "-"
+                };
+                println!(
+                    "  + {} pid={} seq={} category=0x{:08X} ({}) detail=0x{:08X} ({}) {}",
+                    if ui.process_name.is_empty() {
+                        "(unknown)"
+                    } else {
+                        ui.process_name.as_str()
+                    },
+                    ui.process_id,
+                    ui.sequence_number,
+                    ui.category,
+                    category_name,
+                    ui.detail,
+                    detail_name,
+                    denied,
+                );
+                match ui.category {
+                    CONVERT_TO_GUI => convert_to_gui += 1,
+                    UI_OPERATION => ui_operation += 1,
+                    _ => {}
+                }
+            }
+        }
+        if convert_to_gui > 0 {
+            println!("  + ui.disable will be set to false (UI subsystem required)");
+        }
+        if ui_operation > 0 {
+            println!(
+                "  + ui.* / processContainer.ui.* policy will be relaxed for blocked operations (flags=0x{:04X}):",
+                ui_operation_flags
+            );
+            for bit_pos in 0..16 {
+                let bit = 1u32 << bit_pos;
+                if ui_operation_flags & bit != 0 {
+                    println!(
+                        "      - 0x{:04X} ({})",
+                        bit,
+                        ui_limit_name(bit).unwrap_or("UNKNOWN")
+                    );
+                }
+            }
+        }
+    }
+
+    println!();
     println!("Detected capabilities ({}):", capabilities.len());
     if capabilities.is_empty() {
         println!("  (none)");
@@ -832,6 +1138,28 @@ pub fn write_detection_summary(events: &[LearningModeAccessEvent], capabilities:
         sorted.sort();
         for c in sorted {
             println!("  + {c}");
+        }
+    }
+}
+
+pub fn write_added_paths_summary(added: &AddedPaths, verbose: bool) {
+    // The added-paths summary is diagnostic chatter on stdout; only emit
+    // it when the caller asked for verbose output so a normal run leaves
+    // stdout for the generated config alone.
+    if !verbose {
+        return;
+    }
+    println!();
+    if !added.readwrite.is_empty() {
+        println!("Added to readwritePaths ({}):", added.readwrite.len());
+        for p in &added.readwrite {
+            println!("  + {p}");
+        }
+    }
+    if !added.readonly.is_empty() {
+        println!("Added to readonlyPaths ({}):", added.readonly.len());
+        for p in &added.readonly {
+            println!("  + {p}");
         }
     }
 }
@@ -1488,6 +1816,372 @@ mod tests {
     fn initialize_filesystem_rejects_wrong_typed_filesystem() {
         let mut cfg = json!({ "filesystem": "deny" });
         assert!(initialize_filesystem(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn set_ui_subsystem_enabled_rejects_non_object_ui() {
+        let mut cfg = json!({ "ui": "disabled" });
+        assert!(set_ui_subsystem_enabled(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn set_ui_subsystem_enabled_always_writes_false() {
+        // Was previously inverted -- this locks in the fix.
+        let mut cfg = json!({});
+        set_ui_subsystem_enabled(&mut cfg).unwrap();
+        assert_eq!(cfg["ui"]["disable"], json!(false));
+
+        let mut cfg2 = json!({ "ui": { "disable": true } });
+        set_ui_subsystem_enabled(&mut cfg2).unwrap();
+        assert_eq!(cfg2["ui"]["disable"], json!(false));
+    }
+
+    // ---- apply_ui_operation_flags ----------------------------------------
+
+    #[test]
+    fn apply_ui_flags_clipboard_widens_to_all() {
+        use crate::ui_limits::{
+            JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+        };
+        let mut cfg = json!({});
+        apply_ui_operation_flags(
+            &mut cfg,
+            JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+        )
+        .unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("all"));
+    }
+
+    // asymmetric / widening clipboard branches.
+
+    #[test]
+    fn apply_ui_flags_read_clipboard_only_sets_read() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_READCLIPBOARD;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_READCLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("read"));
+    }
+
+    #[test]
+    fn apply_ui_flags_write_clipboard_only_sets_write() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_WRITECLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("write"));
+    }
+
+    #[test]
+    fn apply_ui_flags_read_widens_existing_write_to_all() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_READCLIPBOARD;
+        let mut cfg = json!({ "ui": { "clipboard": "write" } });
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_READCLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("all"));
+    }
+
+    #[test]
+    fn apply_ui_flags_write_widens_existing_read_to_all() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+        let mut cfg = json!({ "ui": { "clipboard": "read" } });
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_WRITECLIPBOARD).unwrap();
+        assert_eq!(cfg["ui"]["clipboard"], json!("all"));
+    }
+
+    #[test]
+    fn apply_ui_flags_system_settings_widening_from_existing_parameters() {
+        // pre-existing "parameters" + new DISPLAYSETTINGS → "all"
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
+        let mut cfg = json!({ "processContainer": { "ui": { "systemSettings": "parameters" } } });
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS).unwrap();
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("all")
+        );
+    }
+
+    #[test]
+    fn apply_ui_flags_ime_sets_true() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).unwrap();
+        assert_eq!(cfg["processContainer"]["ui"]["ime"], json!(true));
+    }
+
+    #[test]
+    fn apply_ui_flags_desktop_or_exitwindows_sets_desktop_system_control() {
+        use crate::ui_limits::{JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_EXITWINDOWS};
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DESKTOP).unwrap();
+        assert_eq!(
+            cfg["processContainer"]["ui"]["desktopSystemControl"],
+            json!(true)
+        );
+
+        let mut cfg2 = json!({});
+        apply_ui_operation_flags(&mut cfg2, JOB_OBJECT_UILIMIT_EXITWINDOWS).unwrap();
+        assert_eq!(
+            cfg2["processContainer"]["ui"]["desktopSystemControl"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn apply_ui_flags_injection_sets_true() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_INJECTION;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_INJECTION).unwrap();
+        assert_eq!(cfg["ui"]["injection"], json!(true));
+    }
+
+    #[test]
+    fn apply_ui_flags_rejects_non_object_ui() {
+        let mut cfg = json!({ "ui": null });
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
+        assert!(apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME).is_err());
+    }
+
+    #[test]
+    fn apply_ui_flags_rejects_non_object_process_container() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_IME;
+        let mut cfg = json!({ "processContainer": "not-an-object" });
+        let err = apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_IME)
+            .expect_err("non-object processContainer must error");
+        assert!(
+            err.to_string().contains("processContainer"),
+            "error must identify the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_ui_flags_rejects_non_object_process_container_ui() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_GLOBALATOMS;
+        let mut cfg = json!({ "processContainer": { "ui": null } });
+        let err = apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_GLOBALATOMS)
+            .expect_err("non-object processContainer.ui must error");
+        assert!(
+            err.to_string().contains("processContainer.ui"),
+            "error must identify the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_ui_flags_always_sets_disable_false_when_any_flag_applied() {
+        // schema default for `ui.disable` is `true`,
+        // in which case the runner ignores all other ui.* fields. We must
+        // unconditionally clear it whenever ANY relaxation is applied so
+        // a UI_OPERATION-only trace (e.g. GLOBALATOMS) actually converges.
+        use crate::ui_limits::{JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_IME};
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_GLOBALATOMS).unwrap();
+        assert_eq!(cfg["ui"]["disable"], json!(false));
+
+        let mut cfg2 = json!({});
+        apply_ui_operation_flags(&mut cfg2, JOB_OBJECT_UILIMIT_IME).unwrap();
+        assert_eq!(cfg2["ui"]["disable"], json!(false));
+
+        // No-op when flags == 0: no `ui` object created.
+        let mut cfg3 = json!({});
+        apply_ui_operation_flags(&mut cfg3, 0).unwrap();
+        assert!(cfg3.get("ui").is_none());
+    }
+
+    // explicit coverage for the systemSettings and
+    // isolation branches that were previously only exercised indirectly.
+
+    #[test]
+    fn apply_ui_flags_system_parameters_widens_system_settings() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS).unwrap();
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("parameters")
+        );
+        assert_eq!(cfg["ui"]["disable"], json!(false));
+    }
+
+    #[test]
+    fn apply_ui_flags_display_settings_widens_system_settings() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS).unwrap();
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("display")
+        );
+    }
+
+    #[test]
+    fn apply_ui_flags_system_params_and_display_combine_to_all() {
+        use crate::ui_limits::{
+            JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+        };
+        let mut cfg = json!({});
+        apply_ui_operation_flags(
+            &mut cfg,
+            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg["processContainer"]["ui"]["systemSettings"],
+            json!("all")
+        );
+    }
+
+    #[test]
+    fn apply_ui_flags_handles_relaxes_isolation_to_atoms() {
+        use crate::ui_limits::JOB_OBJECT_UILIMIT_HANDLES;
+        // Default isolation is "container" (handles + atoms restricted);
+        // granting HANDLES drops the handles restriction → "atoms".
+        let mut cfg = json!({});
+        apply_ui_operation_flags(&mut cfg, JOB_OBJECT_UILIMIT_HANDLES).unwrap();
+        assert_eq!(cfg["processContainer"]["ui"]["isolation"], json!("atoms"));
+    }
+
+    #[test]
+    fn apply_ui_flags_handles_and_global_atoms_drop_to_desktop_isolation() {
+        use crate::ui_limits::{JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES};
+        let mut cfg = json!({});
+        apply_ui_operation_flags(
+            &mut cfg,
+            JOB_OBJECT_UILIMIT_HANDLES | JOB_OBJECT_UILIMIT_GLOBALATOMS,
+        )
+        .unwrap();
+        assert_eq!(cfg["processContainer"]["ui"]["isolation"], json!("desktop"));
+    }
+
+    // ---- merge_capabilities ----------------------------------------------
+
+    #[test]
+    fn merge_capabilities_dedups_case_insensitively_and_sorts() {
+        // Existing config pre-seeds the camelCase key the schema requires.
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": ["InternetClient"] }
+        });
+        let req: HashSet<String> = ["internetclient", "registryRead"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        let caps = cfg["processContainer"]["capabilities"].as_array().unwrap();
+        // Only one of {InternetClient, internetclient} survives, plus
+        // registryRead. Result is case-insensitively sorted.
+        let names: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("internetclient")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("registryRead")));
+    }
+
+    /// PLM previously used the `containment` enum value (lowercase
+    /// `processcontainer`) as the sub-object key. The schema requires
+    /// camelCase `processContainer`. The merge no longer synthesizes a
+    /// missing block at all (see
+    /// `merge_capabilities_is_noop_without_process_container`), but when
+    /// one exists under any spelling it must be reused rather than
+    /// duplicated under a second casing.
+    #[test]
+    fn merge_capabilities_reuses_existing_block_without_adding_a_second_casing() {
+        let mut cfg = json!({ "processcontainer": { "capabilities": [] } });
+        let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(
+            cfg.get("processContainer").is_none(),
+            "must not insert a second camelCase variant"
+        );
+        let caps = cfg["processcontainer"]["capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].as_str().unwrap(), "internetClient");
+    }
+
+    #[test]
+    fn merge_capabilities_preserves_existing_camel_case_subobject() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": ["foo"] }
+        });
+        let req: HashSet<String> = ["bar"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(cfg.get("processcontainer").is_none());
+        assert_eq!(
+            cfg["processContainer"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    // merge_capabilities must silently no-op (no
+    // panic, no error) when the config has no `containment` set.
+    #[test]
+    fn merge_capabilities_silently_skips_when_containment_missing() {
+        let mut cfg = json!({});
+        let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(cfg.get("processContainer").is_none());
+    }
+
+    #[test]
+    fn merge_capabilities_silently_skips_when_containment_blank() {
+        let mut cfg = json!({ "containment": "   " });
+        let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        assert!(cfg.get("processContainer").is_none());
+    }
+
+    // non-PC backends must NOT have capabilities
+    // misfiled into a `processContainer` sub-object. They have no
+    // `capabilities` array in their schema; the merge is a no-op.
+    #[test]
+    fn merge_capabilities_skips_for_non_processcontainer_backends() {
+        for backend in [
+            "lxc",
+            "wslc",
+            "windows_sandbox",
+            "seatbelt",
+            "isolation_session",
+        ] {
+            let mut cfg = json!({ "containment": backend });
+            let req: HashSet<String> = ["internetClient"].iter().map(|s| s.to_string()).collect();
+            merge_capabilities(&mut cfg, &req).unwrap();
+            assert!(
+                cfg.get("processContainer").is_none(),
+                "backend {backend} must not get a processContainer sub-object"
+            );
+            // Backends with their own section MAY have one pre-existing
+            // on the config; merge_capabilities must not introduce one.
+            // Verify the only top-level key is still `containment`.
+            let top_keys: Vec<&String> = cfg.as_object().unwrap().keys().collect();
+            assert_eq!(
+                top_keys.len(),
+                1,
+                "backend {backend}: unexpected top-level keys {top_keys:?}"
+            );
+        }
+    }
+
+    // merge is additive-only. Even when the
+    // requested set is disjoint from existing capabilities, every
+    // pre-existing capability must survive the merge.
+    #[test]
+    fn merge_capabilities_preserves_existing_capability_not_in_requested_set() {
+        let mut cfg = json!({
+            "containment": "processcontainer",
+            "processContainer": { "capabilities": ["foo", "bar"] }
+        });
+        let req: HashSet<String> = ["baz"].iter().map(|s| s.to_string()).collect();
+        merge_capabilities(&mut cfg, &req).unwrap();
+        let names: Vec<&str> = cfg["processContainer"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("foo")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("bar")));
+        assert!(names.iter().any(|n| n.eq_ignore_ascii_case("baz")));
     }
 
     // R5-31: load_config rejects malformed JSON files with a useful
