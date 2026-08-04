@@ -65,17 +65,26 @@ const lfNormalize = (buf) =>
 
 // --- Minimal TOML reader (targeted, no dependency) --------------------------
 function tomlSection(text, header) {
-  const escaped = header.replace(/[.[\]]/g, "\\$&");
-  const m = new RegExp(`^\\[${escaped}\\]\\s*$`, "m").exec(text);
-  if (!m) return null;
-  const rest = text.slice(m.index + m[0].length);
-  const next = rest.search(/^\s*\[/m);
-  return next === -1 ? rest : rest.slice(0, next);
+  const lines = text.split(/\r?\n/);
+  const marker = `[${header}]`;
+  const start = lines.findIndex((line) => line.trim() === marker);
+  if (start === -1) return null;
+  let end = start + 1;
+  while (end < lines.length && !lines[end].trimStart().startsWith("[")) {
+    end++;
+  }
+  return lines.slice(start + 1, end).join("\n");
 }
 function tomlString(block, key) {
   if (block == null) return null;
-  const m = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, "m").exec(block);
-  return m ? m[1] : null;
+  for (const line of block.split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator === -1 || line.slice(0, separator).trim() !== key) continue;
+    const value = line.slice(separator + 1).trim();
+    const match = /^"([^"]+)"(?:\s+#.*)?$/.exec(value);
+    return match ? match[1] : null;
+  }
+  return null;
 }
 
 function readProvenance() {
