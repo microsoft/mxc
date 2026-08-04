@@ -97,8 +97,11 @@ impl IsolationSessionManager {
     /// until this returns, the caller constructs the manager via `new`
     /// afterward — hence an associated function rather than a method.
     ///
-    /// Note: `lifecycle.destroyOnExit` is silently ignored on this backend.
-    /// The in-proc API hardcodes `Indefinite` lifetime.
+    /// Note: the in-proc API exposes no session-lifetime knob, so `lifecycle`
+    /// cannot be honored here. Unsupported values are refused by the calling
+    /// surface rather than ignored — one-shot rejects `destroyOnExit: false`
+    /// and `preservePolicy: true` in `validate_runner`, and the state-aware
+    /// parser rejects the whole `lifecycle` section.
     pub(super) fn add_user(
         opt_entra_account_name: &str,
         opt_wam_token: &str,

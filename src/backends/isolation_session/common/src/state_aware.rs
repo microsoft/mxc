@@ -553,6 +553,58 @@ mod tests {
         assert_eq!(d.code, MxcErrorCode::PolicyValidation);
     }
 
+    // ====== UI policy is refused on every phase ======
+
+    #[test]
+    fn every_validate_hook_rejects_supplied_ui() {
+        // The backend has no UI-restriction primitive at any phase, so all five
+        // hooks refuse a supplied `ui` rather than accepting and dropping it.
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                ui_specified: true,
+                ..request_with_canonical_network().policy
+            },
+            ..Default::default()
+        };
+
+        let p = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(p.code, MxcErrorCode::PolicyValidation);
+        assert!(p.message.contains("UI policy"), "got {}", p.message);
+
+        for (label, err) in [
+            ("start", runner.validate_start("iso:abc", &req, None)),
+            ("exec", runner.validate_exec("iso:abc", &req, None)),
+            ("stop", runner.validate_stop("iso:abc", &req, None)),
+            (
+                "deprovision",
+                runner.validate_deprovision("iso:abc", &req, None),
+            ),
+        ] {
+            let err = err.unwrap_err();
+            assert_eq!(err.code, MxcErrorCode::PolicyValidation, "phase {label}");
+            assert!(
+                err.message.contains("UI policy"),
+                "phase {label}: got {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_hooks_accept_absent_ui() {
+        // Guard against over-rejection.
+        let runner = IsolationSessionRunner::new();
+        runner
+            .validate_provision(&request_with_canonical_network(), None)
+            .unwrap();
+        let req = ExecutionRequest::default();
+        runner.validate_start("iso:abc", &req, None).unwrap();
+        runner.validate_exec("iso:abc", &req, None).unwrap();
+        runner.validate_stop("iso:abc", &req, None).unwrap();
+        runner.validate_deprovision("iso:abc", &req, None).unwrap();
+    }
+
     // ====== Entra user bundle validation ======
 
     #[test]
