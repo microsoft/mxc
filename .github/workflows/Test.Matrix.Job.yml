@@ -49,8 +49,8 @@ jobs:
           path: artifacts/bin
 
       - name: Prepare Process Container host
-        if: matrix.command == 'process-container'
-        shell: powershell
+        if: matrix.backend == 'process-t3'
+        shell: pwsh
         run: |
           $hostPrep = Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin\wxc-host-prep.exe'
           & $hostPrep prepare-system-drive
@@ -59,7 +59,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run backend tests
-        shell: powershell
+        shell: pwsh
         run: |
           $arguments = @{
             Backend = '${{ matrix.command }}'
@@ -105,13 +105,17 @@ jobs:
           name: ${{ matrix.artifact }}
           path: artifacts/bin
 
-      - name: Verify backend prerequisites
+      - name: Prepare backend prerequisites
         shell: bash
         run: |
           set -euo pipefail
           chmod +x artifacts/bin/lxc-exec
           case '${{ matrix.command }}' in
             bubblewrap)
+              if ! command -v bwrap >/dev/null 2>&1; then
+                sudo apt-get update
+                sudo apt-get install -y --no-install-recommends bubblewrap
+              fi
               command -v bwrap
               if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
                 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
