@@ -4,12 +4,13 @@
 #
 # THROWAWAY / PROOF workflow. Not part of the real CI matrix (Build.yml).
 #
-# Pool is in WEBHOOK mode (UseScaleSet tag removed), so it uses the standard
-# multi-label targeting that every working example (SbomToolkit, ebpf, vscode,
-# openvmm) uses. Benchmark: ebpf's 1ES pool picks up jobs in ~2.5-3 min, so a
-# healthy pickup here should occur well under ~3-4 min.
+# Pool: 1es-mxc-test-2 — REPOSITORY-level pool bound directly to microsoft/mxc
+# (runner group 1 / Default). Confirmed working: run 30931840357 registered
+# runner 21 (bf347e45c000000) after a ~10.5-min COLD start on the idle pool.
 #
-# Pool: 1es-mxc-e2e-windows-25h2-pro-x64
+# NOTE: uses `shell: powershell` (Windows PowerShell 5.1) because the raw
+# windows-25h2-pro-x64 CLIENT image ships powershell.exe, NOT pwsh.exe (PS7).
+# Cold-start pickup on an idle Stateless pool is ~10-11 min — allow a full 15.
 # ============================================================================
 name: 1ES Connectivity Smoke
 
@@ -32,20 +33,21 @@ jobs:
 
     steps:
       - name: Hello from the 1ES runner
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "=== Job picked up on the 1ES pool ==="
           Write-Host "Hostname   : $(hostname)"
           Write-Host "User       : $(whoami)"
           Write-Host "OS         : $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "PSVersion  : $($PSVersionTable.PSVersion)"
           Write-Host "RUNNER_NAME: $env:RUNNER_NAME"
           Write-Host "Cores      : $env:NUMBER_OF_PROCESSORS"
 
       - name: Confirm this is the expected Azure pool VM (IMDS)
-        shell: pwsh
+        shell: powershell
         run: |
           try {
-            $c = (Invoke-RestMethod -Headers @{Metadata="true"} -NoProxy `
+            $c = (Invoke-RestMethod -Headers @{Metadata="true"} `
               -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01").compute
             Write-Host "vmSize   : $($c.vmSize)"
             Write-Host "location : $($c.location)"
