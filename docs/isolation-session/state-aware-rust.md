@@ -223,12 +223,64 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
 | `Policy(...)` | `policy_validation` | Caller-supplied policy field that this phase does not accept — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot). |
-| `ServiceUnavailable(...)` | `backend_unavailable` | `IsoSessionOps` activation failure: the `Windows.AI.IsolationSession.Preview` API is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
-| `Stale(...)` | `stale_id` | OS-side `AgentManager::FindActiveAgentUserByProvisionId` returns `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the `provisionId` is missing from both the in-memory cache and the persisted registry. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
-| `Lifecycle(...)` | `backend_error` | Any other HRESULT from a lifecycle op. The error message embeds the operation name, HRESULT, OS-side message, and remediation hint where present. |
+| `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
+| `Stale(...)` | `stale_id` | The OS service reports `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the agent user is unknown to it. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
+| `Lifecycle(...)` | `backend_error` | Any other failure of a lifecycle op, whether the API reported it semantically or the call itself could not be completed. |
 
-`error.details` is empty in v1. The HRESULT and OS-side message live inside
-`error.message` rather than as a structured field.
+### Structured failure fields
+
+The components of an API failure travel as **discrete fields** on the wire error
+envelope — `operation`, `nativeCode` and `remediation` — rather than being concatenated
+into `message`. `message` holds the bare human-readable text; for a semantic API failure
+that is the API's own message, passed through verbatim.
+
+| Failure | `operation` | `nativeCode` | `remediation` |
+|---|---|---|---|
+| Semantic API failure (the call completed and reported an error) | ✅ | ✅ | when the API supplies one |
+| Transport failure (the call could not be completed, or a result property could not be read) | ✅ | ✅ | — |
+| Activation failure (`backend_unavailable`) | ✅ | ✅ | — |
+| The API's status code itself could not be read | ✅ | — | best-effort |
+| MXC-internal failure (relay threads, console handles) | — | — | — |
+| `Policy` and the MXC-side `malformed_*` rejections | — | — | — |
+
+**Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
+`operation` marks that an API operation was in flight; neither refinement appears alone.
+
+`operation` is the interface-qualified member name — for example
+`IsoSessionOps.StopSessionAsync`. It is deliberately low-cardinality and free of call
+parameters (a failing environment-variable insert names the variable in `message`, not
+in `operation`) so that consumers can aggregate on it. Where a lifecycle call succeeds
+but reading one of its result properties fails, `operation` stays the lifecycle call and
+the finer step is described in `message`.
+
+These values are **best-effort diagnostics, not a versioned contract**: they mirror the
+projected WinRT class and method names, which this repo does not own. Branch on `code`;
+treat `operation` as telemetry and log detail. See the
+[cross-backend contract](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) §7.3.
+
+`nativeCode` is the HRESULT rendered as lowercase hex, e.g. `0x80070490`.
+
+`message` is the API's own text, passed through verbatim, and is never empty: when the
+API reports a failure without a message, a short stand-in is substituted, because the
+operation and status now live in their own fields and no longer backfill it.
+
+`error.details` is unused by this backend. It remains the escape hatch for
+backend-specific structured data that has no cross-backend meaning; the three named
+fields above are backend-neutral and so live on the envelope itself.
+
+### The `stale_id` promotion is semantic-path only
+
+`ERROR_NOT_FOUND` is promoted to `stale_id` **only** when it arrives through the API's
+semantic error channel, and **only** for non-provision operations.
+
+- *Semantic only:* the in-proc client maps its internal codes to standard HRESULTs when
+  it builds the error object, and that mapping is what gives `0x80070490` the meaning
+  "agent user not provisioned". The same value arriving as a transport failure has no
+  such provenance — it could be any "not found" from activation or RPC — so promoting it
+  would emit a false `stale_id`, whose remediation is "re-provision; treat the id as
+  dead", and destroy a healthy sandbox.
+- *Non-provision only:* provision mints the agent user. There is no `sandboxId` yet, so
+  reporting a stale one would be incoherent.
 
 ## Cancellation
 
