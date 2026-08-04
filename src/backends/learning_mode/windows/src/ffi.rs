@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::ptr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
@@ -120,12 +121,25 @@ impl LearningModeApi {
 
     /// Load `processmodel.dll` and resolve the Learning Mode trace exports.
     ///
+    /// The result — success or failure — is memoized for the lifetime of the
+    /// process: `processmodel.dll` is a resident system DLL whose export set does
+    /// not change while the process runs, so repeated probes would only repeat the
+    /// same `LoadLibraryExW`/`GetProcAddress` work and return the same answer. The
+    /// cached error is cloned (see [`LearningModeError`]), preserving the original
+    /// diagnostic on every call.
+    ///
     /// # Errors
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
     /// - [`LearningModeError::ExportMissing`] if any export is absent. Requiring
     ///   `CloseLearningModeTrace` rejects builds that expose the incompatible
     ///   earlier two-export ABI.
     pub fn load() -> Result<Self, LearningModeError> {
+        static CACHE: OnceLock<Result<LearningModeApi, LearningModeError>> = OnceLock::new();
+        CACHE.get_or_init(Self::load_uncached).clone()
+    }
+
+    /// Perform the actual DLL load and export resolution, bypassing the cache.
+    fn load_uncached() -> Result<Self, LearningModeError> {
         let dll = string_util::to_wide(PROCESSMODEL_DLL);
 
         // SAFETY: `dll` is a valid null-terminated wide string that outlives the call.
@@ -138,9 +152,9 @@ impl LearningModeApi {
             let hmodule = LoadLibraryExW(PCWSTR(dll.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
                 .map_err(|e| LearningModeError::DllLoad(e.to_string()))?;
 
-            let start_proc = resolve_export(hmodule, c"StartLearningModeTrace")?;
-            let stop_proc = resolve_export(hmodule, c"StopLearningModeTrace")?;
-            let close_proc = resolve_export(hmodule, c"CloseLearningModeTrace")?;
+            let start_proc = resolve_export(hmodule, START_NAME)?;
+            let stop_proc = resolve_export(hmodule, STOP_NAME)?;
+            let close_proc = resolve_export(hmodule, CLOSE_NAME)?;
 
             let start: PfnStartLearningModeTrace = std::mem::transmute(start_proc);
             let stop: PfnStopLearningModeTrace = std::mem::transmute(stop_proc);
@@ -148,6 +162,19 @@ impl LearningModeApi {
 
             Ok(Self { start, stop, close })
         }
+    }
+
+    /// Construct an API surface directly from raw export pointers, bypassing the
+    /// DLL load. Test-only: lets sibling modules (e.g. `lifecycle`) inject fakes to
+    /// exercise the capture lifecycle host-independently without going through the
+    /// memoized [`load`](Self::load) path, so fakes never populate the process cache.
+    #[cfg(test)]
+    pub(crate) fn from_raw_parts(
+        start: PfnStartLearningModeTrace,
+        stop: PfnStopLearningModeTrace,
+        close: PfnCloseLearningModeTrace,
+    ) -> Self {
+        Self { start, stop, close }
     }
 
     /// Start a Learning Mode trace for the sandbox identified by
@@ -309,11 +336,79 @@ fn last_error() -> u32 {
     unsafe { GetLastError().0 }
 }
 
+/// Undecorated names of the three Learning Mode trace exports, in the order the
+/// 2-phase capture lifecycle uses them.
+const START_NAME: &core::ffi::CStr = c"StartLearningModeTrace";
+const STOP_NAME: &core::ffi::CStr = c"StopLearningModeTrace";
+const CLOSE_NAME: &core::ffi::CStr = c"CloseLearningModeTrace";
+
+/// Which Learning Mode trace exports resolved on this machine.
+///
+/// This mirrors the security-environment report shape and isolates the pure
+/// all-or-nothing completeness rule so it can be unit-tested without a live DLL.
+/// Requiring `close` in addition to `start`/`stop` is what rejects the incompatible
+/// earlier two-export ("V1") ABI.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LearningModeExportReport {
+    /// Resolved name of `StartLearningModeTrace`, if present.
+    pub start: Option<&'static str>,
+    /// Resolved name of `StopLearningModeTrace`, if present.
+    pub stop: Option<&'static str>,
+    /// Resolved name of `CloseLearningModeTrace`, if present.
+    pub close: Option<&'static str>,
+}
+
+impl LearningModeExportReport {
+    /// `true` only when all three trace exports resolved. A start+stop-only build
+    /// (the legacy two-export ABI) is deliberately incomplete.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.start.is_some() && self.stop.is_some() && self.close.is_some()
+    }
+}
+
+/// Probe `processmodel.dll` for the three Learning Mode trace exports. Returns an
+/// all-`None` report if the DLL itself cannot be loaded.
+fn probe_learning_mode_exports() -> LearningModeExportReport {
+    let dll = string_util::to_wide(PROCESSMODEL_DLL);
+    // SAFETY: `dll` is a valid null-terminated wide string that outlives the call;
+    // `LOAD_LIBRARY_SEARCH_SYSTEM32` restricts the search to System32.
+    let hmodule =
+        match unsafe { LoadLibraryExW(PCWSTR(dll.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32) } {
+            Ok(h) => h,
+            Err(_) => return LearningModeExportReport::default(),
+        };
+
+    // SAFETY: `hmodule` is valid; `export_name_if_present` only reads exports.
+    unsafe {
+        LearningModeExportReport {
+            start: export_name_if_present(hmodule, START_NAME),
+            stop: export_name_if_present(hmodule, STOP_NAME),
+            close: export_name_if_present(hmodule, CLOSE_NAME),
+        }
+    }
+}
+
+/// Return `name` if it resolves in `hmodule`, otherwise `None`.
+///
+/// # Safety
+/// `hmodule` must be a valid module handle.
+unsafe fn export_name_if_present(
+    hmodule: HMODULE,
+    name: &'static core::ffi::CStr,
+) -> Option<&'static str> {
+    // SAFETY: `name` is a valid null-terminated C string; `hmodule` is valid.
+    if unsafe { GetProcAddress(hmodule, PCSTR(name.as_ptr().cast())) }.is_some() {
+        name.to_str().ok()
+    } else {
+        None
+    }
+}
+
 /// Capability probe: `true` only when `processmodel.dll` exposes all three Learning Mode
 /// trace exports on this machine.
 #[must_use]
 pub fn is_learning_mode_api_available() -> bool {
-    LearningModeApi::load().is_ok()
+    probe_learning_mode_exports().is_complete()
 }
 
 #[cfg(test)]
@@ -362,11 +457,7 @@ mod tests {
     }
 
     fn fake_api() -> LearningModeApi {
-        LearningModeApi {
-            start: fake_start,
-            stop: fake_stop,
-            close: fake_close,
-        }
+        LearningModeApi::from_raw_parts(fake_start, fake_stop, fake_close)
     }
 
     fn fake_environment() -> HANDLE {
@@ -570,5 +661,63 @@ mod tests {
         trace.close();
 
         assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn load_result_is_memoized_and_consistent() {
+        // `load` memoizes success or failure for the process. Repeated calls must
+        // agree with each other and with the capability probe, and never panic —
+        // regardless of whether the API is present on this host.
+        let first = LearningModeApi::load().is_ok();
+        let second = LearningModeApi::load().is_ok();
+        assert_eq!(first, second);
+        assert_eq!(first, is_learning_mode_api_available());
+    }
+
+    #[test]
+    fn learning_mode_report_all_present_is_complete() {
+        let report = LearningModeExportReport {
+            start: Some("StartLearningModeTrace"),
+            stop: Some("StopLearningModeTrace"),
+            close: Some("CloseLearningModeTrace"),
+        };
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn learning_mode_report_each_missing_export_is_incomplete() {
+        let complete = LearningModeExportReport {
+            start: Some("StartLearningModeTrace"),
+            stop: Some("StopLearningModeTrace"),
+            close: Some("CloseLearningModeTrace"),
+        };
+
+        assert!(!LearningModeExportReport {
+            start: None,
+            ..complete
+        }
+        .is_complete());
+        assert!(!LearningModeExportReport {
+            stop: None,
+            ..complete
+        }
+        .is_complete());
+        assert!(!LearningModeExportReport {
+            close: None,
+            ..complete
+        }
+        .is_complete());
+        assert!(!LearningModeExportReport::default().is_complete());
+    }
+
+    #[test]
+    fn learning_mode_report_v1_two_export_subset_is_incomplete() {
+        // The legacy ABI exposed only Start/Stop. Requiring Close rejects it.
+        let v1_subset = LearningModeExportReport {
+            start: Some("StartLearningModeTrace"),
+            stop: Some("StopLearningModeTrace"),
+            close: None,
+        };
+        assert!(!v1_subset.is_complete());
     }
 }

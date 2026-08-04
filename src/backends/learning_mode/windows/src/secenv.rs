@@ -33,6 +33,7 @@
 
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, HMODULE};
 use windows::Win32::System::LibraryLoader::{
@@ -308,11 +309,18 @@ const QUERY_SUPPORT_NAMES: &[&core::ffi::CStr] = &[c"QueryProcessSecurityEnviron
 const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 
 /// Resolved process security-environment exports from `processmodel.dll`.
+///
+/// `cacheable` records whether this surface was produced by the memoizing
+/// [`SecurityEnvironmentApi::load`] (the real, process-wide singleton) as opposed
+/// to a test fake. Only cacheable surfaces are allowed to populate the process-wide
+/// [`supports_deny_paths`](Self::supports_deny_paths) cache, so injected fakes can
+/// never poison it for the real API or for each other.
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
     query_support: PfnQueryProcessSecurityEnvironmentSupport,
     close: PfnCloseProcessSecurityEnvironment,
+    cacheable: bool,
 }
 
 impl std::fmt::Debug for SecurityEnvironmentApi {
@@ -321,6 +329,7 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
             .field("create", &(self.create as *const ()))
             .field("query_support", &(self.query_support as *const ()))
             .field("close", &(self.close as *const ()))
+            .field("cacheable", &self.cacheable)
             .finish()
     }
 }
@@ -328,10 +337,24 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
 impl SecurityEnvironmentApi {
     /// Load `processmodel.dll` and resolve the 2-phase security-environment exports.
     ///
+    /// The result — success or failure — is memoized for the lifetime of the
+    /// process: `processmodel.dll` is a resident system DLL whose export set does
+    /// not change while the process runs, so repeated probes would only repeat the
+    /// same work and return the same answer. The cached error is cloned (see
+    /// [`LearningModeError`]), preserving the original diagnostic on every call. The
+    /// cached surface is marked cacheable so its
+    /// [`supports_deny_paths`](Self::supports_deny_paths) result is memoized too.
+    ///
     /// # Errors
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
     /// - [`LearningModeError::ExportMissing`] if any required export is absent.
     pub fn load() -> Result<Self, LearningModeError> {
+        static CACHE: OnceLock<Result<SecurityEnvironmentApi, LearningModeError>> = OnceLock::new();
+        CACHE.get_or_init(Self::load_uncached).clone()
+    }
+
+    /// Perform the actual DLL load and export resolution, bypassing the cache.
+    fn load_uncached() -> Result<Self, LearningModeError> {
         let dll = string_util::to_wide(PROCESSMODEL_DLL);
 
         // SAFETY: `dll` is a valid null-terminated wide string that outlives the call.
@@ -360,12 +383,65 @@ impl SecurityEnvironmentApi {
                     unsafe extern "system" fn() -> isize,
                     PfnCloseProcessSecurityEnvironment,
                 >(close_proc),
+                cacheable: true,
             })
         }
     }
 
+    /// Construct an API surface directly from raw export pointers, bypassing the
+    /// DLL load. Test-only: lets sibling modules inject fakes. The surface is marked
+    /// non-cacheable so its [`supports_deny_paths`](Self::supports_deny_paths) result
+    /// never populates the process-wide cache.
+    #[cfg(test)]
+    pub(crate) fn from_raw_parts(
+        create: PfnCreateProcessSecurityEnvironment,
+        query_support: PfnQueryProcessSecurityEnvironmentSupport,
+        close: PfnCloseProcessSecurityEnvironment,
+    ) -> Self {
+        Self {
+            create,
+            query_support,
+            close,
+            cacheable: false,
+        }
+    }
+
+    /// Like [`from_raw_parts`](Self::from_raw_parts) but marked cacheable, so the
+    /// memoization of [`supports_deny_paths`](Self::supports_deny_paths) can be
+    /// exercised host-independently. Test-only.
+    #[cfg(test)]
+    pub(crate) fn from_raw_parts_cacheable(
+        create: PfnCreateProcessSecurityEnvironment,
+        query_support: PfnQueryProcessSecurityEnvironmentSupport,
+        close: PfnCloseProcessSecurityEnvironment,
+    ) -> Self {
+        Self {
+            create,
+            query_support,
+            close,
+            cacheable: true,
+        }
+    }
+
     /// Whether the official V2 API supports native deny paths.
+    ///
+    /// The answer is a fixed host capability, so for the real (cacheable) API the
+    /// result — including a typed error — is memoized once per process. Non-cacheable
+    /// test fakes always query directly and never touch the process-wide cache.
     pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
+        if self.cacheable {
+            static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
+            CACHE
+                .get_or_init(|| self.query_deny_paths_support())
+                .clone()
+        } else {
+            self.query_deny_paths_support()
+        }
+    }
+
+    /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
+    /// without consulting or populating the process-wide cache.
+    fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
         const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
         let mut support_flags = 0u64;
         // SAFETY: `query_support` matches the official V2 declaration and
@@ -516,12 +592,51 @@ pub fn is_security_environment_api_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::{E_FAIL, S_OK};
 
     static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
+    /// Serializes the tests that share the query fakes' global counters.
+    static QUERY_LOCK: Mutex<()> = Mutex::new(());
+    static QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static QUERY_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
+    static QUERY_FLAGS: AtomicU64 = AtomicU64::new(0);
+
+    /// Native-deny-path support bit reported by `QueryProcessSecurityEnvironmentSupport`.
+    const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+
     unsafe extern "system" fn fake_close(_: HANDLE) {
         CLOSE_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "system" fn fake_create(
+        _: *const c_void,
+        _: u32,
+        _: u32,
+        _: *mut HANDLE,
+    ) -> HRESULT {
+        S_OK
+    }
+
+    unsafe extern "system" fn fake_query(support_flags: *mut u64) -> HRESULT {
+        QUERY_CALLS.fetch_add(1, Ordering::SeqCst);
+        let result = HRESULT(QUERY_RESULT.load(Ordering::SeqCst));
+        if result.is_ok() {
+            unsafe { *support_flags = QUERY_FLAGS.load(Ordering::SeqCst) };
+        }
+        result
+    }
+
+    fn reset_query_fakes() {
+        QUERY_CALLS.store(0, Ordering::SeqCst);
+        QUERY_RESULT.store(S_OK.0, Ordering::SeqCst);
+        QUERY_FLAGS.store(0, Ordering::SeqCst);
+    }
+
+    fn fake_uncached_api() -> SecurityEnvironmentApi {
+        SecurityEnvironmentApi::from_raw_parts(fake_create, fake_query, fake_close)
     }
 
     #[test]
@@ -592,5 +707,108 @@ mod tests {
 
         environment.close();
         assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn export_report_all_present_is_complete() {
+        let report = SecurityEnvironmentExportReport {
+            create: Some("CreateProcessSecurityEnvironment"),
+            query_support: Some("QueryProcessSecurityEnvironmentSupport"),
+            close: Some("CloseProcessSecurityEnvironment"),
+        };
+        assert!(report.is_complete());
+    }
+
+    #[test]
+    fn export_report_each_missing_export_is_incomplete() {
+        let complete = SecurityEnvironmentExportReport {
+            create: Some("CreateProcessSecurityEnvironment"),
+            query_support: Some("QueryProcessSecurityEnvironmentSupport"),
+            close: Some("CloseProcessSecurityEnvironment"),
+        };
+
+        assert!(!SecurityEnvironmentExportReport {
+            create: None,
+            ..complete
+        }
+        .is_complete());
+        assert!(!SecurityEnvironmentExportReport {
+            query_support: None,
+            ..complete
+        }
+        .is_complete());
+        assert!(!SecurityEnvironmentExportReport {
+            close: None,
+            ..complete
+        }
+        .is_complete());
+        assert!(!SecurityEnvironmentExportReport::default().is_complete());
+    }
+
+    #[test]
+    fn supports_deny_paths_reports_flag_state() {
+        let _guard = QUERY_LOCK.lock().unwrap();
+        let api = fake_uncached_api();
+
+        reset_query_fakes();
+        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
+        assert!(api.supports_deny_paths().unwrap());
+        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
+
+        reset_query_fakes();
+        QUERY_FLAGS.store(0, Ordering::SeqCst);
+        assert!(!api.supports_deny_paths().unwrap());
+
+        reset_query_fakes();
+        // Unrelated support bits must not be mistaken for deny-path support.
+        QUERY_FLAGS.store(0xFFFF_FFFF_FFFF_FFFE, Ordering::SeqCst);
+        assert!(!api.supports_deny_paths().unwrap());
+    }
+
+    #[test]
+    fn supports_deny_paths_maps_failing_hresult() {
+        let _guard = QUERY_LOCK.lock().unwrap();
+        reset_query_fakes();
+        QUERY_RESULT.store(E_FAIL.0, Ordering::SeqCst);
+        let api = fake_uncached_api();
+
+        let error = api.supports_deny_paths().unwrap_err();
+        assert!(matches!(
+            error,
+            LearningModeError::HResultCall {
+                function: "QueryProcessSecurityEnvironmentSupport",
+                code
+            } if code == E_FAIL.0
+        ));
+    }
+
+    #[test]
+    fn non_cacheable_api_queries_every_call() {
+        let _guard = QUERY_LOCK.lock().unwrap();
+        reset_query_fakes();
+        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
+        let api = fake_uncached_api();
+
+        assert!(api.supports_deny_paths().unwrap());
+        assert!(api.supports_deny_paths().unwrap());
+        // A test fake must never be memoized: both calls hit the underlying query.
+        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn cacheable_api_memoizes_support_query() {
+        // The only test that drives the cacheable (process-wide) support cache, so
+        // the `OnceLock` initializer runs deterministically here.
+        let _guard = QUERY_LOCK.lock().unwrap();
+        reset_query_fakes();
+        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
+        let api =
+            SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
+
+        let first = api.supports_deny_paths().unwrap();
+        let second = api.supports_deny_paths().unwrap();
+        assert_eq!(first, second);
+        // The result is memoized for the process: the query runs at most once.
+        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
     }
 }

@@ -62,7 +62,14 @@ pub use secenv::{
 };
 
 /// Errors surfaced while loading or invoking the Learning Mode trace API.
-#[derive(Debug, Error)]
+///
+/// `Clone` is derived so that [`crate::LearningModeApi::load`] and
+/// [`crate::SecurityEnvironmentApi::load`] can memoize a failed load and hand
+/// every caller an owned, typed copy of the original diagnostic. Every variant
+/// already owns its data (`&'static str`, `String`, or plain integers), so the
+/// clone preserves the full message and source information without erasing it
+/// behind a stringified surrogate.
+#[derive(Debug, Clone, Error)]
 pub enum LearningModeError {
     /// `processmodel.dll` itself could not be loaded from System32.
     #[error("failed to load processmodel.dll: {0}")]

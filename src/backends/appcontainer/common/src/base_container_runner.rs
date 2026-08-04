@@ -282,6 +282,11 @@ trait CaptureSessionFactory: Send + Sync {
     ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError>;
 }
 
+trait CapturePlatformSupport: Send + Sync {
+    fn check_apis(&self) -> Result<(), String>;
+    fn supports_deny_paths(&self) -> Result<bool, String>;
+}
+
 struct RealCaptureSessionFactory;
 
 impl CaptureSessionFactory for RealCaptureSessionFactory {
@@ -302,11 +307,39 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
     }
 }
 
+struct RealCapturePlatformSupport;
+
+impl CapturePlatformSupport for RealCapturePlatformSupport {
+    fn check_apis(&self) -> Result<(), String> {
+        match (SecurityEnvironmentApi::load(), LearningModeApi::load()) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (security_environment_api, learning_mode_api) => {
+                let detail = match (&security_environment_api, &learning_mode_api) {
+                    (Err(error), _) => format!("security-environment API: {error}"),
+                    (_, Err(error)) => format!("learning-mode trace API: {error}"),
+                    _ => "unknown".to_string(),
+                };
+                Err(detail)
+            }
+        }
+    }
+
+    fn supports_deny_paths(&self) -> Result<bool, String> {
+        SecurityEnvironmentApi::load()
+            .map_err(|error| format!("process security-environment API unavailable: {error}"))?
+            .supports_deny_paths()
+            .map_err(|error| {
+                format!("could not query process security-environment support: {error}")
+            })
+    }
+}
+
 /// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 pub struct BaseContainerRunner {
     proxy_coordinator: ProxyCoordinator,
     capture_factory: Arc<dyn CaptureSessionFactory>,
+    capture_support: Arc<dyn CapturePlatformSupport>,
 }
 
 impl Default for BaseContainerRunner {
@@ -314,6 +347,7 @@ impl Default for BaseContainerRunner {
         Self {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory: Arc::new(RealCaptureSessionFactory),
+            capture_support: Arc::new(RealCapturePlatformSupport),
         }
     }
 }
@@ -348,6 +382,19 @@ impl BaseContainerRunner {
         Self {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory,
+            capture_support: Arc::new(RealCapturePlatformSupport),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_capture_components(
+        capture_factory: Arc<dyn CaptureSessionFactory>,
+        capture_support: Arc<dyn CapturePlatformSupport>,
+    ) -> Self {
+        Self {
+            proxy_coordinator: ProxyCoordinator::default(),
+            capture_factory,
+            capture_support,
         }
     }
 
@@ -625,19 +672,26 @@ impl BaseContainerRunner {
         builder.finished_data().to_vec()
     }
 
+    fn needs_internet_client(request: &ExecutionRequest) -> bool {
+        let use_caps_for_network = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
+        );
+        use_caps_for_network
+            && request.policy.default_network_policy == NetworkPolicy::Allow
+            && !request
+                .policy
+                .capabilities
+                .iter()
+                .any(|capability| capability == "internetClient")
+    }
+
     fn effective_capabilities(request: &ExecutionRequest) -> Vec<String> {
         // Match legacy AppContainer behaviour: when network enforcement uses
         // capabilities and the default policy is Allow, ensure internetClient
         // is present so the sandboxed process has network access.
         let mut caps = request.policy.capabilities.clone();
-        let use_caps_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        if use_caps_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
-            && !caps.iter().any(|c| c == "internetClient")
-        {
+        if Self::needs_internet_client(request) {
             caps.push("internetClient".to_string());
         }
         caps
@@ -649,11 +703,18 @@ impl BaseContainerRunner {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
         let version = SchemaVersion::new(1, 0);
 
-        let caps = Self::effective_capabilities(request);
-        let capabilities = if caps.is_empty() {
+        let needs_internet_client = Self::needs_internet_client(request);
+        let capabilities = if request.policy.capabilities.is_empty() && !needs_internet_client {
             None
         } else {
-            Some(builder.create_string(&caps.join(",")))
+            let mut capabilities = request.policy.capabilities.join(",");
+            if needs_internet_client {
+                if !capabilities.is_empty() {
+                    capabilities.push(',');
+                }
+                capabilities.push_str("internetClient");
+            }
+            Some(builder.create_string(&capabilities))
         };
 
         let fs_read_write = create_string_vector(&mut builder, &request.policy.readwrite_paths);
@@ -1690,23 +1751,27 @@ impl SandboxBackend for BaseContainerRunner {
                  proxy AppContainer peer identity",
             ));
         }
+        if capture_denials {
+            self.capture_support
+                .check_apis()
+                .map_err(|detail| ScriptResponse {
+                    failure_phase: FailurePhase::BackendUnavailable,
+                    ..ScriptResponse::error(&format!(
+                        "captureDenials requires the official V2 APIs ({detail})"
+                    ))
+                })?;
+        }
         // deniedPaths reaches ordinary BaseContainer through SBOX and capture
         // through PSEC. Each path has a distinct support query; fail closed
         // rather than silently dropping the deny policy.
         if !request.policy.denied_paths.is_empty() {
             let deny_supported = if capture_denials {
-                let api = SecurityEnvironmentApi::load().map_err(|error| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&format!(
-                        "process security-environment API unavailable: {error}"
-                    ))
-                })?;
-                api.supports_deny_paths().map_err(|error| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&format!(
-                        "could not query process security-environment support: {error}"
-                    ))
-                })?
+                self.capture_support
+                    .supports_deny_paths()
+                    .map_err(|message| ScriptResponse {
+                        failure_phase: FailurePhase::BackendUnavailable,
+                        ..ScriptResponse::error(&message)
+                    })?
             } else {
                 crate::fallback_detector::base_container_supports_deny_paths()
             };
@@ -1727,22 +1792,7 @@ impl SandboxBackend for BaseContainerRunner {
             ));
         }
         if capture_denials {
-            return match (SecurityEnvironmentApi::load(), LearningModeApi::load()) {
-                (Ok(_), Ok(_)) => Ok(()),
-                (security_environment_api, learning_mode_api) => {
-                    let detail = match (&security_environment_api, &learning_mode_api) {
-                        (Err(error), _) => format!("security-environment API: {error}"),
-                        (_, Err(error)) => format!("learning-mode trace API: {error}"),
-                        _ => "unknown".to_string(),
-                    };
-                    Err(ScriptResponse {
-                        failure_phase: FailurePhase::BackendUnavailable,
-                        ..ScriptResponse::error(&format!(
-                            "captureDenials requires the official V2 APIs ({detail})"
-                        ))
-                    })
-                }
-            };
+            return Ok(());
         }
 
         Self::is_base_container_api_present().map_err(|e| {
@@ -2342,6 +2392,44 @@ mod tests {
                 finish_calls: Arc::clone(&self.finish_calls),
             }))
         }
+    }
+
+    struct FakeCaptureSupport {
+        api_error: Option<&'static str>,
+        deny_error: Option<&'static str>,
+        deny_supported: bool,
+        api_calls: AtomicUsize,
+        deny_calls: AtomicUsize,
+    }
+
+    impl CapturePlatformSupport for FakeCaptureSupport {
+        fn check_apis(&self) -> Result<(), String> {
+            self.api_calls.fetch_add(1, Ordering::SeqCst);
+            self.api_error
+                .map_or(Ok(()), |error| Err(error.to_string()))
+        }
+
+        fn supports_deny_paths(&self) -> Result<bool, String> {
+            self.deny_calls.fetch_add(1, Ordering::SeqCst);
+            self.deny_error
+                .map_or(Ok(self.deny_supported), |error| Err(error.to_string()))
+        }
+    }
+
+    fn fake_capture_factory() -> Arc<FakeCaptureFactory> {
+        Arc::new(FakeCaptureFactory {
+            begin_error: None,
+            finish_error: None,
+            begin_calls: AtomicUsize::new(0),
+            finish_calls: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn capture_request_with_denied_path() -> ExecutionRequest {
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.denied_paths = vec![r"C:\secret".to_string()];
+        request
     }
 
     struct FakeAnalyzer {
@@ -3000,6 +3088,77 @@ mod tests {
         assert!(CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG.contains("PSE_SUPPORT_FS_DENY"));
         assert!(!CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG.contains("Experimental_QuerySandboxSupport"));
         assert!(CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG.contains("cannot fall back to AppContainer"));
+    }
+
+    #[test]
+    fn capture_validation_fails_closed_when_v2_api_is_unavailable() {
+        let factory = fake_capture_factory();
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: Some("missing CloseLearningModeTrace"),
+            deny_error: None,
+            deny_supported: true,
+            api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
+
+        let error = runner
+            .validate(&capture_request_with_denied_path())
+            .expect_err("missing V2 API must fail closed");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert!(error
+            .error_message
+            .contains("missing CloseLearningModeTrace"));
+        assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn capture_validation_fails_closed_when_deny_query_fails() {
+        let factory = fake_capture_factory();
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: None,
+            deny_error: Some("query failed"),
+            deny_supported: false,
+            api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
+
+        let error = runner
+            .validate(&capture_request_with_denied_path())
+            .expect_err("deny query failure must fail closed");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert!(error.error_message.contains("query failed"));
+        assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn capture_validation_fails_closed_when_deny_bit_is_clear() {
+        let factory = fake_capture_factory();
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: None,
+            deny_error: None,
+            deny_supported: false,
+            api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
+
+        let error = runner
+            .validate(&capture_request_with_denied_path())
+            .expect_err("missing deny support bit must fail closed");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(error.error_message, CAPTURE_DENIED_PATHS_UNSUPPORTED_MSG);
+        assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
