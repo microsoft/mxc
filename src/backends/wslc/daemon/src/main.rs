@@ -14,17 +14,16 @@
 //! Boot sequence:
 //! 1. Secure the record root and mint a unique pipe name.
 //! 2. Spawn the WSLc worker thread.
-//! 3. Publish a `daemon.json` record with `ready = false` so a racing client can
-//!    discover us but knows not to send work yet.
-//! 4. Start the control server; once it is listening, flip the record to
-//!    `ready = true`.
-//! 5. Run an idle watchdog: when the live-container count stays at zero past the
-//!    idle timeout, shut down.
-//! 6. On exit, remove the record.
+//! 3. Bind the first control-pipe instance, then publish a `ready` `daemon.json`
+//!    record — the pipe is listening before any client can discover it.
+//! 4. Run an idle watchdog: when the live-container count stays at zero with no
+//!    in-flight requests past the idle timeout, shut down.
+//! 5. On exit, remove the record.
 
 mod control_server;
 mod session_manager;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,33 +59,38 @@ async fn run() -> Result<()> {
 
     let session = session_manager::spawn().context("spawn WSLc session worker")?;
 
-    // Publish a not-yet-ready record so a racing client can find us but waits.
-    let mut record = DaemonRecord {
+    // Bind the first pipe instance before advertising the record, so a client
+    // never discovers a ready record for a pipe that is not yet listening.
+    let (security, first_instance) =
+        control_server::bind(&pipe_name).context("bind control pipe")?;
+
+    let record = DaemonRecord {
         schema_version: RECORD_SCHEMA_VERSION,
         pid,
         pid_creation_time,
         pipe_name: pipe_name.clone(),
-        ready: false,
+        ready: true,
         protocol_version: PROTOCOL_VERSION,
     };
-    write_daemon_record(&record).context("publish initial daemon record")?;
+    write_daemon_record(&record).context("publish daemon record")?;
 
     let shutdown = Arc::new(Notify::new());
+    let active_clients = Arc::new(AtomicUsize::new(0));
 
-    // Start the control server. It creates the first pipe instance eagerly, so
-    // once `spawn` returns the pipe exists and clients can connect.
     let server = tokio::spawn(control_server::run(
         session.clone(),
         pipe_name.clone(),
+        security,
+        first_instance,
+        active_clients.clone(),
         shutdown.clone(),
     ));
 
-    // Flip the record to ready now that the pipe is being served.
-    record.ready = true;
-    write_daemon_record(&record).context("publish ready daemon record")?;
-
-    // Idle watchdog: exit after IDLE_TIMEOUT with no live containers.
-    let watchdog = tokio::spawn(idle_watchdog(session.clone(), shutdown.clone()));
+    let watchdog = tokio::spawn(idle_watchdog(
+        session.clone(),
+        active_clients,
+        shutdown.clone(),
+    ));
 
     // Wait for the control server to finish (it stops when `shutdown` fires).
     let server_result = server.await;
@@ -104,14 +108,20 @@ async fn run() -> Result<()> {
         .context("control server failed")
 }
 
-/// Poll the live-container count; once it has been zero for `IDLE_TIMEOUT`,
-/// notify shutdown.
-async fn idle_watchdog(session: session_manager::SessionHandle, shutdown: Arc<Notify>) {
+/// Poll the live-container count; once it has been zero for `IDLE_TIMEOUT` with
+/// no in-flight requests, notify shutdown.
+async fn idle_watchdog(
+    session: session_manager::SessionHandle,
+    active_clients: Arc<AtomicUsize>,
+    shutdown: Arc<Notify>,
+) {
     let mut idle_for = Duration::ZERO;
     loop {
         tokio::time::sleep(IDLE_POLL).await;
         match session.container_count().await {
-            Ok(0) => {
+            // A provision holds the count at zero while it runs, so also require
+            // no in-flight client requests before counting as idle.
+            Ok(0) if active_clients.load(Ordering::SeqCst) == 0 => {
                 idle_for += IDLE_POLL;
                 if idle_for >= IDLE_TIMEOUT {
                     shutdown.notify_waiters();

@@ -172,9 +172,12 @@ struct ContainerEntry {
 /// only [`WorkerCommand`]s cross the channel.
 struct Worker {
     logger: Logger,
-    sdk: Option<WslcSdk>,
-    session: Option<WslcSessionGuard>,
+    // Field order is load-bearing on implicit drop: `containers` and `session`
+    // hold handles whose Drop calls into the SDK, so they must drop before `sdk`
+    // unloads `wslcsdk.dll`.
     containers: HashMap<String, ContainerEntry>,
+    session: Option<WslcSessionGuard>,
+    sdk: Option<WslcSdk>,
 }
 
 impl Worker {
@@ -363,37 +366,29 @@ impl Worker {
     }
 
     fn deprovision(&mut self, config: DeprovisionConfig) -> Result<()> {
-        let entry = self
-            .containers
-            .remove(&config.sandbox_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown sandbox {}", config.sandbox_id))?;
-
-        let result = if let Some(sdk) = self.sdk.as_ref() {
-            // SAFETY: `sdk` is valid and `entry.container` is a live handle.
-            unsafe {
-                container_steps::delete_daemon_container(
-                    sdk,
-                    entry.container.as_raw(),
-                    &mut self.logger,
-                )
-            }
-            .map_err(sr_err)
-        } else {
-            Ok(())
+        let container_raw = match self.containers.get(&config.sandbox_id) {
+            Some(e) => e.container.as_raw(),
+            None => anyhow::bail!("unknown sandbox {}", config.sandbox_id),
         };
 
-        // Release the container handle regardless of delete success. Must happen
-        // before the SDK/session are torn down below (their DLL must stay loaded).
-        drop(entry);
+        if let Some(sdk) = self.sdk.as_ref() {
+            // SAFETY: `sdk` is valid and `container_raw` is a live handle.
+            unsafe {
+                container_steps::delete_daemon_container(sdk, container_raw, &mut self.logger)
+            }
+            .map_err(sr_err)?;
+        }
 
-        // Release the shared session (and unload the SDK) once idle. Ordering is
-        // load-bearing: the session guard's Drop uses SDK fn pointers, so it must
-        // drop before the SDK unloads the DLL.
+        // Delete succeeded (or no SDK loaded): drop the handle now. Keeping the
+        // entry on failure above leaves it retryable.
+        self.containers.remove(&config.sandbox_id);
+
+        // Release the shared session (and unload the SDK) once idle.
         if self.containers.is_empty() {
             self.session = None;
             self.sdk = None;
         }
-        result
+        Ok(())
     }
 
     fn shutdown(&mut self) {

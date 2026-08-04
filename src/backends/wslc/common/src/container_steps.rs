@@ -75,36 +75,14 @@ pub struct IoContext {
     pub(crate) exited: Arc<(Mutex<bool>, Condvar)>,
 }
 
-/// RAII guard that reclaims an `Arc<IoContext>` from a raw pointer on drop.
-/// Prevents leaking the `Arc` reference count on early returns.
-pub(crate) struct IoCtxRawGuard {
-    ptr: *mut c_void,
-}
-
-impl IoCtxRawGuard {
-    fn new(ptr: *mut c_void) -> Self {
-        Self { ptr }
-    }
-}
-
-impl Drop for IoCtxRawGuard {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe {
-                eprintln!("[WSLC][debug] IoCtxRawGuard dropped -- reclaiming Arc<IoContext>");
-                let _ = Arc::from_raw(self.ptr as *const IoContext);
-            }
-        }
-    }
-}
-
 /// Callback invoked by the WSLc SDK for stdout/stderr data.
 ///
 /// # Safety
 /// `context` must be a valid pointer obtained from `Arc::into_raw(Arc<IoContext>)`.
-/// The `Arc` is kept alive by the owning [`ProcessSettings`] (via [`IoCtxRawGuard`],
-/// which reclaims it on drop), so the pointer remains valid for the duration of
-/// all callbacks. The SDK guarantees `data` is valid for `data_size` bytes.
+/// The `Arc` reference handed to the SDK is released inside [`exit_callback`]; the
+/// SDK guarantees no I/O callback fires after exit, and the owning
+/// [`ProcessSettings`] holds an independent reference, so the pointer stays valid
+/// for every callback. The SDK guarantees `data` is valid for `data_size` bytes.
 unsafe extern "C" fn io_callback(
     io_handle: WslcProcessIOHandle,
     data: *const BYTE,
@@ -131,15 +109,21 @@ unsafe extern "C" fn io_callback(
 
 /// Callback invoked when the process exits and all I/O has been flushed.
 /// Per SDK docs: "Once this callback is invoked, any registered IO callbacks
-/// will no longer be called." This guarantees buffers are complete.
+/// will no longer be called." This guarantees buffers are complete and that the
+/// SDK will not touch `context` again, so this reclaims the `Arc` reference the
+/// SDK was handed.
 ///
 /// # Safety
-/// Same lifetime requirements as [`io_callback`].
+/// `context` must be the pointer handed to `WslcSetProcessSettingsCallbacks`,
+/// obtained from `Arc::into_raw(Arc<IoContext>)`, and must be invoked at most
+/// once.
 unsafe extern "C" fn exit_callback(_exit_code: i32, context: *mut c_void) {
     if context.is_null() {
         return;
     }
-    let ctx = &*(context as *const IoContext);
+    // Reclaim the SDK's reference. The owning `ProcessSettings` holds its own
+    // reference, so the `IoContext` stays alive for the waiting thread.
+    let ctx = Arc::from_raw(context as *const IoContext);
     let mut exited = ctx.exited.0.lock().unwrap_or_else(|e| e.into_inner());
     *exited = true;
     ctx.exited.1.notify_all();
@@ -156,7 +140,6 @@ unsafe extern "C" fn exit_callback(_exit_code: i32, context: *mut c_void) {
 pub struct ProcessSettings {
     raw: WslcProcessSettings,
     io_ctx: Arc<IoContext>,
-    _io_guard: IoCtxRawGuard,
     _sh: Vec<u8>,
     _dash_c: Vec<u8>,
     _script_cstr: Vec<u8>,
@@ -212,21 +195,19 @@ impl ProcessSettings {
             return Err(sdk_error("WslcInitProcessSettings failed", hr, ""));
         }
 
-        // Register I/O callbacks to capture stdout/stderr. We hand the SDK an
-        // Arc reference via raw pointer; IoCtxRawGuard reconstructs it on drop
-        // so the reference count is not leaked, and the memory stays alive while
-        // the SDK may still invoke callbacks on its internal threads.
         let io_ctx = Arc::new(IoContext {
             stdout: Arc::new(Mutex::new(Vec::new())),
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((Mutex::new(false), Condvar::new())),
         });
-        let io_ctx_raw = Arc::into_raw(Arc::clone(&io_ctx)) as *mut c_void;
-        let io_guard = IoCtxRawGuard::new(io_ctx_raw);
 
         // Callbacks are registered only for the streamed path; a detached init
-        // shares no IoContext with the SDK.
+        // shares no IoContext with the SDK and mints no extra reference. The
+        // SDK's reference is reclaimed inside `exit_callback`, so a process that
+        // is killed without its exit callback firing deliberately leaks the
+        // reference rather than freeing it while the SDK may still call back.
         if register_callbacks {
+            let io_ctx_raw = Arc::into_raw(Arc::clone(&io_ctx)) as *mut c_void;
             let callbacks = WslcProcessCallbacks {
                 onStdOut: Some(io_callback),
                 onStdErr: Some(io_callback),
@@ -234,6 +215,8 @@ impl ProcessSettings {
             };
             let hr = sdk.WslcSetProcessSettingsCallbacks(&mut raw, &callbacks, io_ctx_raw);
             if hr != S_OK {
+                // The SDK never took ownership; reclaim the reference now.
+                drop(Arc::from_raw(io_ctx_raw as *const IoContext));
                 return Err(sdk_error("WslcSetProcessSettingsCallbacks failed", hr, ""));
             }
         }
@@ -296,7 +279,6 @@ impl ProcessSettings {
         Ok(ProcessSettings {
             raw,
             io_ctx,
-            _io_guard: io_guard,
             _sh: sh,
             _dash_c: dash_c,
             _script_cstr: script_cstr,

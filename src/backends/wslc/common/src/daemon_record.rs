@@ -94,11 +94,15 @@ pub fn secure_record_root() -> Result<()> {
     ensure_secure_dir(&state_aware_root())
 }
 
+/// Required prefix for a daemon control pipe. A trusted record must name a pipe
+/// with this prefix; anything else is treated as a planted/hostile record.
+pub const PIPE_NAME_PREFIX: &str = r"\\.\pipe\mxc-wslc-";
+
 /// Derive a fresh, unique named-pipe path for a daemon instance. The pipe's ACL
 /// (not the name) enforces access control, so uniqueness only needs to avoid
 /// collision with a concurrent stale-but-not-yet-reaped daemon.
 pub fn mint_pipe_name() -> String {
-    format!(r"\\.\pipe\mxc-wslc-{}", uuid::Uuid::new_v4().simple())
+    format!("{PIPE_NAME_PREFIX}{}", uuid::Uuid::new_v4().simple())
 }
 
 // ---------------------------------------------------------------------------
@@ -111,11 +115,12 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path
         .parent()
         .context("record path has no parent directory")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("create record dir {parent:?}"))?;
 
-    // Secure the directory before creating the temp file. A later DACL change
-    // would not revoke an attacker's already-open handle.
-    set_owner_only_dir(parent).with_context(|| format!("secure record dir {parent:?}"))?;
+    // Secure every directory we introduce (not just the leaf) before creating
+    // the temp file: an attacker owning an intermediate dir could otherwise swap
+    // the leaf via a rename, and a later DACL change would not revoke an
+    // attacker's already-open handle.
+    ensure_secure_dir(parent).with_context(|| format!("secure record dir {parent:?}"))?;
 
     let json = serde_json::to_vec_pretty(value).context("serialise record")?;
     let tmp = parent.join(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -164,11 +169,26 @@ pub fn check_schema(found: u32) -> Result<()> {
 /// Read the global daemon record, validating its schema. Returns `Ok(None)` if
 /// the record does not exist.
 pub fn read_daemon_record() -> Result<Option<DaemonRecord>> {
-    let Some(record) = read_json::<DaemonRecord>(&daemon_record_path())? else {
+    let path = daemon_record_path();
+    // Verify the record file and its directory chain are owned by the current
+    // user before trusting the contents; a shared-`%TEMP%` attacker could
+    // otherwise plant a record redirecting us to a hostile pipe.
+    verify_record_trust(&path)?;
+    let Some(record) = read_json::<DaemonRecord>(&path)? else {
         return Ok(None);
     };
     check_schema(record.schema_version)?;
+    validate_pipe_name(&record.pipe_name)?;
     Ok(Some(record))
+}
+
+/// Reject a record naming any pipe outside the daemon's namespace, so a planted
+/// record cannot redirect a phase process to an arbitrary endpoint.
+fn validate_pipe_name(name: &str) -> Result<()> {
+    if !name.starts_with(PIPE_NAME_PREFIX) {
+        anyhow::bail!("daemon record names an unexpected pipe {name:?}; refusing to connect");
+    }
+    Ok(())
 }
 
 /// Read the daemon record only if it describes a process that is still alive. A
@@ -228,17 +248,75 @@ pub fn set_owner_only_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Create and secure a directory before reading trusted state from it.
+/// Create and owner-secure a directory and every component we introduce beneath
+/// the system temp dir (not just the leaf), then verify current-user ownership.
 #[cfg(windows)]
 pub fn ensure_secure_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("create dir {dir:?}"))?;
-    set_owner_only_dir(dir)
+    for component in dirs_to_secure(dir) {
+        std::fs::create_dir_all(&component).with_context(|| format!("create dir {component:?}"))?;
+        set_owner_only_dir(&component)?;
+    }
+    Ok(())
 }
 
 /// Non-Windows directory creation.
 #[cfg(not(windows))]
 pub fn ensure_secure_dir(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("create dir {dir:?}"))
+}
+
+/// The directory components to secure for `dir`, shallowest first: every strict
+/// descendant of the system temp dir up to and including `dir`. If `dir` is not
+/// under the temp dir, only `dir` itself is secured.
+#[cfg(windows)]
+fn dirs_to_secure(dir: &Path) -> Vec<PathBuf> {
+    let base = std::env::temp_dir();
+    if !dir.starts_with(&base) {
+        return vec![dir.to_path_buf()];
+    }
+    let mut chain = Vec::new();
+    let mut cur = Some(dir);
+    while let Some(p) = cur {
+        if p == base {
+            break;
+        }
+        chain.push(p.to_path_buf());
+        cur = p.parent();
+    }
+    chain.reverse();
+    chain
+}
+
+/// Verify `path` and its securable directory chain are owned by the current
+/// user before their contents are trusted. Absent files (and dirs) pass, since
+/// there is then nothing to trust.
+#[cfg(windows)]
+fn verify_record_trust(path: &Path) -> Result<()> {
+    let check = |p: &Path| -> Result<()> {
+        if !p.exists() {
+            return Ok(());
+        }
+        let owned = wxc_common::filesystem_dacl::owner_is_self(p)
+            .map_err(|e| anyhow::Error::new(e).context(format!("read owner of {p:?}")))?;
+        if !owned {
+            anyhow::bail!(
+                "refusing to trust {p:?}: it is owned by another user (cross-user tampering risk)"
+            );
+        }
+        Ok(())
+    };
+    if let Some(parent) = path.parent() {
+        for component in dirs_to_secure(parent) {
+            check(&component)?;
+        }
+    }
+    check(path)
+}
+
+/// Non-Windows no-op.
+#[cfg(not(windows))]
+fn verify_record_trust(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Apply an owner-only DACL to an existing file.
@@ -486,6 +564,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         set_state_aware_root_for_test(Some(dir.path().to_path_buf()));
         assert!(read_daemon_record().unwrap().is_none());
+        set_state_aware_root_for_test(None);
+    }
+
+    #[test]
+    fn read_rejects_record_with_foreign_pipe_name() {
+        let _guard = STATE_AWARE_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        set_state_aware_root_for_test(Some(dir.path().to_path_buf()));
+
+        let json = format!(
+            r#"{{"schema_version":{RECORD_SCHEMA_VERSION},"pid":1,"pid_creation_time":2,
+               "pipe_name":"\\\\.\\pipe\\evil","ready":true,"protocol_version":{}}}"#,
+            crate::daemon_protocol::PROTOCOL_VERSION
+        );
+        std::fs::write(daemon_record_path(), json).unwrap();
+        assert!(read_daemon_record().is_err());
+
         set_state_aware_root_for_test(None);
     }
 

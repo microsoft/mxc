@@ -17,6 +17,7 @@
 //! connect to the control plane.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -42,27 +43,51 @@ use wslc_common::daemon_protocol::{
 
 use crate::session_manager::SessionHandle;
 
+/// Bind the first pipe instance and build the owner-only security descriptor.
+///
+/// Called synchronously before the daemon record is published so a client never
+/// discovers a `ready` record for a pipe that is not yet listening.
+pub fn bind(pipe_name: &str) -> Result<(OwnerOnlySecurity, NamedPipeServer)> {
+    let security = OwnerOnlySecurity::new().context("build owner-only pipe security")?;
+    let first = create_secured_instance(pipe_name, &security, true)?;
+    Ok((security, first))
+}
+
 /// Run the accept loop until `shutdown` is notified.
 ///
-/// Uses the standard tokio overlapped-pipe pattern: keep one un-connected
-/// server instance listening; when it connects, hand it to a task and create the
-/// next instance so the next client is never refused.
-pub async fn run(session: SessionHandle, pipe_name: String, shutdown: Arc<Notify>) -> Result<()> {
-    let security = OwnerOnlySecurity::new().context("build owner-only pipe security")?;
-    let mut server = create_secured_instance(&pipe_name, &security, true)?;
+/// Keeps one un-connected server instance listening; when it connects, hand it
+/// to a task and create the next instance so the next client is never refused.
+/// `active_clients` tracks in-flight requests so the idle watchdog does not tear
+/// the daemon down mid-request.
+pub async fn run(
+    session: SessionHandle,
+    pipe_name: String,
+    security: OwnerOnlySecurity,
+    first_instance: NamedPipeServer,
+    active_clients: Arc<AtomicUsize>,
+    shutdown: Arc<Notify>,
+) -> Result<()> {
+    let mut server = first_instance;
 
     loop {
         tokio::select! {
             connect = server.connect() => {
-                connect?;
+                if let Err(e) = connect {
+                    eprintln!("[wslc-daemon] pipe connect error: {e}");
+                    server = create_secured_instance(&pipe_name, &security, false)?;
+                    continue;
+                }
                 let connected = server;
                 // Create the next instance before servicing this one.
                 server = create_secured_instance(&pipe_name, &security, false)?;
                 let session = session.clone();
+                let active = active_clients.clone();
+                active.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(connected, session).await {
                         eprintln!("[wslc-daemon] client connection error: {e:#}");
                     }
+                    active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             _ = shutdown.notified() => break,
@@ -93,7 +118,7 @@ fn create_secured_instance(
 
 /// Owns a `PSECURITY_DESCRIPTOR` describing a protected DACL that grants the
 /// current user and Local SYSTEM full access, and nothing else.
-struct OwnerOnlySecurity {
+pub(crate) struct OwnerOnlySecurity {
     psd: PSECURITY_DESCRIPTOR,
 }
 
