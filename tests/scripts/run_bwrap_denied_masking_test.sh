@@ -49,6 +49,8 @@ sudo mkdir -p "$DIR"
 echo "VISIBLE_SECRET" | sudo tee "$VISIBLE" > /dev/null
 echo "FILE_SECRET" | sudo tee "$FILE" > /dev/null
 echo "DIR_SECRET" | sudo tee "$DIR/inner.txt" > /dev/null
+# The parent is delegated as read-write, so the invoking user must own it.
+sudo chown -R "$(id -u):$(id -g)" "$BASE"
 
 # Sanity: all fixtures are readable on the host.
 if ! sudo cat "$VISIBLE" | grep -q "VISIBLE_SECRET"; then
@@ -116,6 +118,8 @@ echo "DIR_TARGET_SECRET" | sudo tee "$SYMBASE/real_dir/inner.txt" > /dev/null
 echo "FILE_TARGET_SECRET" | sudo tee "$SYMBASE/real_file.txt" > /dev/null
 sudo ln -s "$SYMBASE/real_dir" "$SYMBASE/link_to_dir"
 sudo ln -s "$SYMBASE/real_file.txt" "$SYMBASE/link_to_file"
+# Keep the canonical symlink targets and their read-write parent delegable.
+sudo chown -R "$(id -u):$(id -g)" "$SYMBASE"
 
 echo "Running Bubblewrap denied-symlink -> dir masking test..."
 DIR_OUT=$("$LXC_EXEC" --experimental \
