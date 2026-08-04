@@ -51,9 +51,9 @@ chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
 
 case "$backend" in
     bubblewrap)
-        "$script_root/run_bwrap_all_tests.sh"
+        bash "$script_root/run_bwrap_all_tests.sh"
         ;;
     lxc)
-        "$script_root/run_lxc_all_tests.sh"
+        bash "$script_root/run_lxc_all_tests.sh"
         ;;
 esac
