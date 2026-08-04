@@ -1,0 +1,13 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "PLM-Injection-ChildWindow-Basic",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "plmtester.exe injection",
+    "timeout": 30000
+  },
+  "ui": {
+    "disable": false,
+    "injection": false
+  }
+}
