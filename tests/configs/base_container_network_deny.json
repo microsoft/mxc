@@ -1,0 +1,22 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-BaseContainer-Network-Deny",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -Command \"$response = (& 'C:\\Windows\\System32\\curl.exe' 'https://dev.azure.com' 2>$null) -join [Environment]::NewLine; $curlExitCode = $LASTEXITCODE; if ($curlExitCode -ne 0) { Write-Output 'OK:network_deny'; exit 0 }; if ($response -match 'Object moved' -and $response -match 'azure.microsoft.com/services/devops') { Write-Output 'FAIL:network_deny_leaked'; exit 1 }; Write-Output 'FAIL:network_deny_unexpected_response'; exit 1\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "C:\\Windows"
+    ]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "capabilities"
+  },
+  "ui": {
+    "disable": false
+  }
+}
