@@ -239,8 +239,10 @@ wire format and have different roles:
 | `containerId` | One-shot wire envelope (per `docs/schema.md`) | Caller-supplied (or auto-generated random hex) | Human-readable label, used as e.g. AppContainer profile name |
 
 State-aware non-provision calls carry `sandboxId` on the request; provision returns it
-on the response. Neither shape carries `containerId`. One-shot calls carry `containerId`
-(when present); they do not carry `sandboxId`.
+on the response. A state-aware request **may** also carry `containerId` — the parser
+preserves it into the request the backend receives — but it is inert for backends that
+do not use it as a label, and it is never a routing key on the state-aware path.
+One-shot calls carry `containerId` (when present); they do not carry `sandboxId`.
 
 ## 6. TypeScript SDK
 
@@ -265,6 +267,14 @@ type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_sessi
 // at the Config root, only in phases where the backend honors them per its policy
 // honor matrix (§10.3). Phases with no backend-specific or cross-cutting fields
 // declare a Config carrying only `version?`.
+
+// NOTE: the IsolationSession shapes below are *illustrative* — they show the
+// per-(backend, phase) Config pattern, not the shipped IsolationSession
+// contract. The authoritative shapes (including the Entra `user` bundle on
+// provision and start, and the three-field provision metadata) live in
+// `docs/isolation-session/state-aware-rust.md` and
+// `sdk/node/src/state-aware-types.ts`. The same caveat applies to the worked
+// example in §7.4 and the config-typing example in §10.2.
 
 interface IsolationSessionProvisionConfig {
   version?: string;
@@ -294,6 +304,8 @@ interface IsolationSessionDeprovisionConfig {
 
 interface IsolationSessionProvisionMetadata {
   agentUserName: string;
+  agentUserSid: string;
+  ephemeralWorkspacePath: string;
 }
 
 // WindowsSandbox holds a single active sandbox behind a persistent host-side
