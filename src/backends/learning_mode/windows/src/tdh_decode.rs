@@ -33,6 +33,7 @@ const TDH_INTYPE_UINT64: u16 = 10;
 const TDH_INTYPE_FLOAT: u16 = 11;
 const TDH_INTYPE_DOUBLE: u16 = 12;
 const TDH_INTYPE_BOOLEAN: u16 = 13;
+const TDH_INTYPE_BINARY: u16 = 14;
 const TDH_INTYPE_GUID: u16 = 15;
 const TDH_INTYPE_POINTER: u16 = 16;
 const TDH_INTYPE_FILETIME: u16 = 17;
@@ -609,6 +610,16 @@ fn format_property_value_with_pointer_size(
             8,
         ),
         TDH_INTYPE_SID if available >= 8 => format_sid(data, available),
+        TDH_INTYPE_BINARY if declared_length > 0 && declared_length <= available => {
+            let bytes = unsafe { std::slice::from_raw_parts(data, declared_length) };
+            let mut rendered = String::with_capacity(4 + declared_length * 2);
+            rendered.push_str("hex:");
+            for byte in bytes {
+                use std::fmt::Write;
+                let _ = write!(rendered, "{byte:02X}");
+            }
+            (rendered, declared_length)
+        }
         // Known-but-unformatted fixed-width values still have an implicit
         // payload size when TDH reports a zero declared length.
         _ => {
@@ -1196,6 +1207,15 @@ mod tests {
         let bytes = [1u8, 3, 0, 0, 0, 0, 0, 15];
         let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
         assert_eq!(val, "<invalid SID>");
+        assert_eq!(consumed, bytes.len());
+    }
+
+    #[test]
+    fn format_property_value_binary_preserves_hex_payload() {
+        let bytes = [0x00, 0x0a, 0xfe, 0xff];
+        let (value, consumed) =
+            format_property_value(TDH_INTYPE_BINARY, bytes.len(), bytes.as_ptr(), bytes.len());
+        assert_eq!(value, "hex:000AFEFF");
         assert_eq!(consumed, bytes.len());
     }
 }

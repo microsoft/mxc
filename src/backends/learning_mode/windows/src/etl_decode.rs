@@ -219,11 +219,18 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
 /// provider manifests registered on the machine).
 #[cfg(test)]
 fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
-    dedup_to_resources(
-        events
-            .iter()
-            .filter_map(|e| extract_denial(&e.parts, e.pid, e.filetime)),
-    )
+    let mut raws = Vec::new();
+    for event in events {
+        if let Some(raw) = extract_denial(&event.parts, event.pid, event.filetime) {
+            raws.push(raw);
+        }
+        raws.extend(crate::capability_dacl::extract_denials(
+            &event.parts,
+            event.pid,
+            event.filetime,
+        ));
+    }
+    dedup_to_resources(raws)
 }
 
 /// Streams every decoded event in the ETL to `visitor` for schema discovery
@@ -409,6 +416,13 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
             CollectionMode::Analyze => {
                 if let Some(raw) = extract_denial(&parts, header.ProcessId, header.TimeStamp as u64)
                 {
+                    acc.add_raw_denial(raw);
+                }
+                for raw in crate::capability_dacl::extract_denials(
+                    &parts,
+                    header.ProcessId,
+                    header.TimeStamp as u64,
+                ) {
                     acc.add_raw_denial(raw);
                 }
             }
@@ -762,7 +776,9 @@ mod tests {
     /// file/registry checks plus a capability check folded into an
     /// empty-`ObjectType` event 14 (there is no event 28 in this mode).
     #[test]
-    fn allow_shape_omits_unidentified_capability_event() {
+    fn allow_shape_recovers_capability_from_dacl() {
+        // DWORD-padded allow ACE carrying S-1-15-3-1 (internetClient).
+        let dacl = "hex:000000000000000001000000010200000000000F0300000001000000";
         let events = vec![
             permissive_event(
                 14,
@@ -785,6 +801,7 @@ mod tests {
                     ("ObjectType", "\"\""),
                     ("ObjectName", "\"\""),
                     ("AccessMask", "0x1"),
+                    ("Dacl", dacl),
                 ],
             ),
             // UI violations continue to come from Kernel-General while the
@@ -793,11 +810,14 @@ mod tests {
         ];
 
         let out = resources_from_events(&events).denials;
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].access_type, AccessType::Write);
-        assert_eq!(out[1].resource, "ConvertToGui");
-        assert_eq!(out[1].resource_type, ResourceType::Ui);
+        assert_eq!(out[1].resource, "internetClient");
+        assert_eq!(out[1].resource_type, ResourceType::Capability);
+        assert_eq!(out[1].pid, 5900);
+        assert_eq!(out[2].resource, "ConvertToGui");
+        assert_eq!(out[2].resource_type, ResourceType::Ui);
     }
 
     #[test]
