@@ -59,6 +59,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Diagnose interactive desktop
+        continue-on-error: true
         shell: pwsh
         run: |
           Write-Host "UserInteractive=$([Environment]::UserInteractive)"
