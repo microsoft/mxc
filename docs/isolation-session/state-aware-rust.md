@@ -49,7 +49,7 @@ without metadata use `()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `user` | `IsolationSessionUser` (object) \| absent | absent | Optional Entra cloud-agent credentials. When present, the UPN and WAM token are passed to `AddUserAsync` and the resulting sandbox is Entra-backed. When absent, provision calls `AddUserAsync` with empty strings and produces a local-agent sandbox. The bundle is `{ upn: string, wamToken: string }`; both fields required when supplied. `wamToken` is passed verbatim to the OS-side service and never stored by MXC. The wire path is `experimental.isolation_session.provision.user`. |
+| `user` | `IsolationSessionUser` (object) \| absent | absent | Optional Entra cloud-agent credentials. When present, the UPN and WAM token are passed to `AddUserAsync` and the resulting sandbox is Entra-backed. When absent, provision calls `AddUserAsync` with empty strings and produces a local-agent sandbox. The bundle is `{ upn: string, wamToken: string }`; both fields required when supplied. `upn` is trimmed of surrounding whitespace both for the shape check and for the value handed to the OS, so validation and transmission cannot disagree. `wamToken` is passed verbatim to the OS-side service (it is an opaque bearer credential, so trimming could corrupt it) and never stored by MXC. The wire path is `experimental.isolation_session.provision.user`. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
