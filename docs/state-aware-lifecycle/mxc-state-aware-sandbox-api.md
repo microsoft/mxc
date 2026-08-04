@@ -578,7 +578,8 @@ The wire contract is a typed envelope, JSON-serialised, that flows from the SDK 
 executor (`wxc-exec` on Windows, `lxc-exec` on Linux) via the existing `--config-base64`
 CLI argument. Both ends agree on the same shape: the SDK serialises a TypeScript value,
 the executor parses the same value into a Rust struct (§9.1). The only open content in
-the envelope is at the leaves of `ErrorEnvelope.details`.
+the envelope is at the leaves of `ErrorEnvelope.details`; every other field, including
+the error envelope's named structured fields, is statically typed.
 
 ### 7.1 Request envelope
 
@@ -750,6 +751,9 @@ output to a file and leaves stderr as pure script content.
 interface ErrorEnvelope {
   code: ErrorCode;
   message: string;
+  operation?: string;
+  nativeCode?: string;
+  remediation?: string;
   details?: Record<string, unknown>;
 }
 
@@ -778,10 +782,45 @@ Because MXC diagnostic output is routed to `stderr` in state-aware mode, this
 stdout-based discrimination has no false positives or negatives — the content is always
 either pure envelope or pure script output.
 
+`code` and `message` are always present. `code` is the machine-readable category a
+consumer branches on; `message` is the human-readable description, and for a failure
+raised by an underlying platform API it is that API's own message, passed through
+verbatim rather than concatenated with the other fields.
+
+The three optional named fields describe a failure that originated in an underlying
+platform API:
+
+| Field | Meaning |
+|---|---|
+| `operation` | The API call that failed, namespaced by its interface — e.g. `IsoSessionOps.RunProcessWithOptionsAsync`. Low-cardinality and free of call parameters, so it is safe to aggregate on in telemetry. **Best-effort diagnostic, not a versioned contract** — see below. |
+| `nativeCode` | The underlying platform status as a string. An HRESULT such as `0x80070490` on Windows; the field is platform-neutral, so another backend can carry an errno or equivalent. |
+| `remediation` | The API's actionable "how to fix it" hint, when it supplies one. |
+
+**Availability.** These fields are currently populated only by **IsolationSession
+state-aware** operations. Windows Sandbox has no semantic error channel to derive them
+from, and the one-shot surface composes its full detail into `message` instead, so all
+three are uniformly absent there. Other backends may adopt them as they grow an
+equivalent channel — treat all three as optional on every backend, and branch program
+logic on `code` first.
+
+**Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
+
+**Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
+`operation` marks that an API operation was in flight; the other two refine it, and
+neither ever appears alone. A failure MXC raises before or outside any API call — a
+malformed request or id, a policy rejection, or an internal failure of MXC's own
+machinery — carries only `code` and `message`.
+
+**Which fields earn a place here.** A named top-level field is for a **backend-neutral**
+concept: `operation`, `nativeCode` and `remediation` all apply equally to a Windows
+HRESULT, a Linux errno, or any other backend's failure. **Backend-specific** structured
+data belongs in `details` instead. That is what keeps `details` from becoming vestigial
+as named fields are added — it remains the designated home for anything without a
+cross-backend meaning.
+
 `ErrorEnvelope.details` is the only `Record<string, unknown>` in the contract. It's the
-escape hatch backends use to convey structured failure information that's
-per-error-code (a backend's native HRESULT, partial output captured before a timeout,
-etc.). Each backend's plan doc (§11) specifies what `details` contains for which error
+escape hatch backends use to convey structured failure information that has no dedicated
+field. Each backend's plan doc (§11) specifies what `details` contains for which error
 codes.
 
 ### 7.4 Worked example: IsolationSession end-to-end

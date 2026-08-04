@@ -43,7 +43,7 @@ on the response, and neither shape carries `containerId`.
 | TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension reused. The wire-format-aligned `Process` / `Filesystem` / `Network` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). `*Config` naming convention reused. |
 | JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (reference §9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (the `wire::MxcConfig` parse target). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends unchanged. |
-| Error model (reference §8) | Closed enum of 12 codes. `MxcError` class with `code: ErrorCode`. `details` open object. | Existing one-shot error paths preserved. |
+| Error model (reference §8) | Closed enum of 12 codes. `MxcError` class with `code: ErrorCode`. Named structured fields `operation` / `nativeCode` / `remediation` for failures raised by an underlying platform API, plus the open `details` object for backend-specific data. | Existing one-shot error paths preserved. |
 | Plug-in surface (reference §11) | Implement `StatefulSandboxBackend`. Define typed per-(backend, phase) `*Config` interfaces. Declare the trait's `ID_PREFIX` and `BACKEND_KEY` consts. Document the cross-cutting honor matrix. | Ephemeral-only backends require no changes. |
 
 ## Lifecycle
@@ -144,7 +144,8 @@ The wire envelope is a TypeScript discriminated union over `phase`, JSON-seriali
 The Rust executor parses the same shape into the typed wire model
 (`wire::MxcConfig`, reference §9.1). The only `Record<string, unknown>` in the contract is
 `ErrorEnvelope.details` — the escape hatch for backend-specific structured failure
-information.
+information. Backend-neutral failure detail travels in the error envelope's named
+fields (`operation`, `nativeCode`, `remediation`) instead.
 
 ```typescript
 interface OneShotRequest {
@@ -374,8 +375,11 @@ rejected.
 
 ## Error codes
 
-Closed enum at the MXC layer; backend-specific failures use `backend_error` with
-structured `details`. Reference §8 has the full list and the `MxcError` mapping.
+Closed enum at the MXC layer; backend-specific failures use `backend_error`, with the
+detail carried in the error envelope's named structured fields (`operation`,
+`nativeCode`, `remediation`) and, where a backend needs data with no cross-backend
+meaning, in `details`. Reference §8 has the full list and the `MxcError` mapping, and
+§7.3 the field invariant.
 
 | Group | Codes |
 |---|---|
@@ -384,7 +388,7 @@ structured `details`. Reference §8 has the full list and the `MxcError` mapping
 | Id problems | `malformed_id`, `stale_id` |
 | State-machine violations | `not_provisioned`, `not_started`, `already_started`, `already_stopped` |
 | Config / policy | `policy_validation` |
-| Catch-all | `backend_error` (with structured `details`) |
+| Catch-all | `backend_error` |
 
 Process-runtime kill conditions (timeouts, backend-initiated termination) surface as
 sentinel exit codes from the exec process, not as typed wire-format errors. Each code
