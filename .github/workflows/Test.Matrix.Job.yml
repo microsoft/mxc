@@ -58,6 +58,19 @@ jobs:
           & $hostPrep prepare-null-device --no-sacl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Diagnose interactive desktop
+        shell: pwsh
+        run: |
+          Write-Host "UserInteractive=$([Environment]::UserInteractive)"
+          Write-Host "SessionId=$((Get-Process -Id $PID).SessionId)"
+          query user
+          query session
+          Get-Process explorer, dwm, ShellExperienceHost -ErrorAction SilentlyContinue |
+            Select-Object Name, Id, SessionId
+          Get-Process |
+            Where-Object { $_.SessionId -eq (Get-Process -Id $PID).SessionId } |
+            Select-Object Name, Id, SessionId
+
       - name: Run backend tests
         shell: pwsh
         run: |
