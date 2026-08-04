@@ -334,6 +334,13 @@
     "IsolationSessionProvisionPhase": {
       "description": "Provision-phase IsolationSession configuration (state-aware lifecycle).\n\nSplit from the start phase rather than shared: the two phases accept different fields, and a shared type would advertise every field on both in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.",
       "properties": {
+        "appId": {
+          "description": "Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "user": {
           "anyOf": [
             {

@@ -182,6 +182,26 @@ function Parse-Envelope {
     try { $Stdout | ConvertFrom-Json } catch { $null }
 }
 
+# Decodes the `iso:<base64url-nopad(JSON)>` sandbox id payload. Returns $null
+# if the id is not in that shape. base64url differs from standard base64 in two
+# ways that both have to be undone before [Convert] will accept it: the '-' and
+# '_' substitutions, and the stripped '=' padding.
+function Decode-SandboxId {
+    param([string]$SandboxId)
+    if ([string]::IsNullOrWhiteSpace($SandboxId)) { return $null }
+    $parts = $SandboxId.Split(':', 2)
+    if ($parts.Count -ne 2 -or $parts[0] -ne 'iso') { return $null }
+    $b64 = $parts[1].Replace('-', '+').Replace('_', '/')
+    switch ($b64.Length % 4) {
+        2 { $b64 += '==' }
+        3 { $b64 += '=' }
+        1 { return $null }
+    }
+    try {
+        [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | ConvertFrom-Json
+    } catch { $null }
+}
+
 # Returns "result" / "error" / "<empty>" describing which arm of the envelope
 # is present. Useful for failure messages.
 function Envelope-Arm {
@@ -297,14 +317,106 @@ try {
             $agentUserName = $envObj.result.metadata.agentUserName
             $agentUserSid = $envObj.result.metadata.agentUserSid
             $workspacePath = $envObj.result.metadata.ephemeralWorkspacePath
-            Assert-True ($script:sandboxId -match '^iso:.+$') "sandbox_id is iso:<opaque agent user name> ($script:sandboxId)"
+            Assert-True ($script:sandboxId -match '^iso:[A-Za-z0-9_-]+$') "sandbox_id is iso:<base64url payload> ($script:sandboxId)"
+            $decoded = Decode-SandboxId $script:sandboxId
+            Assert-True ($null -ne $decoded) "sandbox_id payload decodes as base64url JSON"
+            Assert-True ($decoded.version -eq 1) "payload version is 1 (got '$($decoded.version)')"
+            Assert-True ($decoded.agentUserName -eq $agentUserName) "payload agentUserName matches metadata ($($decoded.agentUserName))"
+            Assert-True ($null -eq $decoded.appId) "payload omits appId when none was supplied"
             Assert-True ($null -ne $agentUserName) "metadata.agentUserName is present ($agentUserName)"
             Assert-True (-not [string]::IsNullOrWhiteSpace($agentUserSid)) "metadata.agentUserSid is present ($agentUserSid)"
             Assert-True (-not [string]::IsNullOrWhiteSpace($workspacePath)) "metadata.ephemeralWorkspacePath is present ($workspacePath)"
         }
     } | Out-Null
 
-    # Test 1b: provision rejects non-empty deniedPaths. Backend has no Deny
+    # Test 1b: appId round-trips through the sandboxId. The value is carried
+    # inside the id (not in metadata) so post-provision phases recover it
+    # without the caller re-supplying it. This sandbox is real, so it is
+    # deprovisioned immediately after the assertions.
+    Run-StateAwareTest "provision (appId round-trips through sandboxId)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid.json' -Experimental
+        Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj -and $null -ne $envObj.result) "provision returned a result envelope"
+        if ($envObj -and $envObj.result) {
+            $id = $envObj.result.sandboxId
+            $decoded = Decode-SandboxId $id
+            Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
+            Assert-True ($decoded.appId -eq 'Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
+            Assert-True ($decoded.agentUserName -eq $envObj.result.metadata.agentUserName) "payload agentUserName matches metadata"
+            # appId is deliberately NOT echoed in metadata -- the caller already
+            # supplied it, so echoing it would be redundant surface.
+            Assert-True ($null -eq $envObj.result.metadata.appId) "metadata does not echo appId"
+            Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental | Out-Null
+        }
+    } | Out-Null
+
+    # Test 1b-empty: an explicitly empty appId is a DISTINCT value from an
+    # absent one and must survive as such -- a future OS API may assign it
+    # meaning, so MXC must not collapse the two.
+    Run-StateAwareTest "provision (empty appId is preserved, not dropped)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid_empty.json' -Experimental
+        Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj -and $null -ne $envObj.result) "provision returned a result envelope"
+        if ($envObj -and $envObj.result) {
+            $id = $envObj.result.sandboxId
+            $decoded = Decode-SandboxId $id
+            Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
+            Assert-True ($decoded.PSObject.Properties.Name -contains 'appId') "payload keeps the appId key when empty"
+            Assert-True ($decoded.appId -eq '') "payload appId is the empty string (got '$($decoded.appId)')"
+            Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental | Out-Null
+        }
+    } | Out-Null
+
+    # Test 1b-toolong / 1b-control: structural appId validation runs in
+    # validate_provision, before any OS call, so these never create a sandbox.
+    Run-StateAwareTest "provision (oversized appId rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid_too_long.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'appId') "error.message names appId (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "provision (control character in appId rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid_control.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    } | Out-Null
+
+    # Test 1d: id-format rejections. Both run entirely in the decoder, before
+    # any OS call, so they need no sandbox and leave nothing to clean up.
+    Run-StateAwareTest "malformed_id (legacy plaintext sandboxId rejected)" {
+        # Pre-change ids were `iso:<agentUserName>` in the clear. They are no
+        # longer addressable -- an accepted consequence of the format change.
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = 'iso:wxc-legacy-plaintext' } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (sandboxId from a newer MXC is called out)" {
+        # A structurally valid payload whose version this build does not
+        # understand must say so -- the remediation is "upgrade MXC", which is
+        # completely different from "this id is corrupt".
+        $json = '{"version":9999,"agentUserName":"a"}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'newer MXC') "error.message identifies a newer-MXC id (got '$msg')"
+    } | Out-Null
+
+    # Test 1e: provision rejects non-empty deniedPaths. Backend has no Deny
     # ACE primitive, so any deniedPaths request must be rejected (consistent
     # with how readwrite/readonly are accepted but denied is not). Uses a
     # separate throwaway sandbox -- never reaches the OS-side service since

@@ -569,6 +569,11 @@ pub struct IsolationSession {
 pub struct IsolationSessionProvisionPhase {
     /// Entra cloud-agent user bundle for this phase.
     pub user: Option<IsolationUser>,
+    /// Optional application identifier for the calling application. For a
+    /// packaged application this is the Package Family Name; for an unpackaged
+    /// one it may be any string. Carried inside the `sandboxId` so later
+    /// lifecycle phases can recover it without the caller re-supplying it.
+    pub app_id: Option<String>,
 }
 
 /// Start-phase IsolationSession configuration (state-aware lifecycle).

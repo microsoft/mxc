@@ -296,9 +296,17 @@ impl From<crate::wire::IsolationUser> for IsolationSessionUser {
 /// credentials when the caller wants a cloud-agent sandbox; absent for
 /// local sandboxes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
     pub user: Option<IsolationSessionUser>,
+    /// Optional identifier for the calling application — the Package Family
+    /// Name for a packaged app, any string otherwise. Carried verbatim into
+    /// the `sandboxId`; MXC does not interpret or verify it.
+    ///
+    /// An explicitly-supplied empty string is a **distinct** value from an
+    /// absent one and round-trips as such. A JSON `null` is a second spelling
+    /// of absent.
+    pub app_id: Option<String>,
 }
 
 /// Configuration specific to the LXC container backend.

@@ -158,10 +158,12 @@ type _StartUserBundleReuse = AssertTrue<
 // adding a backend-specific field to either phase config must be a deliberate
 // edit here, not a silent widening.
 type _ProvisionKeysNonVacuous = AssertTrue<
-  Equivalent<BackendKeys<IsolationSessionProvisionConfig>, 'user'>
+  Equivalent<BackendKeys<IsolationSessionProvisionConfig>, 'user' | 'appId'>
 >;
 type _StartKeysNonVacuous = AssertTrue<Equivalent<BackendKeys<IsolationSessionStartConfig>, 'user'>>;
-type _ProvisionWireKeysNonVacuous = AssertTrue<Equivalent<WireKeys<WireProvisionPhase>, 'user'>>;
+type _ProvisionWireKeysNonVacuous = AssertTrue<
+  Equivalent<WireKeys<WireProvisionPhase>, 'user' | 'appId'>
+>;
 type _StartWireKeysNonVacuous = AssertTrue<Equivalent<WireKeys<WireStartPhase>, 'user'>>;
 
 // --- delegation to the one-shot oracle (documented, asserted) --------------

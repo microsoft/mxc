@@ -147,6 +147,10 @@ export interface IsolationSession {
  */
 export interface IsolationSessionProvisionPhase {
   /**
+   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
+   */
+  appId?: string | null;
+  /**
    * Entra cloud-agent user bundle for this phase.
    */
   user?: IsolationUser | null;
