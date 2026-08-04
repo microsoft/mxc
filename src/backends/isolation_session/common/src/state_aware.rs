@@ -11,7 +11,7 @@ use std::io::IsTerminal;
 use serde::Serialize;
 
 use wxc_common::models::{
-    ExecutionRequest, IsolationSessionConfig, IsolationSessionProvisionConfig,
+    ExecutionRequest, IsolationSessionProvisionConfig, IsolationSessionStartConfig,
 };
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
@@ -66,10 +66,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     const BACKEND_KEY: &'static str = "isolation_session";
 
     type ProvisionConfig = IsolationSessionProvisionConfig;
-    /// `experimental.isolation_session.start` mirrors the one-shot
-    /// `experimental.isolation_session` shape — same `IsolationSessionConfig`
-    /// type, same wire keys.
-    type StartConfig = IsolationSessionConfig;
+    /// `experimental.isolation_session.start` carries the Entra WAM token
+    /// again for a cloud-agent sandbox; the one-shot surface takes no
+    /// backend configuration.
+    type StartConfig = IsolationSessionStartConfig;
     type ExecConfig = ();
     type StopConfig = ();
     type DeprovisionConfig = ();
@@ -109,7 +109,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         &mut self,
         sandbox_id: &str,
         _request: &ExecutionRequest,
-        config: Option<IsolationSessionConfig>,
+        config: Option<IsolationSessionStartConfig>,
     ) -> Result<StartResult<()>, MxcError> {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager = IsolationSessionManager::new(agent_user_name).map_err(map_lifecycle_error)?;
@@ -180,7 +180,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         &self,
         sandbox_id: &str,
         request: &ExecutionRequest,
-        config: Option<&IsolationSessionConfig>,
+        config: Option<&IsolationSessionStartConfig>,
     ) -> Result<(), MxcError> {
         // The sandboxId tail is opaque, so start no longer cross-checks it
         // against the user bundle. A user bundle (Entra) is optional at
@@ -337,7 +337,6 @@ mod tests {
         // to the wire struct breaks this test's compilation, forcing a
         // decision about whether the backend honors it.
         let wire = wxc_common::wire::IsolationSession {
-            user: None,
             provision: None,
             start: None,
         };
@@ -351,7 +350,7 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["provision", "start", "user"],
+            ["provision", "start"],
             "wire model nests a per-phase config for a phase the backend takes none for"
         );
     }
@@ -638,7 +637,7 @@ mod tests {
         // A user bundle is now allowed at start regardless of the opaque
         // sandboxId; it only needs to be well-formed.
         let runner = IsolationSessionRunner::new();
-        let cfg = IsolationSessionConfig {
+        let cfg = IsolationSessionStartConfig {
             user: Some(well_formed_user()),
         };
         runner
@@ -649,7 +648,7 @@ mod tests {
     #[test]
     fn validate_start_rejects_malformed_user() {
         let runner = IsolationSessionRunner::new();
-        let cfg = IsolationSessionConfig {
+        let cfg = IsolationSessionStartConfig {
             user: Some(IsolationSessionUser {
                 upn: "no-at-sign".to_string(),
                 wam_token: "tok".to_string(),

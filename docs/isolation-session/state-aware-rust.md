@@ -38,7 +38,7 @@ without metadata use `()`.
 | Phase | `*Config` | `*Metadata` |
 |---|---|---|
 | provision | `IsolationSessionProvisionConfig` | `IsolationSessionProvisionMetadata` |
-| start | `IsolationSessionConfig` | `()` |
+| start | `IsolationSessionStartConfig` | `()` |
 | exec | `()` | (n/a — exec returns an exit code, not metadata) |
 | stop | `()` | `()` |
 | deprovision | `()` | `()` |
@@ -69,17 +69,16 @@ and not stable across builds.
 
 ### Start
 
-**Config (`IsolationSessionConfig`):**
+**Config (`IsolationSessionStartConfig`):**
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `user` | `IsolationSessionUser` (object) \| absent | absent | Optional. Supply for an Entra sandbox to re-provide the WAM token (the opaque `sandboxId` tail can't carry it); omit for a local sandbox. When supplied it is shape-validated (`upn` contains `@`, `wamToken` non-empty) by `validate_start`, surfacing shape errors as `policy_validation`; the OS validates the token against the agent user assigned at provision. The wire path is `experimental.isolation_session.start.user`. |
 
-This is the same `IsolationSessionConfig` shape used by the one-shot
-`experimental.isolation_session` block, with one mode difference: `user` is
-honoured here at state-aware start, but rejected on the one-shot path
-(`validate_runner` returns `policy_validation` if a one-shot request carries
-it).
+The one-shot surface takes **no backend configuration at all**. `user` is
+state-aware-only, so on a one-shot request it is simply an unrecognised key in
+the deliberately permissive `experimental` block and is ignored — the run
+proceeds as a local (non-Entra) agent.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -192,7 +191,7 @@ meaning for this backend.
 | `containerId` | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
 | `process.commandLine` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
 | `process.{cwd,env,timeout}` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
-| `experimental.isolation_session.user` (flat) | rejected | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
+| `experimental.isolation_session.user` (flat) | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
 | `experimental.isolation_session.<this phase>.user` | accepted, ignored | **honored** | **honored** | n/a | n/a | n/a |
 | `experimental.isolation_session.<another phase>.*` | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
@@ -234,9 +233,10 @@ Notes on the rows that are not a simple accept/reject:
   ignored, not rejected.** `deserialize_config` navigates exactly
   `experimental.<backend>.<the request's own phase>`; anything else in that block
   is read by nothing. Three shapes reach that state:
-  - the flat `experimental.isolation_session.user` on a *state-aware* request
-    (it is the one-shot spelling, and one-shot does reject it, since one-shot has
-    no Entra mode);
+  - the flat `experimental.isolation_session.user` on either surface (it is not
+    a field of any config type — the one-shot surface takes no backend
+    configuration, and state-aware reads `user` only from the request's own
+    phase block);
   - a nested `provision` / `start` block on a *one-shot* request;
   - a block under a phase that is not this request's phase, e.g.
     `{"phase": "start", …, "isolation_session": {"provision": {…}}}`.

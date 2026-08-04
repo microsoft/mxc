@@ -113,8 +113,8 @@ interface.
 | `src/Cargo.toml` | Add `isolation_session_bindings` to workspace members |
 | `src/core/wxc_common/Cargo.toml` | Add optional dependency on `isolation_session_bindings` |
 | `src/core/wxc_common/src/lib.rs` | Add the IsolationSession backend module (cfg-gated). *(The backend now lives in `src/backends/isolation_session/common/`.)* |
-| `src/core/wxc_common/src/models.rs` | Add `IsolationSession` to `ContainmentBackend`; add `IsolationSessionConfig` |
-| `src/core/wxc_common/src/config_parser.rs` | Parse `"isolation_session"` containment and the `experimental.isolation_session` section |
+| `src/core/wxc_common/src/models.rs` | Add `IsolationSession` to `ContainmentBackend` |
+| `src/core/wxc_common/src/config_parser.rs` | Parse the `"isolation_session"` containment value |
 | `src/core/wxc/Cargo.toml` | Add `isolation_session` Cargo feature |
 | `src/core/wxc/src/main.rs` | Dispatch `IsolationSession` behind `--experimental`; call `CoInitializeEx(COINIT_MULTITHREADED)` at top of `main` (required for any WinRT activation, benign for other backends) |
 
@@ -141,11 +141,13 @@ interface.
 }
 ```
 
-The one-shot `experimental.isolation_session` block currently carries no
-honored knobs — the Entra `user` bundle is a state-aware-only field and is
-rejected on the one-shot path. Process options (`cwd`, `env`, `timeout`) read
-from the existing top-level `process` section, matching the contract every
-other backend honors.
+The one-shot surface takes **no backend configuration at all** — there is no
+`experimental.isolation_session` field the one-shot path reads. The Entra
+`user` bundle is state-aware-only, so supplying it here is just an
+unrecognised key in the deliberately permissive `experimental` block and is
+ignored (the run proceeds as a local, non-Entra agent). Process options
+(`cwd`, `env`, `timeout`) read from the existing top-level `process` section,
+matching the contract every other backend honors.
 
 Run with: `wxc-exec.exe --experimental config.json`.
 
@@ -253,8 +255,8 @@ the rationale for each disposition, and the error mapping live in
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `experimental.isolation_session.user` | rejected — Entra is state-aware-only |
-| `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only, and the one-shot mapping reads only the flat `user` |
+| `experimental.isolation_session.user` | accepted, ignored — Entra is state-aware-only, and one-shot reads no backend config |
+| `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
@@ -284,11 +286,12 @@ The full field-by-field table is in
   provisioned agent + session can host multiple `wxc-exec` invocations
   without re-paying the lifecycle cost. The manager / runner split exists
   precisely to make this migration straightforward later.
-- **TypeScript SDK exposure.** Lifting `experimental.isolation_session`
-  into `SandboxSpawnOptions` so the SDK can spawn isolation-session
+- **TypeScript SDK exposure.** Adding a one-shot isolation-session config
+  surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
   workloads programmatically **on the one-shot path**. Today the one-shot
   backend is reachable only via JSON config (`spawnSandboxFromConfig` or
-  `wxc-exec` directly); the state-aware lifecycle *is* SDK-exposed.
+  `wxc-exec` directly), and it takes no backend configuration; the
+  state-aware lifecycle *is* SDK-exposed.
 
 ## Test Plan
 
@@ -296,7 +299,7 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | `"isolation_session"` containment value and `experimental.isolation_session` section parsing |
+| Config parsing | `config_parser.rs` | The `"isolation_session"` containment value; a stray `experimental.isolation_session` payload is accepted and ignored |
 | Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |

@@ -304,7 +304,7 @@
       "type": "object"
     },
     "IsolationSession": {
-      "description": "IsolationSession backend config. Carries the one-shot `user` field and the per-phase state-aware nesting for the phases that take config (`provision` / `start`). `stop`, `deprovision`, and `exec` take no per-phase config payload: `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.",
+      "description": "IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision` / `start`). The one-shot surface takes no backend configuration at all. `stop`, `deprovision`, and `exec` take no per-phase config payload: `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.",
       "properties": {
         "provision": {
           "anyOf": [
@@ -327,17 +327,6 @@
             }
           ],
           "description": "State-aware start-phase configuration."
-        },
-        "user": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationUser"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional Entra cloud-agent user bundle (one-shot)."
         }
       },
       "type": "object"
