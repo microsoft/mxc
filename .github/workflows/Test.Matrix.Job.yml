@@ -50,7 +50,7 @@ jobs:
 
       - name: Prepare Process Container host
         if: matrix.command == 'process-container'
-        shell: pwsh
+        shell: powershell
         run: |
           $hostPrep = Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin\wxc-host-prep.exe'
           & $hostPrep prepare-system-drive
@@ -59,7 +59,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run backend tests
-        shell: pwsh
+        shell: powershell
         run: |
           $arguments = @{
             Backend = '${{ matrix.command }}'
