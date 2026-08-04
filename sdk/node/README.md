@@ -265,6 +265,30 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
+**Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first; when the failure came from an underlying platform API, the error also carries discrete diagnostic fields rather than a prose blob:
+
+```typescript
+import { MxcError } from '@microsoft/mxc-sdk';
+
+try {
+  await startSandbox(sandboxId, {}, { experimental: true });
+} catch (err) {
+  if (err instanceof MxcError) {
+    if (err.code === 'stale_id') { /* the sandbox is gone -- re-provision */ }
+    console.error(err.message);      // bare, human-readable
+    console.error(err.operation);    // e.g. 'IsoSessionOps.StartSessionAsync'
+    console.error(err.nativeCode);   // e.g. '0x80070490'
+    console.error(err.remediation);  // the API's own fix-it hint, when it supplies one
+  }
+}
+```
+
+`operation`, `nativeCode` and `remediation` are optional and travel together: `nativeCode` and `remediation` never appear without `operation`. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries only `code` and `message`.
+
+These three are currently populated only by **IsolationSession state-aware** operations. Windows Sandbox has no semantic error channel to derive them from, and the one-shot surface folds the same detail into `message` instead, so they are uniformly absent there — always treat them as optional.
+
+Branch program logic on `code`, which is a closed, versioned union. The *values* of `operation` and `nativeCode` are best-effort diagnostics derived from the underlying platform API and may change without a version bump — use them for telemetry, logging and diagnosis rather than control flow.
+
 Full design and API: [`docs/state-aware-lifecycle/`](https://github.com/microsoft/mxc/tree/main/docs/state-aware-lifecycle/).
 
 </details>
@@ -391,7 +415,8 @@ getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 UiCapabilitySupport
 
 // Errors (typed wire-format errors from wxc-exec)
-ErrorCode, MxcError, mxcErrorFromCode(code)
+ErrorCode, MxcError, MxcErrorFields
+mxcErrorFromCode(code, message, details?)   → MxcError
 ```
 
 Full TypeScript definitions ship with the package (`dist/index.d.ts`). All exports are named exports from `@microsoft/mxc-sdk`.
