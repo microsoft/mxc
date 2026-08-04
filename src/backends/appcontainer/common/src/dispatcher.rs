@@ -69,13 +69,88 @@ use std::path::PathBuf;
 
 use crate::appcontainer_runner::{derive_sid_string, AppContainerScriptRunner, FilesystemMode};
 use crate::base_container_runner::BaseContainerRunner;
-use crate::fallback_detector::{self, FallbackError, IsolationTier};
+use crate::fallback_detector::{self, DegradationReason, FallbackError, IsolationTier};
+use wxc_common::audit::{AuditEvent, AuditEventName, EffectiveEnforcementLevel};
 use wxc_common::error::WxcError;
 use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::ScriptRunner;
+
+/// Bounded, machine-readable summary of how far the selected tier fell short of
+/// the preferred one. Carried alongside the free-form `warnings` so audit
+/// records never have to parse prose.
+///
+/// This exists because the dispatcher outlives the [`TierDecision`] that
+/// produced it (the decision's `bfscfg_path` is moved into the runner). The
+/// *semantics* — what counts as degraded, and how the reason codes render — live
+/// exactly once, in [`fallback_detector::is_degraded`] and
+/// [`fallback_detector::reason_codes`], which this type delegates to.
+#[derive(Debug, Clone, Default)]
+pub struct Degradation {
+    /// Whether the chosen tier needs host-DACL augmentation to enforce the
+    /// policy. Previously computed by the detector and then dropped on the
+    /// floor by the dispatcher.
+    pub needs_dacl_augmentation: bool,
+    /// Bounded reason codes, produced at the detector branches themselves.
+    pub reasons: Vec<DegradationReason>,
+}
+
+fn effective_enforcement_level(
+    tier: IsolationTier,
+    needs_dacl_augmentation: bool,
+) -> EffectiveEnforcementLevel {
+    match (tier, needs_dacl_augmentation) {
+        (IsolationTier::BaseContainer, false) => EffectiveEnforcementLevel::BaseContainer,
+        (IsolationTier::BaseContainer, true) => {
+            EffectiveEnforcementLevel::BaseContainerDaclAugmented
+        }
+        (IsolationTier::AppContainerBfs, false) => EffectiveEnforcementLevel::AppContainerBfs,
+        (IsolationTier::AppContainerBfs, true) => {
+            EffectiveEnforcementLevel::AppContainerBfsDaclAugmented
+        }
+        (IsolationTier::AppContainerDacl, _) => EffectiveEnforcementLevel::AppContainerDacl,
+    }
+}
+
+/// Emit `mxc.EnforcementDegraded` when the preferred tier was not selected.
+///
+/// A clean Tier 1 run produces no record, so the stream stays signal-bearing.
+/// Called from both dispatch surfaces (run-to-completion and streaming),
+/// including the streaming spawn-failure arm — a tier was already chosen there,
+/// so the degradation is real even though the spawn did not succeed.
+pub(crate) fn log_enforcement_degraded(
+    logger: &mut Logger,
+    tier: IsolationTier,
+    degradation: &Degradation,
+) {
+    if !fallback_detector::is_degraded(
+        tier,
+        degradation.needs_dacl_augmentation,
+        &degradation.reasons,
+    ) {
+        return;
+    }
+    if !logger.has_diagnostic_sink() {
+        return;
+    }
+    let effective_level = effective_enforcement_level(tier, degradation.needs_dacl_augmentation);
+    let record = AuditEvent::new(AuditEventName::EnforcementDegraded)
+        .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+        .str("tier", tier.as_str())
+        .str("effective_enforcement_level", effective_level.as_str())
+        .bool(
+            "needs_dacl_augmentation",
+            degradation.needs_dacl_augmentation,
+        )
+        .str(
+            "degradation_reasons",
+            &fallback_detector::reason_codes(&degradation.reasons),
+        )
+        .u64("degradation_reason_count", degradation.reasons.len() as u64);
+    logger.log_audit_event(&record);
+}
 
 /// Result of a successful dispatch decision: a phased handle holding a
 /// runner and (optionally) a `DaclManager`, with **private fields** so
@@ -102,6 +177,10 @@ pub struct Dispatched {
     pub tier: IsolationTier,
     /// Operator-visible warnings collected during tier selection.
     pub warnings: Vec<String>,
+    /// Bounded, machine-readable degradation facts for the
+    /// `mxc.EnforcementDegraded` audit record. Distinct from `warnings`, which
+    /// is free-form prose that can embed filesystem paths.
+    pub degradation: Degradation,
 }
 
 impl Dispatched {
@@ -125,6 +204,17 @@ impl Dispatched {
     #[cfg(test)]
     pub(crate) fn has_dacl_guard(&self) -> bool {
         self.dacl_manager.is_some()
+    }
+
+    /// Record `mxc.EnforcementDegraded` when the preferred tier was not
+    /// selected. A no-op for a clean Tier 1 dispatch.
+    ///
+    /// This lives on `Dispatched` rather than inside
+    /// [`dispatch_with_fallback`] because that function takes no `Logger`; the
+    /// caller (which has one) invokes it right where it already logs the
+    /// selected tier and the tier-selection warnings.
+    pub fn log_enforcement_degraded(&self, logger: &mut Logger) {
+        log_enforcement_degraded(logger, self.tier, &self.degradation);
     }
 }
 
@@ -318,6 +408,23 @@ impl SandboxBackend for SelectedBackend {
     }
 }
 
+/// Everything [`select_backend_with_fallback`] resolves for a request: the
+/// concrete backend, the (already-applied) DACL guard, the selected tier, the
+/// operator-visible warnings, and the bounded degradation facts.
+///
+/// A struct rather than a tuple so the two dispatch surfaces cannot bind the
+/// fields in the wrong order, and so adding a field later is not a
+/// call-site-wide edit.
+struct BackendPlan {
+    backend: SelectedBackend,
+    /// When present, this manager has **already applied its ACEs** and MUST
+    /// outlive the run — its `Drop` restores the host ACEs.
+    dacl_manager: Option<DaclManager>,
+    tier: IsolationTier,
+    warnings: Vec<String>,
+    degradation: Degradation,
+}
+
 /// Run tier selection and construct the backend + (optional) DACL guard for
 /// `request`. This is the single source of truth for the tier → (backend, DACL)
 /// mapping, shared by the run-to-completion ([`dispatch_with_fallback`]) and
@@ -327,17 +434,7 @@ impl SandboxBackend for SelectedBackend {
 /// its ACEs** and MUST outlive the run (its `Drop` restores the host ACEs). The
 /// selected [`IsolationTier`] and any tier-selection warnings are returned for
 /// telemetry.
-fn select_backend_with_fallback(
-    request: &ExecutionRequest,
-) -> Result<
-    (
-        SelectedBackend,
-        Option<DaclManager>,
-        IsolationTier,
-        Vec<String>,
-    ),
-    DispatchError,
-> {
+fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPlan, DispatchError> {
     let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
     if request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer {
         return Err(DispatchError::CaptureDenialsUnsupported {
@@ -425,7 +522,16 @@ fn select_backend_with_fallback(
         }
     };
 
-    Ok((backend, dacl_manager, decision.tier, decision.warnings))
+    Ok(BackendPlan {
+        backend,
+        dacl_manager,
+        tier: decision.tier,
+        warnings: decision.warnings,
+        degradation: Degradation {
+            needs_dacl_augmentation: decision.needs_dacl_augmentation,
+            reasons: decision.reasons,
+        },
+    })
 }
 
 /// Build a runner with appropriate DACL augmentation for the
@@ -437,13 +543,14 @@ fn select_backend_with_fallback(
 /// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
 /// extract both; the manager MUST stay alive through the run.
 pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
-    let (backend, dacl_manager, tier, warnings) = select_backend_with_fallback(request)?;
-    let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(backend));
+    let plan = select_backend_with_fallback(request)?;
+    let runner: Box<dyn ScriptRunner> = Box::new(Runner::new(plan.backend));
     Ok(Dispatched {
         runner,
-        dacl_manager,
-        tier,
-        warnings,
+        dacl_manager: plan.dacl_manager,
+        tier: plan.tier,
+        warnings: plan.warnings,
+        degradation: plan.degradation,
     })
 }
 
@@ -459,7 +566,6 @@ pub struct DispatchedProcess {
     /// Operator-visible warnings collected during tier selection.
     pub warnings: Vec<String>,
 }
-
 /// Error from the streaming [`spawn_with_fallback`] path. Kept distinct from a
 /// flat error so the caller can preserve fallback semantics: tier-selection /
 /// DACL failures map to `backend_unavailable` (as the run-to-completion path
@@ -508,8 +614,17 @@ pub fn spawn_with_fallback(
     logger: &mut Logger,
     stdio: StdioMode,
 ) -> Result<DispatchedProcess, SpawnDispatchError> {
-    let (mut backend, dacl_manager, tier, warnings) =
-        select_backend_with_fallback(request).map_err(SpawnDispatchError::Dispatch)?;
+    let BackendPlan {
+        mut backend,
+        dacl_manager,
+        tier,
+        warnings,
+        degradation,
+    } = select_backend_with_fallback(request).map_err(SpawnDispatchError::Dispatch)?;
+
+    // A tier has been chosen: record any degradation now, so the record exists
+    // whether or not the spawn below succeeds.
+    log_enforcement_degraded(logger, tier, &degradation);
 
     // Spawn with the DACL ACEs (if any) already applied. On a spawn failure the
     // `dacl_manager` local drops here, restoring any ACEs that were stamped; we
@@ -624,6 +739,49 @@ mod tests {
 
     fn empty_policy() -> ContainerPolicy {
         ContainerPolicy::default()
+    }
+
+    #[test]
+    fn effective_enforcement_level_covers_all_tier_combinations() {
+        let cases = [
+            (
+                IsolationTier::BaseContainer,
+                false,
+                EffectiveEnforcementLevel::BaseContainer,
+            ),
+            (
+                IsolationTier::BaseContainer,
+                true,
+                EffectiveEnforcementLevel::BaseContainerDaclAugmented,
+            ),
+            (
+                IsolationTier::AppContainerBfs,
+                false,
+                EffectiveEnforcementLevel::AppContainerBfs,
+            ),
+            (
+                IsolationTier::AppContainerBfs,
+                true,
+                EffectiveEnforcementLevel::AppContainerBfsDaclAugmented,
+            ),
+            (
+                IsolationTier::AppContainerDacl,
+                false,
+                EffectiveEnforcementLevel::AppContainerDacl,
+            ),
+            (
+                IsolationTier::AppContainerDacl,
+                true,
+                EffectiveEnforcementLevel::AppContainerDacl,
+            ),
+        ];
+
+        for (tier, needs_dacl_augmentation, expected) in cases {
+            assert_eq!(
+                effective_enforcement_level(tier, needs_dacl_augmentation),
+                expected
+            );
+        }
     }
     fn policy_with_denied_temp() -> (ContainerPolicy, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -879,8 +1037,8 @@ mod tests {
     fn select_backend_t1_builds_base_container_no_dacl() {
         let _g = ForceTierGuard::set("base-container");
         let req = test_request(empty_policy());
-        let (backend, dacl, tier, _w) =
-            select_backend_with_fallback(&req).expect("T1 selection should succeed");
+        let plan = select_backend_with_fallback(&req).expect("T1 selection should succeed");
+        let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::BaseContainer));
         assert!(
             matches!(backend, SelectedBackend::BaseContainer(_)),
@@ -896,8 +1054,8 @@ mod tests {
     fn select_backend_t2_no_deny_builds_appcontainer_no_dacl() {
         let _g = ForceTierGuard::set("appcontainer-bfs");
         let req = test_request(empty_policy());
-        let (backend, dacl, tier, _w) =
-            select_backend_with_fallback(&req).expect("T2 selection should succeed");
+        let plan = select_backend_with_fallback(&req).expect("T2 selection should succeed");
+        let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerBfs));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
         assert!(
@@ -911,8 +1069,8 @@ mod tests {
         let _g = ForceTierGuard::set("appcontainer-bfs");
         let (policy, _tmp) = policy_with_denied_temp();
         let req = test_request(policy);
-        let (backend, dacl, tier, _w) =
-            select_backend_with_fallback(&req).expect("T2+deny selection should succeed");
+        let plan = select_backend_with_fallback(&req).expect("T2+deny selection should succeed");
+        let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerBfs));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
         assert!(
@@ -926,8 +1084,8 @@ mod tests {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (policy, _tmp) = policy_with_rw_temp();
         let req = test_request(policy);
-        let (backend, dacl, tier, _w) =
-            select_backend_with_fallback(&req).expect("T3 selection should succeed");
+        let plan = select_backend_with_fallback(&req).expect("T3 selection should succeed");
+        let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerDacl));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
         assert!(
@@ -946,8 +1104,8 @@ mod tests {
         // with the "bfscfg.exe is not available" error.
         let _g = BcUsableGuard::set(false);
         let req = test_request(empty_policy());
-        let (backend, dacl, tier, _w) =
-            select_backend_with_fallback(&req).expect("selection should succeed");
+        let plan = select_backend_with_fallback(&req).expect("selection should succeed");
+        let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
         assert!(matches!(tier, IsolationTier::AppContainerDacl));
         assert!(matches!(backend, SelectedBackend::AppContainer(_)));
         assert!(dacl.is_some());

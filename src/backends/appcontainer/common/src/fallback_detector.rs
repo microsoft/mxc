@@ -43,6 +43,62 @@ impl IsolationTier {
     }
 }
 
+/// Bounded reason a higher isolation tier was rejected.
+///
+/// Each variant is produced at exactly the branch that causes it — the enum is
+/// **never** derived by pattern-matching [`TierDecision::warnings`], whose
+/// human-readable strings can embed filesystem paths and are not a stable
+/// vocabulary.
+///
+/// Used by the `mxc.EnforcementDegraded` audit record
+/// ([`wxc_common::audit::AuditEventName::EnforcementDegraded`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DegradationReason {
+    /// BaseContainer was preferred and usable, but the OS does not advertise
+    /// `SANDBOX_CAP_FS_DENY`, so a `deniedPaths` policy cannot be enforced
+    /// natively at Tier 1.
+    BaseContainerDenyUnsupported,
+    /// BaseContainer was not selected — either it was not preferred, or the
+    /// backend is not usable on this host.
+    BaseContainerUnavailable,
+    /// AppContainer + BFS is not compiled into this binary (the `tier2_bfs`
+    /// Cargo feature is off), so Tier 2 was skipped entirely.
+    Tier2FeatureDisabled,
+    /// `bfscfg.exe` could not be resolved, so BFS could not enforce the
+    /// filesystem policy.
+    BfscfgUnavailable,
+    /// The selected tier has to mutate host DACLs to enforce the policy.
+    DaclAugmentationRequired,
+    /// The system-drive metadata ACEs `wxc-host-prep prepare-system-drive`
+    /// stamps are not in effect on this machine.
+    HostPrepSystemDriveMissing,
+    /// The `\Device\Null` security descriptor `wxc-host-prep
+    /// prepare-null-device` applies is not in effect (the kernel resets it at
+    /// every boot).
+    HostPrepNullDeviceMissing,
+}
+
+impl DegradationReason {
+    /// Stable snake_case code for the audit record.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BaseContainerDenyUnsupported => "base_container_deny_unsupported",
+            Self::BaseContainerUnavailable => "base_container_unavailable",
+            Self::Tier2FeatureDisabled => "tier2_feature_disabled",
+            Self::BfscfgUnavailable => "bfscfg_unavailable",
+            Self::DaclAugmentationRequired => "dacl_augmentation_required",
+            Self::HostPrepSystemDriveMissing => "host_prep_system_drive_missing",
+            Self::HostPrepNullDeviceMissing => "host_prep_null_device_missing",
+        }
+    }
+}
+
+impl std::fmt::Display for DegradationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Outcome of [`detect`]: the chosen tier plus any operator-visible warnings
 /// gathered while walking the decision algorithm.
 #[derive(Debug, Clone)]
@@ -65,7 +121,55 @@ pub struct TierDecision {
     pub bfscfg_path: Option<PathBuf>,
     /// Human-readable degradation messages explaining why a higher tier was
     /// rejected. Empty when the preferred tier was selected.
+    ///
+    /// **Not for structured consumption.** These strings can embed filesystem
+    /// paths and are not a stable vocabulary; use [`TierDecision::reasons`] for
+    /// anything machine-readable.
     pub warnings: Vec<String>,
+    /// Bounded, machine-readable counterpart to [`TierDecision::warnings`],
+    /// populated at the same branches. Empty when the preferred tier was
+    /// selected.
+    pub reasons: Vec<DegradationReason>,
+}
+
+impl TierDecision {
+    /// Whether enforcement was degraded relative to the preferred tier — the
+    /// condition under which `mxc.EnforcementDegraded` fires. A clean Tier 1
+    /// selection returns `false` and produces no record.
+    pub fn is_degraded(&self) -> bool {
+        is_degraded(self.tier, self.needs_dacl_augmentation, &self.reasons)
+    }
+
+    /// The bounded reason codes joined into the single comma-separated string
+    /// the audit record carries (arrays are not part of the record format).
+    pub fn reason_codes(&self) -> String {
+        reason_codes(&self.reasons)
+    }
+}
+
+/// Whether the selected tier represents degraded enforcement.
+///
+/// A free function rather than only a `TierDecision` method because the
+/// dispatcher keeps the degradation facts after the `TierDecision` itself has
+/// been consumed (its `bfscfg_path` is moved into the runner). Having exactly
+/// one definition is what stops the two layers from drifting apart on what
+/// "degraded" means.
+pub fn is_degraded(
+    tier: IsolationTier,
+    needs_dacl_augmentation: bool,
+    reasons: &[DegradationReason],
+) -> bool {
+    tier != IsolationTier::BaseContainer || needs_dacl_augmentation || !reasons.is_empty()
+}
+
+/// Join bounded reason codes into the comma-separated string the audit record
+/// carries. Single definition, shared with the dispatcher — see [`is_degraded`].
+pub fn reason_codes(reasons: &[DegradationReason]) -> String {
+    reasons
+        .iter()
+        .map(|r| r.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Errors that abort tier selection.
@@ -161,6 +265,7 @@ pub fn detect(
     }
 
     let mut warnings: Vec<String> = Vec::new();
+    let mut reasons: Vec<DegradationReason> = Vec::new();
 
     // Tier 1 — BaseContainer
     if prefer_base_container && is_base_container_usable() {
@@ -173,6 +278,7 @@ pub fn detect(
                 needs_dacl_augmentation: false,
                 bfscfg_path: None,
                 warnings,
+                reasons,
             });
         }
         warnings.push(
@@ -181,6 +287,13 @@ pub fn detect(
              for deniedPaths enforcement"
                 .to_string(),
         );
+        reasons.push(DegradationReason::BaseContainerDenyUnsupported);
+    } else {
+        // Tier 1 was not selected at all: either the caller did not prefer it,
+        // or the backend is not usable on this host. Recorded as a bounded
+        // reason here rather than inferred later, so the audit record can
+        // distinguish "T1 rejected the policy" from "T1 was never available".
+        reasons.push(DegradationReason::BaseContainerUnavailable);
     }
     // Tier 2 — AppContainer + BFS
     //
@@ -210,25 +323,30 @@ pub fn detect(
             if denied {
                 ensure_dacl_augmentation_allowed(policy)?;
                 verify_write_dac_all(&policy.denied_paths)?;
+                reasons.push(DegradationReason::DaclAugmentationRequired);
             }
             return Ok(TierDecision {
                 tier: IsolationTier::AppContainerBfs,
                 needs_dacl_augmentation: denied,
                 bfscfg_path,
                 warnings,
+                reasons,
             });
         }
         warnings.push("bfscfg.exe not present; falling back to AppContainer + DACL".to_string());
+        reasons.push(DegradationReason::BfscfgUnavailable);
     } else {
         warnings.push(
             "BaseContainer tier not selected, and AppContainer + BFS is not \
              compiled into this binary; falling back to AppContainer + DACL"
                 .to_string(),
         );
+        reasons.push(DegradationReason::Tier2FeatureDisabled);
     }
 
     // Tier 3 — AppContainer + DACL
     ensure_dacl_augmentation_allowed(policy)?;
+    reasons.push(DegradationReason::DaclAugmentationRequired);
     // For RW / RO paths we only need `WRITE_DAC` if we'd actually have
     // to add an ACE. When the path's existing DACL already grants the
     // needed mask to the well-known AppContainer SIDs (typically
@@ -250,24 +368,25 @@ pub fn detect(
     // boot (the `\Device\Null` descriptor). Surface actionable
     // `wxc-host-prep` recommendations, but only for the preparations
     // that are not already in effect on this machine.
-    push_host_prep_warnings(&mut warnings);
+    push_host_prep_warnings(&mut warnings, &mut reasons);
 
     Ok(TierDecision {
         tier: IsolationTier::AppContainerDacl,
         needs_dacl_augmentation: true,
         bfscfg_path: None,
         warnings,
+        reasons,
     })
 }
 
-/// Append `wxc-host-prep` recommendations to `warnings` for any
-/// host-side preparation the AppContainer + DACL tier relies on that is
-/// not currently in effect on this machine.
+/// Append `wxc-host-prep` recommendations to `warnings` (and their bounded
+/// counterparts to `reasons`) for any host-side preparation the AppContainer +
+/// DACL tier relies on that is not currently in effect on this machine.
 ///
 /// Each check is read-only and best-effort: if the machine state cannot
 /// be determined we err on the side of surfacing the recommendation
 /// rather than silently swallowing it.
-fn push_host_prep_warnings(warnings: &mut Vec<String>) {
+fn push_host_prep_warnings(warnings: &mut Vec<String>, reasons: &mut Vec<DegradationReason>) {
     if !system_drive_prepared() {
         warnings.push(
             "AppContainer + DACL tier selected: AppContainer processes may be unable to read \
@@ -276,6 +395,7 @@ fn push_host_prep_warnings(warnings: &mut Vec<String>) {
              minimal metadata ACEs."
                 .to_string(),
         );
+        reasons.push(DegradationReason::HostPrepSystemDriveMissing);
     }
     if !null_device_prepared() {
         warnings.push(
@@ -285,6 +405,7 @@ fn push_host_prep_warnings(warnings: &mut Vec<String>) {
              the documented security descriptor."
                 .to_string(),
         );
+        reasons.push(DegradationReason::HostPrepNullDeviceMissing);
     }
 }
 
@@ -447,6 +568,7 @@ fn forced_decision(
         needs_dacl_augmentation: needs_dacl,
         bfscfg_path: None,
         warnings: Vec::new(),
+        reasons: Vec::new(),
     })
 }
 
@@ -692,6 +814,68 @@ mod tests {
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(!d.needs_dacl_augmentation);
         assert!(d.warnings.is_empty());
+        assert!(d.reasons.is_empty());
+        assert!(
+            !d.is_degraded(),
+            "a clean Tier 1 selection must not report degradation"
+        );
+    }
+
+    #[test]
+    fn degradation_reason_codes_are_bounded_snake_case_and_unique() {
+        let all = [
+            DegradationReason::BaseContainerDenyUnsupported,
+            DegradationReason::BaseContainerUnavailable,
+            DegradationReason::Tier2FeatureDisabled,
+            DegradationReason::BfscfgUnavailable,
+            DegradationReason::DaclAugmentationRequired,
+            DegradationReason::HostPrepSystemDriveMissing,
+            DegradationReason::HostPrepNullDeviceMissing,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for r in all {
+            let code = r.as_str();
+            assert!(
+                code.chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()),
+                "not snake_case: {code}"
+            );
+            assert!(seen.insert(code), "duplicate reason code: {code}");
+        }
+    }
+
+    #[test]
+    fn reason_codes_join_without_whitespace_so_the_field_stays_parseable() {
+        let decision = TierDecision {
+            tier: IsolationTier::AppContainerDacl,
+            needs_dacl_augmentation: true,
+            bfscfg_path: None,
+            warnings: Vec::new(),
+            reasons: vec![
+                DegradationReason::BaseContainerUnavailable,
+                DegradationReason::Tier2FeatureDisabled,
+            ],
+        };
+        assert_eq!(
+            decision.reason_codes(),
+            "base_container_unavailable,tier2_feature_disabled"
+        );
+        assert!(decision.is_degraded());
+    }
+
+    #[test]
+    fn a_non_base_container_tier_is_always_degraded_even_without_reasons() {
+        // A forced decision carries no reasons, but landing below Tier 1 is
+        // itself the degradation the record exists to report.
+        let decision = TierDecision {
+            tier: IsolationTier::AppContainerBfs,
+            needs_dacl_augmentation: false,
+            bfscfg_path: None,
+            warnings: Vec::new(),
+            reasons: Vec::new(),
+        };
+        assert!(decision.is_degraded());
+        assert_eq!(decision.reason_codes(), "");
     }
     #[test]
     fn empty_policy_no_filesystem_t2_path() {
@@ -1022,20 +1206,38 @@ mod tests {
 
     /// The host-prep state is machine-dependent, so we assert only the
     /// contract: at most the two known recommendations, and each names
-    /// the corresponding `wxc-host-prep` verb.
+    /// the corresponding `wxc-host-prep` verb. The bounded `reasons` must stay
+    /// 1:1 with the prose warnings so the audit record can never disagree with
+    /// what the operator was told.
     #[test]
     fn push_host_prep_warnings_are_actionable_and_bounded() {
         let mut warnings = Vec::new();
-        push_host_prep_warnings(&mut warnings);
+        let mut reasons = Vec::new();
+        push_host_prep_warnings(&mut warnings, &mut reasons);
         assert!(
             warnings.len() <= 2,
             "expected at most two host-prep warnings, got {warnings:?}"
+        );
+        assert_eq!(
+            warnings.len(),
+            reasons.len(),
+            "each host-prep warning needs exactly one bounded reason code"
         );
         for w in &warnings {
             assert!(
                 w.contains("wxc-host-prep prepare-system-drive")
                     || w.contains("wxc-host-prep prepare-null-device"),
                 "host-prep warning should name a wxc-host-prep verb, got: {w}"
+            );
+        }
+        for r in &reasons {
+            assert!(
+                matches!(
+                    r,
+                    DegradationReason::HostPrepSystemDriveMissing
+                        | DegradationReason::HostPrepNullDeviceMissing
+                ),
+                "unexpected host-prep reason: {r}"
             );
         }
     }

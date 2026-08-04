@@ -30,6 +30,8 @@ pub enum ParseError {
     Decode(WxcError),
     /// Discriminated as one-shot; conversion to `ExecutionRequest` failed.
     OneShot(WxcError),
+    /// Discriminated as one-shot, but the JSON payload was malformed.
+    OneShotMalformed(WxcError),
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
@@ -44,14 +46,16 @@ enum ErrorOutput {
 impl ParseError {
     fn output(&self) -> ErrorOutput {
         match self {
-            Self::Decode(_) | Self::OneShot(_) => ErrorOutput::Primary,
+            Self::Decode(_) | Self::OneShot(_) | Self::OneShotMalformed(_) => ErrorOutput::Primary,
             Self::StateAware(_) => ErrorOutput::DiagnosticOnly,
         }
     }
 
     fn message(&self) -> String {
         match self {
-            Self::Decode(error) | Self::OneShot(error) => error.to_string(),
+            Self::Decode(error) | Self::OneShot(error) | Self::OneShotMalformed(error) => {
+                error.to_string()
+            }
             Self::StateAware(error) => error.to_string(),
         }
     }
@@ -229,8 +233,16 @@ fn parse_mxc_request_json(
         .map(MxcRequest::StateAware)
         .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
-        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
-            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str).map_err(|error| {
+            let error = WxcError::ConfigParse(error.to_string());
+            if error.to_string().contains("expected value")
+                || error.to_string().contains("EOF while parsing")
+            {
+                ParseError::OneShotMalformed(error)
+            } else {
+                ParseError::OneShot(error)
+            }
+        })?;
         convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)

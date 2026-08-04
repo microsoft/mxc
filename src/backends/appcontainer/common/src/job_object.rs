@@ -277,13 +277,17 @@ impl UiJobObject {
 
     /// Terminate every process currently assigned to this job (the sandboxed
     /// child and all of its descendants) with the given exit code. Used to
-    /// tree-kill a running sandbox. Best-effort: errors are ignored since the
-    /// processes may already have exited.
-    pub fn terminate(&self, exit_code: u32) {
+    /// tree-kill a running sandbox.
+    ///
+    /// Best-effort: the returned error is **diagnostic only** and callers must
+    /// keep treating a failure as non-fatal, because the processes may simply
+    /// have exited already (`TerminateJobObject` reports `ERROR_ACCESS_DENIED`
+    /// for an already-terminated job). The result is returned rather than
+    /// discarded so a caller can record *that* the kill failed instead of
+    /// silently reporting a clean teardown.
+    pub fn terminate(&self, exit_code: u32) -> windows::core::Result<()> {
         // SAFETY: `self.handle` is a valid job handle owned by this struct.
-        unsafe {
-            let _ = TerminateJobObject(self.handle, exit_code);
-        }
+        unsafe { TerminateJobObject(self.handle, exit_code) }
     }
 }
 
@@ -316,6 +320,23 @@ mod tests {
         })
         .expect("set global-namespace block");
         drop(job);
+    }
+
+    /// `terminate` must surface its `Result` so a caller can *record* a failed
+    /// kill, while remaining safe to call on an empty job (the common case:
+    /// every process already exited).
+    ///
+    /// The `let _ =` at the call sites is deliberate — the audit records
+    /// consume the error, and control flow must not change — so this test locks
+    /// in that the value is available at all.
+    #[test]
+    fn terminate_returns_a_result_and_succeeds_on_an_empty_job() {
+        let job = UiJobObject::new().expect("create");
+        let result: windows::core::Result<()> = job.terminate(u32::MAX);
+        assert!(
+            result.is_ok(),
+            "terminating an empty job should succeed: {result:?}"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::io::IsTerminal;
 use serde::Serialize;
 
 use wxc_common::id::mint_random_token;
+use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{
     ExecutionRequest, IsolationSessionConfig, IsolationSessionProvisionConfig,
 };
@@ -271,9 +272,14 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
         let interactive = std::io::stdout().is_terminal();
         let options = build_process_options(request, interactive);
+        let mut logger = Logger::new(Mode::Buffer);
+        let diagnostic_config = wxc_common::diagnostic::DiagnosticConfig::from_environment();
+        if diagnostic_config.console_enabled {
+            logger.enable_diagnostics(&diagnostic_config);
+        }
 
         let exit_code = manager
-            .create_process(&options)
+            .create_process(&options, Some(&mut logger))
             .map_err(map_lifecycle_error)?;
 
         // The output relay completed inside `create_process`. The dispatcher

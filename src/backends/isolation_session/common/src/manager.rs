@@ -6,6 +6,8 @@
 //! plus the `share_folders` non-lifecycle op. `create_process` also drives
 //! the ConPTY relay setup + shutdown ladder against the local console.
 
+use wxc_common::audit::{AuditEvent, AuditEventName, KillMethod};
+use wxc_common::logger::Logger;
 use wxc_common::models::IsolationSessionConfigurationId;
 use wxc_common::process_util::OwnedHandle;
 
@@ -285,6 +287,7 @@ impl IsolationSessionManager {
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
+        logger: Option<&mut Logger>,
     ) -> Result<i32, IsolationSessionError> {
         let proc_options = build_iso_process_options(options)?;
 
@@ -506,7 +509,9 @@ impl IsolationSessionManager {
             .WaitForExit(options.timeout_ms)
             .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
 
-        let exit_code = wait_with_graceful_shutdown(&process)?;
+        let identity = self.provision_id.to_string_lossy();
+        let exit_code =
+            wait_with_graceful_shutdown(&process, options.timeout_ms, &identity, logger)?;
 
         // Signal the stdin relay to exit. Effective for waitable (console)
         // handles; for pipe handles the bounded wait below expires and we
@@ -589,7 +594,7 @@ impl IsolationSessionManager {
 /// running after `WaitForExit(timeout_ms)` returns. Tier 1: close stdin —
 /// many REPLs exit on EOF alone. Tier 2: `SendCtrlClose` — ConPTY-only;
 /// `E_NOTIMPL` outside ConPTY, benign. Tier 3: force-terminate, wait
-/// infinitely (`WaitForExit(0)` = INFINITE) for the kill to land.
+/// for up to five seconds for the kill to land.
 ///
 /// The first `ExitCode()` query is `?`-propagated: a failure there means
 /// the kernel handle is broken, and the cleanup methods on the same
@@ -597,7 +602,12 @@ impl IsolationSessionManager {
 /// than to fire blind. Per-tier subsequent queries fall back to
 /// `STILL_ACTIVE` so a transient read failure does not short-circuit the
 /// escalation.
-fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, IsolationSessionError> {
+fn wait_with_graceful_shutdown(
+    process: &IsoSessionProcess,
+    timeout_ms: u32,
+    identity: &str,
+    mut logger: Option<&mut Logger>,
+) -> Result<i32, IsolationSessionError> {
     // `STILL_ACTIVE` (0x103) is exposed by the `windows` crate as
     // `STATUS_PENDING: NTSTATUS` — same numeric value, different name.
     use windows::Win32::Foundation::STATUS_PENDING;
@@ -607,6 +617,18 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
         .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
     if exit_code != STILL_ACTIVE {
         return Ok(exit_code);
+    }
+
+    if let Some(logger) = logger.as_mut() {
+        let record = AuditEvent::new(AuditEventName::ProcessTimedOut)
+            .str("backend", "isolation_session")
+            .str(
+                "identity",
+                &wxc_common::policy_identity::redact_identity(identity),
+            )
+            .u64("pid", process.ProcessId().unwrap_or_default() as u64)
+            .u64("timeout_ms", timeout_ms as u64);
+        logger.log_audit_event(&record);
     }
 
     let _ = process.CloseStandardInput();
@@ -623,8 +645,42 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
         return Ok(exit_code);
     }
 
-    let _ = process.Terminate();
-    let _ = process.WaitForExit(0);
+    if let Err(first_error) = process.Terminate() {
+        if let Some(logger) = logger.as_mut() {
+            let record = AuditEvent::new(AuditEventName::ProcessKillFailed)
+                .str("backend", "isolation_session")
+                .str(
+                    "identity",
+                    &wxc_common::policy_identity::redact_identity(identity),
+                )
+                .u64("pid", process.ProcessId().unwrap_or_default() as u64)
+                .str("kill_method", KillMethod::TerminateProcess.as_str())
+                .i64("error_code", first_error.code().0 as i64);
+            logger.log_audit_event(&record);
+        }
+
+        // A failed termination must not be reported as a completed process:
+        // retry once after a bounded wait, then surface the failure instead of
+        // allowing relay cleanup to wait indefinitely on an active process.
+        let _ = process.WaitForExit(1000);
+        exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+        if exit_code == STILL_ACTIVE {
+            if let Err(retry_error) = process.Terminate() {
+                return Err(lifecycle_err(format!(
+                    "failed to terminate isolation-session process: {first_error}; retry failed: {retry_error}"
+                )));
+            }
+            let _ = process.WaitForExit(1000);
+            exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+            if exit_code == STILL_ACTIVE {
+                return Err(lifecycle_err(
+                    "isolation-session process remained active after termination retry",
+                ));
+            }
+        }
+        return Ok(exit_code);
+    }
+    let _ = process.WaitForExit(5000);
     Ok(process.ExitCode().unwrap_or(-1))
 }
 

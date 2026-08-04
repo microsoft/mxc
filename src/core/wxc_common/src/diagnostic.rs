@@ -15,20 +15,45 @@ use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKE
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const ENV_CONSOLE: &str = "MXC_DIAG_CONSOLE";
+const ENV_PIPE_TOKEN: &str = "MXC_DIAG_PIPE_TOKEN";
 const PIPE_NAME_PREFIX: &str = r"\\.\pipe\mxc-diagnostics";
 
-/// Build the diagnostic pipe name for the current user: `\\.\pipe\mxc-diagnostics-{SID}`.
-///
-/// Falls back to the bare prefix if the SID cannot be determined.
+/// Build the per-user, per-session diagnostic pipe name.
 pub fn diagnostic_pipe_name() -> String {
-    match get_current_user_sid() {
-        Some(sid) => format!("{PIPE_NAME_PREFIX}-{sid}"),
-        None => PIPE_NAME_PREFIX.to_string(),
+    let suffix = diagnostic_pipe_token()
+        .map(|token| format!("-{token}"))
+        .unwrap_or_default();
+    match current_user_sid() {
+        Some(sid) => format!("{PIPE_NAME_PREFIX}-{sid}{suffix}"),
+        None => format!("{PIPE_NAME_PREFIX}{suffix}"),
     }
 }
 
+/// Return the caller-provided per-session pipe token when it has sufficient
+/// entropy for a pipe name.
+pub fn diagnostic_pipe_token() -> Option<String> {
+    let token = env::var(ENV_PIPE_TOKEN).ok()?;
+    if !is_valid_pipe_token(&token) {
+        return None;
+    }
+    Some(token)
+}
+
+fn is_valid_pipe_token(token: &str) -> bool {
+    token.len() >= 32
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        && token
+            .bytes()
+            .filter(|byte| *byte != b'-')
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            >= 4
+}
+
 /// Retrieve the SID string for the current process token's user.
-fn get_current_user_sid() -> Option<String> {
+pub fn current_user_sid() -> Option<String> {
     use crate::string_util::sid_to_string;
     use windows::Win32::Foundation::HANDLE;
 
@@ -99,7 +124,7 @@ impl DiagnosticConfig {
     /// `learningModeLogging` capability is automatically injected into the
     /// container policy so that access-check ETW events are captured.
     pub fn force_learning_mode() -> bool {
-        env_bool(ENV_CONSOLE).unwrap_or(false)
+        env_bool(ENV_CONSOLE).unwrap_or(false) && diagnostic_pipe_token().is_some()
     }
 }
 
@@ -132,6 +157,14 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
         redacted
             .script_code
             .push_str(&format!("... ({total_len} chars total)"));
+    }
+
+    // Never persist Entra credentials or account identifiers in diagnostics.
+    if let Some(isolation_session) = redacted.experimental.isolation_session.as_mut() {
+        if let Some(user) = isolation_session.user.as_mut() {
+            user.upn = "<redacted>".to_string();
+            user.wam_token = "<redacted>".to_string();
+        }
     }
 
     // Serialize the redacted request.
@@ -308,8 +341,34 @@ mod tests {
     }
 
     #[test]
+    fn redacted_request_hides_isolation_session_credentials() {
+        let mut request = ExecutionRequest::default();
+        request.experimental.isolation_session = Some(crate::models::IsolationSessionConfig {
+            user: Some(crate::models::IsolationSessionUser {
+                upn: "user@example.com".to_string(),
+                wam_token: "super-secret-bearer-token".to_string(),
+            }),
+            ..Default::default()
+        });
+
+        let json = redacted_request_json(&request);
+        assert!(!json.contains("user@example.com"));
+        assert!(!json.contains("super-secret-bearer-token"));
+        assert_eq!(json.matches("<redacted>").count(), 2);
+    }
+
+    #[test]
     fn env_bool_parses_correctly() {
         // env_bool on non-existent var returns None
         assert!(env_bool("MXC_TEST_NONEXISTENT_VAR_12345").is_none());
+    }
+
+    #[test]
+    fn pipe_tokens_require_length_and_safe_characters() {
+        assert!(is_valid_pipe_token("0123456789abcdef0123456789abcdef"));
+        assert!(is_valid_pipe_token("0123456789abcdef0123456789ab-cdef"));
+        assert!(!is_valid_pipe_token("0123456789abcdef"));
+        assert!(!is_valid_pipe_token("0123456789abcdef0123456789abcde!"));
+        assert!(!is_valid_pipe_token("--------------------------------"));
     }
 }

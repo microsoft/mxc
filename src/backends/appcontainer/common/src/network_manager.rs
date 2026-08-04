@@ -89,6 +89,38 @@ pub struct NetworkManager {
     proxy_coordinator: ProxyCoordinator,
 }
 
+/// What [`NetworkManager::stop_all`] actually released.
+///
+/// Previously the firewall-removal `Result` was discarded at the call site, so
+/// a partially-failed cleanup was indistinguishable from a clean one. These are
+/// diagnostic values only — teardown remains best-effort and non-fatal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkTeardown {
+    /// How many firewall rules this manager had created and attempted to
+    /// remove. Zero when no rules were installed or cleanup was skipped.
+    pub rules_removed: usize,
+    /// Whether every rule removal succeeded. `true` when there was nothing to
+    /// remove.
+    pub firewall_removal_ok: bool,
+    /// Whether an active proxy coordinator was stopped.
+    pub proxy_stopped: bool,
+}
+
+impl Default for NetworkTeardown {
+    /// "Nothing to remove, and that is fine."
+    ///
+    /// Written by hand because the derived default would set
+    /// `firewall_removal_ok: false`, which reads as a *failed* removal — the
+    /// opposite of what an empty teardown means.
+    fn default() -> Self {
+        Self {
+            rules_removed: 0,
+            firewall_removal_ok: true,
+            proxy_stopped: false,
+        }
+    }
+}
+
 /// Invariant context for creating firewall rules within a single
 /// `apply_firewall_rules` call: the firewall interface (valid only for the
 /// current COM apartment / thread) and the AppContainer principal the rules are
@@ -96,6 +128,23 @@ pub struct NetworkManager {
 struct RuleContext<'a> {
     fw_policy: &'a INetFwPolicy2,
     principal_id: &'a str,
+}
+
+/// The outcome of evaluating a request's network policy: the effective default
+/// policy, whether the caller asked for firewall-rule enforcement, and whether
+/// any rules will actually be installed.
+///
+/// The last two are **not** the same, and conflating them is a real bug: with
+/// `enforcementMode: firewall`, no host lists, and `defaultPolicy: allow`, the
+/// caller asked for firewall enforcement but there is nothing to install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkPolicyPlan {
+    /// Effective default policy for the rules that get installed.
+    pub default_policy: DefaultPolicy,
+    /// Whether `enforcementMode` selects firewall-rule enforcement at all.
+    pub firewall_mode_selected: bool,
+    /// Whether this policy actually produces firewall rules to install.
+    pub rules_will_be_installed: bool,
 }
 
 impl NetworkManager {
@@ -107,30 +156,62 @@ impl NetworkManager {
         }
     }
 
-    pub fn initialize_policy(
-        policy: &ContainerPolicy,
-        logger: &mut Logger,
-    ) -> (DefaultPolicy, bool) {
-        let use_firewall_rules = matches!(
+    /// Decide the effective default policy and whether firewall rules will be
+    /// installed for `policy` — the pure core of [`Self::initialize_policy`],
+    /// factored out so callers that only need the *decision* (e.g. audit
+    /// records) do not have to log an "Applying network firewall rules" line as
+    /// a side effect of asking.
+    pub fn describe_policy(policy: &ContainerPolicy) -> NetworkPolicyPlan {
+        let firewall_mode_selected = matches!(
             policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
         );
 
-        if use_firewall_rules
+        if firewall_mode_selected
             && (!policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty()
                 || policy.default_network_policy == NetworkPolicy::Block)
         {
-            logger.log_line("Applying network firewall rules...");
             let default_policy = if policy.default_network_policy == NetworkPolicy::Block {
                 DefaultPolicy::Block
             } else {
                 DefaultPolicy::Allow
             };
-            return (default_policy, true);
+            return NetworkPolicyPlan {
+                default_policy,
+                firewall_mode_selected,
+                rules_will_be_installed: true,
+            };
         }
 
-        (DefaultPolicy::Allow, use_firewall_rules)
+        NetworkPolicyPlan {
+            default_policy: DefaultPolicy::Allow,
+            firewall_mode_selected,
+            rules_will_be_installed: false,
+        }
+    }
+
+    pub fn initialize_policy(
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> (DefaultPolicy, bool) {
+        let plan = Self::describe_policy(policy);
+        // The operator-visible line fires only when rules will actually be
+        // created — not merely because `enforcementMode` asked for firewall
+        // enforcement.
+        if plan.rules_will_be_installed {
+            logger.log_line("Applying network firewall rules...");
+        }
+        (plan.default_policy, plan.firewall_mode_selected)
+    }
+
+    /// Number of firewall rules currently created by this manager.
+    ///
+    /// The *count* is deliberately what the audit record carries: rule names
+    /// embed the AppContainer principal id and a timestamp, which is
+    /// high-cardinality and semi-identifying.
+    pub fn rule_count(&self) -> usize {
+        self.created_rule_names.len()
     }
 
     pub fn apply_firewall_rules(
@@ -284,13 +365,36 @@ impl NetworkManager {
     }
 
     /// Stop all network resources: firewall rules, proxy policy, test proxy.
-    pub fn stop_all(&mut self, cleanup_policy: bool, logger: &mut Logger) {
+    ///
+    /// Returns what was actually released, so a caller can record an honest
+    /// teardown record instead of assuming success. Failures remain non-fatal —
+    /// this is a best-effort cleanup path and the return value is diagnostic.
+    pub fn stop_all(&mut self, cleanup_policy: bool, logger: &mut Logger) -> NetworkTeardown {
+        let rules_at_entry = self.created_rule_names.len();
+        let mut outcome = NetworkTeardown {
+            rules_removed: 0,
+            firewall_removal_ok: true,
+            proxy_stopped: false,
+        };
+
         if self.rules_applied() && cleanup_policy {
-            let _ = self.remove_firewall_rules(logger);
+            match self.remove_firewall_rules(logger) {
+                Ok(all_success) => {
+                    outcome.rules_removed = rules_at_entry;
+                    outcome.firewall_removal_ok = all_success;
+                }
+                Err(_) => {
+                    // `remove_firewall_rules` failed before it could clear the
+                    // list, so nothing was removed.
+                    outcome.firewall_removal_ok = false;
+                }
+            }
         }
         if self.proxy_coordinator.is_active() {
             self.proxy_coordinator.stop(logger);
+            outcome.proxy_stopped = true;
         }
+        outcome
     }
 
     pub fn remove_firewall_rules(&mut self, logger: &mut Logger) -> Result<bool, WxcError> {
@@ -509,6 +613,105 @@ mod tests {
         let (default_policy, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
         assert!(use_fw);
         assert_eq!(default_policy, DefaultPolicy::Block);
+    }
+
+    /// `describe_policy` is the pure core of `initialize_policy`; the audit
+    /// record calls it instead so asking the question does not also emit an
+    /// "Applying network firewall rules..." line as a side effect.
+    #[test]
+    fn describe_policy_matches_initialize_policy_but_is_side_effect_free() {
+        let cases = [
+            ContainerPolicy {
+                network_enforcement_mode: NetworkEnforcementMode::Firewall,
+                default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ContainerPolicy {
+                network_enforcement_mode: NetworkEnforcementMode::Capabilities,
+                default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ContainerPolicy {
+                network_enforcement_mode: NetworkEnforcementMode::Both,
+                default_network_policy: NetworkPolicy::Allow,
+                ..Default::default()
+            },
+            ContainerPolicy {
+                network_enforcement_mode: NetworkEnforcementMode::Firewall,
+                default_network_policy: NetworkPolicy::Allow,
+                ..Default::default()
+            },
+        ];
+        for policy in cases {
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            let (default_policy, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
+            let plan = NetworkManager::describe_policy(&policy);
+            assert_eq!(default_policy, plan.default_policy, "policy: {policy:?}");
+            assert_eq!(use_fw, plan.firewall_mode_selected, "policy: {policy:?}");
+            // The operator-visible line must track "rules will actually be
+            // installed", not "firewall mode was selected".
+            assert_eq!(
+                logger
+                    .get_buffer()
+                    .contains("Applying network firewall rules"),
+                plan.rules_will_be_installed,
+                "log line must track rule installation; policy: {policy:?}"
+            );
+        }
+    }
+
+    /// Regression guard for the split between "the caller asked for firewall
+    /// enforcement" and "rules will actually be installed". With
+    /// `enforcementMode: firewall`, no host lists, and `defaultPolicy: allow`
+    /// there is nothing to install, so `initialize_policy` must stay silent —
+    /// exactly as it did before `describe_policy` was extracted.
+    #[test]
+    fn firewall_mode_without_rules_installs_nothing_and_logs_nothing() {
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            default_network_policy: NetworkPolicy::Allow,
+            ..Default::default()
+        };
+        let plan = NetworkManager::describe_policy(&policy);
+        assert!(plan.firewall_mode_selected);
+        assert!(!plan.rules_will_be_installed);
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let (_, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
+        assert!(use_fw, "the caller did select firewall enforcement");
+        assert!(
+            !logger
+                .get_buffer()
+                .contains("Applying network firewall rules"),
+            "must not claim rules are being applied; buffer: {}",
+            logger.get_buffer()
+        );
+    }
+
+    /// `stop_all` on a manager that installed nothing must report a clean,
+    /// empty teardown — not a failure. The derived `Default` for
+    /// `NetworkTeardown` would get this backwards, which is why it is
+    /// hand-written.
+    #[test]
+    fn stop_all_with_nothing_installed_reports_a_clean_teardown() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut manager = NetworkManager::new();
+        let outcome = manager.stop_all(true, &mut logger);
+        assert_eq!(outcome, NetworkTeardown::default());
+        assert_eq!(outcome.rules_removed, 0);
+        assert!(outcome.firewall_removal_ok);
+        assert!(!outcome.proxy_stopped);
+    }
+
+    /// Skipping cleanup (`preservePolicy`) must not be reported as a failed
+    /// removal.
+    #[test]
+    fn stop_all_without_cleanup_reports_no_removal_failure() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut manager = NetworkManager::new();
+        let outcome = manager.stop_all(false, &mut logger);
+        assert!(outcome.firewall_removal_ok);
+        assert_eq!(outcome.rules_removed, 0);
     }
 
     #[test]

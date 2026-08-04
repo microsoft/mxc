@@ -9,7 +9,8 @@
 //! Usage:
 //!   mxc-diagnostic-console.exe
 //!
-//! Then run `wxc-exec.exe` with `MXC_DIAG_CONSOLE=1` (or registry key).
+//! Set the same high-entropy `MXC_DIAG_PIPE_TOKEN` for the console and
+//! `wxc-exec.exe`, then enable `MXC_DIAG_CONSOLE=1` (or the registry key).
 
 mod etw;
 
@@ -22,10 +23,12 @@ use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 use windows::Win32::Security::{
-    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
-    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_ELEVATION, TOKEN_QUERY,
+    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAG_FIRST_PIPE_INSTANCE;
 use windows::Win32::System::Pipes::{
@@ -182,6 +185,13 @@ fn main() {
     };
 
     // Compute the per-user pipe name (includes current user's SID).
+    if wxc_common::diagnostic::diagnostic_pipe_token().is_none() {
+        eprintln!(
+            "[error] Set MXC_DIAG_PIPE_TOKEN to a high-entropy token in the \
+             environment shared with wxc-exec before starting the diagnostic console."
+        );
+        std::process::exit(1);
+    }
     let pipe_name = wxc_common::diagnostic::diagnostic_pipe_name();
 
     // Enable ANSI escape codes on Windows console.
@@ -361,19 +371,23 @@ fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> 
     let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 
-    // Create a security descriptor with a NULL DACL (allows all access).
-    // This is required so that medium/low integrity clients (e.g. sandboxed processes)
-    // can connect to the pipe when the server is running elevated.
-    let mut sd = SECURITY_DESCRIPTOR::default();
-    let psd = PSECURITY_DESCRIPTOR(std::ptr::addr_of_mut!(sd).cast());
-    // SAFETY: `psd` points to a valid stack-allocated SECURITY_DESCRIPTOR;
-    // revision 1 is the only valid value. SetSecurityDescriptorDacl with None
-    // sets a NULL DACL (allow all).
+    let sid = wxc_common::diagnostic::current_user_sid()
+        .ok_or_else(|| "could not determine current user SID".to_string())?;
+    let sddl = format!("D:(A;;GA;;;{sid})S:(ML;;NW;;;LW)");
+    let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut psd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the SDDL buffer is null terminated and remains alive for the call.
     unsafe {
-        InitializeSecurityDescriptor(psd, 1)
-            .map_err(|e| format!("InitializeSecurityDescriptor: {e}"))?;
-        SetSecurityDescriptorDacl(psd, true, None, false)
-            .map_err(|e| format!("SetSecurityDescriptorDacl: {e}"))?;
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl_wide.as_ptr()),
+            SDDL_REVISION_1,
+            &mut psd,
+            None,
+        )
+        .map_err(|e| format!("ConvertStringSecurityDescriptorToSecurityDescriptorW: {e}"))?;
+    }
+    if psd.0.is_null() {
+        return Err("security descriptor conversion returned NULL".to_string());
     }
 
     let sa = SECURITY_ATTRIBUTES {
@@ -403,14 +417,29 @@ fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> 
         )
     };
 
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(format!(
+    let result = if handle == INVALID_HANDLE_VALUE {
+        Err(format!(
             "CreateNamedPipeW failed: {}",
             std::io::Error::last_os_error()
-        ));
+        ))
+    } else {
+        Ok(handle)
+    };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(psd.0)));
     }
 
-    Ok(handle)
+    result
+}
+
+fn sanitize_display_text(text: &str) -> String {
+    text.chars()
+        .flat_map(|ch| match ch {
+            '\t' | '\n' => Some(ch).into_iter().collect::<Vec<_>>(),
+            '\u{20}'..='\u{7e}' => vec![ch],
+            _ => format!("\\x{:02X}", ch as u32 & 0xff).chars().collect(),
+        })
+        .collect()
 }
 
 /// Get the client process ID from a connected pipe handle.
@@ -450,11 +479,14 @@ fn client_reader(pipe: HANDLE, pid: u32, tx: mpsc::Sender<DisplayEvent>) {
                         continue;
                     }
                     if let Some(msg) = parse_log_message(segment) {
-                        let _ = tx.send(DisplayEvent::Message { pid, text: msg });
+                        let _ = tx.send(DisplayEvent::Message {
+                            pid,
+                            text: sanitize_display_text(&msg),
+                        });
                     } else {
                         let _ = tx.send(DisplayEvent::Message {
                             pid,
-                            text: segment.to_string(),
+                            text: sanitize_display_text(segment),
                         });
                     }
                 }
@@ -465,7 +497,7 @@ fn client_reader(pipe: HANDLE, pid: u32, tx: mpsc::Sender<DisplayEvent>) {
                     let partial = String::from_utf8_lossy(&buf).to_string();
                     let _ = tx.send(DisplayEvent::Message {
                         pid,
-                        text: format!("{partial}... (truncated)"),
+                        text: sanitize_display_text(&format!("{partial}... (truncated)")),
                     });
                     continue;
                 }
@@ -492,9 +524,13 @@ fn client_reader(pipe: HANDLE, pid: u32, tx: mpsc::Sender<DisplayEvent>) {
 
 /// Parse a JSON log message envelope and extract the text.
 ///
-/// Expected format: `{"msg": "the log text"}`
+/// Expected formats are `{"msg": "the log text"}` and
+/// `{"kind":"audit","record":{...}}`.
 fn parse_log_message(json: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if v.get("kind").and_then(|k| k.as_str()) == Some("audit") {
+        return v.get("record").map(ToString::to_string);
+    }
     v.get("msg").and_then(|m| m.as_str()).map(|s| s.to_string())
 }
 

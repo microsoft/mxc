@@ -64,6 +64,10 @@ pub fn spawn_runner(
             "dry_run is not supported for streaming spawns",
         ));
     }
+    // Anchor the run to its policy identity before any backend is engaged, so
+    // the streaming surface produces the same `mxc.PolicyHash` record as the
+    // run-to-completion one.
+    crate::run::log_policy_hash(request, logger);
     match &request.containment {
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
