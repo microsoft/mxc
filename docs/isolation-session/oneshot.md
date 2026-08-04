@@ -112,7 +112,7 @@ interface.
 |---|---|
 | `src/Cargo.toml` | Add `isolation_session_bindings` to workspace members |
 | `src/core/wxc_common/Cargo.toml` | Add optional dependency on `isolation_session_bindings` |
-| `src/core/wxc_common/src/lib.rs` | Add `pub mod isolation_session_runner` (cfg-gated) |
+| `src/core/wxc_common/src/lib.rs` | Add the IsolationSession backend module (cfg-gated). *(The backend now lives in `src/backends/isolation_session/common/`.)* |
 | `src/core/wxc_common/src/models.rs` | Add `IsolationSession` to `ContainmentBackend`; add `IsolationSessionConfig` |
 | `src/core/wxc_common/src/config_parser.rs` | Parse `"isolation_session"` containment and the `experimental.isolation_session` section |
 | `src/core/wxc/Cargo.toml` | Add `isolation_session` Cargo feature |
@@ -130,6 +130,10 @@ interface.
         "cwd": "C:\\Windows",
         "env": ["MYVAR=hello"],
         "timeout": 30000
+    },
+    "network": {
+        "defaultPolicy": "allow",
+        "allowLocalNetwork": true
     },
     "experimental": {
         "isolation_session": {}
@@ -159,10 +163,11 @@ Activation requires `RoInitialize(RO_INIT_MULTITHREADED)` (handled in
 backends).
 
 The API surface includes the lifecycle methods plus
-`IsoSessionProcess` (the running-process handle). The runner
-uses a minimal subset of the process surface: stdout pipe, stderr
-pipe, exit-wait, and exit code. It does not use stdin, terminate,
-control signals, or interactive ConPTY mode.
+`IsoSessionProcess` (the running-process handle). The runner uses the
+process surface for stdio relay (stdout / stderr / stdin pipe handles),
+exit-wait and exit code, console resize, and the graceful-shutdown ladder
+(close stdin → send-ctrl-close → terminate). It sets the interactive-console
+flag when `wxc-exec`'s stdout is a TTY.
 
 ## Bindings Workflow
 
@@ -216,10 +221,62 @@ versions and stating that the bindings must be regenerated.
   `IsoSessionProcessOptions`).
 - `process.timeout` (forwarded to the OS-side per-process timeout
   enforcement).
-- `lifecycle.destroyOnExit` (mapped to the OS-side `LifetimePolicy`: `true` →
-  `CallerProcess`, `false` → `Indefinite`; matches how other backends
-  interpret this field).
 - Stdout / stderr capture and exit code propagation into `ScriptResponse`.
+
+**Not honored (refused, not silently dropped):**
+
+- `lifecycle.destroyOnExit: false` and `lifecycle.preservePolicy: true`. The
+  in-proc API exposes no session-lifetime knob, so the backend cannot vary
+  teardown: the one-shot path always stops the session and removes the agent
+  user before returning. `destroyOnExit: true` (the default) is therefore
+  accepted because it matches actual behavior; `false` is refused. There is no
+  filesystem or network policy to preserve (both are rejected outright), so
+  `preservePolicy: true` is refused as meaningless here.
+- `ui` (any value). The backend has no UI-restriction primitive — see the
+  cross-cutting policy honor matrix below.
+
+## Cross-cutting policy honor matrix (one-shot)
+
+The full one-shot column of the backend's honor matrix. The state-aware columns,
+the rationale for each disposition, and the error mapping live in
+[state-aware-rust.md](state-aware-rust.md).
+
+| Field | one-shot disposition |
+|---|---|
+| `process.commandLine` | **honored** (required) |
+| `process.cwd` / `process.env` / `process.timeout` | **honored** |
+| `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
+| `network` — canonical unrestricted acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** |
+| `network` — anything else, including absent (defaults to the unenforceable `block`) | rejected |
+| `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
+| `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
+| `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
+| `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
+| `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
+| `experimental.isolation_session.user` | rejected — Entra is state-aware-only |
+| `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only, and the one-shot mapping reads only the flat `user` |
+| `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
+
+Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
+typed policy error code: the envelope carries `error.code = "backend_error"` with
+the reason in the message, unlike the state-aware surface which emits
+`policy_validation`.
+
+**Why every supplied `ui` is refused.** The `ui` section states intent about the
+contained code's relationship to the *user's* environment, and was modelled on a
+process/job boundary where "the clipboard" and "the desktop" are the user's. An
+isolation session is a separate OS session, so the contained code keeps its UI
+capabilities but cannot reach the host's. That makes every posture untrue here —
+`disable` either denies capabilities the session grants or promises a GUI the
+user can never see; `clipboard` describes a relationship to a clipboard the
+sandbox cannot touch. Only `injection: false` is honest (`SendInput` returns
+`ERROR_ACCESS_DENIED`), and it cannot be supplied alone because the other fields
+materialize to defaults that are false. With nothing truthful to accept, there is
+no acknowledgment-style gate as there is for `network`. An omitted `ui` is
+accepted because absence is not a caller statement of intent — but note it
+applies no restriction, so the schema's default-deny reading does not hold here.
+The full field-by-field table is in
+[`state-aware-rust.md`](state-aware-rust.md).
 
 **Deferred to follow-up work:**
 
@@ -229,11 +286,9 @@ versions and stating that the bindings must be regenerated.
   precisely to make this migration straightforward later.
 - **TypeScript SDK exposure.** Lifting `experimental.isolation_session`
   into `SandboxSpawnOptions` so the SDK can spawn isolation-session
-  workloads programmatically. Today the backend works only via JSON.
-- **Interactive ConPTY** (no plans currently). The OS-side
-  `InteractiveConsole` flag, console resize, and control signals
-  (CtrlC / CtrlBreak / CtrlClose) are not used by fire-and-forget script
-  execution.
+  workloads programmatically **on the one-shot path**. Today the one-shot
+  backend is reachable only via JSON config (`spawnSandboxFromConfig` or
+  `wxc-exec` directly); the state-aware lifecycle *is* SDK-exposed.
 
 ## Test Plan
 
@@ -243,8 +298,8 @@ versions and stating that the bindings must be regenerated.
 |---|---|---|
 | Config parsing | `config_parser.rs` | `"isolation_session"` containment value and `experimental.isolation_session` section parsing |
 | Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
-| Option building | `isolation_session_runner.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
-| Feature unavailable | `isolation_session_runner.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
+| Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
+| Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
 These backend-specific tests run alongside the existing workspace tests. The
 feature-unavailable test is what runs in CI, since CI machines do not have a
@@ -291,11 +346,10 @@ The following were observed during VM testing and are accepted for v0.1.
   (qualitatively, not quantitatively measured). Documented for awareness;
   if it regresses materially, the runner can be reshaped to return the
   `ScriptResponse` ahead of teardown.
-- **`DeprovisionAgentUserAsync` returning status 1.** Initially observed as
-  a stderr warning on an earlier OS build. No longer surfacing on the
-  current OS build. Cleanup proceeds via the OS-side process-exit callback
-  when `LifetimePolicy: CallerProcess` is used, so the warning was
-  non-functional even when present.
+- **Agent-user deprovision returning a non-success status.** Initially observed
+  as a stderr warning on an earlier OS build. No longer surfacing on the
+  current OS build. The one-shot path stops the session and removes the agent
+  user before returning, so the warning was non-functional even when present.
 - **Intermittent `IdentityNotFound` (status 4) immediately after VM boot.**
   Observed once, resolved by a VM restart. Cause unconfirmed; suspected to
   be an Isolation Session service initialization race. Re-runs on a settled VM
@@ -310,8 +364,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
 | One-shot lifecycle is heavy (full provision → start per call) | Accepted for v0.1; experimental flag indicates rough edges. Stateful API is the planned mitigation |
-| `ProvisionAgentUserAsync` re-provision hang under `Indefinite` lifetime | Manager calls `GetAgentUser` first and skips a redundant provision when the user already exists |
-| `DeprovisionAgentUserAsync` failure under `Indefinite` lifetime | Manager re-provisions with `CallerProcess` lifetime as part of teardown so the OS-side process-exit callback handles cleanup naturally |
+| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user before returning |
 
 ## Prerequisites
 
@@ -348,6 +401,10 @@ wxc-exec.exe --experimental hello.json
   "process": {
     "commandLine": "whoami",
     "timeout": 30000
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
   },
   "experimental": {
     "isolation_session": {}
