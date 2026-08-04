@@ -20,6 +20,7 @@ import path from 'node:path';
 import os from 'os';
 import {
   execInSandboxAsync,
+  IsolationSessionUserConfig,
   MxcError,
   provisionSandbox,
   startSandbox,
@@ -27,9 +28,14 @@ import {
 } from '@microsoft/mxc-sdk';
 import { probeStateAwareRuntime, safeDeprovision, sandboxSkipReason } from './test-helpers.js';
 
-const skipReason = os.platform() !== 'win32'
-  ? 'IsolationSession is Windows-only'
-  : sandboxSkipReason ?? await probeStateAwareRuntime('isolation_session');
+const platformSkipReason =
+  os.platform() !== 'win32' ? 'IsolationSession is Windows-only' : undefined;
+
+// Host-dependent gate: adds the runtime probe (and the CI opt-out) on top of
+// the platform check. `??` short-circuits, so the probe is never spawned on a
+// non-Windows host.
+const skipReason =
+  platformSkipReason ?? sandboxSkipReason ?? (await probeStateAwareRuntime('isolation_session'));
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
@@ -158,13 +164,26 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       await safeDeprovision(sandboxId);
     }
   });
+});
 
-  // --- Runtime backend guard for the network acknowledgment ----------------
+// Policy rejections are raised by MXC's own validation, before any
+// IsolationSession API call: the dispatcher runs `validate_provision` ahead of
+// `provision`, and `IsolationSessionRunner` is a stateless marker whose
+// construction touches no WinRT. So these need a `wxc-exec.exe` built with
+// `--features isolation_session` (which CI builds) but *not* a host that can
+// actually run isolation sessions.
+//
+// Keeping them out of the probe-gated suite above is deliberate. That suite is
+// additionally gated on `sandboxSkipReason`, and both CI systems set
+// `MXC_SKIP_OS_BUILD_DEPENDENT_TESTS=1`, so anything inside it never runs in
+// CI. These assertions cover the full chain this feature depends on — Rust
+// envelope serialisation → dispatcher → SDK parse → typed `MxcError` — which
+// is exactly the path where drift would otherwise go unnoticed.
+describe('IsolationSession state-aware policy validation', { skip: platformSkipReason }, () => {
   // The TypeScript type makes `network` required (and pins its value) at
   // provision, but a plain-JS caller can bypass that. These assert the backend
   // itself refuses a missing or non-canonical network acknowledgment — the
   // "respect or refuse" guarantee must not rest on the compile-time type alone.
-  // Validation runs before the OS service is touched, so no cleanup is needed.
   type UntypedProvision = (
     containment: 'isolation_session',
     config: unknown,
@@ -198,6 +217,37 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
         { experimental: true },
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  // Full chain, negative case. A malformed Entra UPN is rejected by MXC's
+  // own validation, before any IsolationSession API call is made. The
+  // structured failure fields describe an API operation that was in flight;
+  // none was, so they must reach the caller absent rather than empty —
+  // `nativeCode` and `remediation` never appear without `operation`.
+  //
+  // The canonical network acknowledgment is supplied so the only thing wrong
+  // with this request is the UPN; that keeps the assertion on the message
+  // independent of the order in which the backend runs its validations.
+  it('a policy rejection reaches the SDK with no structured failure fields', async () => {
+    await assert.rejects(
+      () => provisionSandbox(
+        'isolation_session',
+        {
+          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          user: new IsolationSessionUserConfig('missing-the-at-sign', 'token'),
+        },
+        { experimental: true },
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof MxcError, `expected MxcError, got ${String(err)}`);
+        assert.strictEqual(err.code, 'policy_validation');
+        assert.match(err.message, /upn/i, `expected the message to name upn: ${err.message}`);
+        assert.strictEqual(err.operation, undefined, 'operation must be absent');
+        assert.strictEqual(err.nativeCode, undefined, 'nativeCode must be absent');
+        assert.strictEqual(err.remediation, undefined, 'remediation must be absent');
+        return true;
+      },
     );
   });
 });

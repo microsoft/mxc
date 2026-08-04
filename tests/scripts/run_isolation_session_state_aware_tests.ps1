@@ -625,6 +625,11 @@ try {
     # `MxcError::StaleId` (wire `error.code = "stale_id"`), proving the
     # Rust-layer ERROR_NOT_FOUND HRESULT detection is wired through the
     # backend impl all the way to the wire envelope.
+    #
+    # This is also the one place the structured failure fields are asserted
+    # end-to-end against the live API: the OS-side mapping of "agent user not
+    # provisioned" to HRESULT_FROM_WIN32(ERROR_NOT_FOUND) is a documented
+    # cross-repo contract, so `nativeCode` has a stable expected value here.
     if ($deprovisionedOk) {
         Run-StateAwareTest "stale_id (stop on previously-deprovisioned sandbox)" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:sandboxId -Experimental
@@ -633,6 +638,29 @@ try {
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'stale_id') "error.code is 'stale_id' (got '$code')"
+
+            # Structured failure fields: an API failure names the operation
+            # that failed and carries the underlying HRESULT.
+            #
+            # Pinning the exact operation string is deliberate here: this
+            # verifies MXC's own mapping (that the right `op::` constant
+            # reaches the wire), so it is expected to move together with that
+            # constant. Consumers should not pin these values -- they mirror
+            # the projected WinRT names, which MXC does not own.
+            $operation = if ($envObj) { [string]$envObj.error.operation } else { '' }
+            Assert-True ($operation -eq 'IsoSessionOps.StopSessionAsync') `
+                "error.operation is 'IsoSessionOps.StopSessionAsync' (got '$operation')"
+            $nativeCode = if ($envObj) { [string]$envObj.error.nativeCode } else { '' }
+            Assert-True ($nativeCode -eq '0x80070490') `
+                "error.nativeCode is '0x80070490' (got '$nativeCode')"
+
+            # `message` is the bare API message -- the operation and HRESULT
+            # live in their own fields and must not be concatenated into it.
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True (-not $msg.Contains('0x80070490')) `
+                "error.message does not repeat the HRESULT (got '$msg')"
+            Assert-True (-not $msg.Contains('IsoSessionOps.')) `
+                "error.message does not repeat the operation (got '$msg')"
         } | Out-Null
     }
 
@@ -670,6 +698,16 @@ Run-StateAwareTest "filesystem: provision rejected" {
     Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+
+    # MXC rejects this before any API call is made, so the structured
+    # failure fields must be absent entirely -- they describe an API
+    # operation that was in flight, and none was.
+    $hasOperation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['operation'] } else { $true }
+    Assert-True (-not $hasOperation) "error.operation is absent on an MXC-side rejection"
+    $hasNativeCode = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['nativeCode'] } else { $true }
+    Assert-True (-not $hasNativeCode) "error.nativeCode is absent on an MXC-side rejection"
+    $hasRemediation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['remediation'] } else { $true }
+    Assert-True (-not $hasRemediation) "error.remediation is absent on an MXC-side rejection"
 } | Out-Null
 
 
