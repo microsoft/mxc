@@ -17,6 +17,9 @@
 //! - RAII guard types ([`WslcSessionGuard`], [`WslcContainerGuard`],
 //!   [`WslcProcessGuard`]) that release their handle on drop.
 //! - [`check_hresult`] and the [`S_OK`] sentinel.
+//! - [`WslcSdk::shared`] — the process-wide, never-unloaded SDK instance.
+//! - [`ComApartment`] and [`is_available`] — per-call COM apartment handling
+//!   and the host-capability probe behind `platform_support()`.
 
 pub use crate::wslcsdk_sys::*;
 
@@ -208,6 +211,119 @@ impl WslcSdk {
     }
 }
 
+/// The process-wide loaded SDK. Deliberately never dropped — see [`WslcSdk::shared`].
+static SHARED_SDK: std::sync::OnceLock<WslcSdk> = std::sync::OnceLock::new();
+
+impl WslcSdk {
+    /// The process-wide `wslcsdk.dll`: loaded and symbol-checked once, then
+    /// reused, and **never unloaded**.
+    ///
+    /// Unloading is what makes this a safety property rather than a mere
+    /// optimization. The SDK runs its own threads and delivers stdout/stderr
+    /// and exit callbacks from them; the only signal that it has stopped is the
+    /// exit callback, which teardown waits for but cannot force. Dropping the
+    /// library on a path where that wait timed out would `FreeLibrary` code an
+    /// SDK thread is still executing. Holding it in a `'static` removes that
+    /// window entirely, and also removes any drop-order significance from the
+    /// handle types that borrow it.
+    ///
+    /// If two threads race here, the loser's instance is dropped; the module
+    /// stays loaded because `LoadLibrary` is refcounted and the winner still
+    /// holds a reference.
+    pub fn shared() -> Result<&'static WslcSdk, String> {
+        if let Some(sdk) = SHARED_SDK.get() {
+            return Ok(sdk);
+        }
+        let sdk = Self::load()?;
+        Ok(SHARED_SDK.get_or_init(|| sdk))
+    }
+}
+
+/// `RPC_E_CHANGED_MODE`: `CoInitializeEx` returns this when COM is already
+/// initialized on the calling thread with a *different* apartment model. The
+/// existing initialization is reused and must **not** be balanced by our own
+/// `CoUninitialize`.
+const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
+
+/// RAII guard joining the multithreaded apartment on the **current** thread for
+/// the duration of a batch of WSLC SDK calls.
+///
+/// The SDK is entered under `COINIT_MULTITHREADED` (see
+/// `WSLContainerRunner::init_and_load_sdk`), but `CoInitializeEx` is per-thread,
+/// and the streaming handle is `Send` — so `wait`/`kill`/`Drop` can call the SDK
+/// from a thread that never initialized COM. Every such entry point takes one of
+/// these first, mirroring `appcontainer_common`'s `ComApartment`, so the calling
+/// thread always has an apartment while the SDK is on the stack.
+pub(crate) struct ComApartment {
+    /// Whether *this* guard performed the initialization it must balance with
+    /// `CoUninitialize`. `false` when the thread was already in a different
+    /// apartment model (`RPC_E_CHANGED_MODE`), which we reuse but do not own.
+    owns_init: bool,
+}
+
+impl ComApartment {
+    /// Join (or initialize) the multithreaded apartment for the current thread.
+    ///
+    /// `S_OK`/`S_FALSE` are both initializations this guard balances;
+    /// `RPC_E_CHANGED_MODE` reuses the thread's existing apartment without
+    /// taking ownership of its teardown. Every other `HRESULT` is a genuine
+    /// failure to establish *any* apartment — reported as an error rather than
+    /// swallowed, since the caller's soundness argument for using the SDK from
+    /// this thread depends on the apartment actually existing.
+    pub(crate) fn enter() -> Result<Self, String> {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        // SAFETY: `CoInitializeEx` is always safe to call; the matching
+        // `CoUninitialize` runs in `Drop`, on this same thread, when we own it.
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_ok() {
+            Ok(Self { owns_init: true })
+        } else if hr.0 as u32 == RPC_E_CHANGED_MODE {
+            Ok(Self { owns_init: false })
+        } else {
+            Err(format!(
+                "CoInitializeEx(COINIT_MULTITHREADED) failed: 0x{:08X}",
+                hr.0 as u32
+            ))
+        }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.owns_init {
+            // SAFETY: balances the `CoInitializeEx` in `enter` on the same thread.
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
+/// Whether this host can run the WSLC backend: `wslcsdk.dll` loads next to the
+/// running executable and the runtime reports no missing components (WSL2 and
+/// the WSLC runtime installed).
+///
+/// Used for host capability reporting. A `false` here is exactly the condition
+/// under which the runner's own preflight would fail.
+pub fn is_available() -> bool {
+    // Without an apartment the probe can't be trusted, so fail closed rather
+    // than advertise a backend we may not be able to drive.
+    let Ok(_com) = ComApartment::enter() else {
+        return false;
+    };
+    probe_components()
+}
+
+/// Load the SDK and ask it whether any prerequisite component is missing.
+fn probe_components() -> bool {
+    let Ok(sdk) = WslcSdk::shared() else {
+        return false;
+    };
+    let mut missing = WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE;
+    // SAFETY: `sdk` holds valid function pointers for the life of the process,
+    // and `missing` is a valid out-param for the call.
+    let hr = unsafe { sdk.WslcGetMissingComponents(&mut missing) };
+    hr == S_OK && !missing.any_missing()
+}
+
 // ---------------------------------------------------------------------------
 // RAII Guard types
 // ---------------------------------------------------------------------------
@@ -245,14 +361,26 @@ impl WslcSessionGuard {
 
 impl Drop for WslcSessionGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe {
-                eprintln!(
-                    "[WSLC][debug] WslcSessionGuard dropped -- terminating and releasing session"
-                );
-                let _ = (self.terminate_fn)(self.handle);
-                (self.release_fn)(self.handle);
-            }
+        if self.handle.is_null() {
+            return;
+        }
+        // Joins the MTA for the release, like every other SDK entry point:
+        // these guards hang off a `Send` handle, so they can drop on a thread
+        // that never entered the apartment (a `spawn_blocking` pool, say).
+        //
+        // If no apartment can be established, the handle is deliberately
+        // **leaked**: calling into the SDK apartment-less is the one thing the
+        // `Send` soundness argument (and #721) exists to prevent, and a leaked
+        // in-process handle is the strictly safer of the two failures. There is
+        // no error channel in `Drop` to report it through either way.
+        let Ok(_com) = ComApartment::enter() else {
+            return;
+        };
+        // SAFETY: the handle is non-null and owned by this guard, so it is
+        // terminated and released exactly once.
+        unsafe {
+            let _ = (self.terminate_fn)(self.handle);
+            (self.release_fn)(self.handle);
         }
     }
 }
@@ -281,11 +409,18 @@ impl WslcContainerGuard {
 
 impl Drop for WslcContainerGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe {
-                eprintln!("[WSLC][debug] WslcContainerGuard dropped -- releasing container");
-                (self.release_fn)(self.handle);
-            }
+        if self.handle.is_null() {
+            return;
+        }
+        // Joins the MTA for the release, and leaks the handle rather than
+        // calling the SDK without one — see `WslcSessionGuard`'s `Drop`.
+        let Ok(_com) = ComApartment::enter() else {
+            return;
+        };
+        // SAFETY: the handle is non-null and owned by this guard, so it is
+        // released exactly once.
+        unsafe {
+            (self.release_fn)(self.handle);
         }
     }
 }
@@ -314,11 +449,18 @@ impl WslcProcessGuard {
 
 impl Drop for WslcProcessGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe {
-                eprintln!("[WSLC][debug] WslcProcessGuard dropped -- releasing process");
-                (self.release_fn)(self.handle);
-            }
+        if self.handle.is_null() {
+            return;
+        }
+        // Joins the MTA for the release, and leaks the handle rather than
+        // calling the SDK without one — see `WslcSessionGuard`'s `Drop`.
+        let Ok(_com) = ComApartment::enter() else {
+            return;
+        };
+        // SAFETY: the handle is non-null and owned by this guard, so it is
+        // released exactly once.
+        unsafe {
+            (self.release_fn)(self.handle);
         }
     }
 }
