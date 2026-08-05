@@ -17,7 +17,7 @@
 //! [`run_dism`] and [`sandbox_exe_exists`] touch the host.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -66,6 +66,10 @@ fn decide(dism: Option<String>, exe_exists: impl FnOnce() -> bool) -> bool {
 /// `Disabled with Payload Removed`, ...) never uses `Enabled` as a prefix of
 /// another state, so exact-value matching yields the same verdict for every
 /// real DISM output while rejecting an accidental `Enabled…` substring.
+///
+/// [`run_dism`] passes DISM's `/English` global option, so the `State` /
+/// `Enabled` tokens parsed here are not localized on non-English Windows
+/// installations.
 fn dism_reports_enabled(output: &str) -> bool {
     output.lines().any(|line| {
         line.split_once(':').is_some_and(|(key, value)| {
@@ -74,30 +78,80 @@ fn dism_reports_enabled(output: &str) -> bool {
     })
 }
 
-/// Resolve the full path to `dism.exe` under `%SystemRoot%\System32`. Invoking
-/// the absolute path (rather than the bare `dism` name) avoids resolving a
+/// Absolute path to `dism.exe` under the Windows system directory. Invoking the
+/// absolute path (rather than the bare `dism` name) avoids resolving a
 /// same-named binary planted earlier on `PATH` — a hardening measure that
 /// matters for a sandboxing product's own capability probe.
 fn dism_path() -> PathBuf {
-    system_root().join("System32").join("dism.exe")
+    system_directory().join("dism.exe")
 }
 
-/// `%SystemRoot%`, defaulting to `C:\Windows` when the variable is unset.
-fn system_root() -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+/// Absolute path to the Windows **system directory** (e.g.
+/// `C:\Windows\System32`), resolved via `GetSystemDirectoryW` and cached on
+/// first use.
+///
+/// The kernel publishes this value at process creation and the environment
+/// block cannot override it, so it is safe even when an unelevated parent set
+/// `SystemRoot` to an attacker-controlled directory (UAC inherits the parent's
+/// environment verbatim). Reading `%SystemRoot%` here would let a standard user
+/// point this probe — and the `dism.exe` it launches — at a planted binary. See
+/// `src/host/plm/src/wpr_path.rs` for the same requirement and its full
+/// rationale.
+///
+/// Falls back to the well-known `C:\Windows\System32` literal only if
+/// `GetSystemDirectoryW` fails outright (it does not on a real Windows install);
+/// that fallback is a compile-time constant, not env-derived, so it preserves
+/// the security property.
+fn system_directory() -> &'static Path {
+    static SYSTEM_DIR: OnceLock<PathBuf> = OnceLock::new();
+    SYSTEM_DIR
+        .get_or_init(|| {
+            resolve_system_directory().unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32"))
+        })
+        .as_path()
 }
 
-/// Run `dism /online /get-featureinfo /featurename:Containers-DisposableClientVM`
-/// and return its stdout when it exits successfully within [`DISM_TIMEOUT`], or
-/// `None` on any spawn failure, non-zero exit, or timeout. DISM against
-/// `/online` typically requires elevation, so a non-elevated caller lands in the
-/// `None` (fallback) branch. The timeout guards against a wedged DISM hanging
-/// the probe indefinitely, matching the TypeScript port's 10s `execSync` limit.
+/// Resolve the system directory via `GetSystemDirectoryW`, growing the buffer
+/// once if it is reported too small. Returns `None` only on an outright Win32
+/// failure (return value 0), which does not happen on a real Windows install.
+fn resolve_system_directory() -> Option<PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buf = vec![0u16; 260];
+    // SAFETY: `buf` is valid and owned for the duration of the call; we pass its
+    // true length and read only the returned prefix.
+    let mut n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
+    if n == 0 {
+        return None;
+    }
+    // On success `n` excludes the terminating NUL and is strictly less than the
+    // buffer size; if `n` >= buffer size the buffer was too small and `n` is the
+    // required size including the NUL — grow and retry once.
+    if n as usize >= buf.len() {
+        buf = vec![0u16; n as usize];
+        n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
+        if n == 0 || n as usize >= buf.len() {
+            return None;
+        }
+    }
+    Some(PathBuf::from(wxc_common::string_util::from_wide(
+        &buf[..n as usize],
+    )))
+}
+
+/// Run `dism /English /online /get-featureinfo`
+/// `/featurename:Containers-DisposableClientVM` and return its stdout when it
+/// exits successfully within [`DISM_TIMEOUT`], or `None` on any spawn failure,
+/// non-zero exit, or timeout. DISM against `/online` typically requires
+/// elevation, so a non-elevated caller lands in the `None` (fallback) branch.
+/// The timeout guards against a wedged DISM hanging the probe indefinitely,
+/// matching the TypeScript port's 10s `execSync` limit. The `/English` global
+/// option forces the `State : Enabled` tokens to their invariant English form so
+/// [`dism_reports_enabled`] parses correctly on localized Windows.
 fn run_dism() -> Option<String> {
     let mut child = Command::new(dism_path())
         .args([
+            "/English",
             "/online",
             "/get-featureinfo",
             "/featurename:Containers-DisposableClientVM",
@@ -135,14 +189,12 @@ fn run_dism() -> Option<String> {
     }
 }
 
-/// Whether `WindowsSandbox.exe` exists under `%SystemRoot%\System32`. Windows
-/// installs it only when the `Containers-DisposableClientVM` feature is enabled,
-/// and the path is readable without elevation.
+/// Whether `WindowsSandbox.exe` exists under the Windows system directory.
+/// Windows installs it only when the `Containers-DisposableClientVM` feature is
+/// enabled, and the path is readable without elevation. Uses the same
+/// env-spoof-proof [`system_directory`] resolution as [`dism_path`].
 fn sandbox_exe_exists() -> bool {
-    system_root()
-        .join("System32")
-        .join("WindowsSandbox.exe")
-        .exists()
+    system_directory().join("WindowsSandbox.exe").exists()
 }
 
 #[cfg(test)]

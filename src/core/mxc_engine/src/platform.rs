@@ -20,8 +20,8 @@ pub struct PlatformSupport {
     pub is_supported: bool,
     /// Why the platform is unsupported, when `is_supported` is false.
     pub reason: Option<String>,
-    /// Containment backends the current host can run, by wire name
-    /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"lxc"`, `"processcontainer"`,
+    /// Containment backends detected as runnable on the current host, by wire
+    /// name (e.g. `"seatbelt"`, `"bubblewrap"`, `"lxc"`, `"processcontainer"`,
     /// `"windows_sandbox"`).
     ///
     /// This is a **host-capability** signal — the backends the host can run —
@@ -29,17 +29,28 @@ pub struct PlatformSupport {
     /// reports `lxc` (a separate `lxc-exec` binary) and `windows_sandbox` when
     /// the host supports them, even though `mxc-sdk`'s own run/stream paths do
     /// not drive those backends.
+    ///
+    /// It is the **currently detected** subset, not an exhaustive capability
+    /// list: backends whose Rust host-detector is not yet implemented (notably
+    /// `isolation_session`) are omitted even when the host could actually run
+    /// them. Treat a backend's absence as "not affirmed here", **not** as proof
+    /// it cannot run.
     pub available_methods: Vec<String>,
 }
 
 /// Detect MXC support on the current host.
 ///
-/// Reports every containment backend the current host can run — a
-/// host-capability signal, not the narrower "backends `mxc-sdk` can launch"
+/// Reports the containment backends currently detected as runnable on the host
+/// — a host-capability signal, not the narrower "backends `mxc-sdk` can launch"
 /// subset. On Linux `lxc` is included when `lxc-ls` is runnable (alongside
 /// `bubblewrap`); on Windows `windows_sandbox` is included when its optional
 /// feature is enabled (alongside `processcontainer`). Backend names are the
 /// `wxc_common::wire::Containment` wire names.
+///
+/// The list is the **currently detected** subset, not an exhaustive capability
+/// list: backends without a Rust host-detector yet (notably `isolation_session`)
+/// are omitted even when the host could run them, so a backend's absence means
+/// "not affirmed here", not "cannot run".
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
