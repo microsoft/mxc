@@ -80,7 +80,7 @@ static PROCESS_CORRELATION_VECTOR: Mutex<Option<String>> = Mutex::new(None);
 /// process. The best-effort out-of-band paths (panic hook, cancellation
 /// handler) can race the main thread's normal completion emit; this guard makes
 /// emission exactly-once so a single dispatch never yields duplicate
-/// `MXC.Execution` records.
+/// `Execution` records.
 static HAS_EMITTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
@@ -232,8 +232,8 @@ fn classify_failure(phase: &FailurePhase) -> FailureReason {
 /// down. No-op when `active` is `false`.
 ///
 /// This is the single shared emit path for the `wxc` and `lxc` executors:
-/// it records an `MXC.Execution` event and, for failures that carry an error
-/// message, an `MXC.Error` event (category + exit code only — never the
+/// it records an `Execution` event and, for failures that carry an error
+/// message, an `Error` event (category + exit code only — never the
 /// message text), then calls [`shutdown`].
 pub fn emit_completion(
     active: bool,
@@ -290,8 +290,8 @@ pub fn emit_completion(
 ///
 /// One-shot executors validate configuration and select a backend before
 /// running; failures there call `process::exit` directly and would otherwise
-/// bypass [`emit_completion`] entirely. This records an `MXC.Execution` event
-/// (exit code 1, `failure` outcome) plus an `MXC.Error` event carrying the
+/// bypass [`emit_completion`] entirely. This records an `Execution` event
+/// (exit code 1, `failure` outcome) plus an `Error` event carrying the
 /// bounded `reason` category and exit code, so config/policy/init failures are
 /// observable. `duration_ms` is reported as `0` because no execution occurred.
 pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
@@ -443,7 +443,7 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Build the `MXC.Execution` event for an out-of-band crash/cancellation. Pure
+/// Build the `Execution` event for an out-of-band crash/cancellation. Pure
 /// (no ETW I/O) so the exit-code/reason/attribution mapping can be unit-tested.
 fn crash_event<'a>(
     ctx: TelemetryContext<'a>,
@@ -462,7 +462,7 @@ fn crash_event<'a>(
 }
 
 /// The pair of events an out-of-band crash/cancellation emits: one failure
-/// `MXC.Execution` and one `MXC.Error`, both attributed to the same backend,
+/// `Execution` and one `Error`, both attributed to the same backend,
 /// phase, exit code, and reason.
 struct CrashTelemetry<'a> {
     execution: ExecutionEvent<'a>,
@@ -500,7 +500,7 @@ fn emit_crash(ctx: TelemetryContext<'_>, exit_code: i32, reason: FailureReason) 
 ///
 /// Guarded by [`mxc_telemetry::is_active`], so it is a cheap no-op when
 /// telemetry is disabled or the provider is already shut down. It records a
-/// failure `MXC.Execution` and an `MXC.Error` categorised as
+/// failure `Execution` and an `Error` categorised as
 /// [`FailureReason::InternalError`], attributed to the process backend stashed
 /// by [`set_process_context`] and the phase stashed by [`set_process_phase`].
 ///
@@ -529,7 +529,7 @@ pub fn emit_panic() {
 ///
 /// Guarded by [`mxc_telemetry::is_active`], so it is a cheap no-op when
 /// telemetry is disabled or already shut down. It records a failure
-/// `MXC.Execution` and an `MXC.Error` categorised as [`FailureReason::Cancelled`],
+/// `Execution` and an `Error` categorised as [`FailureReason::Cancelled`],
 /// attributed to the process backend stashed by [`set_process_context`] and the
 /// phase stashed by [`set_process_phase`].
 ///
@@ -573,7 +573,7 @@ fn classify_mxc_error(err: &MxcError) -> FailureReason {
 }
 
 /// The telemetry a completed state-aware dispatch should emit: one
-/// `MXC.Execution`, plus an optional `MXC.Error` category when the dispatch was
+/// `Execution`, plus an optional `Error` category when the dispatch was
 /// an MXC infrastructure failure. Pure (no ETW I/O) so the outcome→event mapping
 /// can be unit-tested deterministically without an active provider.
 struct StateAwareEvents<'a> {
@@ -611,7 +611,7 @@ fn plan_state_aware<'a>(
                     duration_ms,
                     // A non-zero guest exit is a faithfully propagated sandbox
                     // exit code, not an MXC infrastructure error — leave the
-                    // reason unset and emit no MXC.Error (mirrors one-shot
+                    // reason unset and emit no Error (mirrors one-shot
                     // emit_completion).
                     failure_reason: None,
                     phase: ctx.phase,
@@ -650,10 +650,10 @@ fn plan_state_aware<'a>(
 /// This is the state-aware counterpart to [`emit_completion`]. Outcome mapping:
 /// - [`DispatchOutcome::Envelope`] (non-exec phases and exec dry-run) — success,
 ///   exit code 0.
-/// - [`DispatchOutcome::ExecCompleted`] — mirrors one-shot: an `MXC.Execution`
+/// - [`DispatchOutcome::ExecCompleted`] — mirrors one-shot: an `Execution`
 ///   with the sandbox exit code. A clean non-zero *sandbox* exit is not an MXC
-///   failure, so no `MXC.Error` is emitted.
-/// - `Err(MxcError)` — an `MXC.Execution` failure plus an `MXC.Error` carrying
+///   failure, so no `Error` is emitted.
+/// - `Err(MxcError)` — an `Execution` failure plus an `Error` carrying
 ///   the [`classify_mxc_error`] category.
 ///
 /// Terminal path (`run_state_aware_main` exits immediately after), so it calls
@@ -916,7 +916,7 @@ mod tests {
     fn emit_panic_active_captures_execution_and_error() {
         // Drive the real emit glue (globals read → active guard → paired write)
         // with the provider forced active and the capture sink installed, then
-        // assert the exact MXC.Execution + MXC.Error records a panic produces.
+        // assert the exact Execution + Error records a panic produces.
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
@@ -928,7 +928,7 @@ mod tests {
         emit_panic();
 
         let execs = events::test_sink::take_executions();
-        assert_eq!(execs.len(), 1, "panic emits exactly one MXC.Execution");
+        assert_eq!(execs.len(), 1, "panic emits exactly one Execution");
         let exec = &execs[0];
         assert_eq!(exec.backend, "isolation_session");
         assert_eq!(exec.exit_code, PANIC_EXIT_CODE);
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(exec.correlation_vector, "iso:wxc-abcd");
 
         let errors = events::test_sink::take_errors();
-        assert_eq!(errors.len(), 1, "panic emits exactly one MXC.Error");
+        assert_eq!(errors.len(), 1, "panic emits exactly one Error");
         let error = &errors[0];
         assert_eq!(error.backend, "isolation_session");
         assert_eq!(error.error_type, FailureReason::InternalError);
@@ -998,12 +998,12 @@ mod tests {
         assert_eq!(
             events::test_sink::take_executions().len(),
             1,
-            "second emit must not add an MXC.Execution"
+            "second emit must not add an Execution"
         );
         assert_eq!(
             events::test_sink::take_errors().len(),
             1,
-            "second emit must not add an MXC.Error"
+            "second emit must not add an Error"
         );
 
         reset_for_test();
@@ -1014,7 +1014,7 @@ mod tests {
         // The exactly-once slot (`HAS_EMITTED`) is concurrency-critical: the
         // out-of-band panic/cancellation paths race the main completion emit,
         // and the guard is what keeps a single dispatch from producing
-        // duplicate MXC.Execution records. Lock the global state, reset to a
+        // duplicate Execution records. Lock the global state, reset to a
         // known baseline, and assert claim-once semantics end-to-end.
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
@@ -1183,7 +1183,7 @@ mod tests {
             panic.execution.failure_reason,
             Some(FailureReason::InternalError)
         );
-        // The MXC.Error carries the same reason/exit code as the execution event.
+        // The Error carries the same reason/exit code as the execution event.
         assert_eq!(panic.error, FailureReason::InternalError);
         assert_eq!(panic.exit_code, PANIC_EXIT_CODE);
 
@@ -1251,7 +1251,7 @@ mod tests {
             assert!(zero_plan.error.is_none());
 
             // Non-zero guest exit → failure with the propagated exit code, but
-            // NO MXC.Error (a faithfully-propagated script exit, not an MXC
+            // NO Error (a faithfully-propagated script exit, not an MXC
             // failure).
             let nonzero = Ok(DispatchOutcome::ExecCompleted { exit_code: 42 });
             let nonzero_plan = plan_state_aware(ctx, &nonzero, 3);
@@ -1262,7 +1262,7 @@ mod tests {
             assert!(nonzero_plan.execution.failure_reason.is_none());
             assert!(nonzero_plan.error.is_none());
 
-            // MxcError → failure / exit 1 / classified MXC.Error.
+            // MxcError → failure / exit 1 / classified Error.
             let err = Err(MxcError::backend_unavailable("no host"));
             let err_plan = plan_state_aware(ctx, &err, 5);
             assert_eq!(err_plan.execution.phase, phase);
@@ -1331,7 +1331,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
 
-        // Provision-style success envelope → one MXC.Execution, no MXC.Error.
+        // Provision-style success envelope → one Execution, no Error.
         let envelope = Ok(DispatchOutcome::Envelope(serde_json::json!({})));
         emit_state_aware(
             true,

@@ -68,7 +68,7 @@ Windows app or SDK must. This design applies the same pillars end-to-end:
 | **Control** | The user (or the agent acting on their behalf) can flip the flag at any time, as many times as they like — no re-install, no support ticket. |
 | **Transparency** | A `status` query is always available and cheap (local file read, no network call) so any consumer can show the current state and link to [`telemetry.md`](telemetry.md) describing exactly what is collected. |
 | **No dark patterns** | Denying is exactly as easy as granting; MXC does not nag on every run once a choice has been made; the consent primitives never bias the wording or defaults toward "on". |
-| **Least privilege / data minimization** | Reuses the existing bounded, PII-scrubbed event schema (`MXC.Execution` / `MXC.Error`, see `telemetry.md`) — this spec changes *whether* those events fire, never *what* they contain. |
+| **Least privilege / data minimization** | Reuses the existing bounded, PII-scrubbed event schema (`Execution` / `Error` from the `Microsoft.MXC` provider, see `telemetry.md`) — this spec changes *whether* those events fire, never *what* they contain. |
 | **Fail closed** | Any ambiguous state — missing file, corrupt file, unreadable file, unknown platform — resolves to **not collecting**, never to collecting. |
 | **Platform honesty** | Non-Windows builds do not merely default the flag to "off" — the consent module does not compile in on non-Windows targets, so there is no code path, storage file, or API pretending consent is meaningful where MXC cannot and does not collect anything. |
 
@@ -541,7 +541,8 @@ opposite order.
   the Windows policy "doesn't apply to any additional apps installed by your
   organization", and the supported OS evaluation APIs deliberately fold in the
   user's Settings-app choice, which MXC must not consume.
-- Any change to the *content* of `MXC.Execution` / `MXC.Error` events —
+- Any change to the *content* of `Execution` / `Error` events from the
+  `Microsoft.MXC` provider —
   this spec only changes the gate in front of the existing, already
   PII-reviewed schema.
 - Linux/macOS telemetry of any kind — explicitly and permanently not a goal.
@@ -651,5 +652,4 @@ without one.
   tests, the C# and Node suites driving a native binary) only get them from a
   debug build, so their consent/policy coverage is debug-only. Tracked as
   [#691](https://github.com/microsoft/mxc/issues/691).
-
 
