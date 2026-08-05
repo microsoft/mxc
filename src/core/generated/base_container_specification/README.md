@@ -1,20 +1,23 @@
 # Regenerating FlatBuffers Bindings
 
-The `base_container_specification` crate contains Rust bindings auto-generated from `external/windows-sdk/BaseContainerSpecification.fbs`.
+The `sandbox_spec` crate contains the legacy `base_container_layout` bindings and
+the newer `process_security_environment_layout` bindings auto-generated from
+`external/windows-sdk/base_container/ProcessSecurityEnvironment.fbs`.
 
 ## Prerequisites
 
 - `flatc.exe` (FlatBuffers compiler) -- download from https://github.com/google/flatbuffers/releases
-- Copy .fbs from Windows SDK to external/windows-sdk/BaseContainerSpecification.fbs
+- Copy .fbs from Windows SDK to external/windows-sdk/base_container/ProcessSecurityEnvironment.fbs
 
 ## Steps
 
-From the repo root, run the regeneration script in PowerShell:
+Run the regeneration script in PowerShell from any directory:
 
 ```powershell
-pwsh -File src/core/generated/base_container_specification/regenerate.ps1
+pwsh -File <repo-path>/src/core/generated/base_container_specification/regenerate.ps1
 ```
 
-The script runs `flatc`, reorganizes the output into the crate's module layout,
-patches `lib.rs` (module rename + lint suppression), and formats the result with
-`cargo fmt`. Pass `-Flatc <path>` if `flatc.exe` is not on your `PATH`.
+The script runs `flatc`, preserves the legacy bindings, appends the new module to
+`lib.rs`, reorganizes the generated files into the crate's module layout, and
+formats the result with `cargo fmt`. Pass `-Flatc <path>` if `flatc.exe` is not on
+your `PATH`.

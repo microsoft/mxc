@@ -1,0 +1,133 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+//
+// FlatBuffers schema for the BaseContainer sandbox specification used in the CreateProcessSecurityEnvironment Windows API.
+//
+// This is the CPSE wire format. The legacy CPIS path continues to use
+// SandboxSpec.fbs and its "SBOX" file identifier.
+//
+// ---- FlatBuffers Schema Evolution Rules ----
+//
+// Compatible (non-breaking) changes:
+//   - Add new fields to the END of a table (they get the next vtable slot).
+//   - Add new tables, structs, enums, or union members.
+//   - Deprecate a field with (deprecated) - the slot is preserved, readers skip it.
+//   - Rename a field or table (wire format uses slot indices, not names).
+//
+// BREAKING changes (will corrupt existing buffers):
+//   - Remove or reorder fields in a table or struct.
+//   - Change a field's type (e.g. uint32 -> int32, or scalar -> string).
+//   - Change a field's default value.
+//   - Add/remove/reorder values in an enum that is already serialized.
+//   - Change the file_identifier or root_type.
+//   - Change a field from scalar to non-scalar (or vice versa).
+//
+// To machine-check for breaking changes, keep a copy of the last shipped schema
+// (e.g. ProcessSecurityEnvironment.previous.fbs) and run:
+//
+//   flatc --conform ProcessSecurityEnvironment.previous.fbs ProcessSecurityEnvironment.fbs
+//
+// --conform verifies that every field/enum/table in the old schema still exists
+// at the same vtable slot, type, and default in the new schema.
+
+namespace ProcessSecurityEnvironmentLayout;
+
+// CPSE schema version. CPSE versions have major and minor components only.
+// Consumers must reject versions they do not support.
+struct SchemaVersion {
+    major:uint16;
+    minor:uint16;
+}
+
+table ProcessSecurityEnvironment {
+    // Initial CPSE schema version is 1.0.
+    version:SchemaVersion (required);
+
+    // Comma-delimited capability names (e.g. "internetClient,registryRead").
+    capabilities:string;
+
+    // Completely disable access to the GUI subsystem through the
+    // DisallowWin32kSystemCalls mitigation.
+    disallow_win32k_system_calls:bool = false;
+
+    // JOB_OBJECT_UILIMIT_* bitmask for UI restrictions.
+    ui_restrictions:uint64 = 0;
+
+    // Directory paths with read/write access.
+    fs_read_write:[string];
+
+    // Directory paths with read-only access.
+    fs_read_only:[string];
+
+    // File or directory paths that are denied access.
+    fs_deny:[string];
+
+    // Optional proxy or direct-egress network policy.
+    network_policy:NetworkPolicy;
+}
+
+// Per-AppContainer proxy configuration.
+table ProxyInfo {
+    url:string;
+}
+
+// Default stance for traffic not matched by any rule (allow or deny).
+enum FilterAction : byte { deny, allow }
+
+// L4 protocol for a port rule. "any" matches all protocols.
+enum IpProtocol : byte { any, tcp, udp, icmpv4, icmpv6 }
+
+// A destination subnet: an IP address literal plus a prefix length.
+table IpSubnet {
+    // IPv4/IPv6 address literal without a prefix suffix
+    // (e.g. "140.82.112.0", "0.0.0.0", or "::").
+    address:string;
+
+    // Prefix length (subnet width). 0 means match-any for the family.
+    prefix_length:ubyte = 0;
+}
+
+// A destination with optional exclusion subnets carved out.
+table DestinationRule {
+    subnet:IpSubnet;
+
+    // Exclusion subnets within `subnet` (Kubernetes ipBlock.except style).
+    except:[IpSubnet];
+}
+
+// A destination port/protocol. Omit `port` (0) to match all ports.
+table PortRule {
+    protocol:IpProtocol = any;
+    port:uint16 = 0;
+
+    // Inclusive end of a port range; 0 means a single `port`.
+    end_port:uint16 = 0;
+}
+
+// One endpoint rule: match any listed destination AND any listed port.
+// The shape is direction-neutral so it can support ingress rules later.
+table EndpointRule {
+    destinations:[DestinationRule];
+    ports:[PortRule];
+}
+
+// An allow/deny policy over endpoint rules. An explicit deny overrides an
+// allow. NetworkPolicy.egress applies it as egress today.
+table EndpointPolicy {
+    default_action:FilterAction = deny;
+    allow:[EndpointRule];
+    deny:[EndpointRule];
+}
+
+table NetworkPolicy {
+    proxy:ProxyInfo;
+    egress:EndpointPolicy;
+
+    // The proxied client's single AppContainer proxy moniker: the peer it may
+    // loop back with. Set only on the client's spec; the proxy never learns
+    // its clients.
+    allowed_appcontainer_peer:string;
+}
+
+root_type ProcessSecurityEnvironment;
+file_identifier "PSEC";

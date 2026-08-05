@@ -1,6 +1,9 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
 //
-// FlatBuffers schema for the BaseContainer sandbox specification.
+// FlatBuffers schema for the BaseContainer sandbox specification used in the experimental CreateProcessInSandbox Windows API.
+// DO NOT USE THIS FILE WHEN ADDING NEW FEATURES. USE base_container/ProcessSecurityEnvironment.fbs INSTEAD. THIS FILE IS
+// MAINTAINED FOR LEGACY PURPOSES ONLY.
 //
 // ---- FlatBuffers Schema Evolution Rules ----
 //
