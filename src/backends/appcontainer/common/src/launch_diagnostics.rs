@@ -143,14 +143,16 @@ fn check_exe_heuristics(
         });
     }
 
-    if missing_root_readonly(exe_path, readonly_paths) {
+    if missing_root_metadata_access(exe_path, readonly_paths, || {
+        crate::fallback_detector::system_drive_prepared()
+    }) {
         let root = drive_root(exe_path);
         return Some(LaunchDiagnostic {
             kind: "missing_filesystem_access",
             message: format!(
                 "pwsh.exe versions before 7.7 require read access to the root \
-                 drive ({root}) to start, and the current sandbox policy does \
-                 not grant it. Run `wxc-host-prep prepare-system-drive` — it \
+                 drive ({root}) to start, and this host has not been prepared \
+                 to grant it. Run `wxc-host-prep prepare-system-drive` — it \
                  adds metadata-only, non-inheriting ACEs for the AppContainer \
                  SIDs on {root} — or upgrade to pwsh 7.7+. Do not add \
                  \"{root}\" to `readonlyPaths`: that grant is recursive and \
@@ -395,7 +397,25 @@ fn is_powershell(exe_path: &Path) -> bool {
     filename == "pwsh.exe" || filename == "powershell.exe"
 }
 
-fn missing_root_readonly(exe_path: &Path, readonly_paths: &[String]) -> bool {
+/// Whether a failing `pwsh.exe` launch plausibly lacks the root-drive
+/// metadata access it needs to start.
+///
+/// The sandbox can obtain that access two ways: a (dangerously recursive)
+/// root entry in `readonlyPaths`, or the narrow metadata-only ACEs that
+/// `wxc-host-prep prepare-system-drive` stamps on the root. Since the policy
+/// discovery helpers deliberately never grant a filesystem root, the host-prep
+/// state is normally the only signal — without checking it, every ordinary
+/// nonzero `pwsh.exe` exit (a script error, say) would be misreported as
+/// missing filesystem access.
+///
+/// `drive_prepared` is a closure so the host-prep DACL probe is skipped
+/// entirely for non-PowerShell exes and for policies that already grant the
+/// root, and so tests can supply a deterministic host state.
+fn missing_root_metadata_access(
+    exe_path: &Path,
+    readonly_paths: &[String],
+    drive_prepared: impl FnOnce() -> bool,
+) -> bool {
     let filename = exe_path
         .file_name()
         .unwrap_or_default()
@@ -405,9 +425,10 @@ fn missing_root_readonly(exe_path: &Path, readonly_paths: &[String]) -> bool {
         return false;
     }
     let root = drive_root(exe_path);
-    !readonly_paths
+    let policy_grants_root = readonly_paths
         .iter()
-        .any(|p| p.eq_ignore_ascii_case(&root) || p == "\\")
+        .any(|p| p.eq_ignore_ascii_case(&root) || p == "\\");
+    !policy_grants_root && !drive_prepared()
 }
 
 fn drive_root(exe_path: &Path) -> String {
@@ -510,11 +531,30 @@ mod tests {
     }
 
     #[test]
-    fn missing_root_readonly_from_exit() {
-        let diag =
-            diagnose_process_exit(r#""C:\Program Files\PowerShell\7\pwsh.exe""#, &[], &[], 1);
-        assert!(diag.is_some());
-        assert_eq!(diag.unwrap().kind, "missing_filesystem_access");
+    fn missing_root_metadata_access_only_when_host_unprepared() {
+        let pwsh = Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
+
+        // Unprepared host, no root grant: the diagnostic is warranted.
+        assert!(missing_root_metadata_access(pwsh, &[], || false));
+
+        // Prepared host: the metadata ACEs already grant what pwsh needs, so
+        // a nonzero exit must NOT be blamed on filesystem access.
+        assert!(!missing_root_metadata_access(pwsh, &[], || true));
+
+        // An explicit (over-broad) root grant also satisfies pwsh, and must
+        // short-circuit before the host probe runs.
+        assert!(!missing_root_metadata_access(
+            pwsh,
+            &["C:\\".to_string()],
+            || { panic!("host-prep probe must not run when the policy already grants the root") }
+        ));
+
+        // Non-PowerShell exes never reach the probe.
+        assert!(!missing_root_metadata_access(
+            Path::new(r"C:\tools\node.exe"),
+            &[],
+            || { panic!("host-prep probe must not run for non-PowerShell executables") }
+        ));
     }
 
     #[test]

@@ -133,32 +133,44 @@ function stripVerbatimPrefix(dirPath: string): string {
     return dirPath;
 }
 
+/** Whether a resolved path is a filesystem root (`C:\`, `\\server\share\`, `/`). */
+function isRootPath(resolved: string, pathApi: path.PlatformPath): boolean {
+    return pathApi.parse(resolved).root === resolved;
+}
+
 /**
  * Returns `true` if the path resides under system-critical locations.
  * On Windows: a volume/share root or under %WINDIR%. On Linux: `/`, /bin,
  * /sbin, /boot, /proc, /sys, /dev, etc.
+ *
+ * `pathApi` and `isWindows` are parameters rather than reads of the ambient
+ * `path` module and `process.platform` so that Windows semantics — drive and
+ * UNC roots, drive-relative paths, verbatim and device namespaces — can be
+ * exercised from a POSIX host. Mocking `process.platform` alone cannot reach
+ * those branches, because the imported `path` module stays POSIX.
+ *
+ * @internal Exported for tests; not part of the SDK's public surface.
  */
-/** Whether a resolved path is a filesystem root (`C:\`, `\\server\share\`, `/`). */
-function isRootPath(resolved: string): boolean {
-    return path.parse(resolved).root === resolved;
-}
-
-function isSystemCriticalPath(dirPath: string): boolean {
-    const resolved = path.resolve(dirPath);
+export function isSystemCriticalPathWith(
+    dirPath: string,
+    pathApi: path.PlatformPath,
+    isWindows: boolean,
+): boolean {
+    const resolved = pathApi.resolve(dirPath);
     // A volume or share root (`C:\`, `\\server\share`, `/`) is never a
     // legitimate tool directory, and granting one exposes every file on the
     // volume. `path.parse().root` equals the path itself only for a root.
-    if (isRootPath(resolved)) {
+    if (isRootPath(resolved, pathApi)) {
         return true;
     }
-    if (process.platform === 'win32') {
+    if (isWindows) {
         // Strip a verbatim (`\\?\`, `\\?\UNC\`) or device-namespace (`\\.\`)
         // prefix so a path supplied in that form still matches the plain
         // comparisons below, as the Rust mirror does. The root test above runs
         // on the un-stripped path first, so stripping can never turn an
         // absolute root into a cwd-relative path that escapes it.
         const unwrapped = stripVerbatimPrefix(resolved);
-        if (unwrapped !== resolved && isRootPath(path.resolve(unwrapped))) {
+        if (unwrapped !== resolved && isRootPath(pathApi.resolve(unwrapped), pathApi)) {
             return true;
         }
         const winDir = getWindowsDirectory().toLowerCase();
@@ -168,6 +180,10 @@ function isSystemCriticalPath(dirPath: string): boolean {
     // Linux: protect critical system paths
     const criticalPaths = ['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/boot', '/proc', '/sys', '/dev'];
     return criticalPaths.some(cp => resolved === cp || resolved.startsWith(cp + '/'));
+}
+
+function isSystemCriticalPath(dirPath: string): boolean {
+    return isSystemCriticalPathWith(dirPath, path, process.platform === 'win32');
 }
 
 /**

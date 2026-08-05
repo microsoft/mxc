@@ -3,7 +3,7 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { getAvailableToolsPolicy } from '../../src/policy.js';
+import { getAvailableToolsPolicy, isSystemCriticalPathWith } from '../../src/policy.js';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -116,5 +116,74 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         assert.deepStrictEqual(result.readonlyPaths, [],
             'A filesystem root must never be granted — it exposes the whole volume',
         );
+    });
+});
+
+describe('isSystemCriticalPath - Windows path semantics', () => {
+    // The imported `path` module is POSIX on Linux/macOS, so mocking
+    // `process.platform` alone cannot reach the Windows branches. Injecting
+    // `path.win32` exercises them on every host.
+    const isCritical = (p: string) => isSystemCriticalPathWith(p, path.win32, true);
+    const originalWinDir = process.env['WINDIR'];
+
+    afterEach(() => {
+        if (originalWinDir === undefined) {
+            delete process.env['WINDIR'];
+        } else {
+            process.env['WINDIR'] = originalWinDir;
+        }
+    });
+
+    it('should reject drive and UNC share roots', () => {
+        process.env['WINDIR'] = 'C:\\Windows';
+        for (const root of ['C:\\', 'C:/', 'D:\\', '\\\\server\\share', '\\\\server\\share\\']) {
+            assert.strictEqual(isCritical(root), true, `${root} must be system-critical`);
+        }
+    });
+
+    it('should reject roots expressed in the verbatim or device namespace', () => {
+        process.env['WINDIR'] = 'C:\\Windows';
+        for (const root of [
+            '\\\\?\\C:\\',
+            '\\\\?\\C:',            // drive-relative: must not resolve against the cwd
+            '\\\\.\\C:',
+            '\\\\?\\Volume{9f1b2c3d-0000-0000-0000-000000000000}\\',
+            '\\\\?\\UNC\\server\\share',
+            '\\\\?\\unc\\server\\share\\',
+        ]) {
+            assert.strictEqual(isCritical(root), true, `${root} must be system-critical`);
+        }
+    });
+
+    it('should reject %WINDIR% however it is spelled', () => {
+        process.env['WINDIR'] = 'C:\\Windows';
+        for (const dir of [
+            'C:\\Windows',
+            'c:\\windows\\system32',
+            'C:\\Windows\\..\\Windows\\System32',
+            '\\\\?\\C:\\Windows\\System32',
+            '\\\\.\\C:\\Windows',
+        ]) {
+            assert.strictEqual(isCritical(dir), true, `${dir} must be system-critical`);
+        }
+    });
+
+    it('should allow ordinary tool directories', () => {
+        process.env['WINDIR'] = 'C:\\Windows';
+        for (const dir of [
+            'C:\\Program Files\\PowerShell\\7',
+            'C:\\tools',
+            'C:\\WindowsApps\\vendor',   // prefix of %WINDIR% but not under it
+            '\\\\server\\share\\tools',
+            '\\\\?\\UNC\\server\\share\\tools',
+        ]) {
+            assert.strictEqual(isCritical(dir), false, `${dir} must not be system-critical`);
+        }
+    });
+
+    it('should reject the POSIX root on non-Windows', () => {
+        assert.strictEqual(isSystemCriticalPathWith('/', path.posix, false), true);
+        assert.strictEqual(isSystemCriticalPathWith('/usr/bin', path.posix, false), true);
+        assert.strictEqual(isSystemCriticalPathWith('/opt/tools', path.posix, false), false);
     });
 });
