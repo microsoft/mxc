@@ -92,6 +92,7 @@ dependencies = [
  "learning_mode_windows",
  "process_security_environment_spec",
  "sandbox_spec",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

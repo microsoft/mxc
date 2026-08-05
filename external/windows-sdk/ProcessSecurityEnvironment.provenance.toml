@@ -28,7 +28,7 @@ related_trace_abi_pull_request = 16307987
 # SHA-256 of external/windows-sdk/ProcessSecurityEnvironment.fbs, computed over
 # the LF-normalized (git-blob) content so it is checkout-independent regardless
 # of autocrlf. Verified by regenerate.ps1 and the CI drift gate.
-sha256 = "2bb6b5bb5eccf589ffa1d19ad1f011dcc72b3e7eacefa1f0741e123cb259bf29"
+sha256 = "7d14b01850a735329da00cde4d4d2e32e463f49026a39708be9059fd64e764d3"
 
 [tool]
 # Exact flatc version used to generate the committed bindings. Regeneration
