@@ -34,7 +34,9 @@ use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
+use wxc_common::models::{
+    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
+};
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
@@ -45,6 +47,9 @@ use wxc_common::sandbox_process::{
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
+
+pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
+    "captureDenials requires the BaseContainer learning-mode APIs and is not supported by the AppContainer fallback tier";
 
 /// `UpdateProcThreadAttribute` value for
 /// `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` that opts the
@@ -59,7 +64,7 @@ const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
 /// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
-fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
+pub(crate) fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
     let mut sorted: Vec<&(String, String)> = entries.iter().collect();
     sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
 
@@ -80,7 +85,7 @@ fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
 /// Calls `CreateEnvironmentBlock` with `bInherit = FALSE` so that only the
 /// system/user profile variables are included (no process-level vars leak in).
 /// Returns the entries as `(key, value)` pairs.
-fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
+pub(crate) fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
@@ -390,6 +395,123 @@ pub enum FilesystemMode {
     Dacl,
 }
 
+/// Config capability string that enables **learning mode**: the OS logs every
+/// *failed* access check for the AppContainer, but the access is still
+/// **denied** (deny-and-record). Containment is unchanged.
+pub(crate) const CAP_LEARNING_MODE_LOGGING: &str = "learningModeLogging";
+
+/// Config capability string that enables **permissive learning mode**: the OS
+/// logs every access check and **allows** it (audit / allow-all). This relaxes
+/// deny-by-default for the run, so it is security-sensitive; the runner emits a
+/// security warning whenever it is present.
+pub(crate) const CAP_PERMISSIVE_LEARNING_MODE: &str = "permissiveLearningMode";
+
+const LEARNING_MODE_INFORMATION: &str =
+    "learningModeLogging is ENABLED: failed access attempts are logged; accesses are still denied \
+     (deny-and-record).";
+const PERMISSIVE_LEARNING_MODE_WARNING: &str =
+    "*** SECURITY WARNING *** permissiveLearningMode is ENABLED: every access check is logged AND \
+     ALLOWED (audit mode); the container is not enforcing deny-by-default.";
+const PERMISSIVE_OVERRIDES_LEARNING_WARNING: &str =
+    "*** SECURITY WARNING *** permissiveLearningMode overrides learningModeLogging: every access \
+     check is logged AND ALLOWED (audit mode); the container is not enforcing deny-by-default.";
+
+/// A recognized Windows learning-mode capability.
+///
+/// The two learning-mode capabilities are semantically **distinct** and must
+/// not be conflated: [`Learning`](Self::Learning) only records denials (accesses
+/// stay denied), while [`Permissive`](Self::Permissive) additionally *allows*
+/// the accesses it logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearningModeCapability {
+    /// `learningModeLogging` — log *failed* accesses; accesses remain **denied**
+    /// (deny-and-record). Containment is unchanged.
+    Learning,
+    /// `permissiveLearningMode` — log every access check and **allow** it
+    /// (audit / allow-all). Does not enforce deny-by-default.
+    Permissive,
+}
+
+impl LearningModeCapability {
+    /// Classify a policy capability string as a learning-mode capability, or
+    /// `None` if it is an unrelated capability. Matching is case-insensitive
+    /// because Windows derives the capability SID case-insensitively, so a
+    /// mis-cased spelling still takes effect and must be classified the same.
+    pub(crate) fn from_capability_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case(CAP_LEARNING_MODE_LOGGING) {
+            Some(Self::Learning)
+        } else if name.eq_ignore_ascii_case(CAP_PERMISSIVE_LEARNING_MODE) {
+            Some(Self::Permissive)
+        } else {
+            None
+        }
+    }
+}
+
+enum LearningModeDiagnostic {
+    Information(&'static str),
+    SecurityWarning(&'static str),
+}
+
+impl LearningModeDiagnostic {
+    #[cfg(test)]
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Information(message) | Self::SecurityWarning(message) => message,
+        }
+    }
+}
+
+fn effective_learning_mode_diagnostic(capabilities: &[String]) -> Option<LearningModeDiagnostic> {
+    let mut learning = false;
+    let mut permissive = false;
+    for capability in capabilities {
+        match LearningModeCapability::from_capability_name(capability) {
+            Some(LearningModeCapability::Learning) => learning = true,
+            Some(LearningModeCapability::Permissive) => permissive = true,
+            None => {}
+        }
+    }
+
+    if permissive {
+        Some(LearningModeDiagnostic::SecurityWarning(if learning {
+            PERMISSIVE_OVERRIDES_LEARNING_WARNING
+        } else {
+            PERMISSIVE_LEARNING_MODE_WARNING
+        }))
+    } else if learning {
+        Some(LearningModeDiagnostic::Information(
+            LEARNING_MODE_INFORMATION,
+        ))
+    } else {
+        None
+    }
+}
+
+/// Return the diagnostic lines the caller should log for the learning-mode
+/// capabilities requested by a policy.
+///
+/// `learningModeLogging` (deny-and-record) is safe and emits an informational
+/// note. `permissiveLearningMode` logs *and allows* every access check (audit
+/// mode); it relaxes deny-by-default, so it emits a security warning.
+#[cfg(test)]
+pub(crate) fn learning_mode_capability_diagnostics(capabilities: &[String]) -> Vec<String> {
+    effective_learning_mode_diagnostic(capabilities)
+        .map(|diagnostic| vec![diagnostic.message().to_string()])
+        .unwrap_or_default()
+}
+
+pub(crate) fn log_learning_mode_capability_diagnostics(
+    capabilities: &[String],
+    logger: &mut Logger,
+) {
+    match effective_learning_mode_diagnostic(capabilities) {
+        Some(LearningModeDiagnostic::SecurityWarning(message)) => logger.warning_line(message),
+        Some(LearningModeDiagnostic::Information(message)) => logger.log_line(message),
+        None => {}
+    }
+}
+
 /// Script runner that executes commands inside a Windows AppContainer.
 pub struct AppContainerScriptRunner {
     app_container_name: String,
@@ -505,22 +627,13 @@ impl AppContainerScriptRunner {
         logger: &mut Logger,
         capture: bool,
     ) -> Result<SpawnedChild, WxcError> {
-        // --- Validate permissiveLearningMode ---
-        for cap in &request.policy.capabilities {
-            if cap == "permissiveLearningMode" {
-                if request.audit {
-                    logger.log_line("*** SECURITY WARNING ***");
-                    logger.log_line(
-                        "permissiveLearningMode is ENABLED. \
-                         Container will learn and record access patterns.",
-                    );
-                } else {
-                    return Err(WxcError::Validation(
-                        "SECURITY: permissiveLearningMode requires --audit".to_string(),
-                    ));
-                }
-            }
-        }
+        // --- Learning-mode capabilities ---
+        // `learningModeLogging` (deny-and-record) and `permissiveLearningMode`
+        // (allow-all audit) are distinct. Emit per-capability diagnostics for
+        // whichever are present (informational for `learningModeLogging`, a
+        // security warning for `permissiveLearningMode`). See
+        // [`learning_mode_capability_diagnostics`].
+        log_learning_mode_capability_diagnostics(&request.policy.capabilities, logger);
 
         // --- Build capability list ---
         let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
@@ -1195,6 +1308,12 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if request.policy.capture_denials.is_some() {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
+            });
+        }
         if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
             return Err(ScriptResponse::error(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
@@ -1479,6 +1598,95 @@ mod tests {
     }
 
     #[test]
+    fn learning_mode_capability_classification() {
+        use super::LearningModeCapability;
+        assert_eq!(
+            LearningModeCapability::from_capability_name("learningModeLogging"),
+            Some(LearningModeCapability::Learning)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("permissiveLearningMode"),
+            Some(LearningModeCapability::Permissive)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("internetClient"),
+            None
+        );
+    }
+
+    #[test]
+    fn learning_mode_diagnostic_is_deny_and_record() {
+        let caps = vec!["learningModeLogging".to_string()];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("deny-and-record"));
+        assert!(!out[0].contains("SECURITY WARNING"));
+    }
+
+    #[test]
+    fn permissive_learning_mode_warns() {
+        // Permissive mode must surface a distinct security warning because it
+        // relaxes deny-by-default.
+        let caps = vec!["permissiveLearningMode".to_string()];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("SECURITY WARNING"));
+        assert!(out[0].contains("ALLOWED"));
+    }
+
+    #[test]
+    fn permissive_learning_mode_uses_security_warning_channel() {
+        let caps = vec!["permissiveLearningMode".to_string()];
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+
+        super::log_learning_mode_capability_diagnostics(&caps, &mut logger);
+
+        assert_eq!(logger.warnings().len(), 1);
+        assert!(logger.warnings()[0].contains("SECURITY WARNING"));
+        assert!(logger.get_buffer().is_empty());
+    }
+
+    #[test]
+    fn learning_mode_capability_classification_is_case_insensitive() {
+        use super::LearningModeCapability;
+        // Windows derives the capability SID case-insensitively, so mis-cased
+        // spellings must classify the same as the canonical form.
+        assert_eq!(
+            LearningModeCapability::from_capability_name("LearningModeLogging"),
+            Some(LearningModeCapability::Learning)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("PermissiveLearningMode"),
+            Some(LearningModeCapability::Permissive)
+        );
+        assert_eq!(
+            LearningModeCapability::from_capability_name("PERMISSIVELEARNINGMODE"),
+            Some(LearningModeCapability::Permissive)
+        );
+    }
+
+    #[test]
+    fn unrelated_capabilities_produce_no_diagnostics() {
+        // Ordinary (non-learning-mode) capabilities must be ignored entirely.
+        let caps = vec!["internetClient".to_string(), "registryRead".to_string()];
+        assert!(super::learning_mode_capability_diagnostics(&caps).is_empty());
+    }
+
+    #[test]
+    fn permissive_learning_mode_overrides_deny_and_record_diagnostic() {
+        let caps = vec![
+            "learningModeLogging".to_string(),
+            "permissiveLearningMode".to_string(),
+        ];
+        let out = super::learning_mode_capability_diagnostics(&caps);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("SECURITY WARNING"));
+        assert!(out[0].contains("overrides learningModeLogging"));
+        assert!(out[0].contains("ALLOWED"));
+        assert!(!out[0].contains("accesses are still denied"));
+    }
+
+    #[test]
     fn derive_sid_string_empty_profile_name_errors() {
         let res = super::derive_sid_string("");
         assert!(matches!(
@@ -1626,8 +1834,10 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
-    use super::{AppContainerScriptRunner, FilesystemMode};
-    use wxc_common::models::ExecutionRequest;
+    use super::{
+        AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
+    };
+    use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
@@ -1687,5 +1897,21 @@ mod tests {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
         assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_capture_denials_on_appcontainer_fallback() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer fallback must not silently ignore captureDenials");
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            error.error_message,
+            CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG
+        );
     }
 }

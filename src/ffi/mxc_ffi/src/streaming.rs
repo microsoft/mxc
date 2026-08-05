@@ -403,6 +403,46 @@ pub unsafe extern "C" fn mxc_sandbox_id(handle: *mut MxcSandbox) -> u32 {
     .unwrap_or(0)
 }
 
+/// Return structured output metadata as owned JSON. A successful call leaves
+/// `*out_json_utf8` null when the sandbox has not completed or produced no
+/// metadata.
+///
+/// The caller owns a non-null `*out_json_utf8` and must free it with
+/// [`mxc_string_free`](crate::mxc_string_free).
+///
+/// # Safety
+/// - `handle` must be null or a live handle from [`mxc_spawn`].
+/// - `out_json_utf8` must be non-null and point to writable pointer storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_output_metadata_json(
+    handle: *mut MxcSandbox,
+    out_json_utf8: *mut *mut c_char,
+) -> i32 {
+    if !out_json_utf8.is_null() {
+        // SAFETY: caller-guaranteed writable pointer-sized storage.
+        unsafe { *out_json_utf8 = ptr::null_mut() };
+    }
+    if handle.is_null() || out_json_utf8.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: non-null live handle per the caller contract.
+        let sandbox = unsafe { &*handle };
+        let Some(metadata) = sandbox.inner.output_metadata() else {
+            return MXC_STATUS_SUCCESS;
+        };
+        let json = match serde_json::to_vec(metadata) {
+            Ok(json) => json,
+            Err(_) => return MXC_STATUS_BACKEND_ERROR,
+        };
+        // SAFETY: non-null writable out pointer per the caller contract.
+        unsafe { *out_json_utf8 = alloc_cstring(&json) };
+        MXC_STATUS_SUCCESS
+    }))
+    .unwrap_or(MXC_STATUS_PANIC)
+}
+
 /// Non-blocking exit check. On return, `*out_running` is `1` if the child is
 /// still running (and `*out_exit` is untouched) or `0` if it has exited (and
 /// `*out_exit` holds its exit code).
@@ -653,6 +693,11 @@ mod tests {
             );
             assert_eq!(mxc_stream_flush(ptr::null_mut()), MXC_STATUS_NULL_ARGUMENT);
             assert_eq!(mxc_sandbox_id(ptr::null_mut()), 0);
+            let mut metadata = ptr::null_mut();
+            assert_eq!(
+                mxc_sandbox_output_metadata_json(ptr::null_mut(), &mut metadata),
+                MXC_STATUS_NULL_ARGUMENT
+            );
             assert_eq!(
                 mxc_sandbox_try_wait(ptr::null_mut(), &mut i, &mut j),
                 MXC_STATUS_NULL_ARGUMENT

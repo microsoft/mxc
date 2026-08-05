@@ -217,6 +217,12 @@ Backend-specific tuning lives on the returned `ContainerConfig`. The full set of
 
 Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.6.0-alpha.json`) and look up `processContainer`, `lxc`, `experimental.wslc`, `experimental.windows_sandbox`, etc.
 
+For Windows ProcessContainer configs, `processContainer.learningMode: true`
+enables deny-and-record learning mode: failed accesses are logged but remain
+denied. The internal `learningModeLogging` and `permissiveLearningMode`
+capability names are reserved and must not be added directly to
+`processContainer.capabilities`.
+
 </details>
 
 ## State-Aware Sandboxes

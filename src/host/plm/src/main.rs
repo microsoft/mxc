@@ -6,8 +6,9 @@
 //! Subcommands:
 //! - `start`: cancel any active WPR trace and start a new one using
 //!   `plm.wprp!AccessFailureProfile`.
-//! - `stop`: stop the trace and write `trace.etl` into a log directory.
+//! - `stop`: stop the trace and process captured events.
 //! - `log`: interactive — Enter to start, Enter to stop.
+//! - `extract-caps`: standalone ACE decoder.
 //!
 //! The functional binary wraps WPR / ETW / EventLog APIs that have no
 //! cross-platform equivalent and is therefore Windows-only. On
@@ -36,7 +37,7 @@ use std::time::Duration;
 #[cfg(target_os = "windows")]
 use plm::coordination::{singleton_bypass_requested, wait_until_cleared, PLM_LOG_START_IN_FLIGHT};
 #[cfg(target_os = "windows")]
-use plm::{log, profile_gen, start, stop};
+use plm::{extract_caps, log, profile_gen, start, stop};
 
 /// Raw `HANDLE` value of the named-mutex singleton acquired by
 /// `acquire_singleton_if_needed` (zero when unheld). Stashed in a
@@ -252,15 +253,22 @@ enum Cmd {
         /// Path to the MXC container config (JSON) to update.
         #[arg(long)]
         config_path: Option<PathBuf>,
-        /// Override for the adjusted config output path.
-        #[arg(long)]
-        adjusted_config_path: Option<PathBuf>,
         /// Re-process a previously captured .etl instead of stopping a
         /// live WPR session. When set, `wpr -stop` is skipped and the
         /// supplied file is parsed as-is.
         #[arg(long)]
         trace_file: Option<PathBuf>,
         /// Emit per-event/per-ACE diagnostic output.
+        #[arg(long)]
+        verbose_logging: bool,
+    },
+    /// Run extract_caps on a hex-encoded ACE blob and print matched
+    /// capability names. Mirrors the standalone usage of extract_caps.ps1.
+    ExtractCaps {
+        /// Hex-encoded ACE buffer (whitespace allowed, even length).
+        #[arg(long)]
+        hex_bytes: String,
+        /// Emit per-ACE diagnostic output.
         #[arg(long)]
         verbose_logging: bool,
     },
@@ -417,7 +425,6 @@ fn main() -> Result<()> {
             log_dir,
             bin_path,
             config_path,
-            adjusted_config_path,
             trace_file,
             verbose_logging,
         } => {
@@ -427,12 +434,21 @@ fn main() -> Result<()> {
                     log_dir,
                     bin_path,
                     config_path,
-                    adjusted_config_path,
                     trace_file,
                     verbose: verbose_logging,
                 },
                 &exe,
             )
+        }
+        Cmd::ExtractCaps {
+            hex_bytes,
+            verbose_logging,
+        } => {
+            let caps = extract_caps::extract_caps(&hex_bytes, verbose_logging)?;
+            for c in extract_caps::sorted_capability_names(&caps) {
+                println!("{c}");
+            }
+            Ok(())
         }
         Cmd::Log {
             wprp,

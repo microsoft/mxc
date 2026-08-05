@@ -26,8 +26,8 @@ use windows::Win32::Foundation::HANDLE;
 use crate::control_plane::{
     self, generate_nonce, live_daemon, read_daemon_record, read_sandbox_record,
     running_process_creation_time, sandbox_dir, DaemonRecord, MappedFolderRecord, SandboxRecord,
-    SandboxState, TransitionLock, IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_EXEC, IPC_OK,
-    IPC_STOP,
+    SandboxState, TransitionLock, IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_ERR_PROTOCOL,
+    IPC_EXEC, IPC_OK, IPC_STOP,
 };
 use crate::error::OneShotError;
 use crate::ipc_exec::{self, ExecExit, ExecStart, FrameKind};
@@ -238,6 +238,13 @@ fn map_exec_status_error(status: &str) -> MxcError {
             MxcError::backend_error("sandbox is busy: another exec is already running")
         }
         Some(IPC_ERR_NOT_READY) => MxcError::not_started("sandbox is not ready for exec yet"),
+        // A wire-protocol mismatch means a daemon from a different mxc install
+        // holds the VM: surface it as unavailable, matching `ensure_daemon_protocol`.
+        Some(r) if r.starts_with(IPC_ERR_PROTOCOL) => MxcError::backend_unavailable(format!(
+            "daemon rejected exec (wire-protocol mismatch): {}. Tear the stale VM down \
+             (e.g. force-reclaim on a fresh start) and retry.",
+            status.trim()
+        )),
         _ => MxcError::backend_error(format!("daemon rejected exec: {}", status.trim())),
     }
 }
@@ -293,8 +300,15 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
 
     {
         let mut w = &stream;
-        writeln!(w, "{IPC_EXEC} {}", daemon.nonce)
-            .map_err(|e| MxcError::backend_error(format!("send EXEC line: {e}")))?;
+        // Declare our IPC wire-protocol version so the daemon refuses a mismatch
+        // (a daemon from a different mxc install) before any frame exchange.
+        writeln!(
+            w,
+            "{IPC_EXEC} {} {}",
+            daemon.nonce,
+            control_plane::IPC_PROTOCOL_VERSION
+        )
+        .map_err(|e| MxcError::backend_error(format!("send EXEC line: {e}")))?;
         ipc_exec::write_exec_start(&mut w, &exec_start)
             .map_err(|e| MxcError::backend_error(format!("send ExecStart: {e}")))?;
         w.flush()
@@ -452,6 +466,12 @@ fn ipc_command(port: u16, verb: &str, nonce: &str) -> Result<String, MxcError> {
     Ok(line.trim().to_string())
 }
 
+/// Path to the detached daemon's diagnostic log (`<root>\<token>\daemon.log`),
+/// inside the owner-only per-sandbox record directory.
+fn daemon_log_path(token: &str) -> std::path::PathBuf {
+    sandbox_dir(token).join("daemon.log")
+}
+
 /// Spawn the detached daemon and pass its auth nonce over stdin.
 fn spawn_daemon(token: &str, nonce: &str) -> Result<std::process::Child, MxcError> {
     use std::io::Write;
@@ -460,12 +480,27 @@ fn spawn_daemon(token: &str, nonce: &str) -> Result<std::process::Child, MxcErro
     let daemon_path = resolve_sibling_binary(crate::constants::DAEMON_BINARY_NAME)
         .map_err(|e| MxcError::backend_error(format!("locate daemon binary: {e}")))?;
 
+    // Capture the detached daemon's stderr: its only window into boot /
+    // teardown / orphan-reclaim failures. Append so a mid-session restart keeps
+    // prior diagnostics.
+    let log_path = daemon_log_path(token);
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| MxcError::backend_error(format!("open daemon log {log_path:?}: {e}")))?;
+    // Match the owner-only record-dir DACL. Best-effort: the log holds no secret
+    // (never the nonce), so a DACL hiccup must not block start.
+    if let Err(e) = control_plane::set_owner_only_file(&log_path) {
+        eprintln!("[wsb] WARNING: could not secure daemon log {log_path:?}: {e:#}");
+    }
+
     let mut child = Command::new(&daemon_path)
         .arg("--token")
         .arg(token)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(log))
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map_err(|e| MxcError::backend_error(format!("spawn daemon {daemon_path:?}: {e}")))?;
@@ -536,6 +571,28 @@ fn stop_spawned_daemon_best_effort(
         }
     }
     let _ = child.kill();
+}
+
+/// True if a daemon exit during `start` signals VM-slot contention
+/// ([`control_plane::DAEMON_EXIT_VM_SLOT_BUSY`]) rather than an opaque failure.
+fn daemon_exit_is_vm_slot_busy(code: Option<i32>) -> bool {
+    code == Some(control_plane::DAEMON_EXIT_VM_SLOT_BUSY)
+}
+
+/// Reject a live daemon whose IPC wire protocol differs from this build's: it
+/// was left by a different mxc install, so its frame format may not match ours.
+/// The operator tears the stale VM down (e.g. `--force-reclaim`) and retries.
+fn ensure_daemon_protocol(daemon: &DaemonRecord) -> Result<(), MxcError> {
+    if daemon.protocol_compatible() {
+        return Ok(());
+    }
+    Err(MxcError::backend_unavailable(format!(
+        "the active Windows Sandbox daemon speaks IPC protocol v{} but this build speaks v{}; \
+         refusing to drive it. Tear down the stale VM (e.g. force-reclaim on a fresh start) and \
+         retry.",
+        daemon.protocol_version,
+        control_plane::IPC_PROTOCOL_VERSION
+    )))
 }
 
 impl StatefulSandboxBackend for WindowsSandboxRunner {
@@ -642,8 +699,16 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    if daemon_exit_is_vm_slot_busy(status.code()) {
+                        return Err(MxcError::backend_unavailable(
+                            "another Windows Sandbox VM is active on this host; only one is \
+                             supported. The daemon could not acquire the VM slot; retry once the \
+                             other run finishes.",
+                        ));
+                    }
                     return Err(MxcError::backend_error(format!(
-                        "daemon exited during start ({status}); see daemon logs"
+                        "daemon exited during start ({status}); see daemon log at {:?}",
+                        daemon_log_path(token)
                     )));
                 }
                 Ok(None) => {}
@@ -708,6 +773,12 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
                 "sandbox {sandbox_id} is still starting"
             )));
         }
+        // Fast-fail on a protocol-mismatched daemon using the record. The daemon
+        // also enforces this on the wire (via the EXEC version token), so this is
+        // a pre-check, not the sole guard. stop/deprovision stay permitted: their
+        // single-line STOP is stable, and refusing it would strand the VM we most
+        // need to tear down.
+        ensure_daemon_protocol(&daemon)?;
 
         // Stream the execution synchronously, relaying stdout/stderr live to
         // this process's stdio. Mirrors isolation_session: the relay completes
@@ -979,6 +1050,52 @@ mod tests {
     }
 
     #[test]
+    fn vm_slot_busy_exit_code_is_recognized() {
+        assert!(daemon_exit_is_vm_slot_busy(Some(
+            control_plane::DAEMON_EXIT_VM_SLOT_BUSY
+        )));
+        assert!(!daemon_exit_is_vm_slot_busy(Some(1)));
+        assert!(!daemon_exit_is_vm_slot_busy(Some(0)));
+        // A daemon killed by a signal / with no code must not be mistaken for
+        // the VM-slot-busy sentinel.
+        assert!(!daemon_exit_is_vm_slot_busy(None));
+    }
+
+    fn daemon_record_with_protocol(protocol_version: u32) -> DaemonRecord {
+        DaemonRecord {
+            schema_version: control_plane::RECORD_SCHEMA_VERSION,
+            pid: 1,
+            pid_creation_time: 1,
+            ipc_port: 1,
+            nonce: "n".into(),
+            active_sandbox_id: "wsb:x".into(),
+            ready: true,
+            protocol_version,
+            vm_processes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ensure_daemon_protocol_accepts_current_and_refuses_mismatch() {
+        let ok = daemon_record_with_protocol(control_plane::IPC_PROTOCOL_VERSION);
+        assert!(ensure_daemon_protocol(&ok).is_ok());
+
+        // A daemon from a pre-versioning install (default 0) or a different
+        // build must be refused as backend_unavailable.
+        let stale = daemon_record_with_protocol(0);
+        assert_eq!(
+            ensure_daemon_protocol(&stale).unwrap_err().code,
+            MxcErrorCode::BackendUnavailable
+        );
+
+        let newer = daemon_record_with_protocol(control_plane::IPC_PROTOCOL_VERSION + 1);
+        assert_eq!(
+            ensure_daemon_protocol(&newer).unwrap_err().code,
+            MxcErrorCode::BackendUnavailable
+        );
+    }
+
+    #[test]
     fn extract_token_unwraps_wsb_prefix() {
         assert_eq!(extract_token("wsb:deadbeef").unwrap(), "deadbeef");
     }
@@ -1197,6 +1314,17 @@ mod tests {
     }
 
     #[test]
+    fn map_exec_status_error_protocol_is_backend_unavailable() {
+        let err = map_exec_status_error("ERR protocol client v1 != daemon v2");
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert!(
+            err.message.contains("client v1 != daemon v2"),
+            "message: {}",
+            err.message
+        );
+    }
+
+    #[test]
     fn map_exec_status_error_without_err_prefix_uses_whole_status() {
         // Defensive: a status line missing the `ERR` prefix is still surfaced
         // verbatim rather than swallowed.
@@ -1400,6 +1528,7 @@ mod tests {
             nonce: "fixture".into(),
             active_sandbox_id: other_sandbox_id.into(),
             ready: true,
+            protocol_version: control_plane::IPC_PROTOCOL_VERSION,
             vm_processes: Vec::new(),
         };
         control_plane::write_daemon_record(&record).expect("write fixture daemon record");
@@ -1420,6 +1549,7 @@ mod tests {
             nonce: "stale".into(),
             active_sandbox_id: active_sandbox_id.into(),
             ready: false,
+            protocol_version: control_plane::IPC_PROTOCOL_VERSION,
             vm_processes: Vec::new(),
         };
         control_plane::write_daemon_record(&record).expect("write stale daemon record");

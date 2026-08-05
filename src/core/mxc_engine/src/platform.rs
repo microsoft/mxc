@@ -36,7 +36,8 @@ const MIN_WINDOWS_BUILD: u32 = 26100;
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
 /// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
 /// capabilities come from the in-process fallback probe rather than a
-/// `wxc-exec --probe` subprocess.
+/// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
+/// WSL Container runtime (requires the `wslc` feature).
 ///
 /// Each arm probes the dependency that actually fails at spawn time: the
 /// Seatbelt binary on macOS, a real namespace-creating `bwrap` run on Linux,
@@ -71,7 +72,15 @@ fn detect_platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "linux")]
     {
-        match probe_bubblewrap() {
+        // Two independent things can be wrong, so both are checked. `bwrap`
+        // must be new enough for every flag the argument builder emits (see
+        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`), and — since
+        // `--version` never creates a namespace — it must also actually be
+        // able to build a sandbox on this host.
+        let unavailable = bwrap_common::bwrap_version::probe_bwrap()
+            .map_err(|err| err.to_string())
+            .and_then(|_| probe_bubblewrap());
+        match unavailable {
             Ok(()) => PlatformSupport {
                 is_supported: true,
                 available_methods: vec!["bubblewrap".to_string()],
@@ -86,7 +95,10 @@ fn detect_platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "windows")]
     {
-        windows_platform_support(appcontainer_common::job_object::os_build_number())
+        windows_platform_support(
+            appcontainer_common::job_object::os_build_number(),
+            wslc_available(),
+        )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -104,12 +116,24 @@ fn detect_platform_support() -> PlatformSupport {
 /// unit-testable on every host. `os_build_number` reports [`u32::MAX`] when
 /// `RtlGetVersion` fails, which lands here as "modern" — a detection failure
 /// must not silently declare a supported host unsupported.
+///
+/// WSLC is an additional, opt-in backend rather than a fallback, so it is
+/// reported when the host can run it but does not carry `is_supported`: that
+/// flag guards the default `processcontainer` spawn.
 #[cfg(any(target_os = "windows", test))]
-fn windows_platform_support(build: u32) -> PlatformSupport {
+fn windows_platform_support(build: u32, wslc: bool) -> PlatformSupport {
+    let mut available_methods = Vec::new();
+    if build >= MIN_WINDOWS_BUILD {
+        available_methods.push("processcontainer".to_string());
+    }
+    if wslc {
+        available_methods.push("wslc".to_string());
+    }
+
     if build >= MIN_WINDOWS_BUILD {
         PlatformSupport {
             is_supported: true,
-            available_methods: vec!["processcontainer".to_string()],
+            available_methods,
             ..Default::default()
         }
     } else {
@@ -118,6 +142,7 @@ fn windows_platform_support(build: u32) -> PlatformSupport {
                 "Windows build {build} is below {MIN_WINDOWS_BUILD}, the minimum \
                  supported build (Windows 11 24H2)"
             )),
+            available_methods,
             ..Default::default()
         }
     }
@@ -274,6 +299,21 @@ fn bwrap_failure_detail(stderr: &[u8]) -> String {
     }
 }
 
+/// Whether this host can run the WSL Container backend, probing the WSLC
+/// runtime the same way the runner's preflight does. Always `false` when the
+/// backend isn't compiled in, so the caller needs no `cfg` of its own.
+#[cfg(target_os = "windows")]
+fn wslc_available() -> bool {
+    #[cfg(feature = "wslc")]
+    {
+        wslc_common::is_available()
+    }
+    #[cfg(not(feature = "wslc"))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,13 +325,15 @@ mod tests {
     fn support_fields_are_consistent() {
         let support = platform_support();
         assert_eq!(support.is_supported, support.reason.is_none());
-        assert_eq!(support.is_supported, !support.available_methods.is_empty());
+        if support.is_supported {
+            assert!(!support.available_methods.is_empty());
+        }
     }
 
     #[test]
     fn windows_build_at_or_above_floor_is_supported() {
         for build in [MIN_WINDOWS_BUILD, 26200, u32::MAX] {
-            let support = windows_platform_support(build);
+            let support = windows_platform_support(build, false);
             assert!(support.is_supported, "build {build}");
             assert_eq!(support.available_methods, ["processcontainer"]);
             assert!(support.reason.is_none());
@@ -302,12 +344,26 @@ mod tests {
     fn windows_build_below_floor_is_unsupported() {
         // 19045 = Windows 10 22H2, 22631 = Windows 11 23H2.
         for build in [0, 19045, 22631, MIN_WINDOWS_BUILD - 1] {
-            let support = windows_platform_support(build);
+            let support = windows_platform_support(build, false);
             assert!(!support.is_supported, "build {build}");
             assert!(support.available_methods.is_empty());
             let reason = support.reason.expect("unsupported build needs a reason");
             assert!(reason.contains(&build.to_string()), "reason: {reason}");
         }
+    }
+
+    /// WSLC has its own runtime requirements, so it is reported wherever it is
+    /// present — but it is opt-in, and must not make a below-floor host look
+    /// ready for the default `processcontainer` spawn.
+    #[test]
+    fn wslc_is_reported_but_does_not_carry_support() {
+        let below = windows_platform_support(22631, true);
+        assert!(!below.is_supported);
+        assert_eq!(below.available_methods, ["wslc"]);
+
+        let above = windows_platform_support(MIN_WINDOWS_BUILD, true);
+        assert!(above.is_supported);
+        assert_eq!(above.available_methods, ["processcontainer", "wslc"]);
     }
 
     /// The probe is only a precondition worth trusting if it unshares

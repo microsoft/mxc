@@ -82,6 +82,8 @@ public static class MxcSandbox
                         TimedOut = result.timed_out != 0,
                         Stdout = PtrToString(result.stdout_utf8) ?? string.Empty,
                         Stderr = PtrToString(result.stderr_utf8) ?? string.Empty,
+                        OutputMetadata = DeserializeOutputMetadata(
+                            PtrToString(result.output_metadata_json_utf8)),
                     };
                 }
                 finally
@@ -155,4 +157,9 @@ public static class MxcSandbox
 
     private static unsafe string? PtrToString(byte* p) =>
         p is null ? null : Marshal.PtrToStringUTF8((IntPtr)p);
+
+    private static SandboxOutputMetadata? DeserializeOutputMetadata(string? json) =>
+        string.IsNullOrEmpty(json)
+            ? null
+            : JsonSerializer.Deserialize<SandboxOutputMetadata>(json);
 }

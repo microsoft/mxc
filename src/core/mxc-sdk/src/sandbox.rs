@@ -7,6 +7,7 @@
 
 use std::io::{Read, Write};
 
+pub use wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
 
 /// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).
@@ -30,10 +31,14 @@ pub enum WaitOutcome {
 pub struct Output {
     /// How the process finished.
     pub outcome: WaitOutcome,
+    /// Security warnings emitted while applying the sandbox policy.
+    pub warnings: Vec<String>,
     /// Everything the child wrote to stdout.
     pub stdout: Vec<u8>,
     /// Everything the child wrote to stderr.
     pub stderr: Vec<u8>,
+    /// Structured outputs produced by optional sandbox features.
+    pub output_metadata: Option<SandboxOutputMetadata>,
 }
 
 /// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox).
@@ -49,6 +54,16 @@ pub struct Sandbox {
 impl Sandbox {
     pub(crate) fn new(inner: Box<dyn SandboxProcess>) -> Self {
         Self { inner }
+    }
+
+    /// Security warnings emitted while applying the sandbox policy.
+    pub fn warnings(&self) -> &[String] {
+        self.inner.warnings()
+    }
+
+    /// Structured outputs available after a terminal wait completes.
+    pub fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.inner.output_metadata()
     }
 
     /// Take the child's stdin pipe. Returns `None` after the first call.
@@ -130,13 +145,17 @@ impl Sandbox {
 
         // Take both streams before waiting so `wait` won't discard them, and
         // read each on its own thread so the child never blocks on a full pipe.
+        let warnings = self.inner.warnings().to_vec();
         let stdout = capture(self.inner.take_stdout());
         let stderr = capture(self.inner.take_stderr());
         let outcome = self.wait()?;
+        let output_metadata = self.inner.output_metadata().cloned();
         Ok(Output {
             outcome,
+            warnings,
             stdout: stdout.join().unwrap_or_default(),
             stderr: stderr.join().unwrap_or_default(),
+            output_metadata,
         })
     }
 }
@@ -156,5 +175,84 @@ impl StreamCloser {
     /// Close the stream, making any read currently parked on it return.
     pub fn close(&self) {
         self.inner.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeProcess {
+        warnings: Vec<String>,
+        output_metadata: Option<SandboxOutputMetadata>,
+    }
+
+    impl SandboxProcess for FakeProcess {
+        fn warnings(&self) -> &[String] {
+            &self.warnings
+        }
+
+        fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+            self.output_metadata.as_ref()
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(Some(0))
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn sandbox_and_output_expose_security_warnings() {
+        let warning = "permissive mode weakens containment".to_string();
+        let sandbox = Sandbox::new(Box::new(FakeProcess {
+            warnings: vec![warning.clone()],
+            output_metadata: Some(SandboxOutputMetadata {
+                capture_denials: Some(CaptureDenialsOutput {
+                    kind: CaptureDenialsOutput::KIND.to_string(),
+                    output_path: "denials.json".to_string(),
+                    exit_code: 0,
+                    total_denials: 2,
+                    denied_resources_truncated: false,
+                }),
+            }),
+        }));
+
+        assert_eq!(sandbox.warnings(), [warning.as_str()]);
+
+        let output = sandbox.wait_with_output().expect("wait succeeds");
+        assert_eq!(output.warnings, [warning]);
+        assert_eq!(
+            output
+                .output_metadata
+                .unwrap()
+                .capture_denials
+                .unwrap()
+                .total_denials,
+            2
+        );
     }
 }

@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use tokio::sync::{Mutex, Notify};
 use windows_sandbox_lifecycle::control_plane::{
     self, process_creation_time, DaemonRecord, MappedFolderRecord, VmOwnership, VmProcId,
-    RECORD_SCHEMA_VERSION,
+    IPC_PROTOCOL_VERSION, RECORD_SCHEMA_VERSION,
 };
 use windows_sandbox_lifecycle::rendezvous::{
     GUEST_CONNECT_TIMEOUT, RENDEZVOUS_POLL_INTERVAL, RENDEZVOUS_TIMEOUT,
@@ -25,6 +25,9 @@ const VM_WATCHDOG_POLL_INTERVAL_SECS: u64 = 5;
 /// Consecutive gone polls required before the crash watchdog fires.
 const VM_WATCHDOG_GONE_CONFIRMATIONS: u32 = 3;
 
+/// How long to wait for the host's single VM slot before declaring it busy. On
+/// timeout the daemon exits [`control_plane::DAEMON_EXIT_VM_SLOT_BUSY`], which
+/// `start` maps to `backend_unavailable`.
 const HOST_VM_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Parsed daemon command-line arguments.
@@ -99,8 +102,24 @@ async fn main() -> Result<()> {
     let sandbox_id = record.sandbox_id.clone();
     let mapped = to_mapped_folders(&record.mapped_folders);
 
-    let _vm_lock = control_plane::HostVmLock::acquire(HOST_VM_LOCK_TIMEOUT)
-        .context("acquire host Windows Sandbox VM slot")?;
+    let _vm_lock = match control_plane::HostVmLock::try_acquire(HOST_VM_LOCK_TIMEOUT)
+        .context("acquire host Windows Sandbox VM slot")?
+    {
+        Some(lock) => lock,
+        None => {
+            // Slot held by another VM owner. Exit with a distinct code so
+            // `start` maps it to `backend_unavailable` rather than an opaque
+            // error; a real create/wait failure instead propagates via `?`
+            // above. No record written yet, so nothing to clean up.
+            eprintln!(
+                "[wsb-daemon] host Windows Sandbox VM slot is busy (held by another VM owner); \
+                 exiting {} after waiting {:?}",
+                control_plane::DAEMON_EXIT_VM_SLOT_BUSY,
+                HOST_VM_LOCK_TIMEOUT
+            );
+            std::process::exit(control_plane::DAEMON_EXIT_VM_SLOT_BUSY);
+        }
+    };
 
     let prior = control_plane::read_daemon_record().ok().flatten();
 
@@ -210,6 +229,7 @@ async fn main() -> Result<()> {
         nonce: args.nonce.clone(),
         active_sandbox_id: sandbox_id.clone(),
         ready: false,
+        protocol_version: IPC_PROTOCOL_VERSION,
         vm_processes: Vec::new(),
     };
     control_plane::write_daemon_record(&starting).context("write starting daemon record")?;

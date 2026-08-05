@@ -13,9 +13,10 @@ use std::process::Command;
 
 /// Embed Windows VersionInfo resource metadata into the binary being compiled.
 ///
-/// On non-Windows targets this is a no-op.  The `ProductVersion` field is set
-/// to `<cargo-pkg-version>+<short-git-hash>` so that every build encodes the
-/// exact source commit.
+/// On non-Windows hosts and when building non-Windows targets on a Windows host
+/// this is a no-op.
+/// The `ProductVersion` field is set to `<cargo-pkg-version>+<short-git-hash>`
+/// so that every build encodes the exact source commit.
 pub fn embed_version_info(file_description: &str, original_filename: &str) {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
@@ -24,7 +25,11 @@ pub fn embed_version_info(file_description: &str, original_filename: &str) {
     track_git_head();
 
     #[cfg(windows)]
-    embed_version_info_windows(file_description, original_filename);
+    {
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            embed_version_info_windows(file_description, original_filename);
+        }
+    }
 
     // Suppress unused-variable warnings on non-Windows.
     #[cfg(not(windows))]

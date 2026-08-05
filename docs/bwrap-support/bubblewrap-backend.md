@@ -22,8 +22,11 @@ requiring root privileges or a container runtime.
   apk add bubblewrap
   ```
   The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
-  read-only mounts via `--ro-bind-try`, which requires **bwrap 0.3.0+**
-  (released 2017; every currently-supported distro ships a newer version).
+  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
+  environment is built with `--clearenv` (bwrap 0.5.0+), so **bwrap 0.5.0 or
+  newer** is required. Platform detection probes `bwrap --version` and reports
+  the backend as unavailable — with the detected version — when the host is
+  below that floor.
 - User namespaces must be enabled:
   ```bash
   # Check: should print "1"

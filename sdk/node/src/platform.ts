@@ -4,6 +4,7 @@ import * as path from 'path';
 import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
 import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
+import { diagLog } from './diagnostic.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,11 +64,6 @@ type WindowsBuild = { major: number; minor: number } | null;
  * Default implementation that reads `CurrentBuild` / `UBR` from the
  * registry. Replaceable via {@link _setWindowsBuildQuery} in tests so we
  * can exercise the IsolationSession version gate deterministically.
- *
- * `UBR` is only needed for the IsolationSession minor-build gate, so an
- * unreadable `UBR` degrades to `minor: 0` rather than discarding
- * `CurrentBuild` — otherwise a missing revision value would silently bypass
- * the `processcontainer` build floor.
  */
 function defaultWindowsBuildQuery(): WindowsBuild {
   const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
@@ -79,6 +75,10 @@ function defaultWindowsBuildQuery(): WindowsBuild {
   if (isNaN(major)) {
     return null;
   }
+  // `UBR` is only needed for the IsolationSession minor-build gate, so an
+  // unreadable revision degrades to 0 rather than discarding `CurrentBuild` —
+  // otherwise a missing value would silently bypass the processcontainer
+  // build floor.
   const minor = Number(queryWindowsRegistry(registryPath, 'UBR'));
   return { major, minor: isNaN(minor) ? 0 : minor };
 }
@@ -94,6 +94,9 @@ export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
  * Minimum Windows build the `processcontainer` backend supports — 26100
  * (Windows 11 24H2). This is the product floor documented in the README and in
  * `docs/process-container/os-version-support.md`.
+ *
+ * Mirrors `MIN_WINDOWS_BUILD` in `src/core/mxc_engine/src/platform.rs` — keep
+ * both in sync.
  */
 const MIN_PROCESSCONTAINER_BUILD = 26100;
 
@@ -284,13 +287,22 @@ function computeSupport(): PlatformSupport {
     // are installed; callers pick via the containment field.
     const methods: ContainmentBackend[] = [];
     if (isLxcAvailable()) methods.push('lxc');
-    const bubblewrap = probeBubblewrap();
-    if (bubblewrap.ok) methods.push('bubblewrap');
+    const bubblewrap = _probeBubblewrap();
+    if (bubblewrap.available) {
+      methods.push('bubblewrap');
+    } else {
+      // Always surface why bwrap is unavailable. When LXC is present the
+      // platform is still supported, so `reason` — documented as why the
+      // platform is *not* supported — must stay unset, and the detail would
+      // otherwise be dropped with no way to diagnose the missing backend.
+      diagLog(`getPlatformSupport: bubblewrap unavailable — ${bubblewrap.reason}`);
+      if (methods.length === 0) {
+        support.reason = `Neither LXC nor Bubblewrap is available on this system (${bubblewrap.reason})`;
+      }
+    }
     if (methods.length > 0) {
       support.isSupported = true;
       support.availableMethods = methods;
-    } else {
-      support.reason = `No Linux containment backend is usable: LXC is not installed, and bubblewrap ${bubblewrap.detail}`;
     }
     return support;
   }
@@ -311,9 +323,9 @@ function computeSupport(): PlatformSupport {
   }
   // Windows Sandbox and IsolationSession have their own floors, so a host
   // below the processcontainer floor may still have them. They are reported,
-  // but they are experimental-only backends and callers reach them by opting
-  // in explicitly, so they cannot carry `isSupported` — that flag is what
-  // guards the default `processcontainer` spawn.
+  // but they are experimental-only backends reached by explicit opt-in, so
+  // they cannot carry `isSupported` — that flag is what guards the default
+  // `processcontainer` spawn.
   if (isWindowsSandboxAvailable()) {
     methods.push('windows_sandbox');
   }
@@ -323,7 +335,8 @@ function computeSupport(): PlatformSupport {
   support.availableMethods = methods;
 
   if (!methods.includes('processcontainer')) {
-    const alternatives = methods.length > 0 ? ` (experimental backends available: ${methods.join(', ')})` : '';
+    const alternatives =
+      methods.length > 0 ? ` (experimental backends available: ${methods.join(', ')})` : '';
     support.reason =
       `Windows build ${build?.major} is below ${MIN_PROCESSCONTAINER_BUILD}, ` +
       `the minimum supported build (Windows 11 24H2)${alternatives}`;
@@ -345,6 +358,237 @@ function isLxcAvailable(): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Minimum `bwrap` version the Bubblewrap backend supports, as
+ * `[major, minor, patch]`.
+ *
+ * This is the oldest release that has **every** flag the Rust argument builder
+ * emits. `--ro-bind-try` (deny-by-default baseline mounts) landed in bwrap
+ * 0.3.1 and `--clearenv` (minimal sandbox environment) in 0.5.0, so
+ * `--clearenv` sets the floor.
+ *
+ * Mirrors `MIN_BWRAP_VERSION` in
+ * `src/backends/bubblewrap/common/src/bwrap_version.rs` — keep both in sync.
+ */
+const MIN_BWRAP_VERSION: readonly [number, number, number] = [0, 5, 0];
+
+/** Outcome of the Bubblewrap probe: available, or unavailable with a reason. */
+type BubblewrapProbe = { available: true } | { available: false; reason: string };
+
+/**
+ * Raw result of running `bwrap --version`, normalized across the ways the call
+ * can fail. Mirrors the cases the Rust `probe_bwrap` distinguishes.
+ */
+type BwrapVersionResult =
+  | { kind: 'output'; stdout: string }
+  | { kind: 'notFound' }
+  | { kind: 'failed'; status: number | null; detail: string };
+
+/**
+ * Whether a `bwrap` candidate exists anywhere on `PATH`.
+ *
+ * Linux reports `ENOENT` both for a genuinely absent binary and for one that
+ * exists but cannot be executed (a missing ELF interpreter or script shebang
+ * target), so the spawn error alone cannot tell `notFound` from `failed`. A
+ * candidate on `PATH` means the package is installed and the failure is a
+ * broken install.
+ */
+function bwrapExistsOnPath(): boolean {
+  const pathVar = process.env.PATH;
+  if (!pathVar) return false;
+  return pathVar
+    .split(path.delimiter)
+    .some((dir) => dir !== '' && fs.existsSync(path.join(dir, 'bwrap')));
+}
+
+/**
+ * How long to wait for `bwrap --version` before giving up.
+ *
+ * `getPlatformSupport()` is synchronous, so without a bound a `bwrap` that
+ * hangs — a wrapper script on PATH, a binary on a stalled network mount —
+ * would block the caller indefinitely. Printing a version string is
+ * near-instant, so this is generous.
+ */
+const BWRAP_VERSION_TIMEOUT_MS = 5000;
+
+/**
+ * Default runner for `bwrap --version`. Uses `execFileSync` rather than a
+ * shell so a missing binary surfaces as `ENOENT` instead of the shell's
+ * indistinguishable exit code 127 — that separation is what lets us report
+ * "not installed" and "installed but broken" differently.
+ *
+ * Replaceable in unit tests via {@link _setBwrapVersionRunner}.
+ */
+function defaultBwrapVersionRunner(): BwrapVersionResult {
+  try {
+    return {
+      kind: 'output',
+      stdout: execFileSync('bwrap', ['--version'], {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: BWRAP_VERSION_TIMEOUT_MS,
+      }),
+    };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & {
+      status?: number | null;
+      stderr?: Buffer | string;
+      killed?: boolean;
+    };
+    // `ENOENT` covers both an absent binary and a present-but-unusable one
+    // (missing ELF interpreter / shebang target), so confirm the binary is
+    // really absent before blaming the package manager.
+    if (e.code === 'ENOENT' && !bwrapExistsOnPath()) {
+      return { kind: 'notFound' };
+    }
+    // Timed out: the child was killed, so there is no meaningful exit status.
+    if (e.code === 'ETIMEDOUT' || e.killed) {
+      return {
+        kind: 'failed',
+        status: null,
+        detail: `timed out after ${BWRAP_VERSION_TIMEOUT_MS}ms`,
+      };
+    }
+    return {
+      kind: 'failed',
+      status: e.status ?? null,
+      detail: e.stderr?.toString().trim() || e.message,
+    };
+  }
+}
+
+let bwrapVersionRunner: () => BwrapVersionResult = defaultBwrapVersionRunner;
+
+/** @internal Test-only: override the `bwrap --version` runner. */
+export function _setBwrapVersionRunner(fn: (() => BwrapVersionResult) | null): void {
+  bwrapVersionRunner = fn ?? defaultBwrapVersionRunner;
+}
+
+/**
+ * Parse the version out of a `bwrap --version` line such as
+ * `"bubblewrap 0.11.2"`.
+ *
+ * Anchored on the `bubblewrap` package name, which is what makes unrecognized
+ * output fail closed: without it any numeric token in arbitrary output (say
+ * `"some other tool 999"`) would be read as a version and clear the
+ * minimum-version gate.
+ *
+ * Lenient about what *surrounds* each number so distro-patched version strings
+ * (`0.4.1-1`, a bare `0.6`) still resolve: the version token is split on `.`
+ * and each of the (up to three) components contributes its leading digits.
+ * Debian's `+really` marker is honored rather than ignored — see below.
+ *
+ * Strict about components that are *present but not numeric*: only a component
+ * that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
+ * rather than silently read as `0.6.0`.
+ *
+ * @internal Exported for unit tests.
+ * @returns `[major, minor, patch]`, or `null` when the version cannot be determined.
+ */
+export function _parseBwrapVersion(output: string): [number, number, number] | null {
+  // bwrap prints its PACKAGE_STRING, "bubblewrap <version>"; that leading name
+  // has been stable since 0.1.0.
+  const tokens = output.trim().split(/\s+/);
+  if (tokens[0]?.toLowerCase() !== 'bubblewrap' || !tokens[1]) return null;
+  // Debian's `+really` marker means the package ships the version that FOLLOWS
+  // it, so `0.5.0+really0.4.1` is really 0.4.1 — which predates `--clearenv`
+  // and must not clear the gate.
+  const marker = tokens[1].lastIndexOf('+really');
+  const token = marker === -1 ? tokens[1] : tokens[1].slice(marker + '+really'.length);
+  const components: number[] = [];
+  // Every component must be numeric, including ones past the patch: they are
+  // not significant, but `0.5.0.invalid` is an unrecognized banner rather than
+  // 0.5.0. Validating (rather than rejecting on count) keeps a distro
+  // four-part build such as `0.6.0.1` working.
+  for (const part of token.split('.')) {
+    const digits = /^\d+/.exec(part);
+    // Present but non-numeric: fail closed rather than guessing 0.
+    if (!digits) return null;
+    const value = parseInt(digits[0], 10);
+    // Mirror the Rust parser's `u32`: a larger value is not something bwrap
+    // could print, and accepting it would let this gate admit a banner the
+    // backend's gate rejects.
+    if (value > 0xffffffff) return null;
+    components.push(value);
+  }
+  // Only a genuinely absent component defaults to 0, so "0.6" is 0.6.0.
+  return [components[0], components[1] ?? 0, components[2] ?? 0];
+}
+
+/** Compare two `[major, minor, patch]` tuples lexicographically. */
+function compareVersions(
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+/**
+ * Check whether Bubblewrap (bwrap) is installed *and* new enough.
+ *
+ * Presence on PATH is not sufficient: a `bwrap` older than
+ * {@link MIN_BWRAP_VERSION} would reject flags the backend always emits and
+ * fail at spawn time with an opaque "unknown option" error. Unparsable output
+ * fails closed — without a version we cannot assert the required flags exist.
+ *
+ * Mirrors `probe_bwrap` in
+ * `src/backends/bubblewrap/common/src/bwrap_version.rs`, including the
+ * distinction between a missing binary and a present-but-broken one.
+ *
+ * @internal Exported for unit tests.
+ */
+export function _probeBubblewrap(): BubblewrapProbe {
+  const minVersion = MIN_BWRAP_VERSION.join('.');
+  const result = bwrapVersionRunner();
+
+  if (result.kind === 'notFound') {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) is not installed or not on PATH; version ${minVersion} or newer is required`,
+    };
+  }
+  if (result.kind === 'failed') {
+    // Present but broken: do not send the user to their package manager for a
+    // package they already have.
+    // Covers both a spawn failure and termination by a signal, neither of
+    // which yields an exit code.
+    const where =
+      result.status === null ? 'failed without an exit status' : `exited with status ${result.status}`;
+    const detail = result.detail ? `: ${result.detail}` : '';
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) is present but \`bwrap --version\` ${where}${detail}; version ${minVersion} or newer is required`,
+    };
+  }
+
+  const version = _parseBwrapVersion(result.stdout);
+  if (!version) {
+    return {
+      available: false,
+      reason: `could not determine the Bubblewrap (bwrap) version from ${JSON.stringify(result.stdout.trim())}; version ${minVersion} or newer is required`,
+    };
+  }
+  if (compareVersions(version, MIN_BWRAP_VERSION) < 0) {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) ${version.join('.')} is too old; version ${minVersion} or newer is required`,
+    };
+  }
+  // A new enough `bwrap` still cannot sandbox if the host forbids it, and
+  // `--version` never creates a namespace, so ask it to build a real one.
+  const sandbox = bwrapSandboxRunner();
+  if (!sandbox.ok) {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) ${version.join('.')} is installed but cannot create a sandbox on this host: ${sandbox.detail}`,
+    };
+  }
+  return { available: true };
 }
 
 /**
@@ -401,18 +645,20 @@ const BWRAP_PROBE_ARGS = [
   'exit 0',
 ];
 
-/** Outcome of {@link probeBubblewrap}; `detail` is empty when `ok`. */
-type BubblewrapProbe = { ok: boolean; detail: string };
+/** Outcome of the sandbox probe; `detail` is empty when `ok`. */
+export type BubblewrapSandboxProbe = { ok: boolean; detail: string };
 
 /**
- * Check whether Bubblewrap can actually create a sandbox on this system,
- * reporting bwrap's own diagnostic when it can't.
+ * Run {@link BWRAP_PROBE_ARGS}, reporting bwrap's own diagnostic on failure.
+ *
+ * Replaceable in unit tests via {@link _setBwrapSandboxRunner}, so the
+ * version-gate tests can drive `_probeBubblewrap` on a host without `bwrap`.
  */
-function probeBubblewrap(): BubblewrapProbe {
+function defaultBwrapSandboxRunner(): BubblewrapSandboxProbe {
   try {
     execFileSync('bwrap', BWRAP_PROBE_ARGS, {
       stdio: ['ignore', 'ignore', 'pipe'],
-      timeout: 5000,
+      timeout: BWRAP_VERSION_TIMEOUT_MS,
     });
     return { ok: true, detail: '' };
   } catch (error) {
@@ -420,19 +666,23 @@ function probeBubblewrap(): BubblewrapProbe {
   }
 }
 
+let bwrapSandboxRunner: () => BubblewrapSandboxProbe = defaultBwrapSandboxRunner;
+
+/** @internal Test-only: override the Bubblewrap sandbox probe. */
+export function _setBwrapSandboxRunner(fn: (() => BubblewrapSandboxProbe) | null): void {
+  bwrapSandboxRunner = fn ?? defaultBwrapSandboxRunner;
+}
+
 /** Reduce a failed bwrap run to a single length-capped line for a `reason`. */
 function bwrapFailureDetail(error: unknown): string {
   const MAX_LEN = 200;
-  const { code, stderr } = (error ?? {}) as { code?: string; stderr?: Buffer | string };
-  if (code === 'ENOENT') {
-    return 'not installed';
-  }
+  const { stderr } = (error ?? {}) as { stderr?: Buffer | string };
   const line = (stderr?.toString() ?? '')
     .split('\n')
     .map((l) => l.trim())
     .find((l) => l.length > 0);
   if (!line) {
-    return 'failed with no diagnostic output';
+    return 'it failed with no diagnostic output';
   }
   // Spread so the cap counts code points and never splits a surrogate pair.
   const chars = [...line];
