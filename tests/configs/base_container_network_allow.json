@@ -1,0 +1,22 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-BaseContainer-Network-Allow",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -Command \"$response = (& 'C:\\Windows\\System32\\curl.exe' 'https://dev.azure.com' 2>$null) -join [Environment]::NewLine; $curlExitCode = $LASTEXITCODE; if ($curlExitCode -eq 0 -and $response -match 'Object moved' -and $response -match 'azure.microsoft.com/services/devops') { Write-Output 'OK:network_allow'; exit 0 }; Write-Output 'FAIL:network_allow_response'; exit 1\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "C:\\Windows"
+    ]
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "enforcementMode": "capabilities"
+  },
+  "ui": {
+    "disable": false
+  }
+}
