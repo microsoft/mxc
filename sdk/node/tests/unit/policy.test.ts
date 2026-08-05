@@ -8,12 +8,6 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-// TODO: Investigate why Object.defineProperty(process, 'platform', ...) does not
-// take effect on Linux ADO pipeline runners (Node.js v20.19.x). These tests mock
-// process.platform to 'win32' and must be skipped on Linux until the root cause
-// is understood.
-const isLinux = process.platform === 'linux';
-
 describe('getAvailableToolsPolicy - PowerShell discovery', () => {
     let originalPlatform: PropertyDescriptor | undefined;
     let tmpDir: string | undefined;
@@ -46,32 +40,36 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         }
     });
 
-    it('should add system root to readonlyPaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should add $PSHOME (not the drive root) to readonlyPaths when pwsh.exe is on PATH', () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
         const result = getAvailableToolsPolicy(env);
         assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root (e.g. C:\\) should be in readonlyPaths when pwsh.exe is on PATH',
+            result.readonlyPaths.some(p => p.toLowerCase() === path.resolve(pwshDir).toLowerCase()),
+            '$PSHOME should be in readonlyPaths when pwsh.exe is on PATH',
+        );
+        assert.ok(
+            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
+            'The drive root must never be granted — it exposes the whole volume',
         );
     });
 
-    it('should add PSReadLine dir to readwritePaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should add PSReadLine dir to readwritePaths when pwsh.exe is on PATH', () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
         const result = getAvailableToolsPolicy(env);
-        const expected = path.join(
+        const expected = path.resolve(path.join(
             'C:\\Users\\TestUser', 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine',
-        );
+        ));
         assert.ok(
             result.readwritePaths.some(p => p.toLowerCase() === expected.toLowerCase()),
             'PSReadLine directory should be in readwritePaths',
         );
     });
 
-    it('should not add PowerShell paths when pwsh.exe is not on PATH', { skip: isLinux }, () => {
+    it('should not add PowerShell paths when pwsh.exe is not on PATH', () => {
         mockWindows();
         const env = { PATH: 'C:\\Windows\\System32', USERPROFILE: 'C:\\Users\\TestUser' };
         const result = getAvailableToolsPolicy(env);
@@ -84,7 +82,7 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         );
     });
 
-    it('should return empty policy on non-Windows even when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should return empty policy on non-Windows even when pwsh.exe is on PATH', () => {
         mockLinux();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
@@ -98,17 +96,25 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         );
     });
 
-    it('should not add PSReadLine path when USERPROFILE is not set', { skip: isLinux }, () => {
+    it('should not add PSReadLine path when USERPROFILE is not set', () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir };
         const result = getAvailableToolsPolicy(env);
         assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root should still be in readonlyPaths',
+            result.readonlyPaths.some(p => p.toLowerCase() === path.resolve(pwshDir).toLowerCase()),
+            '$PSHOME should still be in readonlyPaths',
         );
         assert.strictEqual(result.readwritePaths.length, 0,
             'readwritePaths should be empty without USERPROFILE',
+        );
+    });
+
+    it('should never grant a filesystem root discovered on PATH', () => {
+        const root = path.parse(process.cwd()).root;
+        const result = getAvailableToolsPolicy({ PATH: root });
+        assert.deepStrictEqual(result.readonlyPaths, [],
+            'A filesystem root must never be granted — it exposes the whole volume',
         );
     });
 });

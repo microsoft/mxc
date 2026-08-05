@@ -14,7 +14,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
@@ -99,21 +99,15 @@ fn join_str(base: &str, segments: &[&str]) -> String {
 }
 
 /// Resolve a path to absolute, lexically-normalized form — the equivalent of
-/// the SDK's `path.resolve`. Purely lexical (no filesystem access, no symlink
-/// resolution): a relative path is joined with the cwd, then `.`/`..` segments
-/// are collapsed. Crucially it does *not* canonicalize, so on Windows it keeps
-/// the plain `C:\...` form (no `\\?\` verbatim prefix) — otherwise
+/// the SDK's `path.resolve`. It does not touch the filesystem or resolve
+/// symlinks: [`std::path::absolute`] makes the path absolute using
+/// platform rules (on Windows via `GetFullPathNameW`, so drive-relative
+/// `C:foo` resolves against that drive's current directory), then `.`/`..`
+/// segments are collapsed. Crucially it does *not* canonicalize, so on Windows
+/// it keeps the plain `C:\...` form (no `\\?\` verbatim prefix) — otherwise
 /// [`is_system_critical_path`]'s `C:\Windows` prefix check would never match.
 fn resolve_path(p: &str) -> String {
-    let path = Path::new(p);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(path),
-            Err(_) => path.to_path_buf(),
-        }
-    };
+    let absolute = std::path::absolute(p).unwrap_or_else(|_| PathBuf::from(p));
     normalize_lexically(&absolute)
         .to_string_lossy()
         .into_owned()
@@ -122,7 +116,6 @@ fn resolve_path(p: &str) -> String {
 /// Collapse `.`/`..` segments without touching the filesystem, preserving the
 /// path prefix/root (the well-known lexical-normalize pattern).
 fn normalize_lexically(path: &Path) -> PathBuf {
-    use std::path::Component;
     let mut components = path.components().peekable();
     let mut out = if let Some(c @ Component::Prefix(..)) = components.peek().copied() {
         components.next();
@@ -174,6 +167,15 @@ fn deduplicate_paths(paths: &[String]) -> Vec<String> {
 /// Whether `dir` is under a system-critical location that must not be exposed.
 fn is_system_critical_path(dir: &str) -> bool {
     let normalized = resolve_path(dir);
+    // A volume or share root (`C:\`, `\\server\share`, `/`) is never a
+    // legitimate tool directory, and granting one exposes every file on the
+    // volume. A root is the only absolute path with no `Normal` component.
+    if !Path::new(&normalized)
+        .components()
+        .any(|c| matches!(c, Component::Normal(_)))
+    {
+        return true;
+    }
     if is_windows() {
         // A set-but-empty `WINDIR` must not disable the filter: treat empty as
         // unset and fall back (the same `WINDIR` handling `powershell_policy`
@@ -184,12 +186,14 @@ fn is_system_critical_path(dir: &str) -> bool {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "C:\\Windows".to_string())
             .to_lowercase();
-        // Strip a verbatim (`\\?\`, `\\?\UNC\`) prefix so a path supplied in
-        // that form still matches the plain `C:\Windows` comparison.
+        // Strip a verbatim (`\\?\`, `\\?\UNC\`) or device-namespace (`\\.\`)
+        // prefix so a path supplied in that form still matches the plain
+        // `C:\Windows` comparison.
         let n = normalized.to_lowercase();
         let n = n
             .strip_prefix(r"\\?\unc\")
             .or_else(|| n.strip_prefix(r"\\?\"))
+            .or_else(|| n.strip_prefix(r"\\.\"))
             .unwrap_or(&n);
         return n == win_dir || n.starts_with(&format!("{win_dir}\\"));
     }
@@ -233,13 +237,21 @@ fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)
 }
 
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
-/// (Windows only), grant the system-drive root (`C:\`) read-only — `pwsh.exe`
-/// enumerates the drive root on startup — plus the PSReadLine history directory
-/// read-write so the module can persist command history.
+/// (Windows only), grant `$PSHOME` — the directory holding `pwsh.exe`, its
+/// bundled modules and `powershell.config.json` — read-only, plus the
+/// PSReadLine history directory read-write so the module can persist command
+/// history. Additional module trees reach the policy through `PSModulePath`,
+/// which [`available_tools_policy`] already discovers.
 ///
-/// Mirrors the SDK's `getPowerShellPolicy`. The system drive is read from the
-/// process environment (`SystemDrive`, defaulting to `C:`); the user-scoped
-/// `USERPROFILE` comes from the passed-in `env`.
+/// It deliberately does **not** grant the system-drive root. `pwsh.exe` does
+/// stat `C:\` on startup, but that only needs metadata rights on the root
+/// directory itself — which `wxc-host-prep prepare-system-drive` grants
+/// host-wide with non-inheriting ACEs (see `docs/host-prep.md`). A `C:\` entry
+/// in `readonly_paths` instead hands the sandbox read access to every file on
+/// the volume.
+///
+/// Mirrors the SDK's `getPowerShellPolicy`. The user-scoped `USERPROFILE`
+/// comes from the passed-in `env`.
 ///
 /// On non-Windows, or when `pwsh.exe` is not on `path_dirs`, returns an empty
 /// policy.
@@ -248,18 +260,12 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
         return FilesystemPolicyResult::default();
     }
 
-    let pwsh_found = path_dirs
+    let Some(ps_home) = path_dirs
         .iter()
-        .any(|dir| Path::new(dir).join("pwsh.exe").exists());
-    if !pwsh_found {
+        .find(|dir| Path::new(dir).join("pwsh.exe").exists())
+    else {
         return FilesystemPolicyResult::default();
-    }
-
-    let system_drive = std::env::var("SystemDrive")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "C:".to_string());
-    let readonly_paths = vec![format!("{system_drive}\\")];
+    };
 
     let mut readwrite_paths: Vec<String> = Vec::new();
     if let Some(user_profile) = env_get(env, "USERPROFILE") {
@@ -278,7 +284,7 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
     }
 
     FilesystemPolicyResult {
-        readonly_paths,
+        readonly_paths: vec![ps_home.clone()],
         readwrite_paths,
     }
 }
@@ -286,9 +292,10 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
 /// Discover tool and SDK directories from `env` (defaults to the process
 /// environment) as read-only policy paths.
 ///
-/// Reads `PATH` plus a registry of well-known tool/SDK variables, then filters
-/// out non-existent and system-critical directories, and adds PowerShell paths
-/// when `pwsh.exe` is on `PATH`. The Rust port of `getAvailableToolsPolicy`.
+/// Reads `PATH` plus a registry of well-known tool/SDK variables, and the
+/// PowerShell paths when `pwsh.exe` is on `PATH`, then filters out
+/// non-existent and system-critical directories (including filesystem roots).
+/// The Rust port of `getAvailableToolsPolicy`.
 /// (The SDK's `processcontainer` AAP-ACL filter is Windows-runtime-specific and
 /// is applied server-side; it is not replicated here.)
 pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPolicyResult {
@@ -313,18 +320,18 @@ pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPol
         }
     }
 
-    let filtered: Vec<String> = deduplicate_paths(&collected)
+    // Merged before the filter below so the PowerShell grant is held to the
+    // same "exists and is not system-critical" bar as every other directory.
+    let pwsh = powershell_policy(&path_dirs, env);
+    collected.extend(pwsh.readonly_paths);
+
+    let readonly_paths: Vec<String> = deduplicate_paths(&collected)
         .into_iter()
         .filter(|dir| directory_exists(dir) && !is_system_critical_path(dir))
         .collect();
 
-    let pwsh = powershell_policy(&path_dirs, env);
-
-    let mut readonly = filtered;
-    readonly.extend(pwsh.readonly_paths);
-
     FilesystemPolicyResult {
-        readonly_paths: deduplicate_paths(&readonly),
+        readonly_paths,
         readwrite_paths: deduplicate_paths(&pwsh.readwrite_paths),
     }
 }
@@ -861,7 +868,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn powershell_policy_grants_system_drive_root() {
+    fn powershell_policy_grants_pshome_not_the_drive_root() {
         use super::powershell_policy;
         use std::fs;
         use std::path::PathBuf;
@@ -886,16 +893,12 @@ mod tests {
         // Clean up before asserting so a failing assertion still leaves nothing.
         let _ = fs::remove_dir_all(&ps_home);
 
-        // The system-drive root (e.g. `C:\`) is granted read-only — pwsh
-        // enumerates the drive root on startup (mirrors `getPowerShellPolicy`).
-        // A bare drive root normalizes to a 2-char `X:` after trimming separators.
-        assert!(
-            result.readonly_paths.iter().any(|p| {
-                let trimmed = p.trim_end_matches(['\\', '/']);
-                trimmed.len() == 2 && trimmed.ends_with(':')
-            }),
-            "expected system-drive root in readonly paths: {:?}",
-            result.readonly_paths
+        // Only `$PSHOME` is granted — never a bare drive root, which would
+        // expose every file on the volume.
+        assert_eq!(
+            result.readonly_paths,
+            vec![ps_home_str],
+            "expected only $PSHOME in readonly paths"
         );
         // PSReadLine command history stays read-write.
         assert!(
@@ -905,6 +908,43 @@ mod tests {
                 .any(|p| p.contains("PSReadLine")),
             "expected PSReadLine history in readwrite paths: {:?}",
             result.readwrite_paths
+        );
+    }
+
+    #[test]
+    fn filesystem_roots_are_system_critical() {
+        use super::is_system_critical_path;
+
+        if cfg!(target_os = "windows") {
+            assert!(is_system_critical_path("C:\\"));
+            assert!(is_system_critical_path("C:/"));
+            assert!(is_system_critical_path("C:\\tools\\.."));
+            assert!(!is_system_critical_path("C:\\tools"));
+        } else {
+            assert!(is_system_critical_path("/"));
+            assert!(is_system_critical_path("/opt/.."));
+            assert!(!is_system_critical_path("/opt/tools"));
+        }
+    }
+
+    #[test]
+    fn tool_paths_never_grant_a_filesystem_root() {
+        use super::available_tools_policy;
+
+        // A root on `PATH` must not survive discovery: granting it would hand
+        // the sandbox read access to the whole volume.
+        let root = if cfg!(target_os = "windows") {
+            "C:\\"
+        } else {
+            "/"
+        };
+        let env = vec![("PATH".to_string(), root.to_string())];
+        let result = available_tools_policy(Some(&env));
+
+        assert!(
+            result.readonly_paths.is_empty(),
+            "a filesystem root must never be granted: {:?}",
+            result.readonly_paths
         );
     }
 

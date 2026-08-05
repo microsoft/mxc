@@ -148,10 +148,13 @@ fn check_exe_heuristics(
         return Some(LaunchDiagnostic {
             kind: "missing_filesystem_access",
             message: format!(
-                "pwsh.exe versions before 7.7 require read-only access to the \
-                 root drive ({root}) to start. The current sandbox policy does \
-                 not grant this access. Add \"{root}\" to `readonlyPaths` in your \
-                 sandbox policy, or upgrade to pwsh 7.7+."
+                "pwsh.exe versions before 7.7 require read access to the root \
+                 drive ({root}) to start, and the current sandbox policy does \
+                 not grant it. Run `wxc-host-prep prepare-system-drive` — it \
+                 adds metadata-only, non-inheriting ACEs for the AppContainer \
+                 SIDs on {root} — or upgrade to pwsh 7.7+. Do not add \
+                 \"{root}\" to `readonlyPaths`: that grant is recursive and \
+                 would expose every file on the volume to the sandbox."
             ),
         });
     }
