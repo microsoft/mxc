@@ -10,6 +10,9 @@ import {
   _resetPlatformSupportCache,
   _setProbeRunner,
   _setWindowsBuildQuery,
+  _parseBwrapVersion,
+  _probeBubblewrap,
+  _setBwrapVersionRunner,
   findWxcExecutable,
 } from '../../src/platform.js';
 
@@ -378,5 +381,186 @@ describe('isolation_session availability gate', () => {
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
     assert.strictEqual(support.availableMethods[0], 'processcontainer');
+  });
+});
+
+// The Bubblewrap probe gates on version, not just presence: `--clearenv`
+// (emitted unconditionally by the Rust argument builder) only exists in
+// bwrap 0.5.0+. Mirrors the Rust tests in
+// `src/backends/bubblewrap/common/src/bwrap_version.rs`.
+describe('bwrap version parsing', () => {
+  it('parses the standard `bwrap --version` output', () => {
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.2\n'), [0, 11, 2]);
+  });
+
+  it('parses distro-patched and short version strings', () => {
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.4.1-1'), [0, 4, 1]);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.6'), [0, 6, 0]);
+  });
+
+  it('honors the Debian `+really` marker', () => {
+    // `X+reallyY` ships upstream Y, not X, so Y is the effective version.
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.0+really0.10.0'), [0, 10, 0]);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.11.0+really0.10.0-1'), [0, 10, 0]);
+  });
+
+  it('returns null when no version token is present', () => {
+    assert.strictEqual(_parseBwrapVersion(''), null);
+    assert.strictEqual(_parseBwrapVersion('bwrap: command not found'), null);
+  });
+
+  it('fails closed on a stray number in unrelated output', () => {
+    // Regression: searching for any numeric token let unrelated output clear
+    // the gate — "some other tool 999" parsed as 999.0.0. Anchoring on the
+    // `bubblewrap` package name is what keeps this fail-closed.
+    assert.strictEqual(_parseBwrapVersion('some other tool 999'), null);
+    assert.strictEqual(_parseBwrapVersion('bwrap 0.11.2'), null);
+  });
+
+  it('rejects components that overflow the Rust parser\'s u32', () => {
+    // Shared contract with `bwrap_version.rs`: an out-of-range component is a
+    // malformed banner, not a very new bwrap. Without this the SDK gate would
+    // admit a banner the backend's gate rejects.
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 99999999999999999999.0.0'), null);
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 0.4294967296.0'), null);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 4294967295.0.0'), [4294967295, 0, 0]);
+  });
+
+  it('rejects junk after the patch component', () => {
+    // Regression: components past the patch were dropped unchecked, so
+    // "0.5.0.invalid" cleared the gate as 0.5.0.
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 0.5.0.invalid'), null);
+    // A numeric fourth component is a plausible distro build, not junk.
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 0.6.0.1'), [0, 6, 0]);
+  });
+
+  it('fails closed on a present but non-numeric component', () => {
+    // "0.6.invalid" must not be read as 0.6.0 — only an absent component
+    // defaults to 0.
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 0.6.invalid'), null);
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 0.beta.1'), null);
+    assert.strictEqual(_parseBwrapVersion('bubblewrap 0.6.'), null);
+    assert.deepStrictEqual(_parseBwrapVersion('bubblewrap 1'), [1, 0, 0]);
+  });
+});
+
+// The minimum-version comparison itself, driven through the injectable
+// runner. Without these the SDK gate could drift from the Rust gate in
+// `src/backends/bubblewrap/common/src/bwrap_version.rs` unnoticed.
+describe('bwrap minimum-version gate', () => {
+  afterEach(() => {
+    _setBwrapVersionRunner(null);
+    _resetPlatformSupportCache();
+  });
+
+  const withVersion = (stdout: string) =>
+    _setBwrapVersionRunner(() => ({ kind: 'output', stdout }));
+
+  it('accepts a version exactly at the floor', () => {
+    withVersion('bubblewrap 0.5.0\n');
+    assert.deepStrictEqual(_probeBubblewrap(), { available: true });
+  });
+
+  it('accepts a version above the floor', () => {
+    withVersion('bubblewrap 0.11.2\n');
+    assert.deepStrictEqual(_probeBubblewrap(), { available: true });
+  });
+
+  it('rejects a version below the floor and names it', () => {
+    // 0.4.1 has --ro-bind-try but not --clearenv.
+    withVersion('bubblewrap 0.4.1\n');
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /0\.4\.1 is too old/);
+    assert.match(probe.reason, /0\.5\.0 or newer/);
+  });
+
+  it('rejects the release immediately below the floor', () => {
+    withVersion('bubblewrap 0.4.99\n');
+    assert.strictEqual(_probeBubblewrap().available, false);
+  });
+
+  it('does not let a `+really` version smuggle a below-floor bwrap past the gate', () => {
+    // Regression: reading the leading version accepted this as 0.5.0, even
+    // though the installed bwrap is 0.4.1 and has no `--clearenv`.
+    withVersion('bubblewrap 0.5.0+really0.4.1\n');
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /0\.4\.1 is too old/);
+  });
+
+  it('fails closed on unparsable probe output', () => {
+    withVersion('something else entirely\n');
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /could not determine/);
+  });
+
+  it('fails closed when unrelated output contains a number', () => {
+    withVersion('some other tool 999\n');
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /could not determine/);
+  });
+
+  it('reports a missing binary as not installed', () => {
+    _setBwrapVersionRunner(() => ({ kind: 'notFound' }));
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /not installed or not on PATH/);
+  });
+
+  it('reports a present but broken binary distinctly from a missing one', () => {
+    // A permissions/loader failure must not tell the user to install a
+    // package they already have; the status and stderr must survive.
+    _setBwrapVersionRunner(() => ({
+      kind: 'failed',
+      status: 126,
+      detail: 'bwrap: permission denied',
+    }));
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /is present but/);
+    assert.match(probe.reason, /126/);
+    assert.match(probe.reason, /permission denied/);
+    assert.doesNotMatch(probe.reason, /not installed/);
+  });
+
+  it('reports a timed-out probe as a failure rather than hanging', () => {
+    // `getPlatformSupport()` is synchronous, so a hung `bwrap --version` must
+    // surface as a bounded failure with the timeout named.
+    _setBwrapVersionRunner(() => ({
+      kind: 'failed',
+      status: null,
+      detail: 'timed out after 5000ms',
+    }));
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /timed out after 5000ms/);
+  });
+
+  it('describes a failure that has no exit status without claiming it never ran', () => {
+    // A signal-terminated run also has a null status, so the wording must not
+    // assert the process could not be executed.
+    _setBwrapVersionRunner(() => ({
+      kind: 'failed',
+      status: null,
+      detail: 'EACCES: permission denied',
+    }));
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /failed without an exit status/);
+  });
+
+  it('omits bubblewrap from getPlatformSupport below the floor', { skip: os.platform() !== 'linux' }, () => {
+    withVersion('bubblewrap 0.4.1\n');
+    _resetPlatformSupportCache();
+    assert.ok(!getPlatformSupport().availableMethods.includes('bubblewrap'));
+  });
+
+  it('includes bubblewrap in getPlatformSupport at the floor', { skip: os.platform() !== 'linux' }, () => {
+    withVersion('bubblewrap 0.5.0\n');
+    _resetPlatformSupportCache();
+    assert.ok(getPlatformSupport().availableMethods.includes('bubblewrap'));
   });
 });

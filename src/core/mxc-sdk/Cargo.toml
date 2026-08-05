@@ -9,6 +9,12 @@ description = "Importable library for starting MXC sandboxes in-process (no pty,
 name = "mxc_sdk"
 path = "src/lib.rs"
 
+[features]
+default = []
+# WSL Container backend (Windows only, experimental). Forwards to the engine,
+# which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
+wslc = ["mxc_engine/wslc"]
+
 [dependencies]
 wxc_common.workspace = true
 mxc_engine = { workspace = true }

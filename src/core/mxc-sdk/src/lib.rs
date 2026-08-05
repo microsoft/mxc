@@ -38,13 +38,42 @@
 //!
 //! ## Backend support
 //!
-//! The selected backend is driven by the `containment` field in the request
-//! (or the host default). The library supports Bubblewrap (Linux), Seatbelt
-//! (macOS), and ProcessContainer — AppContainer and BaseContainer —
-//! (Windows). Other backends (Windows Sandbox, IsolationSession, MicroVM,
-//! Hyperlight, WSLC, LXC) return an [`Error`] with
-//! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
-//! binaries for those.
+//! The selected backend is driven by the `containment` field in the request:
+//! [`build_request`] resolves the host's native one, and
+//! [`build_request_with_containment`] takes an explicit [`Containment`] — the
+//! same choice the TypeScript SDK makes with
+//! `createConfigFromPolicy(policy, containment)`.
+//!
+//! | Backend | Host | Selected by |
+//! |---------|------|-------------|
+//! | Bubblewrap | Linux | [`Containment::Process`] |
+//! | Seatbelt | macOS | [`Containment::Process`] |
+//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
+//! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
+//!
+//! WSLC is **experimental**: build with the crate's `wslc` feature, and call
+//! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
+//! on the request. Its container has no stdin (the WSLC SDK exposes no
+//! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
+//!
+//! Other backends (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
+//! LXC) return an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive
+//! the standalone executor binaries for those.
+//!
+//! ```no_run
+//! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+//!
+//! # let policy = SandboxPolicy {
+//! #     version: "0.7.0-alpha".to_string(),
+//! #     filesystem: None, network: None, ui: None, timeout_ms: None,
+//! # };
+//! // Run a command inside a WSL container (Windows, --features wslc).
+//! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
+//! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
+//! request.set_script("python3 -c 'print(42)'").set_experimental(true);
+//! let output = run(request)?;
+//! # Ok::<(), mxc_sdk::Error>(())
+//! ```
 //!
 //! | Entry point            | Stdio                                   |
 //! |------------------------|-----------------------------------------|
@@ -82,12 +111,14 @@ mod sandbox;
 
 pub use mxc_engine::policy;
 pub use mxc_engine::{
-    available_tools_policy, build_request, platform_support, temporary_files_policy,
-    user_profile_policy, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport, SandboxPolicy,
-    SandboxRequest,
+    available_tools_policy, build_request, build_request_with_containment, platform_support,
+    temporary_files_policy, user_profile_policy, Containment, Error, ErrorCode,
+    FilesystemPolicyResult, PlatformSupport, SandboxPolicy, SandboxRequest, WslcSection,
 };
 
-pub use sandbox::{Output, Sandbox, StreamCloser, WaitOutcome};
+pub use sandbox::{
+    CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata, StreamCloser, WaitOutcome,
+};
 
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
 /// the command, and any working directory / env, filled in).

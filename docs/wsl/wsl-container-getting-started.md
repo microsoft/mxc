@@ -4,15 +4,16 @@ This guide walks you through setting up the WSL Container (WSLC) backend for
 MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 
 > **Note:** WSLC is an **experimental** feature. It requires the `--experimental`
-> CLI flag or `{ experimental: true }` in SDK spawn options.
+> CLI flag, `{ experimental: true }` in TypeScript SDK spawn options, or
+> `SandboxRequest::set_experimental(true)` in the Rust SDK.
 
 ## Prerequisites
 
 | Requirement | Details |
 |---|---|
 | **Windows 11** | Required for WSL2 and the WSLC SDK |
-| **WSL 2.9.3+** | See Step 1 below for installation |
-| **WSLC SDK** | `wslcsdk.dll` must be in the same directory as `wxc-exec.exe` |
+| **WSL 2.9.3+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
+| **WSLC SDK** | `wslcsdk.dll` is a separate client SDK and must be in the same directory as the running executable (`wxc-exec.exe`, or your own binary when using the Rust SDK) |
 | **Container images** | Pre-pulled or available from a registry with network access |
 
 ## Step 1 — Install WSL 2.9.3+
@@ -164,7 +165,74 @@ child.stdout?.on('data', (data) => console.log(data.toString()));
 child.on('close', (code) => console.log('Exit code:', code));
 ```
 
+### Rust SDK
+
+The Rust SDK (`mxc-sdk`) runs WSLC **in-process** — it does not spawn
+`wxc-exec.exe`. Build the crate with its `wslc` feature, select the backend with
+`build_request_with_containment`, and opt into experimental features on the
+request (the library-side equivalent of `--experimental`):
+
+```toml
+# Cargo.toml
+[target.'cfg(target_os = "windows")'.dependencies]
+mxc-sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
+```
+
+```rust
+use mxc_sdk::{
+    build_request_with_containment, run, spawn_sandbox, Containment, SandboxPolicy, WslcSection,
+};
+
+let policy = SandboxPolicy {
+    version: "0.7.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+};
+
+let wslc = WslcSection {
+    image: "python:3.12-alpine".to_string(),
+    cpu_count: Some(2),
+    memory_mb: Some(1024),
+    ..Default::default()
+};
+
+let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
+request
+    .set_script("python3 -c \"print('Hello from WSLC')\"")
+    .set_experimental(true);
+
+// Run to completion, capturing output…
+let output = run(request.clone())?;
+println!("{}", String::from_utf8_lossy(&output.stdout));
+
+// …or stream it live (read stdout/stderr while it runs, kill it, wait).
+let mut sandbox = spawn_sandbox(request)?;
+let stdout = sandbox.take_stdout().expect("stdout");
+```
+
+`WslcSection` mirrors the `experimental.wslc` block below;
+`WslcSection::default()` matches the SDK default (`alpine:latest`). Settings go
+through the same parser the executor uses, so a rejected value (e.g. a port
+mapping with a zero or duplicated host port) fails at
+`build_request_with_containment` rather than at spawn.
+
+Notes and limits:
+
+- **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
+  `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
+- **No stdin.** The WSLC SDK exposes no process-input API, so
+  `Sandbox::take_stdin()` returns `None` for a WSL container.
+- **No host pid.** The process runs inside the WSL VM, so `Sandbox::id()` is `0`;
+  use `kill()` (which stops the container and everything in it) to terminate it.
+- **Discovery.** `platform_support()` lists `"wslc"` in `available_methods` only
+  when this host can actually run it (`wslcsdk.dll` loads and the WSLC runtime
+  reports no missing components).
+
 ## Configuration Reference
+
+### JSON config
 
 WSLC-specific settings go under `experimental.wslc` in the JSON config:
 
@@ -226,6 +294,13 @@ no separate `--setup-wslc` step is required.
 |---|---|
 | `"allowOutbound": true` | Bridged networking (full access) |
 | `"allowOutbound": false` | No networking (isolated) |
+
+> **`allowedHosts` / `blockedHosts` do not work on WSLC today.** They are
+> accepted by the config builders (for parity across the SDKs), but the backend
+> enforces them with in-container `iptables`, and the container is not granted
+> `CAP_NET_ADMIN` — so the rules cannot be installed and the run **fails at
+> spawn** rather than silently going unenforced. Express WSLC network intent
+> with `allowOutbound` until enforcement moves to a VM-level network policy API.
 
 ### Network proxy (cooperative, unprivileged)
 
@@ -332,7 +407,7 @@ the container.
 |---|---|---|
 | `WSLC backend not compiled` | Binary built without `--features wslc` | Rebuild with `build.bat --with-wslc` |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
-| `WSLC runtime not available` | WSL version too old or missing components | Update WSL with `wsl --update` or build from the [WSL repo](https://github.com/microsoft/WSL/tree/feature/wsl-for-apps) |
+| `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.3, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
 | `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
 | `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |

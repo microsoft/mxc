@@ -88,6 +88,9 @@ extends:
             ob_createvpack_patchVer: $(SdkPatch)         # set by 'Set vpack version' step
             ob_createvpack_prereleaseVer: $(VersionDate).$(VersionCounter)
             ob_createvpack_metadata: $(Build.SourceBranchName).$(Build.BuildNumber).$(Build.SourceVersion)
+            # IsolationSession collateral is test-only; continue validating the
+            # production x64 and arm64 payloads outside this subtree.
+            ob_sdl_codeSignValidation_excludes: '-|**\isolation_session_test_bundle\**'
 
           steps:
             - task: PowerShell@2
@@ -143,13 +146,13 @@ extends:
                   # per-arch SBOMs are identical source-wise, so promote x64's.
                   Copy-Item -Recurse -Force "$(ob_outputDirectory)\x64\_manifest" "$(ob_outputDirectory)\_manifest"
 
-                  # Stage isolation_session test collateral into the vpack under isolation_session/
+                  # Stage isolation_session test collateral under isolation_session_test_bundle/.
                   $isoSrcMain = "$(Pipeline.Workspace)\IsoSession-TestPackage\mxc-iso-test-bundle-main-x64"
-                  $isoDestMain = "$(ob_outputDirectory)\isolation_session\main"
+                  $isoDestMain = "$(ob_outputDirectory)\isolation_session_test_bundle\main"
                   New-Item -ItemType Directory -Force -Path $isoDestMain | Out-Null
                   Copy-Item -Recurse -Force "$isoSrcMain\*" $isoDestMain
                   
                   $isoSrcFeature = "$(Pipeline.Workspace)\IsoSession-TestPackage\mxc-iso-test-bundle-feature-x64"
-                  $isoDestFeature = "$(ob_outputDirectory)\isolation_session\feature"
+                  $isoDestFeature = "$(ob_outputDirectory)\isolation_session_test_bundle\feature"
                   New-Item -ItemType Directory -Force -Path $isoDestFeature | Out-Null
                   Copy-Item -Recurse -Force "$isoSrcFeature\*" $isoDestFeature

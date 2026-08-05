@@ -661,9 +661,9 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
 
 /// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
 /// must be an absolute path whose parent directory already exists (the runner
-/// opens the file there when it seals the trace, under the caller's own
-/// identity). The path itself must not be an existing directory. A relative
-/// path, directory path, or missing parent yields an actionable error.
+/// writes the JSON denials output file there after the workload exits). The
+/// path itself must not be an existing directory. A relative path, directory
+/// path, or missing parent yields an actionable error.
 fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
     let candidate = std::path::Path::new(path);
     if !candidate.is_absolute() {
@@ -829,10 +829,6 @@ fn convert_wire_config(
         // available in every build.
         if ac.learning_mode.unwrap_or(false) {
             policy.capabilities.push("learningModeLogging".to_string());
-            logger.log(
-                "NOTE: 'learningModeLogging' enabled - AppContainer restrictions remain \
-enforced; access denials are recorded for diagnostics.\n",
-            );
         }
 
         // Learning-mode capability names are reserved for the dedicated entry
@@ -877,6 +873,39 @@ enforced; access denials are recorded for diagnostics.\n",
                 Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
                 Some(wire::CaptureDenialsMode::Block) | None => CaptureDenialsMode::Block,
             };
+
+            // captureDenials drives the learning-mode ETL capture in the runner,
+            // which requires the corresponding learning-mode capability on the
+            // child token so the OS emits the access-check records the capture
+            // path collects. Inject it additively (preserving the workload's real
+            // capabilities). `block` keeps deny-by-default via
+            // `learningModeLogging`; `allow` replaces deny-and-record with
+            // `permissiveLearningMode` (the runner surfaces the security warning).
+            let capture_capability = match mode {
+                CaptureDenialsMode::Block => {
+                    // Capability entries are exact names. Comma-packed entries
+                    // were rejected above, so substring matching here would
+                    // incorrectly remove unrelated custom capabilities.
+                    policy.capabilities.retain(|capability| {
+                        !capability.eq_ignore_ascii_case("permissiveLearningMode")
+                    });
+                    "learningModeLogging"
+                }
+                CaptureDenialsMode::Allow => {
+                    policy.capabilities.retain(|capability| {
+                        !capability.eq_ignore_ascii_case("learningModeLogging")
+                    });
+                    "permissiveLearningMode"
+                }
+            };
+            if !policy
+                .capabilities
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case(capture_capability))
+            {
+                policy.capabilities.push(capture_capability.to_string());
+            }
+
             policy.capture_denials = Some(CaptureDenialsConfig {
                 mode,
                 output_path: cd.output_path,
@@ -2523,6 +2552,107 @@ mod tests {
     }
 
     #[test]
+    fn capture_denials_block_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "block"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "block capture must additively inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+        assert!(
+            !req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "block must not inject permissiveLearningMode"
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_injects_permissive_learning_mode_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "allow capture must inject permissiveLearningMode: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_default_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "default (block) capture must inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_overrides_learning_mode_boolean() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {
+                "learningMode": true,
+                "capabilities": ["internetClient"],
+                "captureDenials": {"mode": "allow"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"internetClient".to_string()),
+            "the workload's own capabilities must be preserved"
+        );
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "allow capture must inject permissiveLearningMode"
+        );
+        assert!(
+            !req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "allow capture must remove deny-and-record mode"
+        );
+        assert!(
+            !logger.get_buffer().contains("restrictions remain enforced"),
+            "parser must not log the superseded deny-and-record mode"
+        );
+    }
+
+    #[test]
     fn capture_denials_unknown_mode_rejected() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
@@ -2545,7 +2675,7 @@ mod tests {
     #[test]
     fn capture_denials_accepts_valid_absolute_output_path() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("denials.etl");
+        let path = dir.path().join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
             r#"{{
@@ -2569,7 +2699,7 @@ mod tests {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"outputPath": "relative/denials.etl"}}
+            "processContainer": {"captureDenials": {"outputPath": "relative/denials.json"}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -2585,7 +2715,7 @@ mod tests {
     fn capture_denials_missing_parent_dir_rejected() {
         let dir = tempfile::tempdir().expect("temp dir");
         // Parent directory `nonexistent` is never created.
-        let path = dir.path().join("nonexistent").join("denials.etl");
+        let path = dir.path().join("nonexistent").join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
             r#"{{

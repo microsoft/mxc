@@ -94,10 +94,13 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "electron": "^39.8.5",
-    "electron-builder": "^26.8.1",
-    "node-gyp": "^12.2.0",
+    "electron": "^39.8.10",
+    "electron-builder": "^26.15.3",
+    "node-gyp": "^12.3.0",
     "typescript": "^5.4.0"
+  },
+  "overrides": {
+    "global-agent": "^4.1.3"
   },
   "dependencies": {
     "@microsoft/mxc-sdk": "file:../../sdk/node",

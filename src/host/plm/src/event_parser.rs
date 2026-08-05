@@ -1,12 +1,12 @@
 //! Walks a sequence of WinEvent records produced by the permissive
 //! learning-mode trace and returns the file-access events that survived
-//! filtering.
+//! filtering, plus the AppContainer capabilities the workload was
+//! observed to need.
 //!
-//! This PR introduces filesystem extraction only. Capability extraction
-//! (`EventID=14` DACL ACE blobs) lands in a later PR; UI relaxation
-//! (`EventID=27`) lands in a later PR. `requested_capabilities` is
-//! exposed today as an always-empty placeholder so call-sites in
-//! `stop`/`log` can stay stable.
+//! `EventID=14` records carry both a file path and a DACL ACE blob; the
+//! blob is decoded by `crate::extract_caps` and accumulated into
+//! `requested_capabilities`. UI relaxation (`EventID=27`) lands in a
+//! later PR.
 
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
@@ -27,6 +27,7 @@ use windows::Win32::System::EventLog::{
 };
 
 use crate::access_event::LearningModeAccessEvent;
+use crate::extract_caps;
 
 /// EventID the PLM provider emits for a file/capability access that
 /// *would* have been denied. Decoded by `crate::access_failure`.
@@ -55,10 +56,20 @@ impl Drop for EvtHandleOwned {
 
 pub struct ParseResult {
     pub valid_access_events: Vec<LearningModeAccessEvent>,
-    /// Placeholder for the capability-extraction PR. Always empty in
-    /// this PR; the field exists today so `stop`/`log` call-sites stay
-    /// stable across the split.
+    /// AppContainer capability names decoded from the DACL ACE blobs of
+    /// `EventID=14` records. Only capabilities in the module's known
+    /// list, granted by a non-zero allow ACE, appear here.
     pub requested_capabilities: HashSet<String>,
+    /// Records that could not be parsed: malformed event XML, or an
+    /// `EventID=14` whose DACL ACE blob failed to decode. Surfaced so
+    /// partial data loss on a long trace is observable rather than
+    /// silent.
+    pub parse_failures: usize,
+    /// Allow ACEs that named a known capability but granted nothing, so
+    /// were not treated as capability requests. Reported once per trace
+    /// and surfaced here so the condition is assertable in tests rather
+    /// than depending on process-global warning state.
+    pub zero_mask_capabilities: usize,
 }
 
 impl ParseResult {
@@ -434,8 +445,14 @@ pub(crate) struct ParsedEvent {
     pub(crate) time_created: DateTime<Utc>,
     pub(crate) process_id: u32,
     pub(crate) thread_id: u32,
-    /// EventData/Data values in document order.
+    /// EventData/Data values in document order. May be Data or ComplexData.
     pub(crate) event_data: Vec<String>,
+    /// Index into `event_data` of the 5th `<ComplexData>` sibling (the
+    /// DACL ACE blob on `EventID=14` access events). `None` if fewer
+    /// than five `ComplexData` children were seen. Borrowed directly
+    /// rather than cloned to avoid a second `String` allocation of the
+    /// largest per-event field.
+    pub(crate) complex_data_4_idx: Option<usize>,
 }
 
 pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
@@ -484,6 +501,7 @@ pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
         process_id: acc.process_id,
         thread_id: acc.thread_id,
         event_data: acc.event_data,
+        complex_data_4_idx: acc.complex_data_4_idx,
     })
 }
 
@@ -492,7 +510,7 @@ pub(crate) fn parse_event_xml(xml: &str) -> Option<ParsedEvent> {
 /// never captured here.
 enum Capture {
     EventId,
-    Data,
+    Data { is_complex: bool },
 }
 
 /// Streaming replacement for the former per-event roxmltree DOM. Walks
@@ -518,6 +536,10 @@ struct StreamAcc {
     process_id: u32,
     thread_id: u32,
     event_data: Vec<String>,
+    // Position of the 5th `<ComplexData>` sibling (the DACL ACE blob),
+    // tracked instead of cloning that multi-KB text a second time.
+    complex_data_4_idx: Option<usize>,
+    complex_index: usize,
     capture: Option<(Capture, String)>,
 }
 
@@ -563,10 +585,11 @@ impl StreamAcc {
                 }
             }
             b"Data" | b"ComplexData" if self.in_event_data => {
+                let is_complex = name.local_name().as_ref() == b"ComplexData";
                 if is_empty {
-                    self.event_data.push(String::new());
+                    self.finish_data(is_complex, String::new());
                 } else {
-                    self.capture = Some((Capture::Data, String::new()));
+                    self.capture = Some((Capture::Data { is_complex }, String::new()));
                 }
             }
             _ => {}
@@ -588,7 +611,7 @@ impl StreamAcc {
         let matches = matches!(
             (&self.capture, local),
             (Some((Capture::EventId, _)), b"EventID")
-                | (Some((Capture::Data, _)), b"Data" | b"ComplexData")
+                | (Some((Capture::Data { .. }, _)), b"Data" | b"ComplexData")
         );
         if !matches {
             return;
@@ -596,7 +619,18 @@ impl StreamAcc {
         let (kind, text) = self.capture.take().unwrap();
         match kind {
             Capture::EventId => self.event_id = text.parse::<u32>().unwrap_or(0),
-            Capture::Data => self.event_data.push(text),
+            Capture::Data { is_complex } => self.finish_data(is_complex, text),
+        }
+    }
+
+    fn finish_data(&mut self, is_complex: bool, text: String) {
+        let pushed_idx = self.event_data.len();
+        self.event_data.push(text);
+        if is_complex {
+            if self.complex_index == 4 {
+                self.complex_data_4_idx = Some(pushed_idx);
+            }
+            self.complex_index += 1;
         }
     }
 }
@@ -642,10 +676,29 @@ pub(crate) struct ParseAccumulator {
     /// rather than aborting the trace, but the running total is surfaced
     /// at the end of a parse so silent data loss is observable.
     pub(crate) parse_failures: usize,
+    pub(crate) capability_index: extract_caps::CapabilityIndex,
+    /// Per-trace scratch and diagnostics for the ACE walk.
+    ///
+    /// Holds the reusable hex-decode buffer, the per-event staging set,
+    /// and the zero-mask counter. Staged matches are borrowed
+    /// `&'static str`, so a repeated capability costs nothing until it
+    /// is first promoted into `requested_capabilities`.
+    ///
+    /// The staging set is the fail-closed boundary: the ACE walk inserts
+    /// as it goes, so a blob that is valid up to a corrupt tail would
+    /// otherwise contribute its already-matched capabilities even though
+    /// the record is malformed. These blobs are attacker-influenceable
+    /// and the output is a security policy, so matches land here first
+    /// and are promoted only once the whole blob walks cleanly.
+    pub(crate) ace_walk: extract_caps::AceWalkState,
 }
 
 impl ParseAccumulator {
-    pub(crate) fn new(current_directory: Option<&str>, verbose: bool) -> Self {
+    pub(crate) fn new(
+        current_directory: Option<&str>,
+        verbose: bool,
+        capability_index: extract_caps::CapabilityIndex,
+    ) -> Self {
         let (cwd_lc_trimmed, cwd_lc_prefix) = match current_directory {
             Some(cwd) => {
                 let trimmed = cwd.trim_end_matches('\\');
@@ -677,6 +730,8 @@ impl ParseAccumulator {
             access_event_index: HashMap::new(),
             requested_capabilities: HashSet::new(),
             parse_failures: 0,
+            capability_index,
+            ace_walk: extract_caps::AceWalkState::new(),
         }
     }
 
@@ -751,16 +806,37 @@ impl ParseAccumulator {
         }
     }
 
-    fn into_result(self) -> ParseResult {
+    /// Write the end-of-parse diagnostics.
+    ///
+    /// Takes a writer rather than calling `eprintln!` directly so the
+    /// operator-visible text and its counts are assertable in a test and
+    /// cannot go silent in a later refactor.
+    fn write_parse_diagnostics(&self, out: &mut dyn std::io::Write) {
         if self.parse_failures > 0 {
-            eprintln!(
+            let _ = writeln!(
+                out,
                 "Warning: skipped {} malformed event record(s) that could not be parsed",
                 self.parse_failures
             );
         }
+        let zero_mask = self.ace_walk.zero_mask_capabilities();
+        if zero_mask > 0 {
+            let _ = writeln!(
+                out,
+                "warning: {zero_mask} allow ACE(s) named a known capability with a zero access \
+                 mask and were not treated as capability requests. If capabilities are missing \
+                 from the generated config, this filter is the first thing to check."
+            );
+        }
+    }
+
+    fn into_result(self) -> ParseResult {
+        self.write_parse_diagnostics(&mut std::io::stderr());
         ParseResult {
             valid_access_events: self.valid_access_events,
             requested_capabilities: self.requested_capabilities,
+            parse_failures: self.parse_failures,
+            zero_mask_capabilities: self.ace_walk.zero_mask_capabilities(),
         }
     }
 }
@@ -770,8 +846,9 @@ pub fn parse_events(
     trace_file: &Path,
     current_directory: Option<&str>,
     verbose: bool,
+    capability_index: extract_caps::CapabilityIndex,
 ) -> Result<ParseResult> {
-    let mut acc = ParseAccumulator::new(current_directory, verbose);
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_index);
     for_each_event_xml(trace_file, verbose, |xml| {
         acc.consume(xml);
         Ok(())
@@ -781,17 +858,19 @@ pub fn parse_events(
 
 /// Fixture-test seam: drive the same per-event accumulator
 /// `parse_events` uses, but pull XML strings from an iterator rather
-/// than a live ETW session.
+/// than a live ETW session. Pass `CapabilityIndex::for_test(&[])` when
+/// ACE matching isn't under test.
 pub fn parse_events_from_xml<I, S>(
     xmls: I,
     current_directory: Option<&str>,
     verbose: bool,
+    capability_index: extract_caps::CapabilityIndex,
 ) -> ParseResult
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let mut acc = ParseAccumulator::new(current_directory, verbose);
+    let mut acc = ParseAccumulator::new(current_directory, verbose, capability_index);
     for xml in xmls {
         acc.consume(xml.as_ref());
     }
@@ -842,9 +921,306 @@ mod tests {
         // Single fs-only event; ensure the dispatcher runs and the
         // event is collected.
         let xml = make_event_xml("C:\\app\\foo.txt", "0x1");
-        let result = parse_events_from_xml(vec![xml], None, false);
+        let result = parse_events_from_xml(
+            vec![xml],
+            None,
+            false,
+            extract_caps::CapabilityIndex::for_test(&[]),
+        );
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\app\\foo.txt");
+    }
+
+    // ---- end-to-end: XML -> ACE blob -> requested_capabilities ----------
+    //
+    // The positional handoff (`complex_data_4_idx` = the 5th
+    // `<ComplexData>` sibling) is the contract between the provider's
+    // schema and capability extraction, and it is the piece most likely
+    // to break silently if the provider reorders its payload. Every
+    // other test in this crate either feeds `<Data>`-only XML (so the
+    // blob is never reached) or calls the extractor directly (so the
+    // XML layer is bypassed). These drive the whole path.
+
+    /// S-1-1-0 "Everyone" — stands in for a capability SID.
+    fn e2e_sid() -> Vec<u8> {
+        vec![1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+    }
+
+    /// Build one ACE in the layout `extract_caps` decodes.
+    fn e2e_ace(mask: u32, sid: &[u8]) -> Vec<u8> {
+        let mut v = vec![0u8]; // ACCESS_ALLOWED
+        v.extend_from_slice(&[0, 0, 0]); // padding
+        v.extend_from_slice(&[0, 0, 0, 0]); // flags
+        v.extend_from_slice(&mask.to_le_bytes());
+        v.extend_from_slice(sid);
+        v
+    }
+
+    fn e2e_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02X}")).collect()
+    }
+
+    fn e2e_index(name: &'static str, sid: &[u8]) -> extract_caps::CapabilityIndex {
+        extract_caps::CapabilityIndex::for_test(&[(name, Some(sid), None)])
+    }
+
+    /// `EventID=14` XML carrying `complex_count` `<ComplexData>`
+    /// siblings, the last of which holds `blob_hex`.
+    fn event_xml_with_complex_data(
+        file_path: &str,
+        mask_hex: &str,
+        complex_count: usize,
+        blob_hex: &str,
+    ) -> String {
+        let mut complex = String::new();
+        for i in 0..complex_count {
+            let body = if i + 1 == complex_count {
+                blob_hex
+            } else {
+                "00"
+            };
+            complex.push_str(&format!("<ComplexData>{body}</ComplexData>"));
+        }
+        format!(
+            r#"<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+          <System>
+            <EventID>14</EventID>
+            <TimeCreated SystemTime="2024-01-02T03:04:05.000Z"/>
+            <Execution ProcessID="111" ThreadID="222"/>
+          </System>
+          <EventData>
+            <Data>Permissive</Data>
+            <Data>File</Data>
+            <Data>{file_path}</Data>
+            <Data>App.exe</Data>
+            <Data>0</Data>
+            <Data>{mask_hex}</Data>
+            {complex}
+          </EventData>
+        </Event>"#
+        )
+    }
+
+    #[test]
+    fn fifth_complex_data_sibling_populates_requested_capabilities() {
+        let sid = e2e_sid();
+        let hex = e2e_hex(&e2e_ace(0x0012_0089, &sid));
+        let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, &hex);
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
+
+        assert!(
+            result.requested_capabilities.contains("internetClient"),
+            "the 5th <ComplexData> blob should have produced a capability, got {:?}",
+            result.requested_capabilities
+        );
+        assert_eq!(result.valid_access_events.len(), 1);
+        assert_eq!(result.parse_failures, 0);
+    }
+
+    #[test]
+    fn capability_only_event_without_file_path_still_yields_capability() {
+        // Capability-only accesses arrive with an empty path. The event
+        // produces no access-event row, but its capability must still
+        // be collected — this is why extraction runs before the
+        // path-based early return.
+        let sid = e2e_sid();
+        let hex = e2e_hex(&e2e_ace(0x0012_0089, &sid));
+        let xml = event_xml_with_complex_data("", "0x1", 5, &hex);
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
+
+        assert!(result.requested_capabilities.contains("internetClient"));
+        assert!(result.valid_access_events.is_empty());
+    }
+
+    #[test]
+    fn fewer_than_five_complex_data_siblings_yields_no_capability() {
+        // The blob lives in the 5th sibling; with only four present
+        // there is nothing to decode and the event must still be
+        // processed normally rather than mis-indexing into another slot.
+        let sid = e2e_sid();
+        let hex = e2e_hex(&e2e_ace(0x0012_0089, &sid));
+        let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 4, &hex);
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
+
+        assert!(
+            result.requested_capabilities.is_empty(),
+            "no 5th <ComplexData> means no capability blob"
+        );
+        assert_eq!(result.valid_access_events.len(), 1);
+        assert_eq!(result.parse_failures, 0);
+    }
+
+    #[test]
+    fn malformed_ace_blob_is_counted_as_a_parse_failure() {
+        // A corrupt blob must not vanish silently: the file-path half of
+        // the event still succeeds, so without the counter the lost
+        // capabilities would leave no trace in the output.
+        let sid = e2e_sid();
+        let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, "ZZZZ");
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
+
+        assert!(result.requested_capabilities.is_empty());
+        assert_eq!(result.valid_access_events.len(), 1);
+        assert_eq!(
+            result.parse_failures, 1,
+            "a malformed ACE blob should be counted"
+        );
+    }
+
+    #[test]
+    fn valid_ace_with_truncated_tail_contributes_no_capabilities() {
+        // Fail-closed: the blob is attacker-influenceable and the output
+        // is a security policy, so a record that walks partway and then
+        // hits a corrupt trailer must contribute nothing at all — not
+        // the capability it managed to match before failing.
+        let sid = e2e_sid();
+        let mut bytes = e2e_ace(0x0012_0089, &sid);
+        bytes.extend_from_slice(&[0u8; 6]); // truncated trailing ACE
+        let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, &e2e_hex(&bytes));
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
+
+        assert!(
+            result.requested_capabilities.is_empty(),
+            "a partially-valid blob must not leak capabilities into policy, got {:?}",
+            result.requested_capabilities
+        );
+        assert_eq!(result.parse_failures, 1);
+    }
+
+    #[test]
+    fn staging_set_does_not_leak_between_events() {
+        // The staging set is reused across events; a failed record must
+        // not poison the next one, and a good record after a bad one
+        // must still be collected.
+        let sid = e2e_sid();
+        let good = e2e_hex(&e2e_ace(0x0012_0089, &sid));
+        let mut bad_bytes = e2e_ace(0x0012_0089, &sid);
+        bad_bytes.extend_from_slice(&[0u8; 6]);
+        let bad = e2e_hex(&bad_bytes);
+
+        let xmls = vec![
+            event_xml_with_complex_data("C:\\app\\bad.txt", "0x1", 5, &bad),
+            event_xml_with_complex_data("C:\\app\\good.txt", "0x1", 5, &good),
+        ];
+
+        let result = parse_events_from_xml(xmls, None, false, e2e_index("internetClient", &sid));
+
+        assert_eq!(result.parse_failures, 1);
+        assert!(
+            result.requested_capabilities.contains("internetClient"),
+            "the following good event must still contribute"
+        );
+        assert_eq!(result.requested_capabilities.len(), 1);
+    }
+
+    #[test]
+    fn capabilities_dedupe_across_multiple_events() {
+        let sid = e2e_sid();
+        let hex = e2e_hex(&e2e_ace(0x0012_0089, &sid));
+        let xmls: Vec<String> = (0..3)
+            .map(|i| event_xml_with_complex_data(&format!("C:\\app\\f{i}.txt"), "0x1", 5, &hex))
+            .collect();
+
+        let result = parse_events_from_xml(xmls, None, false, e2e_index("internetClient", &sid));
+
+        assert_eq!(result.requested_capabilities.len(), 1);
+        assert_eq!(result.valid_access_events.len(), 3);
+    }
+
+    #[test]
+    fn every_record_malformed_yields_an_empty_result_and_no_config_output() {
+        // A trace where nothing decodes must be loudly empty, not
+        // quietly partial: `stop` keys its "skip writing Adjusted_*.json"
+        // decision off `is_empty()`, so a regression that let junk
+        // through here would emit a config derived from garbage.
+        let xmls = vec![
+            "not xml".to_string(),
+            "<not-an-event/>".to_string(),
+            // Well-formed XML, but no <System> element — the one hard
+            // requirement `parse_event_xml` enforces.
+            "<Event><EventData><Data>x</Data></EventData></Event>".to_string(),
+            String::new(),
+        ];
+        let expected_failures = xmls.len();
+
+        let result = parse_events_from_xml(
+            xmls,
+            None,
+            false,
+            extract_caps::CapabilityIndex::for_test(&[]),
+        );
+
+        assert_eq!(
+            result.parse_failures, expected_failures,
+            "every malformed record must be counted"
+        );
+        assert!(result.valid_access_events.is_empty());
+        assert!(result.requested_capabilities.is_empty());
+        assert!(
+            result.is_empty(),
+            "is_empty() gates whether stop writes an Adjusted_*.json at all"
+        );
+    }
+
+    #[test]
+    fn parse_diagnostics_report_failures_and_zero_mask_counts() {
+        // The counters are covered elsewhere; this pins the
+        // operator-visible text so a refactor cannot make parse failures
+        // silent. Written through a captured writer rather than stderr.
+        let mut acc =
+            ParseAccumulator::new(None, false, extract_caps::CapabilityIndex::for_test(&[]));
+        acc.parse_failures = 3;
+
+        let mut out = Vec::new();
+        acc.write_parse_diagnostics(&mut out);
+        let text = String::from_utf8(out).expect("diagnostics must be UTF-8");
+
+        assert!(
+            text.contains("skipped 3 malformed event record(s)"),
+            "parse-failure count must be reported verbatim: {text}"
+        );
+    }
+
+    #[test]
+    fn parse_diagnostics_are_silent_on_a_clean_trace() {
+        let acc = ParseAccumulator::new(None, false, extract_caps::CapabilityIndex::for_test(&[]));
+        let mut out = Vec::new();
+        acc.write_parse_diagnostics(&mut out);
+        assert!(
+            out.is_empty(),
+            "a clean parse must not emit warning noise: {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    #[test]
+    fn zero_mask_capabilities_are_reported_and_surfaced_on_the_result() {
+        // A zero-mask allow ACE is filtered out, but silently dropping
+        // it would look identical to "this capability was never
+        // requested" — so the count reaches both the operator and the
+        // caller.
+        let sid = e2e_sid();
+        let hex = e2e_hex(&e2e_ace(0, &sid));
+        let xml = event_xml_with_complex_data("C:\\app\\foo.txt", "0x1", 5, &hex);
+
+        let result =
+            parse_events_from_xml(vec![xml], None, false, e2e_index("internetClient", &sid));
+
+        assert!(result.requested_capabilities.is_empty());
+        assert_eq!(
+            result.zero_mask_capabilities, 1,
+            "the filtered ACE must be counted on the result"
+        );
     }
 }
 

@@ -42,9 +42,10 @@ pub fn canonicalize_path(path: &str) -> PathCanonical {
         CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        GETFINALPATHNAMEBYHANDLE_FLAGS, OPEN_EXISTING, VOLUME_NAME_DOS,
+        CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
+        OPEN_EXISTING, VOLUME_NAME_DOS,
     };
 
     // RAII guard so the handle is closed on every exit path, including an
@@ -83,12 +84,53 @@ pub fn canonicalize_path(path: &str) -> PathCanonical {
             // the error captured by the failed call itself (no second, racy
             // GetLastError round-trip).
             let code = e.code();
-            return if code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
-                || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
+            if code != HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
+                && code != HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
             {
-                PathCanonical::Absent
-            } else {
-                PathCanonical::Unknown
+                // Exists but unexaminable (access denied, I/O error, …).
+                return PathCanonical::Unknown;
+            }
+            // "Not found" from the open above is ambiguous: that open *follows*
+            // reparse points, so a dangling symlink/junction (the link object
+            // exists but its target is missing) also reports FILE/PATH_NOT_FOUND.
+            // Re-probe without following the reparse point; if the link itself
+            // opens, the path exists but cannot be resolved — classify it Unknown
+            // so denied-path callers fail closed rather than replay a stale alias.
+            // SAFETY: `wide` is a local NUL-terminated buffer; all other pointers
+            // are NULL.
+            let reparse = unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    FILE_READ_ATTRIBUTES.0,
+                    share,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    None,
+                )
+            };
+            return match reparse {
+                // The link object itself exists: present but unresolvable →
+                // fail closed. Drop the probe handle immediately via the guard.
+                Ok(h) if !h.is_invalid() => {
+                    let _guard = OwnedHandle(h);
+                    PathCanonical::Unknown
+                }
+                // Success with an invalid handle: no error to read → unexaminable.
+                Ok(_) => PathCanonical::Unknown,
+                Err(e) => {
+                    let code = e.code();
+                    if code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
+                        || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
+                    {
+                        // Genuinely missing (or a missing parent): absent.
+                        PathCanonical::Absent
+                    } else {
+                        // Present but unexaminable (access denied, sharing
+                        // violation, I/O) → fail closed.
+                        PathCanonical::Unknown
+                    }
+                }
             };
         }
         // CreateFileW reported success but returned an invalid handle: there is
@@ -351,6 +393,96 @@ mod tests {
         assert!(
             !resolved.to_lowercase().contains(r"\sub\"),
             "`..` must cancel `sub`, got {resolved}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_reparse_point_is_unknown_not_absent() {
+        // A junction whose target is missing exists as an object but makes the
+        // *followed* open report FILE/PATH_NOT_FOUND. It must classify Unknown
+        // (present-but-unresolvable → fail closed), never Absent, so denied-path
+        // callers do not treat it as cleanly-missing and replay a stale alias.
+        use std::process::Command;
+
+        // Thread id keeps concurrent tests from colliding on the fixture dir.
+        let tmp = std::env::temp_dir();
+        let base = format!(
+            r"{}\mxc-dangling-{}-{:?}",
+            tmp.to_string_lossy().trim_end_matches('\\'),
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let link = format!(r"{base}\link");
+        let missing_target = format!(r"{base}\no-such-target");
+        let _ = std::fs::remove_dir_all(&base); // clear any leftover from an aborted run
+        std::fs::create_dir_all(&base).unwrap();
+
+        // `mklink /J` creates a junction even when the target does not exist.
+        let status = Command::new("cmd")
+            .args(["/c", "mklink", "/J", &link, &missing_target])
+            .status()
+            .unwrap();
+        // mklink /J needs no elevation, so a failure is a broken environment,
+        // not an expected skip — surface it rather than silently no-op.
+        assert!(
+            status.success(),
+            "mklink /J failed ({status}); junction creation needs no elevation, so this \
+             indicates a broken test environment rather than an expected skip"
+        );
+
+        let result = canonicalize_path(&link);
+        // Remove the junction itself (do not follow it) before clearing base.
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            result,
+            PathCanonical::Unknown,
+            "a dangling junction must be Unknown (fail closed), not Absent"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_junction_ancestor_is_unknown_not_canonical() {
+        // Chain-level guard where the security property lives: a deny under a
+        // dangling-junction *ancestor* must fail closed, never replay the absent
+        // tail onto a resolved grandparent and return Canonical(<path with the
+        // junction>) — which the overlap check would then miss.
+        use std::process::Command;
+
+        let tmp = std::env::temp_dir();
+        let base = format!(
+            r"{}\mxc-dangling-anc-{}-{:?}",
+            tmp.to_string_lossy().trim_end_matches('\\'),
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let link = format!(r"{base}\link");
+        let missing_target = format!(r"{base}\no-such-target");
+        let leaf = format!(r"{link}\file");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let status = Command::new("cmd")
+            .args(["/c", "mklink", "/J", &link, &missing_target])
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "mklink /J failed ({status}); junction creation needs no elevation"
+        );
+
+        let result = canonicalize_allowing_absent_tail(&leaf);
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            result,
+            PathCanonical::Unknown,
+            "a deny under a dangling-junction ancestor must fail closed, not \
+             resolve to a Canonical path still containing the junction"
         );
     }
 
