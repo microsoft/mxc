@@ -25,8 +25,20 @@ permissions:
   contents: read
 
 jobs:
-  build-artifacts:
-    uses: ./.github/workflows/Build.Artifacts.Job.yml
+  dependency-feed-check:
+    uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
+
+  windows:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Windows.Job.yml
+
+  linux:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Linux.Job.yml
+
+  macos:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.MacOS.Job.yml
 
   test:
     needs: build-artifacts
