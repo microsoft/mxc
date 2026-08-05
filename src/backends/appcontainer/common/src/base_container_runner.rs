@@ -3264,8 +3264,10 @@ mod tests {
     #[test]
     fn validate_runner_rejects_allowed_hosts() {
         let runner = BaseContainerRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.dry_run = true;
+        let mut request = ExecutionRequest {
+            dry_run: true,
+            ..Default::default()
+        };
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
@@ -3277,8 +3279,10 @@ mod tests {
     #[test]
     fn validate_runner_rejects_blocked_hosts() {
         let runner = BaseContainerRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.dry_run = true;
+        let mut request = ExecutionRequest {
+            dry_run: true,
+            ..Default::default()
+        };
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
