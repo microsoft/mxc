@@ -206,29 +206,38 @@ pub fn run_with_deadline(command: &mut Command, timeout: Duration) -> io::Result
         .spawn()?;
 
     let deadline = Instant::now() + timeout;
-    let status = loop {
+    let outcome = loop {
         match child.try_wait()? {
-            Some(status) => break status,
+            Some(status) => break Some(status),
             None if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Ok(None);
+                break None;
             }
         }
     };
 
+    let Some(status) = outcome else {
+        return Ok(None);
+    };
     Ok(Some(Output {
         status,
-        stdout: read_from_start(stdout)?,
-        stderr: read_from_start(stderr)?,
+        stdout: read_capped(stdout)?,
+        stderr: read_capped(stderr)?,
     }))
 }
 
-fn read_from_start(mut file: File) -> io::Result<Vec<u8>> {
+/// Cap on retained probe output. `bwrap --version` prints one line and a
+/// failure prints a short diagnostic, so anything past this is a runaway
+/// writer rather than something worth parsing — read a bounded snapshot
+/// instead of letting the allocation follow the file.
+const MAX_PROBE_OUTPUT: u64 = 64 * 1024;
+
+fn read_capped(mut file: File) -> io::Result<Vec<u8>> {
     file.rewind()?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    file.take(MAX_PROBE_OUTPUT).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -552,6 +561,25 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             "bubblewrap 0.11.0"
+        );
+    }
+
+    /// A verbose command must not translate into an allocation that follows
+    /// the output. Deliberately bounded so the test cannot fill the disk.
+    #[test]
+    #[cfg(unix)]
+    fn output_beyond_the_cap_is_truncated() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes diagnostic | head -c 200000"]);
+
+        let output = run_with_deadline(&mut command, Duration::from_secs(5))
+            .expect("probe should not error")
+            .expect("the command exits on its own");
+
+        assert_eq!(
+            output.stdout.len() as u64,
+            MAX_PROBE_OUTPUT,
+            "expected the read to stop at the cap"
         );
     }
 
