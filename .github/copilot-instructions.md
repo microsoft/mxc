@@ -43,6 +43,15 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 
 Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.7.0-alpha` or later required for macOS/Seatbelt backend.
 
+### GitHub Actions
+
+`.github/workflows/Build.And.Validate.yml` is the PR/CI entry point. It calls the
+workflow-call-only `.github/workflows/Build.Artifacts.Job.yml`, which builds and
+uploads the Windows, Linux, and macOS artifacts in parallel. Scheduled E2E and
+validation-infrastructure workflows reuse the same artifact workflow before
+calling `.github/workflows/Test.Matrix.Job.yml`; keep artifact production and
+consumption in the same workflow run.
+
 ### Individual components
 
 ```

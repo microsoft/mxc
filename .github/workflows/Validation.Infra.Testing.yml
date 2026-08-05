@@ -14,17 +14,11 @@ permissions:
   contents: read
 
 jobs:
-  windows:
-    uses: ./.github/workflows/Build.Windows.Job.yml
-
-  linux:
-    uses: ./.github/workflows/Build.Linux.Job.yml
-
-  macos:
-    uses: ./.github/workflows/Build.MacOS.Job.yml
+  build-artifacts:
+    uses: ./.github/workflows/Build.Artifacts.Job.yml
 
   test:
-    needs: [windows, linux, macos]
+    needs: build-artifacts
     uses: ./.github/workflows/Test.Matrix.Job.yml
     with:
       # Exercise every combination currently rolled out, independent of its

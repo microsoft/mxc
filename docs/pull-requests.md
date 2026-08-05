@@ -3,9 +3,9 @@
 ## GitHub Actions (automatic)
 
 Every PR is validated automatically by the GitHub Actions workflows under
-`.github/workflows/` (entry point: `Build.yml`). This is the primary PR
-signal — it builds and tests on native Windows x64/arm64, Linux x64/arm64,
-and macOS arm64 hosts in parallel.
+`.github/workflows/` (entry point: `Build.And.Validate.yml`). This is the primary
+PR signal — it calls the reusable `Build.Artifacts.Job.yml` workflow, then
+tests on native Windows x64/arm64, Linux x64/arm64, and macOS arm64 hosts.
 
 ## Azure Pipelines (optional on PRs, required on `main`)
 

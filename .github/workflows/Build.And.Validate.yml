@@ -1,7 +1,7 @@
 # Entry point for GHA PR/CI validation. Mirrors the 1ES `1ES.Build.yml`
-# split: this file orchestrates, each stage lives in its own reusable.
+# split: this file orchestrates reusable build-and-validation stages.
 
-name: Build
+name: Build + Validate
 
 on:
   push:
@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: build-${{ github.workflow }}-${{ github.ref }}
+  group: build-validate-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -38,20 +38,12 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Lint.Job.yml
 
-  windows:
+  build-artifacts:
     needs: dependency-feed-check
-    uses: ./.github/workflows/Build.Windows.Job.yml
+    uses: ./.github/workflows/Build.Artifacts.Job.yml
 
-  linux:
-    needs: dependency-feed-check
-    uses: ./.github/workflows/Build.Linux.Job.yml
-
-  macos:
-    needs: dependency-feed-check
-    uses: ./.github/workflows/Build.MacOS.Job.yml
-
-  pr-e2e-test-matrix:
-    needs: [windows, linux, macos]
+  pr-validation-test-matrix:
+    needs: build-artifacts
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     uses: ./.github/workflows/Test.Matrix.Job.yml
     with:
@@ -61,7 +53,7 @@ jobs:
     uses: ./.github/workflows/SDK.Unit.Test.Job.yml
 
   package-npm-sdk:
-    needs: [windows, linux, macos]
+    needs: build-artifacts
     uses: ./.github/workflows/Package.NpmSdk.Job.yml
 
   sdk-integration-tests:
