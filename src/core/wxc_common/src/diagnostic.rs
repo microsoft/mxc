@@ -191,6 +191,55 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
     format!("{json}{proxy_info}")
 }
 
+/// Parse caller-supplied raw config JSON and redact secret-bearing fields
+/// (same closed set of markers as [`crate::config_deserialize`]'s error-path
+/// redaction, e.g. `token`, `secret`, and the whole `user` credential bundle
+/// used by `experimental.isolationSession.user.{upn,wamToken}`) before it is
+/// safe to write to a diagnostic sink.
+///
+/// This must run *before* any policy validation: an `IsolationSession`
+/// one-shot request's credential bundle is only rejected by the runner after
+/// the request has already been parsed and logged, so the raw text emitted
+/// here cannot rely on downstream validation having stripped it first.
+///
+/// If the text fails to parse as JSON, a placeholder is returned instead of
+/// the raw text, since malformed input cannot be proven free of embedded
+/// credentials.
+pub fn redact_raw_config_json(raw: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(mut value) => {
+            redact_secret_fields(&mut value);
+            serde_json::to_string_pretty(&value)
+                .unwrap_or_else(|_| "<unable to re-serialize redacted config>".to_string())
+        }
+        Err(_) => "<unparsable JSON config, omitted from diagnostics>".to_string(),
+    }
+}
+
+/// Recursively blank JSON object values whose key is secret-bearing (see
+/// [`crate::config_deserialize::is_secret_path_field`]). Over-redaction fails
+/// safe: e.g. blanking the whole `user` object (rather than only `upn`/
+/// `wamToken` within it) never leaks a credential.
+fn redact_secret_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                if crate::config_deserialize::is_secret_path_field(&key.to_ascii_lowercase()) {
+                    *entry = serde_json::Value::String("<redacted>".to_string());
+                } else {
+                    redact_secret_fields(entry);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_secret_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Get the parent process name and PID (e.g. `"node.exe:67890"`).
 ///
 /// Returns `"unknown"` if the parent PID cannot be determined, or
@@ -355,6 +404,44 @@ mod tests {
         assert!(!json.contains("user@example.com"));
         assert!(!json.contains("super-secret-bearer-token"));
         assert_eq!(json.matches("<redacted>").count(), 2);
+    }
+
+    #[test]
+    fn redact_raw_config_json_hides_isolation_session_user_bundle() {
+        let raw = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "isolation_session",
+            "experimental": {
+                "isolationSession": {
+                    "user": {"upn": "alice@contoso.com", "wamToken": "super-secret-bearer-token"}
+                }
+            }
+        }"#;
+        let redacted = redact_raw_config_json(raw);
+        assert!(!redacted.contains("alice@contoso.com"));
+        assert!(!redacted.contains("super-secret-bearer-token"));
+        assert!(redacted.contains("<redacted>"));
+        // Non-secret fields survive untouched.
+        assert!(redacted.contains("echo hi"));
+        assert!(redacted.contains("isolation_session"));
+    }
+
+    #[test]
+    fn redact_raw_config_json_hides_bare_token_and_secret_fields() {
+        let raw = r#"{"apiKey": "abc123", "clientSecret": "xyz", "commandLine": "run"}"#;
+        let redacted = redact_raw_config_json(raw);
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("xyz"));
+        assert!(redacted.contains("run"));
+    }
+
+    #[test]
+    fn redact_raw_config_json_falls_back_on_malformed_json() {
+        let redacted = redact_raw_config_json("{ not valid json");
+        assert_eq!(
+            redacted,
+            "<unparsable JSON config, omitted from diagnostics>"
+        );
     }
 
     #[test]

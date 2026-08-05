@@ -34,6 +34,18 @@ const SECRET_PATH_MARKERS: &[&str] = &[
 /// never leaks one.
 const SECRET_PATH_SEGMENTS: &[&str] = &["user"];
 
+/// Whether a single lower-cased JSON object key is secret-bearing, per
+/// [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
+/// (substring match). Shared by error-path redaction (this module) and raw
+/// config redaction (`diagnostic::redact_raw_config_json`) so both use one
+/// definition of "secret-bearing".
+pub(crate) fn is_secret_path_field(field: &str) -> bool {
+    SECRET_PATH_SEGMENTS.contains(&field)
+        || SECRET_PATH_MARKERS
+            .iter()
+            .any(|marker| field.contains(marker))
+}
+
 /// A JSON deserialization failure with the path at which typed policy parsing
 /// failed. Syntax errors have no meaningful policy path.
 #[derive(Debug)]
@@ -90,10 +102,7 @@ impl ConfigDeserializeError {
                 // Match on the field name only, dropping any array-index suffix
                 // so `field[0]` matches on `field`.
                 let field = segment.split('[').next().unwrap_or(segment);
-                SECRET_PATH_SEGMENTS.contains(&field)
-                    || SECRET_PATH_MARKERS
-                        .iter()
-                        .any(|marker| field.contains(marker))
+                is_secret_path_field(field)
             })
         })
     }

@@ -1378,8 +1378,16 @@ fn main() {
             fs::read_to_string(&config_data).ok()
         };
         if let Some(json) = raw_json {
-            let _ = writeln!(logger, "SECTION: JSON Config");
-            let _ = writeln!(logger, "{}", json.trim());
+            // Redact secret-bearing fields (e.g. `experimental.isolationSession.user.{upn,wamToken}`)
+            // before writing: a one-shot IsolationSession request's credential
+            // bundle is only rejected by the runner after this point, so the
+            // raw config as received from the caller may still contain it.
+            let _ = writeln!(logger, "SECTION: JSON Config (redacted)");
+            let _ = writeln!(
+                logger,
+                "{}",
+                wxc_common::diagnostic::redact_raw_config_json(json.trim())
+            );
         }
     }
 
