@@ -181,12 +181,14 @@ fn write_filesystem_deny(out: &mut String, request: &ExecutionRequest) -> Result
     let policy = &request.policy;
 
     if !policy.denied_paths.is_empty() {
-        // `network-outbound` must be denied here even though it is never
-        // allowed per-path above: `write_outbound_allow_rules` emits an
-        // *unfiltered* `(allow network-outbound)`, which would otherwise let
-        // the sandbox `connect()` to a UNIX socket inside a denied subtree and
-        // talk to whatever listens there. A Docker / ssh-agent / gpg-agent
-        // socket is a control plane, so that would be an escape.
+        // `network-outbound` is denied here for two reasons. A denied path can
+        // sit inside a broader `readwritePaths` subtree, whose allow covers it;
+        // and `write_outbound_allow_rules` emits an *unfiltered* `(allow
+        // network-outbound)` under `defaultPolicy: "allow"` and the
+        // remote-proxy fallback. Either would otherwise let the sandbox
+        // `connect()` to a UNIX socket inside a denied subtree and talk to
+        // whatever listens there. A Docker / ssh-agent / gpg-agent socket is a
+        // control plane, so that would be an escape.
         out.push_str(";; --- policy.deniedPaths (override broader allow rules) ---\n");
         write_path_rule(
             out,
@@ -490,12 +492,51 @@ fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
 }
 
 /// Resolve a caller-supplied policy path into the form Seatbelt matches:
-/// expand a leading `~`, then rewrite the symlinked macOS root directories.
+/// expand a leading `~`, normalize redundant lexical segments, then rewrite the
+/// symlinked macOS root directories.
 ///
-/// Both steps are required. See [`expand_tilde`] and
-/// [`resolve_macos_root_symlinks`].
+/// All three steps are required. See [`expand_tilde`], [`normalize_lexical`]
+/// and [`resolve_macos_root_symlinks`].
 pub(crate) fn resolve_policy_path(path: &str) -> Result<String, String> {
-    Ok(resolve_macos_root_symlinks(&expand_tilde(path)?))
+    let expanded = expand_tilde(path)?;
+    Ok(resolve_macos_root_symlinks(&normalize_lexical(&expanded)?))
+}
+
+/// Collapse the lexical spellings of a path that leave a Seatbelt rule dead:
+/// repeated separators (`//tmp`), `.` segments (`/./tmp`), and a trailing `/`.
+///
+/// The kernel canonicalizes an accessed path before matching it against a
+/// profile filter, but it does not canonicalize the filter, so `(subpath
+/// "//tmp/secret")` never matches anything. For `deniedPaths` that fails
+/// **open**, so these spellings have to be folded away rather than passed
+/// through.
+///
+/// A `..` segment is rejected instead of being resolved. macOS resolves `..`
+/// *physically* — after following symlinks — so resolving it lexically can move
+/// the rule somewhere else entirely: `/tmp/..` is `/private`, not `/`. Silently
+/// widening an allow rule to `/` would be worse than the dead rule, and leaving
+/// it in place keeps the deny fail-open, so an unresolvable path is a config
+/// error the caller must fix by passing the resolved path.
+fn normalize_lexical(path: &str) -> Result<String, String> {
+    if path.split('/').any(|seg| seg == "..") {
+        return Err(format!(
+            "Filesystem path '{path}' contains a '..' segment. macOS resolves '..' after \
+             following symlinks, so the generated sandbox rule could not be matched \
+             reliably; specify the fully resolved path instead."
+        ));
+    }
+
+    let joined = path
+        .split('/')
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Ok(if path.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    })
 }
 
 /// The macOS root directories that are symlinks, and their targets.
@@ -929,6 +970,60 @@ mod tests {
             deny_idx > allow_idx,
             "deny must follow allow so last-match-wins re-denies the socket path"
         );
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn lexical_spellings_normalize_to_the_same_rule() {
+        // Each of these accesses `/private/tmp/secret` at the kernel level, so
+        // each must produce the same filter — otherwise a deny written with a
+        // redundant spelling is dead and fails open.
+        for spelling in [
+            "/tmp/secret",
+            "//tmp/secret",
+            "/./tmp/secret",
+            "/tmp//secret",
+            "/tmp/./secret/",
+            "///tmp/secret//",
+        ] {
+            assert_eq!(
+                resolve_policy_path(spelling).unwrap(),
+                "/private/tmp/secret",
+                "spelling {spelling} must normalize"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_normalization_is_idempotent_and_preserves_root() {
+        assert_eq!(resolve_policy_path("/").unwrap(), "/");
+        assert_eq!(resolve_policy_path("//").unwrap(), "/");
+        let once = resolve_policy_path("//tmp/./secret/").unwrap();
+        assert_eq!(resolve_policy_path(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn parent_segments_are_rejected_rather_than_resolved() {
+        // `/tmp/..` is `/private` on macOS, not `/`, so resolving lexically
+        // would silently widen an allow and leave a deny dead.
+        for path in ["/private/var/../tmp", "/tmp/..", "/..", "/a/b/../c"] {
+            let err = resolve_policy_path(path).unwrap_err();
+            assert!(err.contains(".."), "{path} must be rejected, got {err}");
+        }
+        // A path merely *containing* dots in a segment name is fine.
+        assert_eq!(
+            resolve_policy_path("/tmp/..secret").unwrap(),
+            "/private/tmp/..secret"
+        );
+    }
+
+    #[test]
+    fn denied_path_with_redundant_spelling_still_denies() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["//tmp/./secret/".into()];
+        let p = build_profile(&r).unwrap();
+        let deny_idx = p.find(DENY_RULE).expect("deny rule");
         assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
     }
 

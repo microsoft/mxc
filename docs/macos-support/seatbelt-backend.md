@@ -187,11 +187,16 @@ matches MXC's `denied_paths` contract on every other backend.
 Policy paths are rewritten before they are emitted into the profile:
 
 1. A leading `~` / `~/…` is expanded against `$HOME`.
-2. A leading symlinked root path segment is rewritten to its real target:
+2. Redundant lexical segments are collapsed: repeated separators (`//tmp`),
+   `.` segments (`/./tmp`), and a trailing `/`. A `..` segment is **rejected**
+   as a config error rather than resolved — macOS resolves `..` physically,
+   after following symlinks (`/tmp/..` is `/private`, not `/`), so resolving it
+   lexically could silently point the rule somewhere else.
+3. A leading symlinked root path segment is rewritten to its real target:
    `/etc`, `/tmp`, `/var` → `/private/…`, and `/home` →
    `/System/Volumes/Data/home`.
 
-Step 2 is mandatory, not cosmetic. Those root entries are symlinks on macOS,
+Steps 2 and 3 are mandatory, not cosmetic. Those root entries are symlinks on macOS,
 and the kernel fully resolves a path before matching it against a profile
 filter — so a rule written against the unresolved path never matches and is
 silently dead. This applies to the automatic `$TMPDIR` grant too, which
@@ -218,12 +223,13 @@ Two asymmetries are intentional:
 
 - `readonlyPaths` grants **neither** operation. A socket is a bidirectional
   channel, not a read.
-- `deniedPaths` denies `network-outbound` even though no path-scoped
-  `network-outbound` allow can reach it. `defaultPolicy: "allow"` (and the
-  remote-proxy fallback) emit an *unfiltered* `(allow network-outbound)`, so
-  without the deny the sandbox could `connect()` to a pre-existing socket
-  inside a denied subtree — a Docker, `ssh-agent` or `gpg-agent` socket is a
-  control plane, so that would be an escape.
+- `deniedPaths` denies `network-outbound`, overriding **both** kinds of allow
+  that can reach it: a broader `readwritePaths` subtree containing the denied
+  path, and the *unfiltered* `(allow network-outbound)` emitted by
+  `defaultPolicy: "allow"` and the remote-proxy fallback. Without the deny the
+  sandbox could `connect()` to a pre-existing socket inside a denied subtree —
+  a Docker, `ssh-agent` or `gpg-agent` socket is a control plane, so that would
+  be an escape.
 
 A baseline of read-only system paths (`/usr/lib`, `/usr/libexec`,
 `/usr/share`, `/System`, `/Library`, `/private/var/db/timezone`,
