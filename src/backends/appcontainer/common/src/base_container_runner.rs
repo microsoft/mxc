@@ -1874,6 +1874,16 @@ impl SandboxBackend for BaseContainerRunner {
                  proxy AppContainer peer identity",
             ));
         }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        // Dry-run validates the schema and policy shape without requiring the
+        // current host to expose the selected schema's OS APIs.
+        if request.dry_run {
+            return Ok(());
+        }
         if use_process_security_environment {
             self.capture_support
                 .check_apis(capture_denials)
@@ -1909,11 +1919,6 @@ impl SandboxBackend for BaseContainerRunner {
                     ScriptResponse::error(wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG)
                 });
             }
-        }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
         }
         if use_process_security_environment {
             return Ok(());
@@ -3260,6 +3265,7 @@ mod tests {
     fn validate_runner_rejects_allowed_hosts() {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest::default();
+        request.dry_run = true;
         request.policy.allowed_hosts = vec!["example.com".into()];
 
         let err = runner
@@ -3272,6 +3278,7 @@ mod tests {
     fn validate_runner_rejects_blocked_hosts() {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest::default();
+        request.dry_run = true;
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
 
         let err = runner
@@ -3406,10 +3413,41 @@ mod tests {
     }
 
     #[test]
+    fn schema_0_8_dry_run_skips_host_api_probes() {
+        let factory = fake_capture_factory();
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: Some("V2 exports unavailable"),
+            deny_error: Some("deny support query unavailable"),
+            deny_supported: false,
+            api_calls: AtomicUsize::new(0),
+            learning_mode_api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
+        let mut request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.denied_paths = vec![r"C:\secret".to_string()];
+
+        runner
+            .validate(&request)
+            .expect("dry-run should validate policy without probing host APIs");
+
+        assert_eq!(support.api_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn validate_runner_rejects_psec_with_least_privilege() {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest {
             schema_version: "0.8.0-alpha".to_string(),
+            dry_run: true,
             ..Default::default()
         };
         request.policy.least_privilege_mode = true;
@@ -3426,6 +3464,7 @@ mod tests {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest {
             schema_version: "0.8.0-alpha".to_string(),
+            dry_run: true,
             ..Default::default()
         };
         request.policy.network_proxy = ProxyConfig {
@@ -3445,6 +3484,7 @@ mod tests {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest {
             schema_version: "0.7.0-alpha".to_string(),
+            dry_run: true,
             ..Default::default()
         };
         request.policy.capture_denials = Some(Default::default());
