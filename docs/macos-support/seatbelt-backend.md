@@ -176,11 +176,24 @@ settings live under a top-level `seatbelt` key:
 |---|---|---|
 | `readonlyPaths` | `(allow file-read* (subpath …))` | Script can read these subtrees |
 | `readwritePaths` | `(allow file-read* file-write* network-bind network-outbound (subpath …))` | Script can read and write, and bind/connect AF_UNIX sockets under these subtrees |
+| `readonlyPaths` (nested under a read-write path) | `(deny file-write* network-bind network-outbound (subpath …))` | Removes write and socket authority a shallower read-write rule would otherwise grant |
 | `deniedPaths` | `(deny file-read* file-write* network-bind network-outbound (subpath …))` emitted **last** | Overrides any broader allow above |
 
 Apple's Seatbelt evaluates rules with last-match-wins semantics within an
 operation, so denies emitted after allows correctly override them. This
 matches MXC's `denied_paths` contract on every other backend.
+
+`readonlyPaths` and `readwritePaths` are emitted **shallow-to-deep**, one rule
+per path, using the same ordering the Linux backends apply
+(`wxc_common::filesystem_resolve`). Last-match-wins then makes the *deepest*
+intent win at every path, so a read-only entry nested inside a broader
+read-write subtree stays read-only. Because an `allow` can never take authority
+back from an earlier rule, each read-only path also emits an explicit
+`(deny file-write* network-bind network-outbound …)`.
+
+`deniedPaths` is not part of that plan — it is emitted after the network rules
+so it also overrides the unfiltered `(allow network-outbound)`, which makes it
+win outright regardless of depth.
 
 #### Path resolution
 
@@ -195,6 +208,14 @@ Policy paths are rewritten before they are emitted into the profile:
 3. A leading symlinked root path segment is rewritten to its real target:
    `/etc`, `/tmp`, `/var` → `/private/…`, and `/home` →
    `/System/Volumes/Data/home`.
+
+A `..` segment is rejected on this backend only. The shared config parser
+accepts it, so a cross-backend policy using `..` will fail on macOS and run
+elsewhere. That is intentional: the alternative is the failure mode this whole
+section exists to remove — the rule would be emitted, match nothing, and for
+`deniedPaths` fail open. Resolving `..` correctly needs `std::fs::canonicalize`
+against the live filesystem, which the profile builder deliberately avoids so it
+stays pure string generation, unit-testable on any host.
 
 After resolution, the most-restrictive-wins precedence (`deny` > `readonly` >
 `readwrite`) is re-applied to the **resolved** paths. The shared config parser
@@ -219,13 +240,19 @@ ip)` filters used by the network policy cover IP sockets only. MXC therefore
 governs AF_UNIX sockets with the **filesystem** policy, not the network policy:
 both halves are permitted anywhere the sandbox may already create files.
 
-This is deliberate. The socket is a filesystem object reachable only by
-processes that can traverse to its path, so using one where writes are already
-permitted grants no new capability — and Node toolchains (tsx, vite, esbuild,
-jest workers) need it for their IPC pipes. Gating it behind `allowLocalNetwork`
-would force real network ingress on just to run a build. Because the rules are
-path-scoped they never widen IP binding or IP egress, which stay governed by
-`defaultPolicy` and `allowLocalNetwork`.
+This is deliberate. A socket is a filesystem object reachable only by processes
+that can traverse to its path, and Node toolchains (tsx, vite, esbuild, jest
+workers) need both halves for their IPC pipes. Gating them behind
+`allowLocalNetwork` would force real network ingress on just to run a build.
+Because the rules are path-scoped they never widen IP binding or IP egress,
+which stay governed by `defaultPolicy` and `allowLocalNetwork`.
+
+There is a real tradeoff to be aware of, though: `connect()` is a capability
+that `file-write*` alone did not grant. A sandbox with a broad `readwritePaths`
+root can now talk to any **pre-existing** listener underneath it, and a control
+socket (Docker, `ssh-agent`, `gpg-agent`) is a meaningful target. Prefer a
+narrow read-write root, and put any sensitive socket in `deniedPaths`, which
+overrides this grant.
 
 Two asymmetries are intentional:
 

@@ -27,6 +27,7 @@
 
 use std::fmt::Write as _;
 
+use wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
 use wxc_common::models::{
     ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress,
 };
@@ -193,28 +194,47 @@ fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
 }
 
 fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
-    if !paths.readonly.is_empty() {
-        out.push_str(";; --- policy.readonlyPaths ---\n");
-        write_path_rule(out, "allow file-read*", &paths.readonly);
+    if paths.readonly.is_empty() && paths.readwrite.is_empty() {
+        return;
     }
 
-    if !paths.readwrite.is_empty() {
-        // `network-bind` / `network-outbound` under a *path* filter match only
-        // AF_UNIX sockets — Seatbelt matches IP sockets with `(local ip)` /
-        // `(remote ip)` — so this widens nothing on the IP side. A UNIX socket
-        // is a filesystem object reachable only by processes that can traverse
-        // to its path, so `readwritePaths` (not the network policy) governs it:
-        // binding or connecting where the sandbox may already create files
-        // grants no capability it lacks. Both halves are needed — Node
-        // toolchains (tsx, vite, esbuild, jest) bind an IPC pipe and then
-        // connect to it. `readonlyPaths` deliberately gets neither: a socket is
-        // a bidirectional channel, not a read.
-        out.push_str(";; --- policy.readwritePaths (+ AF_UNIX socket bind/connect) ---\n");
-        write_path_rule(
-            out,
-            "allow file-read* file-write* network-bind network-outbound",
-            &paths.readwrite,
-        );
+    // Emit shallow-to-deep, one rule per path, using the same ordering the
+    // Linux backends apply (`wxc_common::filesystem_resolve`). Seatbelt is
+    // last-match-wins, so ordering by depth makes the *deepest* intent win at
+    // every path — a `readonlyPaths` entry nested inside a broader
+    // `readwritePaths` subtree stays read-only rather than inheriting the
+    // parent's write grant. `deniedPaths` is deliberately not part of this
+    // plan: it is emitted after the network rules so it also overrides the
+    // unfiltered `(allow network-outbound)`, which makes it win outright.
+    out.push_str(";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---\n");
+    for mount in resolve_path_plan(&paths.readwrite, &paths.readonly, &[]) {
+        let subpath = [mount.path.clone()];
+        match mount.intent {
+            FsIntent::ReadWrite => {
+                // `network-bind` / `network-outbound` under a *path* filter
+                // match only AF_UNIX sockets — Seatbelt matches IP sockets with
+                // `(local ip)` / `(remote ip)` — so this widens nothing on the
+                // IP side. Both halves are needed: Node toolchains (tsx, vite,
+                // esbuild, jest) bind an IPC pipe and then connect to it.
+                write_path_rule(
+                    out,
+                    "allow file-read* file-write* network-bind network-outbound",
+                    &subpath,
+                );
+            }
+            FsIntent::ReadOnly => {
+                write_path_rule(out, "allow file-read*", &subpath);
+                // The read allow alone cannot take write or socket authority
+                // back from a shallower read-write rule — an `allow` never
+                // denies — so the removal has to be explicit.
+                write_path_rule(
+                    out,
+                    "deny file-write* network-bind network-outbound",
+                    &subpath,
+                );
+            }
+            FsIntent::Denied => unreachable!("denied paths are not part of this plan"),
+        }
     }
 }
 
@@ -939,7 +959,18 @@ mod tests {
         assert!(p.contains("(subpath \"/private/tmp/a\\\"b\\\\c\")"));
     }
 
-    const RO_SECTION: &str = ";; --- policy.readonlyPaths ---";
+    const FS_SECTION: &str =
+        ";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---";
+    const RO_STRIP: &str = "(deny file-write* network-bind network-outbound\n";
+
+    /// The policy-derived filesystem section, excluding the always-emitted
+    /// baseline rules that also start with `(allow file-read*`.
+    fn fs_section(profile: &str) -> &str {
+        profile
+            .find(FS_SECTION)
+            .map(|i| &profile[i..])
+            .unwrap_or("")
+    }
     const RW_RULE: &str = "(allow file-read* file-write* network-bind network-outbound\n";
     const DENY_RULE: &str = "(deny file-read* file-write* network-bind network-outbound\n";
 
@@ -988,7 +1019,9 @@ mod tests {
         r.policy.readonly_paths = vec!["/tmp/input".into()];
         let p = build_profile(&r).unwrap();
         assert!(!p.contains(RW_RULE));
-        assert!(!p.contains("network-bind"));
+        // The only socket mention for a read-only path is the explicit removal.
+        assert!(!p.contains("allow network-bind"));
+        assert!(fs_section(&p).contains(RO_STRIP));
     }
 
     #[test]
@@ -1061,6 +1094,44 @@ mod tests {
     }
 
     #[test]
+    fn nested_readonly_keeps_write_away_from_broader_readwrite() {
+        // `/tmp` resolves to `/private/tmp`, which is an ancestor of the
+        // read-only entry. An `allow` cannot take authority back, so the
+        // read-only path must emit an explicit removal *after* the broader
+        // read-write allow.
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        let strip_idx = p.find(RO_STRIP).expect("read-only must strip write");
+        assert!(
+            strip_idx > rw_idx,
+            "deepest intent must be emitted last, profile:\n{p}"
+        );
+        assert!(p[strip_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn nested_readwrite_still_wins_inside_broader_readonly() {
+        // The mirror case: the deeper read-write entry must survive, otherwise
+        // depth ordering would have simply inverted the bug.
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/build".into()];
+        let p = build_profile(&r).unwrap();
+
+        let strip_idx = p.find(RO_STRIP).expect("read-only strip");
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(
+            rw_idx > strip_idx,
+            "deeper readwrite must win, profile:\n{p}"
+        );
+        assert!(p[rw_idx..].contains("(subpath \"/private/tmp/build\")"));
+    }
+
+    #[test]
     fn readonly_wins_over_readwrite_for_aliased_spellings() {
         // The parser's most-restrictive-wins pass compares raw strings, so
         // these two spellings both survive it and only collide once resolved.
@@ -1071,8 +1142,7 @@ mod tests {
         r.policy.readwrite_paths = vec!["/tmp/x".into()];
         let p = build_profile(&r).unwrap();
 
-        let ro_idx = p.find(RO_SECTION).expect("readonly section");
-        assert!(p[ro_idx..].contains("(subpath \"/private/tmp/x\")"));
+        assert!(fs_section(&p).contains("(subpath \"/private/tmp/x\")"));
         assert!(
             !p.contains(RW_RULE),
             "aliased readwrite entry must be dropped, profile was:\n{p}"
@@ -1087,7 +1157,7 @@ mod tests {
         r.policy.readwrite_paths = vec!["//tmp/./x".into()];
         let p = build_profile(&r).unwrap();
 
-        assert!(!p.contains(RO_SECTION), "profile:\n{p}");
+        assert!(!p.contains(FS_SECTION), "profile:\n{p}");
         assert!(!p.contains(RW_RULE), "profile:\n{p}");
         let deny_idx = p.find(DENY_RULE).expect("deny rule");
         assert!(p[deny_idx..].contains("(subpath \"/private/tmp/x\")"));
@@ -1100,8 +1170,7 @@ mod tests {
         r.policy.readwrite_paths = vec!["/tmp/rw".into()];
         let p = build_profile(&r).unwrap();
 
-        let ro_idx = p.find(RO_SECTION).expect("readonly section");
-        assert!(p[ro_idx..].contains("(subpath \"/private/tmp/ro\")"));
+        assert!(fs_section(&p).contains("(subpath \"/private/tmp/ro\")"));
         let rw_idx = p.find(RW_RULE).expect("readwrite rule");
         assert!(p[rw_idx..].contains("(subpath \"/private/tmp/rw\")"));
     }
