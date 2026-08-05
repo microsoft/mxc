@@ -183,6 +183,7 @@ export interface CollectedOutput {
 export function spawnAndCollect(
   envelope: Record<string, unknown>,
   options: SandboxSpawnOptions,
+  containment?: string,
 ): Promise<CollectedOutput> {
   return new Promise((resolve, reject) => {
     const signal = options.signal;
@@ -194,7 +195,11 @@ export function spawnAndCollect(
     let executablePath: string;
     let args: string[];
     try {
-      ({ executablePath, args } = resolveBinaryAndCommonArgs(JSON.stringify(envelope), options));
+      ({ executablePath, args } = resolveBinaryAndCommonArgs(
+        JSON.stringify(envelope),
+        options,
+        containment,
+      ));
     } catch (err) {
       reject(err);
       return;
@@ -264,7 +269,8 @@ export function spawnAndCollect(
 export async function nonExecCall<T>(
   envelope: Record<string, unknown>,
   options: SandboxSpawnOptions,
+  containment?: string,
 ): Promise<T> {
-  const { stdout } = await spawnAndCollect(envelope, options);
+  const { stdout } = await spawnAndCollect(envelope, options, containment);
   return parseNonExecResponse<T>(stdout);
 }

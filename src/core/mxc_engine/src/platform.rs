@@ -199,15 +199,13 @@ const BWRAP_PROBE_ARGS: &[&str] = &[
     "exit 0",
 ];
 
-/// How long the probe may take before it is treated as a failure. The probe
-/// mounts and forks, so unlike the `--version` call it replaced it can block
-/// on a wedged filesystem.
-#[cfg(target_os = "linux")]
-const BWRAP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Run [`BWRAP_PROBE_ARGS`], reporting why the host cannot sandbox on failure.
+///
+/// Bounded by the same deadline as the version probe: this one mounts and
+/// forks, so it can block on a wedged filesystem.
 #[cfg(target_os = "linux")]
 fn probe_bubblewrap() -> Result<(), String> {
+    use bwrap_common::bwrap_version::{wait_with_deadline, PROBE_TIMEOUT};
     use std::io::ErrorKind;
     use std::process::{Command, Stdio};
 
@@ -226,7 +224,7 @@ fn probe_bubblewrap() -> Result<(), String> {
         Err(e) => return Err(format!("Bubblewrap could not be executed: {e}")),
     };
 
-    let output = match wait_with_deadline(&mut child, BWRAP_PROBE_TIMEOUT) {
+    let output = match wait_with_deadline(&mut child, PROBE_TIMEOUT) {
         Some(Ok(output)) => output,
         Some(Err(e)) => return Err(format!("Bubblewrap could not be executed: {e}")),
         None => {
@@ -234,7 +232,7 @@ fn probe_bubblewrap() -> Result<(), String> {
             let _ = child.wait();
             return Err(format!(
                 "Bubblewrap did not finish a trivial sandbox within {}s on this host",
-                BWRAP_PROBE_TIMEOUT.as_secs()
+                PROBE_TIMEOUT.as_secs()
             ));
         }
     };
@@ -245,42 +243,6 @@ fn probe_bubblewrap() -> Result<(), String> {
     Err(format!(
         "Bubblewrap is installed but cannot create a sandbox on this host: {}",
         bwrap_failure_detail(&output.stderr)
-    ))
-}
-
-/// Collect `child`'s output, or return `None` if it outlives `timeout`.
-#[cfg(target_os = "linux")]
-fn wait_with_deadline(
-    child: &mut std::process::Child,
-    timeout: std::time::Duration,
-) -> Option<std::io::Result<std::process::Output>> {
-    use std::time::Instant;
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            Ok(None) => return None,
-            Err(e) => return Some(Err(e)),
-        }
-    }
-    // The child has exited, so `wait_with_output` drains the already-closed
-    // stderr pipe and returns immediately.
-    Some(child.stderr.take().map_or_else(
-        || Err(std::io::Error::other("bwrap stderr pipe was not captured")),
-        |mut stderr| {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            stderr.read_to_end(&mut buf)?;
-            Ok(std::process::Output {
-                status: child.wait()?,
-                stdout: Vec::new(),
-                stderr: buf,
-            })
-        },
     ))
 }
 

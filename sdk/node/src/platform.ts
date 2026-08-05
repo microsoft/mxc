@@ -321,11 +321,11 @@ function computeSupport(): PlatformSupport {
   if (!build || build.major >= MIN_PROCESSCONTAINER_BUILD) {
     methods.push('processcontainer');
   }
-  // Windows Sandbox and IsolationSession have their own floors, so a host
-  // below the processcontainer floor may still have them. They are reported,
-  // but they are experimental-only backends reached by explicit opt-in, so
-  // they cannot carry `isSupported` — that flag is what guards the default
-  // `processcontainer` spawn.
+  // Windows Sandbox has its own, lower floor, so a host below the
+  // processcontainer floor may still have it. Both it and IsolationSession are
+  // reported when present, but they are experimental-only backends reached by
+  // explicit opt-in, so they cannot carry `isSupported` — that flag is what
+  // guards the default `processcontainer` spawn.
   if (isWindowsSandboxAvailable()) {
     methods.push('windows_sandbox');
   }

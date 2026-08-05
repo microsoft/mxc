@@ -13,7 +13,17 @@
 //! [`probe_bwrap`] shells out.
 
 use std::fmt;
-use std::process::{Command, Stdio};
+use std::io;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long a `bwrap` probe may run before it is treated as a failure.
+///
+/// Platform detection is synchronous, so without a bound a `bwrap` that hangs
+/// — a wrapper script on PATH, a binary on a stalled network mount — blocks
+/// the caller indefinitely. Mirrors `BWRAP_VERSION_TIMEOUT_MS` in the
+/// TypeScript SDK (`sdk/node/src/platform.ts`).
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The minimum `bwrap` version the Bubblewrap backend supports.
 ///
@@ -135,20 +145,39 @@ impl std::error::Error for BwrapUnavailable {}
 /// Runs `bwrap --version` and validates the reported version against
 /// [`MIN_BWRAP_VERSION`]. Returns the detected version on success.
 pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
-    let output = Command::new("bwrap")
+    let spawn_failure = |err: io::Error| match err.kind() {
+        // `ENOENT` covers both an absent binary and a present-but-unusable
+        // one (missing ELF interpreter / shebang target), so confirm the
+        // binary is really absent before blaming the package manager.
+        io::ErrorKind::NotFound if !bwrap_exists_on_path() => BwrapUnavailable::NotFound,
+        _ => BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: err.to_string(),
+        },
+    };
+
+    let mut child = Command::new("bwrap")
         .arg("--version")
         .stdin(Stdio::null())
-        .output()
-        .map_err(|err| match err.kind() {
-            // `ENOENT` covers both an absent binary and a present-but-unusable
-            // one (missing ELF interpreter / shebang target), so confirm the
-            // binary is really absent before blaming the package manager.
-            std::io::ErrorKind::NotFound if !bwrap_exists_on_path() => BwrapUnavailable::NotFound,
-            _ => BwrapUnavailable::ProbeFailed {
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(spawn_failure)?;
+
+    let output = match wait_with_deadline(&mut child, PROBE_TIMEOUT) {
+        Some(result) => result.map_err(spawn_failure)?,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(BwrapUnavailable::ProbeFailed {
                 status: None,
-                detail: err.to_string(),
-            },
-        })?;
+                detail: format!(
+                    "did not respond within {}s and was killed",
+                    PROBE_TIMEOUT.as_secs()
+                ),
+            });
+        }
+    };
 
     if !output.status.success() {
         return Err(BwrapUnavailable::ProbeFailed {
@@ -160,6 +189,42 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
     // The version banner goes to stdout; `parse_version` owns its format.
     let stdout = String::from_utf8_lossy(&output.stdout);
     check_version_output(&stdout)
+}
+
+/// Collect `child`'s output, or return `None` if it outlives `timeout`.
+///
+/// `Child::wait_with_output` has no deadline, so this polls `try_wait` and
+/// only drains the pipes once the process has exited — at which point the
+/// reads return immediately and cannot block on a full pipe.
+pub fn wait_with_deadline(child: &mut Child, timeout: Duration) -> Option<io::Result<Output>> {
+    use std::io::Read;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            Ok(None) => return None,
+            Err(e) => return Some(Err(e)),
+        }
+    }
+
+    let read_pipe = |pipe: Option<&mut dyn Read>| -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        if let Some(pipe) = pipe {
+            pipe.read_to_end(&mut buf)?;
+        }
+        Ok(buf)
+    };
+    Some((|| {
+        let stdout = read_pipe(child.stdout.as_mut().map(|p| p as &mut dyn Read))?;
+        let stderr = read_pipe(child.stderr.as_mut().map(|p| p as &mut dyn Read))?;
+        Ok(Output {
+            status: child.wait()?,
+            stdout,
+            stderr,
+        })
+    })())
 }
 
 /// Validate a raw `bwrap --version` output string against
