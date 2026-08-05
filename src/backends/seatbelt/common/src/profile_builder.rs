@@ -1006,19 +1006,22 @@ mod tests {
     }
 
     #[test]
-    fn denied_paths_deny_outbound_after_unfiltered_allow() {
-        // `defaultPolicy: allow` emits a bare `(allow network-outbound)`; the
-        // deny must come after it or a denied subtree's UNIX sockets stay
-        // connectable.
+    fn denied_paths_deny_outbound_under_default_allow() {
+        // `defaultPolicy: allow` emits a bare `(allow network-outbound)`, which
+        // on its own grants AF_UNIX `connect()`. A denied subtree must still
+        // deny it. Position relative to that unfiltered allow is deliberately
+        // not asserted: an unfiltered rule cannot override a path-filtered one
+        // in either direction, so pinning the order would encode a constraint
+        // that does not exist. The orderings that *do* matter — deny after the
+        // filtered read-write allows — are covered by
+        // `denied_paths_appear_after_allows_to_override` and
+        // `denied_paths_deny_unix_socket_ops_after_allows`.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Allow;
         r.policy.denied_paths = vec!["/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
-        let allow_idx = p
-            .find("(allow network-outbound)")
-            .expect("unfiltered outbound allow");
         let deny_idx = p.find(DENY_RULE).expect("deny must cover network-outbound");
-        assert!(deny_idx > allow_idx);
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
     }
 
     #[test]
@@ -1143,12 +1146,15 @@ mod tests {
     #[test]
     fn readonly_socket_strip_survives_a_default_allow_outbound() {
         // `defaultPolicy: "allow"` emits an unfiltered `(allow
-        // network-outbound)` *after* the filesystem section. Seatbelt does not
-        // let an unfiltered rule override a path-filtered one, so the
-        // read-only strip still governs AF_UNIX `connect()` under that
-        // subtree. Verified against `sandbox-exec`: with both rules present in
-        // this order, connecting to a pre-existing socket there is EPERM,
-        // while the same profile without the strip connects fine.
+        // network-outbound)`. The read-only strip still governs AF_UNIX
+        // `connect()` under that subtree, because an unfiltered rule does not
+        // override a path-filtered one. Verified end-to-end against
+        // `mxc-exec-mac` with a listener created outside the sandbox: this
+        // policy denies `connect()` with EPERM, while the same policy with the
+        // path moved to `readwrite_paths` connects.
+        //
+        // Emission order relative to the unfiltered allow is deliberately not
+        // asserted — it has no bearing on the outcome.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Allow;
         r.policy.readonly_paths = vec!["/tmp/ro".into()];
@@ -1156,10 +1162,6 @@ mod tests {
 
         let strip_idx = p.find(RO_STRIP).expect("read-only strip");
         assert!(p[strip_idx..].contains("(subpath \"/private/tmp/ro\")"));
-        assert!(
-            p.find("(allow network-outbound)\n").expect("default allow") > strip_idx,
-            "this test is only meaningful while the unfiltered allow comes last, profile:\n{p}"
-        );
     }
 
     #[test]
