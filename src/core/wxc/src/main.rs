@@ -136,7 +136,7 @@ struct Cli {
     /// `--telemetry-consent-revoke` decision (e.g. `"prompt"`,
     /// `"settings-toggle"`). Defaults to `"cli"` when omitted. Never
     /// transmitted anywhere; local diagnostic metadata only.
-    #[arg(long = "telemetry-consent-source")]
+    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
     telemetry_consent_source: Option<String>,
 
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it

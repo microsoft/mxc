@@ -64,7 +64,8 @@ if (rustStates.size === 0) {
 // --- C#: the ParsePolicyState switch --------------------------------------
 // Every state except the fail-closed default must appear as a literal arm;
 // the default arm is what maps everything else (including `"blocked"`) to
-// Blocked, so `blocked` is expected to be absent from the explicit arms.
+// Blocked. The default may return Blocked directly or through the helper
+// that records an actionable diagnostic before failing closed.
 const csharpSrc = readFileSync(csharpPath, "utf8");
 const parseBody = csharpSrc.match(
   /ParsePolicyState\(string\? value\) => value switch\s*\{([\s\S]*?)\};/
@@ -77,13 +78,23 @@ const csharpStates = new Set();
 for (const m of parseBody[1].matchAll(/"([a-z-]+)"\s*=>/g)) {
   csharpStates.add(m[1]);
 }
-const csharpDefault = /_\s*=>\s*TelemetryPolicyState\.Blocked/.test(
+const csharpDefault = /_\s*=>\s*(?:TelemetryPolicyState\.Blocked|UnrecognizedPolicyState\(value\))/.test(
   parseBody[1]
 );
 if (!csharpDefault) {
   errors.push(
-    "C# ParsePolicyState must fail closed with `_ => TelemetryPolicyState.Blocked`"
+    "C# ParsePolicyState must fail closed with a direct Blocked result or the UnrecognizedPolicyState helper"
   );
+}
+if (/UnrecognizedPolicyState\(value\)/.test(parseBody[1])) {
+  const helperBody = csharpSrc.match(
+    /UnrecognizedPolicyState\(string\? value\)\s*\{([\s\S]*?)\n\s*\}/
+  );
+  if (!helperBody || !/return\s+TelemetryPolicyState\.Blocked\s*;/.test(helperBody[1])) {
+    errors.push(
+      "C# UnrecognizedPolicyState must return TelemetryPolicyState.Blocked"
+    );
+  }
 }
 // The default arm covers "blocked", so treat it as handled.
 csharpStates.add("blocked");

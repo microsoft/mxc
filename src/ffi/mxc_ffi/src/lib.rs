@@ -414,7 +414,7 @@ pub extern "C" fn mxc_version() -> *const c_char {
 // See docs/telemetry/telemetry-consent-design.md. MXC only ever collects
 // telemetry on Windows, and only when this persisted, MXC-owned consent flag
 // is granted — never derived from any Windows-level diagnostics setting.
-// `wxc_common::telemetry::consent` compiles a non-Windows stub that always
+// `mxc_sdk::telemetry` compiles a non-Windows stub that always
 // reports "not-applicable" and rejects writes, so these entry points behave
 // identically here across platforms: callers get one C ABI regardless of
 // host OS, and the platform gate lives in exactly one place (the Rust
@@ -434,7 +434,7 @@ pub extern "C" fn mxc_version() -> *const c_char {
 /// `out_utf8` must be null or point to writable `*mut c_char`-sized storage.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_telemetry_get_consent(out_utf8: *mut *mut c_char) -> i32 {
-    let result = catch_unwind(|| wxc_common::telemetry::consent::get_consent().as_str());
+    let result = catch_unwind(|| mxc_sdk::telemetry::get_consent().as_str());
     let state_str = match result {
         Ok(s) => s,
         Err(p) => {
@@ -479,7 +479,7 @@ pub unsafe extern "C" fn mxc_telemetry_set_consent(
     let source = source.to_string();
     let granted = granted != 0;
 
-    let result = catch_unwind(|| wxc_common::telemetry::consent::set_consent(granted, &source));
+    let result = catch_unwind(|| mxc_sdk::telemetry::set_consent(granted, &source));
     match result {
         Ok(Ok(())) => MXC_STATUS_SUCCESS,
         Ok(Err(e)) => {
@@ -521,7 +521,7 @@ pub unsafe extern "C" fn mxc_telemetry_needs_consent_prompt(out_needs_prompt: *m
         return MXC_STATUS_NULL_ARGUMENT;
     }
 
-    let needs_prompt = match catch_unwind(wxc_common::telemetry::consent::needs_consent_prompt) {
+    let needs_prompt = match catch_unwind(mxc_sdk::telemetry::needs_consent_prompt) {
         Ok(b) => b,
         Err(p) => {
             report_panic("mxc_telemetry_needs_consent_prompt", &*p);
@@ -559,7 +559,7 @@ pub unsafe extern "C" fn mxc_telemetry_needs_consent_prompt(out_needs_prompt: *m
 /// `out_utf8` must be null or point to writable `*mut c_char`-sized storage.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_telemetry_get_policy(out_utf8: *mut *mut c_char) -> i32 {
-    let result = catch_unwind(|| wxc_common::telemetry::policy::get_policy().as_str());
+    let result = catch_unwind(|| mxc_sdk::telemetry::get_policy().as_str());
     let state_str = match result {
         Ok(s) => s,
         Err(p) => {

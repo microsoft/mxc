@@ -80,7 +80,7 @@ struct Cli {
     telemetry_consent_revoke: bool,
 
     /// Unused on macOS; accepted only for CLI-surface parity.
-    #[arg(long = "telemetry-consent-source")]
+    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
     telemetry_consent_source: Option<String>,
 }
 
