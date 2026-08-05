@@ -8,7 +8,7 @@ use serde_json::{error::Category, Value};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 /// Field-name substrings that mark a value as secret-bearing. Matched anywhere
-/// within a single path segment, so `token` catches `apiToken`, `secret`
+/// within a single path segment, so `token` catches `wamToken`, `secret`
 /// catches `clientSecret`, and so on.
 const SECRET_PATH_MARKERS: &[&str] = &[
     "token",
@@ -27,9 +27,9 @@ const SECRET_PATH_MARKERS: &[&str] = &[
 
 /// Whole path segments that mark a value as secret-bearing. Matched as a
 /// complete field name (not a substring) so they never collide with unrelated
-/// fields such as `username`. `user` marks a credential bundle: a shape error
-/// where the object itself is expected is pathed at `user` rather than at the
-/// secret-bearing leaf inside it, so the whole subtree must be marked.
+/// fields such as `username`. `user` is the credential bundle
+/// (`user: { upn, wamToken }`): a shape error where the object is expected is
+/// pathed at `user`, not at `wamToken`, so the whole subtree must be marked.
 /// Over-redaction fails safe — it only replaces an error value with a location,
 /// never leaks one.
 const SECRET_PATH_SEGMENTS: &[&str] = &["user"];
@@ -361,7 +361,7 @@ mod tests {
     #[serde(rename_all = "camelCase")]
     #[allow(dead_code)]
     struct Secret {
-        api_token: String,
+        wam_token: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn redacts_scalar_supplied_where_credential_subtree_is_expected() {
         // A token supplied where the `user` object is expected pathes the error
-        // at `user`, not at the secret leaf inside it; the whole subtree must still
+        // at `user`, not at `wamToken`; the whole credential subtree must still
         // redact so the scalar is never echoed into diagnostics or the envelope.
         let error = from_str::<UserHolder>(r#"{"user": "super-secret-bearer-token"}"#).unwrap_err();
         let message = error.to_string();
@@ -508,10 +508,10 @@ mod tests {
 
     #[test]
     fn display_redacts_values_at_secret_bearing_paths() {
-        let error = from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err();
+        let error = from_str::<Secret>(r#"{"wamToken": 123456789}"#).unwrap_err();
         let message = error.to_string();
 
-        assert!(message.contains("Invalid configuration at `apiToken`"));
+        assert!(message.contains("Invalid configuration at `wamToken`"));
         assert!(message.contains("invalid secret value"));
         assert!(message.contains("line 1"));
         assert!(!message.contains("123456789"));
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn secret_markers_are_detected_case_insensitively() {
         for path in [
-            "apiToken",
+            "wamToken",
             "adminPassword",
             "clientSecret",
             "serviceCredential",
@@ -549,7 +549,7 @@ mod tests {
         ] {
             let error = ConfigDeserializeError {
                 path: Some(path.to_string()),
-                source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
+                source: serde_json::from_str::<Secret>(r#"{"wamToken": 123456789}"#).unwrap_err(),
                 location_override: None,
             };
 
@@ -564,7 +564,7 @@ mod tests {
     fn ordinary_key_suffixes_are_not_treated_as_secrets() {
         let error = ConfigDeserializeError {
             path: Some("monkey".to_string()),
-            source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
+            source: serde_json::from_str::<Secret>(r#"{"wamToken": 123456789}"#).unwrap_err(),
             location_override: None,
         };
 
@@ -579,14 +579,14 @@ mod tests {
         // unrelated fields that merely contain the substring `user`.
         let redacted = [
             "user",
-            "experimental.someBackend.user",
-            "experimental.someBackend.user.name",
+            "experimental.isolationSession.user",
+            "experimental.isolationSession.user.upn",
             "users[0].user",
         ];
         for path in redacted {
             let error = ConfigDeserializeError {
                 path: Some(path.to_string()),
-                source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
+                source: serde_json::from_str::<Secret>(r#"{"wamToken": 123456789}"#).unwrap_err(),
                 location_override: None,
             };
             assert!(
@@ -599,7 +599,7 @@ mod tests {
         for path in not_redacted {
             let error = ConfigDeserializeError {
                 path: Some(path.to_string()),
-                source: serde_json::from_str::<Secret>(r#"{"apiToken": 123456789}"#).unwrap_err(),
+                source: serde_json::from_str::<Secret>(r#"{"wamToken": 123456789}"#).unwrap_err(),
                 location_override: None,
             };
             assert!(

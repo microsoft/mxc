@@ -167,7 +167,7 @@ Comparing the generated schema against the prior hand-written one on lens (2):
   `processContainer.ui.isolation`, `seatbelt.launchMethod`, port `protocol`).
 - **The generated schema is stricter:** it closes the stable nested objects
   (`process`, `network`, `filesystem`, `lifecycle`, `ui`, `lxc`, `fallback`,
-  `processContainer`/`.ui`, `seatbelt`) with
+  `processContainer`/`.ui`, `seatbelt`, the isolation `user` bundle) with
   `additionalProperties: false`, matching the wire model's `deny_unknown_fields`.
   The hand schema left several of these open, so the generated one catches
   nested typos the old one silently accepted.
@@ -175,7 +175,7 @@ Comparing the generated schema against the prior hand-written one on lens (2):
   schema omitted — `processContainer.learningMode`,
   `experimental.windows_sandbox.idleTimeout` (legacy alias),
   `experimental.seatbelt` (pre-promotion alias), and the per-phase
-  `isolation_session.provision` nesting.
+  `isolation_session.{provision,start,stop,deprovision}` nesting.
 
 Two reductions are intentional, each compensated by the parser:
 
@@ -215,10 +215,10 @@ about it.
 The conformance check covers both SDK surfaces: `wire-conformance.test.ts` pins
 the one-shot public types in `sdk/node/src/types.ts`, and
 `wire-conformance-state-aware.test.ts` pins the state-aware lifecycle types in
-`sdk/node/src/state-aware-types.ts` (the `Phase` enum and each phase's own wire
-field set — provision is compared against its wire type, and the phases that
-take no wire object must expose no backend-specific field) against the same
-generated wire defs. Both share the
+`sdk/node/src/state-aware-types.ts` (the `Phase` enum, the Entra user bundle,
+and each phase's own wire field set — provision and start are compared against
+their separate wire types, and the phases that take no wire object must expose
+no backend-specific field) against the same generated wire defs. Both share the
 assertion helpers in `sdk/node/tests/unit/conformance-helpers.ts` and check
 drift in both directions (public→wire and wire→public) so a new wire field the
 SDK forgets to expose also fails the build. The state-aware file additionally
@@ -234,7 +234,7 @@ approaches were evaluated and rejected:
 
 - **Generate the public API directly (generate-and-replace).** The public types
   are a *curated* surface a raw generator can't reproduce: JSDoc, the branded
-  `SandboxId<C>`, and
+  `SandboxId<C>`, the `IsolationSessionUserConfig` class (token redaction), and
   a per-call-phase organization that deliberately does **not** map 1:1 to the
   wire defs. Replacing them from a generator would either ship an un-ergonomic
   API or get hand-massaged anyway, and would churn the public surface (and its

@@ -703,29 +703,33 @@ pub enum TransportProtocol {
 }
 
 /// IsolationSession backend config. Carries only the per-phase state-aware
-/// nesting for the phases that take config (`provision`). The one-shot surface
-/// takes no backend configuration at all. `start`, `stop`, `deprovision`, and
-/// `exec` take no per-phase config payload: `start`, `stop` and `deprovision`
-/// are invoked with only the top-level `phase` and `sandboxId`, and `exec`
-/// additionally carries the top-level `process` block.
+/// nesting for the phases that take config (`provision` / `start`). The
+/// one-shot surface takes no backend configuration at all. `stop`,
+/// `deprovision`, and `exec` take no per-phase config payload: `stop` and
+/// `deprovision` are invoked with only the top-level `phase` and `sandboxId`,
+/// and `exec` additionally carries the top-level `process` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
     /// State-aware provision-phase configuration.
     pub provision: Option<IsolationSessionProvisionPhase>,
+    /// State-aware start-phase configuration.
+    pub start: Option<IsolationSessionStartPhase>,
 }
 
 /// Provision-phase IsolationSession configuration (state-aware lifecycle).
 ///
-/// The only phase that takes a per-phase payload, so it is its own type rather
-/// than a shared one: a shared type would advertise its fields on every phase
-/// in the generated schema. The domain configs and the SDK types are already
+/// Split from the start phase rather than shared: the two phases accept
+/// different fields, and a shared type would advertise every field on both in
+/// the generated schema. The domain configs and the SDK types are already
 /// split per phase; this keeps the wire model aligned with them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSessionProvisionPhase {
+    /// Entra cloud-agent user bundle for this phase.
+    pub user: Option<IsolationUser>,
     /// Optional identifier for the calling application.
     ///
     /// **A packaged application must supply its Package Family Name in the
@@ -733,6 +737,28 @@ pub struct IsolationSessionProvisionPhase {
     /// An unpackaged application may pass any string. Carried inside the `sandboxId`
     /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
+}
+
+/// Start-phase IsolationSession configuration (state-aware lifecycle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationSessionStartPhase {
+    /// Entra cloud-agent user bundle for this phase. Re-supplied at start
+    /// because the `sandboxId` payload does not carry the WAM token.
+    pub user: Option<IsolationUser>,
+}
+
+/// Entra cloud-agent user bundle. Reachable only under the permissive
+/// `experimental` surface, so unknown fields are tolerated (forward-compat).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationUser {
+    /// User principal name.
+    pub upn: String,
+    /// Short-lived WAM bearer token (passed verbatim to the OS service).
+    pub wam_token: String,
 }
 
 /// JSON Schema generation from the wire model, gated behind `schema-gen` so

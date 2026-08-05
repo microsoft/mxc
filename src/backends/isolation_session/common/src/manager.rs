@@ -228,8 +228,10 @@ impl IsolationSessionManager {
     ///
     /// The OS interface takes an app id plus an optional enterprise account
     /// name and token. MXC passes the caller-supplied `app_id` verbatim to the
-    /// app-scoped [`AddUserAsync2`] overload, with empty strings for the
-    /// enterprise account name and token — which selects a local agent user.
+    /// app-scoped [`AddUserAsync2`] overload. Empty strings for the enterprise
+    /// account name and token select a local agent user; an Entra account name
+    /// with its WAM token selects an Entra-backed agent, and the OS validates
+    /// token/identity consistency.
     ///
     /// Note: the in-proc API exposes no session-lifetime knob, so `lifecycle`
     /// cannot be honored here. Unsupported values are refused by the calling
@@ -238,6 +240,8 @@ impl IsolationSessionManager {
     /// parser rejects the whole `lifecycle` section.
     pub(super) fn add_user(
         app_id: Option<&str>,
+        opt_entra_account_name: &str,
+        opt_wam_token: &str,
     ) -> Result<(ProvisionedUser, Self), IsolationSessionError> {
         let mta = MtaReference::acquire()?;
         let ops = check_service_available_and_activate()?;
@@ -252,11 +256,14 @@ impl IsolationSessionManager {
         let async_op = if app_scoped {
             ops.AddUserAsync2(
                 &HSTRING::from(app_id.unwrap_or_default()),
-                &HSTRING::new(),
-                &HSTRING::new(),
+                &HSTRING::from(opt_entra_account_name),
+                &HSTRING::from(opt_wam_token),
             )
         } else {
-            ops.AddUserAsync(&HSTRING::new(), &HSTRING::new())
+            ops.AddUserAsync(
+                &HSTRING::from(opt_entra_account_name),
+                &HSTRING::from(opt_wam_token),
+            )
         }
         .map_err(|e| transport_err(op_add_user, "call failed", &e))?;
         let user_result: IsoSessionUserResult = async_op
@@ -339,12 +346,12 @@ impl IsolationSessionManager {
 
     /// Step 2: Start the isolation session for the pegged agent user.
     ///
-    /// The OS interface takes an optional token; MXC always passes an empty
-    /// string, which selects a local agent session.
-    pub(super) fn start_session(&self) -> Result<(), IsolationSessionError> {
+    /// `opt_wam_token` is empty for a local agent or the Entra WAM token for
+    /// an Entra-backed agent.
+    pub(super) fn start_session(&self, opt_wam_token: &str) -> Result<(), IsolationSessionError> {
         let async_op = self
             .ops
-            .StartSessionAsync(&self.agent_user_name, &HSTRING::new())
+            .StartSessionAsync(&self.agent_user_name, &HSTRING::from(opt_wam_token))
             .map_err(|e| transport_err(op::START_SESSION, "call failed", &e))?;
         let result = async_op
             .join()

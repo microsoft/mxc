@@ -90,8 +90,10 @@ impl ScriptRunner for IsolationSessionRunner {
         // One-shot takes no backend config, so there is no caller-supplied
         // `appId`. Passing `None` selects the default registration, which the
         // in-proc client resolves to the calling process's PFN when packaged
-        // (or leaves empty when unpackaged).
-        let manager = match IsolationSessionManager::add_user(None) {
+        // (or leaves empty when unpackaged). One-shot runs are local agent
+        // users only — the Entra bundle is a state-aware surface — so the
+        // enterprise account name and token are empty.
+        let manager = match IsolationSessionManager::add_user(None, "", "") {
             Ok((provisioned, manager)) => {
                 let _ = writeln!(
                     logger,
@@ -103,7 +105,7 @@ impl ScriptRunner for IsolationSessionRunner {
             Err(e) => return e.into(),
         };
 
-        if let Err(e) = manager.start_session() {
+        if let Err(e) = manager.start_session("") {
             // Provision succeeded; start did not. Clean up. stop_session
             // is a no-op on an unstarted session.
             let _ = manager.stop_session();

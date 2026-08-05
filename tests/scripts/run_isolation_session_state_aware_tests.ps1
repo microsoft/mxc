@@ -1044,6 +1044,34 @@ Run-StateAwareTest "filesystem: provision rejected" {
 
 
 
+# ---------------- Lifecycle D: Entra user-bundle shape validation ----------------
+
+# These validation tests reject malformed user bundles at provision before a
+# sandbox is created, so no cleanup is needed.
+
+Run-StateAwareTest "provision (user.upn malformed: missing @)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_malformed_upn.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains('upn')) "error.message mentions 'upn' (got '$msg')"
+} | Out-Null
+
+Run-StateAwareTest "provision (user.wamToken empty)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_empty_wamtoken.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains('wamToken')) "error.message mentions 'wamToken' (got '$msg')"
+} | Out-Null
+
+
+
+
 # ---------------- Lifecycle E: Simultaneous isolation-session sandboxes ----------------
 #
 # Three concurrently-provisioned sandboxes (A, B, C) verify that

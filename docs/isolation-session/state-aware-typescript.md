@@ -11,14 +11,15 @@ concurrency); this doc covers SDK API surface, types, and consumer usage pattern
 ### In scope
 
 - Per-(backend, phase) Config and Metadata shapes the SDK exposes for IsolationSession.
-- End-to-end TS usage examples.
+- The `IsolationSessionUserConfig` class and its `wamToken` redaction behaviour.
+- End-to-end TS usage examples — local and Entra variants.
 - Test-helper pattern for state-aware integration tests on hosts that may lack
   IsolationSession runtime support.
 
 ### Out of scope
 
 - Runtime validation rules — see the [Rust spec](state-aware-rust.md)
-  for the policy matrix, idempotence,
+  for the Entra `user` validation, policy matrix, idempotence,
   concurrency, and error mapping.
 - The wire-format envelope — see the
   [main design doc](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) §7.
@@ -47,6 +48,7 @@ contract (including fields not yet exposed via the SDK).
 |---|---|---|---|
 | `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
 | `network` | `{ defaultPolicy: 'allow'; allowLocalNetwork: true }` | — (**required**) | Unrestricted-network acknowledgment. The container runs on a network MXC cannot filter or deny (outbound open; a process inside can listen on a port reachable from outside via localhost), so the caller must explicitly acknowledge it. This exact value is the only one accepted; any other network policy (or omission) is rejected at provision, and `network` is not accepted on the post-provision phases (the posture is fixed at provision). |
+| `user` | `IsolationSessionUserConfig` | absent | Optional Entra credentials (see below). |
 | `appId` | string | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated structurally only (no control characters, at most 256 characters); rejections surface as `MxcError` with `code: 'policy_validation'`. Whitespace and case are preserved exactly, and an explicitly supplied empty string is a **distinct** value from omitting the field. Provision-phase only — it is fixed for the sandbox's lifetime, and the `IsolationSessionStartConfig` type rejects it at compile time. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
@@ -69,6 +71,7 @@ in the SDK parses past the `iso:` prefix.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
+| `user` | `IsolationSessionUserConfig` | absent | Optional. For an Entra sandbox, re-supply the `user` (same UPN, current WAM token) so the OS can validate the token against the agent user assigned at provision. Omit for a local sandbox. Shape-validated only — MXC does not match the UPN against the sandbox id. |
 
 **Metadata:** none.
 
@@ -87,7 +90,28 @@ in the SDK parses past the `iso:` prefix.
 
 Each Config carries only `version?`. Neither phase returns metadata.
 
-## End-to-end example
+## `IsolationSessionUserConfig`
+
+```typescript
+export class IsolationSessionUserConfig {
+  readonly upn: string;
+  readonly wamToken: string;
+  constructor(upn: string, wamToken: string);
+}
+```
+
+`wamToken` is treated as a secret: `util.inspect` (and therefore `console.log`)
+redacts it as `<redacted>`. `JSON.stringify` preserves both fields verbatim so the
+wire envelope carries the real token.
+
+The Config field on `IsolationSessionProvisionConfig` and `IsolationSessionStartConfig`
+is typed as the class itself, which means plain `{ upn, wamToken }` literals are not
+assignable — callers must construct via `new IsolationSessionUserConfig(...)` to
+guarantee consistent redaction across logging paths.
+
+## End-to-end examples
+
+### Local
 
 ```typescript
 import {
@@ -119,6 +143,30 @@ await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
 
+### Entra
+
+Provisioning with a `user` bundle selects the Entra path. The returned id is an
+opaque OS-assigned handle (it does not encode the UPN); re-supply the `user` at
+start so the OS can validate the current WAM token:
+
+```typescript
+import { IsolationSessionUserConfig } from '@microsoft/mxc-sdk';
+
+const user = new IsolationSessionUserConfig('alice@contoso.com', wamToken);
+
+const { sandboxId } = await provisionSandbox(
+  'isolation_session',
+  { user },
+  opts,
+);
+
+await startSandbox(sandboxId, { user }, opts);
+// exec / stop / deprovision unchanged from the local example above.
+```
+
+Validation rules for the Entra path (bundle shape-validation, error
+codes) live in the [Rust spec](state-aware-rust.md).
+
 ## Test helpers
 
 `sdk/node/tests/integration/test-helpers.ts` exports three helpers for state-aware
@@ -144,6 +192,10 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
   it('runs full lifecycle', async () => { /* ... */ });
 });
 ```
+
+The Entra path can't be exercised in CI without WAM credentials; the Rust-side
+[state-aware test runner](../../tests/scripts/run_isolation_session_state_aware_tests.ps1)
+covers the validation rejections.
 
 ## References
 

@@ -28,6 +28,9 @@ fn convert_state_aware_isolation_session(
         provision: provision
             .into_option()
             .map(convert_isolation_session_provision),
+        // The closed contract does not expose the Entra surface, so a request
+        // arriving through it can never carry one.
+        start: None,
     }
 }
 
@@ -36,6 +39,7 @@ fn convert_isolation_session_provision(
 ) -> wire::IsolationSessionProvisionPhase {
     let contract::IsolationSessionProvision { app_id } = value;
     wire::IsolationSessionProvisionPhase {
+        user: None,
         app_id: app_id.into_option(),
     }
 }
