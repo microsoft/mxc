@@ -1276,4 +1276,72 @@ mod tests {
             serde_json::from_value(omitted).expect("null outputPath satisfies the wire type");
         assert!(parsed.output_path.is_none());
     }
+
+    // `captureDenials` and `network.proxy` are independent: capture records
+    // ungranted access checks, while the proxy is a cooperative egress route.
+    // The shared parser owns the wire contract and its `captureDenials` branch
+    // is not Windows-gated, so drive it directly to pin the combination on
+    // every platform. The only documented mutual exclusion is with the
+    // `--audit` CLI flag (docs/learning-mode/capabilities.md), which
+    // `wxc-exec` enforces in `validate_audit_request`.
+    #[test]
+    fn wire_contract_accepts_capture_denials_together_with_a_network_proxy() {
+        let config = serde_json::json!({
+            "process": { "commandLine": "echo hello" },
+            "containment": "processcontainer",
+            "network": {
+                "defaultPolicy": "allow",
+                "proxy": { "localhost": 8080 },
+            },
+            "processContainer": {
+                "captureDenials": { "mode": "allow" },
+            },
+        });
+
+        let mut logger = super::Logger::new(super::Mode::Buffer);
+        let request = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+            .expect("captureDenials alongside network.proxy satisfies the wire contract");
+
+        assert!(
+            request.policy.capture_denials.is_some(),
+            "captureDenials must survive alongside a proxy"
+        );
+        assert!(
+            request.policy.network_proxy.is_enabled(),
+            "network.proxy must survive alongside captureDenials"
+        );
+    }
+
+    // The end-to-end counterpart of the contract test above: the typed policy
+    // emits both sections and the parser accepts the result unchanged.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn capture_denials_and_network_proxy_survive_the_typed_path_together() {
+        // `build_request` validates that the parent directory exists.
+        let expected = std::env::temp_dir()
+            .join("denials-with-proxy.json")
+            .to_string_lossy()
+            .into_owned();
+        let mut policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            proxy: Some(ProxySpec::Localhost(8080)),
+            ..NetworkSection::default()
+        });
+        policy.capture_denials = Some(CaptureDenialsSection {
+            mode: CaptureDenialsMode::Allow,
+            output_path: Some(expected.clone()),
+        });
+
+        let request = build_request(&policy, None)
+            .expect("captureDenials and network.proxy are accepted together");
+
+        let captured = request
+            .inner
+            .policy
+            .capture_denials
+            .as_ref()
+            .expect("captureDenials enabled");
+        assert_eq!(captured.output_path.as_deref(), Some(expected.as_str()));
+        assert!(request.inner.policy.network_proxy.is_enabled());
+    }
 }
