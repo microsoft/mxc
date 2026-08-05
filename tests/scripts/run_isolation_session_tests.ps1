@@ -283,14 +283,14 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExit 1))
 
-# One-shot takes no backend configuration at all. `user` is state-aware-only,
-# so on a one-shot request it is just an unrecognised key in the deliberately
-# permissive `experimental` block and is ignored — the run proceeds normally as
-# a local (non-Entra) agent. Guarding it with an explicit rejection would be
+# One-shot takes no backend configuration at all, so any key under
+# `experimental.isolation_session` is just an unrecognised key in the
+# deliberately permissive `experimental` block and is ignored — the run
+# proceeds normally. Guarding it with an explicit rejection would be
 # scaffolding that graduation to the closed stable surface deletes anyway.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_user_ignored.json" `
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_ignored.json" `
     -ExpectedExit 0 `
-    -OutputContains @("ONE_SHOT_USER_IGNORED")))
+    -OutputContains @("ONE_SHOT_STRAY_CONFIG_IGNORED")))
 
 # One-shot network rejection: the isolation session container's network is
 # unrestricted and cannot be filtered or denied, so a non-canonical network

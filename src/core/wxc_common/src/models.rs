@@ -253,52 +253,12 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
-/// State-aware start-phase config for the Isolation Session backend.
-/// Nested under `experimental.isolation_session.start`. Carries the Entra
-/// WAM token again for a cloud-agent sandbox — the `sandboxId` payload does
-/// not carry it. The one-shot surface takes no backend configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct IsolationSessionStartConfig {
-    /// Optional Entra cloud-agent credentials.
-    pub user: Option<IsolationSessionUser>,
-}
-
-/// Entra cloud-agent credentials. Both fields are required when the bundle
-/// is supplied. `wam_token` is a short-lived bearer token passed verbatim to
-/// the OS-side service; MXC stores nothing.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IsolationSessionUser {
-    pub upn: String,
-    pub wam_token: String,
-}
-
-impl std::fmt::Debug for IsolationSessionUser {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IsolationSessionUser")
-            .field("upn", &self.upn)
-            .field("wam_token", &"<redacted>")
-            .finish()
-    }
-}
-
-impl From<crate::wire::IsolationUser> for IsolationSessionUser {
-    fn from(u: crate::wire::IsolationUser) -> Self {
-        // Destructure (no `..`) so a new wire field fails to compile until mapped.
-        let crate::wire::IsolationUser { upn, wam_token } = u;
-        Self { upn, wam_token }
-    }
-}
-
 /// State-aware provision-phase config for the Isolation Session backend.
-/// Nested under `experimental.isolation_session.provision`. Carries Entra
-/// credentials when the caller wants a cloud-agent sandbox; absent for
-/// local sandboxes.
+/// Nested under `experimental.isolation_session.provision`. The one-shot
+/// surface takes no backend configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
-    pub user: Option<IsolationSessionUser>,
     /// Optional identifier for the calling application — the Package Family
     /// Name for a packaged app, any string otherwise. Carried verbatim into
     /// the `sandboxId`; MXC does not interpret or verify it.
@@ -883,7 +843,6 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn script_response_backend_unavailable_round_trips() {
@@ -916,51 +875,5 @@ mod tests {
             let back: FailurePhase = serde_json::from_str(wire).unwrap();
             assert_eq!(back, variant, "round-trip {wire}");
         }
-    }
-
-    #[test]
-    fn isolation_session_user_serde_round_trips_camel_case() {
-        let wire = json!({"upn": "alice@contoso.com", "wamToken": "tok"});
-        let parsed: IsolationSessionUser = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(parsed.upn, "alice@contoso.com");
-        assert_eq!(parsed.wam_token, "tok");
-        let serialised = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(serialised, wire);
-    }
-
-    #[test]
-    fn isolation_session_user_debug_redacts_wam_token() {
-        let user = IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "super-secret-token".to_string(),
-        };
-        let s = format!("{:?}", user);
-        assert!(s.contains("alice@contoso.com"), "got {}", s);
-        assert!(s.contains("<redacted>"), "got {}", s);
-        assert!(!s.contains("super-secret-token"), "got {}", s);
-    }
-
-    #[test]
-    fn isolation_session_provision_config_accepts_user_field() {
-        let wire = json!({"user": {"upn": "alice@contoso.com", "wamToken": "tok"}});
-        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(wire).unwrap();
-        let u = parsed.user.unwrap();
-        assert_eq!(u.upn, "alice@contoso.com");
-        assert_eq!(u.wam_token, "tok");
-    }
-
-    #[test]
-    fn isolation_session_provision_config_defaults_to_no_user() {
-        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(json!({})).unwrap();
-        assert!(parsed.user.is_none());
-    }
-
-    #[test]
-    fn isolation_session_start_config_carries_optional_user() {
-        let wire = json!({
-            "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
-        });
-        let parsed: IsolationSessionStartConfig = serde_json::from_value(wire).unwrap();
-        assert!(parsed.user.is_some());
     }
 }
