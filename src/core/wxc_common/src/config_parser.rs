@@ -1627,7 +1627,7 @@ mod tests {
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {
-                "isolation_session": {"start": {"opaqueFutureField": true}}
+                "isolation_session": {"start": {"user": {"upn": "alice@contoso.com"}}}
             }
         }"#;
         match load_mxc(json).unwrap() {
@@ -1641,7 +1641,7 @@ mod tests {
                 assert_eq!(
                     exp,
                     serde_json::json!({
-                        "isolation_session": {"start": {"opaqueFutureField": true}}
+                        "isolation_session": {"start": {"user": {"upn": "alice@contoso.com"}}}
                     })
                 );
             }
@@ -4114,17 +4114,18 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_ignores_stray_isolation_session_config_rather_than_rejecting() {
-        // The one-shot surface takes no backend configuration at all, and the
-        // `experimental` block is deliberately permissive, so an unrecognised
-        // key there is silently ignored rather than rejected. Parsing must
-        // succeed and select the backend normally.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"unrecognizedSetting": {"nested": "value", "futureField": true}}}}"#;
+    fn one_shot_ignores_isolation_session_user_rather_than_rejecting() {
+        // The one-shot surface takes no backend configuration. `user` used to
+        // be typed here solely so one-shot could reject it; now it is an
+        // unknown key in the deliberately permissive `experimental` block and
+        // is silently ignored, exactly like any other unrecognised key there.
+        // Parsing must succeed and select the backend normally.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true)
-            .expect("one-shot must accept and ignore a stray isolation_session key");
+            .expect("one-shot must accept and ignore a stray isolation_session.user");
         assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 

@@ -20,6 +20,7 @@ import path from 'node:path';
 import os from 'os';
 import {
   execInSandboxAsync,
+  IsolationSessionUserConfig,
   MxcError,
   provisionSandbox,
   startSandbox,
@@ -228,14 +229,14 @@ describe('IsolationSession state-aware policy validation', { skip: platformSkipR
     );
   });
 
-  // Full chain, negative case. An oversized appId is rejected by MXC's
+  // Full chain, negative case. A malformed Entra UPN is rejected by MXC's
   // own validation, before any IsolationSession API call is made. The
   // structured failure fields describe an API operation that was in flight;
   // none was, so they must reach the caller absent rather than empty —
   // `nativeCode` and `remediation` never appear without `operation`.
   //
   // The canonical network acknowledgment is supplied so the only thing wrong
-  // with this request is the appId; that keeps the assertion on the message
+  // with this request is the UPN; that keeps the assertion on the message
   // independent of the order in which the backend runs its validations.
   it('a policy rejection reaches the SDK with no structured failure fields', async () => {
     await assert.rejects(
@@ -243,14 +244,14 @@ describe('IsolationSession state-aware policy validation', { skip: platformSkipR
         'isolation_session',
         {
           network: { defaultPolicy: 'allow', allowLocalNetwork: true },
-          appId: 'x'.repeat(257),
+          user: new IsolationSessionUserConfig('missing-the-at-sign', 'token'),
         },
         { experimental: true },
       ),
       (err: unknown) => {
         assert.ok(err instanceof MxcError, `expected MxcError, got ${String(err)}`);
         assert.strictEqual(err.code, 'policy_validation');
-        assert.match(err.message, /appId/i, `expected the message to name appId: ${err.message}`);
+        assert.match(err.message, /upn/i, `expected the message to name upn: ${err.message}`);
         assert.strictEqual(err.operation, undefined, 'operation must be absent');
         assert.strictEqual(err.nativeCode, undefined, 'nativeCode must be absent');
         assert.strictEqual(err.remediation, undefined, 'remediation must be absent');

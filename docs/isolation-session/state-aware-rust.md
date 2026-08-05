@@ -38,7 +38,7 @@ without metadata use `()`.
 | Phase | `*Config` | `*Metadata` |
 |---|---|---|
 | provision | `IsolationSessionProvisionConfig` | `IsolationSessionProvisionMetadata` |
-| start | `()` | `()` |
+| start | `IsolationSessionStartConfig` | `()` |
 | exec | `()` | (n/a — exec returns an exit code, not metadata) |
 | stop | `()` | `()` |
 | deprovision | `()` | `()` |
@@ -49,6 +49,8 @@ without metadata use `()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
+| `user` | `IsolationSessionUser` (object) \| absent | absent | Optional Entra cloud-agent credentials. When present, the UPN and WAM token are passed to `AddUserAsync` and the resulting sandbox is Entra-backed. When absent, provision calls `AddUserAsync` with empty strings and produces a local-agent sandbox. The bundle is `{ upn: string, wamToken: string }`; both fields required when supplied. `upn` is trimmed of surrounding whitespace both for the shape check and for the value handed to the OS, so validation and transmission cannot disagree. `wamToken` is passed verbatim to the OS-side service (it is an opaque bearer credential, so trimming could corrupt it) and never stored by MXC. The wire path is `experimental.isolation_session.provision.user`. |
+
 | `appId` | string \| absent | absent | Optional identifier for the calling application. For a **packaged** application this is the Package Family Name; for an unpackaged one it may be any string. Carried verbatim inside the `sandboxId` (see below) so later phases recover it without the caller re-supplying it. **Nothing consumes it today** — it is accepted now so a future OS contract that acts on the calling application's identity does not require a breaking change. Validated **structurally only** (no control characters; at most 256 characters) — MXC is a pass-through carrier here and does not judge what a valid application identity looks like, so enforcing a PFN grammar would risk rejecting forms a future OS API accepts. Preserved verbatim: no trimming, no case folding, no normalisation. An explicitly-supplied **empty string is a distinct value from absent** and round-trips as such (a future OS API may assign it meaning, and MXC never synthesizes an empty string the caller did not send); JSON `null` is a second spelling of absent. Rejections surface as `policy_validation` from `validate_provision`, before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
@@ -133,11 +135,16 @@ always be cleaned up through MXC.
 
 ### Start
 
-**Config (none).** Start takes only the `sandboxId`; it accepts no per-phase
-payload. The one-shot surface likewise takes **no backend configuration at
-all**, so anything under `experimental.isolation_session` there is simply an
-unrecognised key in the deliberately permissive `experimental` block and is
-ignored.
+**Config (`IsolationSessionStartConfig`):**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `user` | `IsolationSessionUser` (object) \| absent | absent | Optional. Supply for an Entra sandbox to re-provide the WAM token (the `sandboxId` payload does not carry it); omit for a local sandbox. When supplied it is shape-validated (`upn` contains `@`, `wamToken` non-empty) by `validate_start`, surfacing shape errors as `policy_validation`; the OS validates the token against the agent user assigned at provision. The wire path is `experimental.isolation_session.start.user`. |
+
+The one-shot surface takes **no backend configuration at all**. `user` is
+state-aware-only, so on a one-shot request it is simply an unrecognised key in
+the deliberately permissive `experimental` block and is ignored — the run
+proceeds as a local (non-Entra) agent.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -228,7 +235,7 @@ intent; refusing it would fail every request that omits the section, which is
 ceremony rather than a control.
 
 The only caller-supplied knob the backend accepts beyond the network
-acknowledgment is the optional `appId`, at provision.
+acknowledgment is the optional Entra `user` bundle, at provision and start.
 
 The matrix covers the full surface a caller can express, on both the one-shot
 and state-aware paths. Dispositions come from the closed set in §10.3 of the
@@ -250,6 +257,8 @@ meaning for this backend.
 | `containerId` | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
 | `process.commandLine` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
 | `process.{cwd,env,timeout}` | **honored** | accepted, ignored | accepted, ignored | **honored** | accepted, ignored | accepted, ignored |
+| `experimental.isolation_session.user` (flat) | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
+| `experimental.isolation_session.<this phase>.user` | accepted, ignored | **honored** | **honored** | n/a | n/a | n/a |
 | `experimental.isolation_session.provision.appId` | accepted, ignored | **honored** | n/a | n/a | n/a | n/a |
 | `experimental.isolation_session.<another phase>.*` | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored | accepted, ignored |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
@@ -290,22 +299,32 @@ Notes on the rows that are not a simple accept/reject:
 - **Mis-slotted `experimental.isolation_session` payloads are accepted and
   ignored, not rejected.** `deserialize_config` navigates exactly
   `experimental.<backend>.<the request's own phase>`; anything else in that block
-  is read by nothing. Two shapes reach that state:
-  - a nested `provision` block on a *one-shot* request;
+  is read by nothing. Three shapes reach that state:
+  - the flat `experimental.isolation_session.user` on either surface (it is not
+    a field of any config type — the one-shot surface takes no backend
+    configuration, and state-aware reads `user` only from the request's own
+    phase block);
+  - a nested `provision` / `start` block on a *one-shot* request;
   - a block under a phase that is not this request's phase, e.g.
     `{"phase": "start", …, "isolation_session": {"provision": {…}}}`.
 
-  Each is a caller supplying a documented field in an undocumented position, so
-  the value is silently not applied. Detecting mis-slotted
+  Each is a caller supplying a documented field in an undocumented position, and
+  the resulting sandbox is *local* rather than Entra-backed. That is a capability
+  downgrade rather than an escalation — the local agent user is more restricted —
+  and it surfaces downstream as an authentication failure. Detecting mis-slotted
   payloads generically is a cross-backend concern and is deliberately not solved
-  here. Nest the config under the request's own phase; the SDK already does.
+  here. Nest the bundle under the request's own phase; the SDK already does.
 
 Rejection of `policy.*` fields surfaces on the **state-aware** surface as
 `error.code = "policy_validation"`. On the **one-shot** surface the typed variant
 is discarded (`ScriptResponse::error`) and the envelope carries
 `error.code = "backend_error"` with the reason in the message; one-shot has no
-typed policy code today. A structurally invalid `appId` likewise surfaces as
-`policy_validation`.
+typed policy code today. A malformed `user` shape (UPN missing `@`, empty
+`wamToken`) likewise surfaces as `policy_validation`, as does a structurally
+invalid `appId`. Start does not cross-check the `user` bundle against the
+`sandboxId` payload — the payload carries no Entra marker — so there is no
+identity-mismatch `malformed_request` path; the OS validates the WAM token
+against the agent user it assigned at provision.
 
 ## Mode-specific fields
 
@@ -337,10 +356,10 @@ whole section for every backend. See the matrix notes above.
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
 - `experimental.isolation_session.<phase>` — typed per-phase config blocks
-  (`provision` carries optional `appId`; `start` / `exec` / `stop` /
-  `deprovision` use `()`).
-- `experimental.isolation_session.provision.appId` — the calling application's
-  identifier. Honoured here. The one-shot surface takes no backend
+  (`provision` carries optional `user`; `start` carries optional `user`;
+  `exec` / `stop` / `deprovision` use `()`).
+- `experimental.isolation_session.{provision,start}.user` — Entra cloud-agent
+  credentials. Honoured here. The one-shot surface takes no backend
   configuration at all, so the same field on a one-shot
   `experimental.isolation_session` is an unrecognised key in the permissive
   `experimental` block and is accepted and ignored.
