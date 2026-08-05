@@ -189,13 +189,14 @@ no filter will not override an earlier path-scoped deny.
 per path, using the same ordering the Linux backends apply
 (`wxc_common::filesystem_resolve`). Last-match-wins then makes the *deepest*
 intent win at every path, so a read-only entry nested inside a broader
-read-write subtree stays read-only. Because an `allow` can never take authority
-back from an earlier rule, each read-only path also emits an explicit
-`(deny file-write* network-bind network-outbound …)`.
+read-write subtree stays read-only. That last part needs an explicit
+`(deny file-write* network-bind network-outbound …)` per read-only path,
+because the read-only `allow` only names `file-read*` — it says nothing about
+write or socket operations, so on its own it cannot displace a broader grant.
 
-`deniedPaths` is not part of that plan — it is emitted after the network rules
-so it also overrides the unfiltered `(allow network-outbound)`, which makes it
-win outright regardless of depth.
+`deniedPaths` is not part of that plan. It is emitted last so it outranks the
+filtered allows above regardless of depth. Its position relative to the network
+rules does not matter: as noted above, an unfiltered allow cannot override it.
 
 #### Path resolution
 
@@ -282,7 +283,7 @@ independently of the profile.
 |---|---|
 | `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all IP sockets. |
 | `defaultPolicy: "allow"` (no host list) | `(allow network-outbound)` plus `(allow network-bind (local ip))` and `(allow system-socket)`. |
-| `allowLocalNetwork: true` | `(allow network-inbound (local ip))` — required in addition to `network-bind` before the kernel will accept `listen()` on an IP socket. Independent of `defaultPolicy`, and unrelated to AF_UNIX sockets (see above). |
+| `allowLocalNetwork: true` | `(allow network-inbound (local ip))` — on its own this is what lets a process `listen()` on a local address; it covers the `bind()` too. (`network-bind (local ip)` alone is *not* enough: `bind()` succeeds and `listen()` is denied.) Independent of `defaultPolicy`, and unrelated to AF_UNIX sockets (see above). |
 | `allowedHosts` | Accepted for SDK compatibility, but Seatbelt cannot filter DNS names; the profile degrades to allow-all outbound as best-effort. |
 | `blockedHosts` | Rejected during validation because Seatbelt cannot enforce hostname blocks. |
 | `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, the existing allow-all covers it. |

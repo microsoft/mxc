@@ -200,12 +200,12 @@ fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
 
     // Emit shallow-to-deep, one rule per path, using the same ordering the
     // Linux backends apply (`wxc_common::filesystem_resolve`). Seatbelt is
-    // last-match-wins, so ordering by depth makes the *deepest* intent win at
-    // every path — a `readonlyPaths` entry nested inside a broader
-    // `readwritePaths` subtree stays read-only rather than inheriting the
-    // parent's write grant. `deniedPaths` is deliberately not part of this
-    // plan: it is emitted after the network rules so it also overrides the
-    // unfiltered `(allow network-outbound)`, which makes it win outright.
+    // last-match-wins between rules that carry a filter, so ordering by depth
+    // makes the *deepest* intent win at every path — a `readonlyPaths` entry
+    // nested inside a broader `readwritePaths` subtree stays read-only rather
+    // than inheriting the parent's write grant. `deniedPaths` is deliberately
+    // not part of this plan: it is emitted last so it outranks these filtered
+    // allows regardless of depth.
     out.push_str(";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---\n");
     for mount in resolve_path_plan(&paths.readwrite, &paths.readonly, &[]) {
         let subpath = [mount.path.clone()];
@@ -863,8 +863,9 @@ mod tests {
 
     #[test]
     fn allow_local_network_emits_inbound_rule() {
-        // server.listen() on macOS needs `network-inbound` in addition to
-        // `network-bind` — the kernel rejects listen() with EPERM otherwise.
+        // server.listen() on macOS is governed by `network-inbound`, not
+        // `network-bind` — with only `network-bind (local ip)` the bind()
+        // succeeds and the kernel then rejects listen() with EPERM.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Allow;
         r.policy.allow_local_network = true;
@@ -1096,9 +1097,10 @@ mod tests {
     #[test]
     fn nested_readonly_keeps_write_away_from_broader_readwrite() {
         // `/tmp` resolves to `/private/tmp`, which is an ancestor of the
-        // read-only entry. An `allow` cannot take authority back, so the
-        // read-only path must emit an explicit removal *after* the broader
-        // read-write allow.
+        // read-only entry. The read-only `allow` names only `file-read*`, so
+        // it says nothing about write or socket ops and cannot displace the
+        // broader grant on its own — hence the explicit removal, emitted
+        // *after* the read-write allow.
         let mut r = req();
         r.policy.readwrite_paths = vec!["/tmp".into()];
         r.policy.readonly_paths = vec!["/private/tmp/secret".into()];
