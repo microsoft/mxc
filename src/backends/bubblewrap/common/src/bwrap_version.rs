@@ -194,6 +194,10 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
 /// the exact hang this deadline exists to prevent. Reading a file always
 /// terminates, and a descendant that keeps writing to it after we return is
 /// harmless because the file is already unlinked.
+///
+/// The timeout path never blocks: the child is signalled and reaped
+/// asynchronously, so the deadline holds even against a process the kernel
+/// will not interrupt.
 pub fn run_with_deadline(command: &mut Command, timeout: Duration) -> io::Result<Option<Output>> {
     const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -212,7 +216,15 @@ pub fn run_with_deadline(command: &mut Command, timeout: Duration) -> io::Result
             None if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
             None => {
                 let _ = child.kill();
-                let _ = child.wait();
+                // Reap on a detached thread rather than blocking here. A
+                // process wedged in uninterruptible I/O — the stalled-mount
+                // case this deadline exists for — leaves the signal pending,
+                // and a `wait()` on it would never return. The thread still
+                // collects the zombie once the kernel lets go, but the caller
+                // gets its deadline back either way.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
                 break None;
             }
         }
