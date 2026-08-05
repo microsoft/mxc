@@ -799,6 +799,20 @@ fn install_dacl_ctrl_handler() {
 fn main() {
     let cli = Cli::parse().normalize_named_config_command();
 
+    // --telemetry-consent-{status,grant,revoke}: administer the persisted
+    // consent flag and exit. Runs BEFORE `force_reclaim` env propagation and
+    // `recover_orphaned_state()` below (unlike a prior version of this
+    // function): this is a read-only/local-file fast path with a 5-second
+    // client-side timeout (Node's consent getter), so it must not be gated
+    // behind unrelated recovery work that scans state files and may restore
+    // host DACLs — that could both time out the query (suppressing the
+    // prompt) and let a plain status read unexpectedly mutate filesystem
+    // ACLs. Matches the Linux/macOS executors, where this fast path also
+    // runs unconditionally immediately after CLI parsing.
+    if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
+
     // Propagate --force-reclaim via the environment so it reaches both the
     // in-process one-shot reconcile and the detached daemon. Set before any
     // backend dispatch or daemon spawn.
@@ -828,13 +842,6 @@ fn main() {
             }
         }
         Err(e) => eprintln!("DACL recovery failed: {e}"),
-    }
-
-    // --telemetry-consent-{status,grant,revoke}: administer the persisted
-    // consent flag and exit. Run before --probe (cheapest possible fast
-    // path — no config parsing, no policy defaults needed).
-    if handle_telemetry_consent_flags(&cli) {
-        return;
     }
 
     // --probe is a detection-only fast path used by SDK

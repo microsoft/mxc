@@ -100,14 +100,19 @@ internal static class NativeLibraryResolver
         }
 
         var baseDir = AppContext.BaseDirectory;
-        yield return Path.Combine(baseDir, file);
-        yield return Path.Combine(baseDir, "runtimes", RuntimeInformation.RuntimeIdentifier, "native", file);
 
         // Dev layout: walk up looking for the Cargo target dir. Probe the
-        // Cargo profile matching this assembly's build configuration first:
-        // a Release C# build binding against a stale debug mxc_ffi would pick
-        // up debug-only behaviour (e.g. the LOCALAPPDATA consent-store
-        // override), which is exactly what a Release build must not do.
+        // Cargo profile matching this assembly's build configuration first,
+        // and *before* the generic baseDir/runtimes candidates below: those
+        // generic locations are also where `build.bat --debug` stages its
+        // debug `mxc_ffi.dll` (into `runtimes/<rid>/native`, which the csproj
+        // then copies to the output directory), so a Release build whose
+        // output dir still holds a leftover debug DLL from a prior debug
+        // build must not pick it up before checking for a freshly built
+        // release binary in the Cargo target dir. A Release C# build binding
+        // against a stale debug mxc_ffi would pick up debug-only behaviour
+        // (e.g. the LOCALAPPDATA consent-store override), which is exactly
+        // what a Release build must not do.
         for (var dir = new DirectoryInfo(baseDir); dir is not null; dir = dir.Parent)
         {
 #if DEBUG
@@ -121,6 +126,12 @@ internal static class NativeLibraryResolver
             yield return Path.Combine(dir.FullName, "src", "target", "release", file);
 #endif
         }
+
+        // Generic fallbacks last: only reached when no Cargo target dir was
+        // found (e.g. a packaged NuGet consumer with no local `src/` checkout),
+        // so there is no profile-specific candidate to prefer over them.
+        yield return Path.Combine(baseDir, file);
+        yield return Path.Combine(baseDir, "runtimes", RuntimeInformation.RuntimeIdentifier, "native", file);
     }
 
     private static string NativeFileName()

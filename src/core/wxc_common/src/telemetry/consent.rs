@@ -204,7 +204,7 @@ mod platform {
             .clone()
     }
 
-    /// Opens the current **process** token with `TOKEN_QUERY`.
+    /// Opens the current **process** token with `TOKEN_QUERY | TOKEN_IMPERSONATE`.
     ///
     /// Passing `None` to `SHGetKnownFolderPath` would resolve against the
     /// calling *thread's* token — the impersonated one, if the host has
@@ -213,9 +213,16 @@ mod platform {
     /// impersonating, which is the same class of attack the known-folder API
     /// is being used to prevent in the first place. Binding explicitly to the
     /// process token keeps the answer a stable property of the process.
+    ///
+    /// `SHGetKnownFolderPath` requires the token it is handed to be opened
+    /// with both `TOKEN_QUERY` *and* `TOKEN_IMPERSONATE` (it duplicates the
+    /// handle into an impersonation token internally); on systems that
+    /// enforce that contract, a `TOKEN_QUERY`-only handle makes resolution
+    /// fail, so consent would always read as `Undetermined` and every
+    /// grant/revoke would fail closed.
     fn process_token() -> Option<crate::process_util::OwnedHandle> {
         use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::Security::TOKEN_QUERY;
+        use windows::Win32::Security::{TOKEN_IMPERSONATE, TOKEN_QUERY};
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
         let mut token = HANDLE::default();
@@ -223,7 +230,14 @@ mod platform {
         // release, and `token` is a valid out-pointer for the duration of the
         // call. On success the returned handle is immediately wrapped in
         // `OwnedHandle`, whose `Drop` closes it exactly once.
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
+        unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_IMPERSONATE,
+                &mut token,
+            )
+        }
+        .ok()?;
         Some(crate::process_util::OwnedHandle::new(token))
     }
 
