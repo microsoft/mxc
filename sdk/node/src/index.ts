@@ -87,7 +87,6 @@ export {
   Phase,
   StateAwareContainmentBackend,
   SandboxId,
-  IsolationSessionUserConfig,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
   IsolationSessionExecConfig,

@@ -22,10 +22,7 @@
 //! refused. On post-provision phases the network posture is fixed at provision:
 //! any supplied network policy is refused, an absent one is inherited.
 
-use wxc_common::models::{
-    ExecutionRequest, IsolationSessionUser, NetworkEnforcementMode, NetworkPolicy,
-};
-use wxc_common::mxc_error::MxcError;
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy};
 
 use super::error::IsolationSessionError;
 
@@ -73,26 +70,6 @@ pub(super) fn validate_post_provision_policy(
     if request.policy.network_specified {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_IMMUTABLE.to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Shape check for an `IsolationSessionUser` bundle: `upn` must contain
-/// `@` not at either boundary; `wam_token` must be non-empty. Surfaces
-/// shape errors as `policy_validation` so they appear as structured
-/// wire-format errors at the dispatch boundary.
-pub(super) fn validate_isolation_session_user(user: &IsolationSessionUser) -> Result<(), MxcError> {
-    let upn = user.upn.trim();
-    if upn.is_empty() || !upn.contains('@') || upn.starts_with('@') || upn.ends_with('@') {
-        return Err(MxcError::policy_validation(format!(
-            "user.upn must be a UPN containing '@' (got {:?})",
-            user.upn
-        )));
-    }
-    if user.wam_token.is_empty() {
-        return Err(MxcError::policy_validation(
-            "user.wamToken must not be empty",
         ));
     }
     Ok(())
@@ -630,71 +607,5 @@ mod tests {
             validate_post_provision_policy(&request).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
-    }
-
-    // ====== IsolationSessionUser shape validation ======
-
-    fn well_formed_user() -> IsolationSessionUser {
-        IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "tok".to_string(),
-        }
-    }
-
-    #[test]
-    fn validate_isolation_session_user_accepts_well_formed_bundle() {
-        validate_isolation_session_user(&well_formed_user()).unwrap();
-    }
-
-    #[test]
-    fn validate_isolation_session_user_rejects_upn_without_at() {
-        let user = IsolationSessionUser {
-            upn: "alice".to_string(),
-            wam_token: "tok".to_string(),
-        };
-        let err = validate_isolation_session_user(&user).unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-        assert!(err.message.contains("upn"), "got {}", err.message);
-    }
-
-    #[test]
-    fn validate_isolation_session_user_rejects_upn_at_at_start() {
-        let user = IsolationSessionUser {
-            upn: "@contoso.com".to_string(),
-            wam_token: "tok".to_string(),
-        };
-        let err = validate_isolation_session_user(&user).unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-    }
-
-    #[test]
-    fn validate_isolation_session_user_rejects_upn_at_at_end() {
-        let user = IsolationSessionUser {
-            upn: "alice@".to_string(),
-            wam_token: "tok".to_string(),
-        };
-        let err = validate_isolation_session_user(&user).unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-    }
-
-    #[test]
-    fn validate_isolation_session_user_rejects_empty_upn() {
-        let user = IsolationSessionUser {
-            upn: String::new(),
-            wam_token: "tok".to_string(),
-        };
-        let err = validate_isolation_session_user(&user).unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-    }
-
-    #[test]
-    fn validate_isolation_session_user_rejects_empty_wam_token() {
-        let user = IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: String::new(),
-        };
-        let err = validate_isolation_session_user(&user).unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-        assert!(err.message.contains("wamToken"), "got {}", err.message);
     }
 }

@@ -10,10 +10,7 @@ use std::io::IsTerminal;
 
 use serde::Serialize;
 
-use wxc_common::models::{
-    ExecutionRequest, IsolationSessionProvisionConfig, IsolationSessionStartConfig,
-    IsolationSessionUser,
-};
+use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
@@ -23,9 +20,7 @@ use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
 use super::manager::IsolationSessionManager;
-use super::policy::{
-    validate_isolation_session_user, validate_post_provision_policy, validate_provision_policy,
-};
+use super::policy::{validate_post_provision_policy, validate_provision_policy};
 use super::process_options::build_process_options;
 use super::sandbox_id::{self, SandboxIdPayload};
 use super::IsolationSessionRunner;
@@ -57,35 +52,12 @@ fn extract_agent_user_name(sandbox_id: &str) -> Result<String, MxcError> {
     Ok(sandbox_id::decode(sandbox_id)?.agent_user_name)
 }
 
-/// Normalizes an optional Entra `user` bundle into the exact
-/// `(entraAccountName, wamToken)` pair handed to the OS.
-///
-/// A local agent is signalled to the OS by empty strings, so an absent bundle
-/// maps to `("", "")`.
-///
-/// The UPN is **trimmed**, matching `validate_isolation_session_user`, which
-/// trims before its shape check — validating a trimmed value and then
-/// transmitting an untrimmed one would let `" alice@contoso.com "` pass
-/// validation and reach the OS with its surrounding spaces intact.
-///
-/// The WAM token is passed **verbatim**: it is an opaque bearer credential and
-/// trimming could corrupt it.
-fn os_credentials(user: Option<&IsolationSessionUser>) -> (String, &str) {
-    match user {
-        Some(u) => (u.upn.trim().to_string(), u.wam_token.as_str()),
-        None => (String::new(), ""),
-    }
-}
-
 impl StatefulSandboxBackend for IsolationSessionRunner {
     const ID_PREFIX: &'static str = sandbox_id::ID_PREFIX;
     const BACKEND_KEY: &'static str = "isolation_session";
 
     type ProvisionConfig = IsolationSessionProvisionConfig;
-    /// `experimental.isolation_session.start` carries the Entra WAM token
-    /// again for a cloud-agent sandbox; the one-shot surface takes no
-    /// backend configuration.
-    type StartConfig = IsolationSessionStartConfig;
+    type StartConfig = ();
     type ExecConfig = ();
     type StopConfig = ();
     type DeprovisionConfig = ();
@@ -101,14 +73,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let config = config.unwrap_or_default();
         let app_id = config.app_id;
-        let user = config.user;
-        // Local agent users pass empty strings; Entra agents pass the UPN +
-        // WAM token. Either way the OS assigns an opaque agent account name,
-        // which becomes the sandboxId's addressing key — start cannot infer
-        // Entra-ness from it, so the token is re-supplied at start.
-        let (entra_account, wam_token) = os_credentials(user.as_ref());
-        let provisioned = IsolationSessionManager::add_user(&entra_account, wam_token)
-            .map_err(map_lifecycle_error)?;
+        let provisioned = IsolationSessionManager::add_user().map_err(map_lifecycle_error)?;
 
         // `appId` rides inside the id so later phases recover it without the
         // caller re-supplying it. Nothing consumes it yet; it is carried for a
@@ -133,20 +98,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         &mut self,
         sandbox_id: &str,
         _request: &ExecutionRequest,
-        config: Option<IsolationSessionStartConfig>,
+        _config: Option<()>,
     ) -> Result<StartResult<()>, MxcError> {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
-        // The sandboxId tail is opaque, so Entra-ness is carried by the
-        // start config's user bundle: present → re-supply the WAM token;
-        // absent → local session (empty token). The OS validates the token
-        // against the agent user it assigned at provision.
-        let cfg = config.unwrap_or_default();
-        let (_entra_account, wam_token) = os_credentials(cfg.user.as_ref());
-        manager
-            .start_session(wam_token)
-            .map_err(map_lifecycle_error)?;
+        manager.start_session().map_err(map_lifecycle_error)?;
         Ok(StartResult { metadata: None })
     }
 
@@ -193,9 +150,6 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
-        if let Some(user) = config.and_then(|c| c.user.as_ref()) {
-            validate_isolation_session_user(user)?;
-        }
         // Structural only — MXC carries `appId` for a future OS consumer and
         // does not judge what a valid application identity looks like.
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
@@ -208,16 +162,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         &self,
         sandbox_id: &str,
         request: &ExecutionRequest,
-        config: Option<&IsolationSessionStartConfig>,
+        _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        // Decode to reject a malformed id before any OS call. Start does not
-        // cross-check the id against the user bundle — the payload carries no
-        // Entra marker. The OS validates the token against the agent user it
-        // assigned at provision.
+        // Decode to reject a malformed id before any OS call.
         extract_agent_user_name(sandbox_id)?;
-        if let Some(user) = config.and_then(|c| c.user.as_ref()) {
-            validate_isolation_session_user(user)?;
-        }
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -298,15 +246,8 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, IsolationSessionUser, NetworkPolicy};
+    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
-
-    fn well_formed_user() -> IsolationSessionUser {
-        IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "tok".to_string(),
-        }
-    }
 
     // ====== Wire-format constants ======
 
@@ -374,10 +315,7 @@ mod tests {
         // Field-by-field construction is deliberate: adding a per-phase field
         // to the wire struct breaks this test's compilation, forcing a
         // decision about whether the backend honors it.
-        let wire = wxc_common::wire::IsolationSession {
-            provision: None,
-            start: None,
-        };
+        let wire = wxc_common::wire::IsolationSession { provision: None };
         let value = serde_json::to_value(&wire).unwrap();
         let mut keys: Vec<&str> = value
             .as_object()
@@ -388,21 +326,27 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["provision", "start"],
+            ["provision"],
             "wire model nests a per-phase config for a phase the backend takes none for"
         );
     }
 
     #[test]
     fn phases_without_a_config_reject_a_payload() {
+        type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;
         type StopConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StopConfig;
         type DeprovisionConfig =
             <IsolationSessionRunner as StatefulSandboxBackend>::DeprovisionConfig;
         type ExecConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ExecConfig;
 
         // These are `()`, which deserializes only from null, so any object in
-        // the slot is a hard error at dispatch.
-        let payload = serde_json::json!({ "user": { "upn": "a@b.com", "wamToken": "t" } });
+        // the slot is a hard error at dispatch. `start` belongs to this group:
+        // it takes no per-phase config at all.
+        let payload = serde_json::json!({ "anything": true });
+        assert!(
+            serde_json::from_value::<StartConfig>(payload.clone()).is_err(),
+            "start accepted a config payload"
+        );
         assert!(
             serde_json::from_value::<StopConfig>(payload.clone()).is_err(),
             "stop accepted a config payload"
@@ -420,45 +364,22 @@ mod tests {
     #[test]
     fn phases_with_a_config_accept_the_wire_payload() {
         type ProvisionConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ProvisionConfig;
-        type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;
 
-        // Derive each payload from its own wire type instead of a JSON
-        // literal: the wire model is only the schema source on this path, so a
-        // serde rename on either side would go unnoticed. Both config types
-        // are `#[serde(default)]` with no `deny_unknown_fields`, so a renamed
-        // key does not error — it drops the bundle and provisions a local
-        // sandbox for a caller who asked for an Entra one. The phases have
-        // separate wire types, so both directions are pinned separately.
-        let wire_user = || wxc_common::wire::IsolationUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "tok".to_string(),
-        };
-
+        // Derive the payload from the wire type instead of a JSON literal: the
+        // wire model is only the schema source on this path, so a serde rename
+        // on either side would go unnoticed. The config type is
+        // `#[serde(default)]` with no `deny_unknown_fields`, so a renamed key
+        // does not error — it silently drops the value.
         let provision_phase = wxc_common::wire::IsolationSessionProvisionPhase {
-            user: Some(wire_user()),
             app_id: Some("Contoso.App_8wekyb3d8bbwe".to_string()),
         };
         let provision: ProvisionConfig =
             serde_json::from_value(serde_json::to_value(&provision_phase).unwrap()).unwrap();
-        let u = provision
-            .user
-            .expect("provision dropped the wire user bundle");
-        assert_eq!(u.upn, "alice@contoso.com");
-        assert_eq!(u.wam_token, "tok");
         assert_eq!(
             provision.app_id.as_deref(),
             Some("Contoso.App_8wekyb3d8bbwe"),
             "provision dropped the wire appId (serde rename drift?)"
         );
-
-        let start_phase = wxc_common::wire::IsolationSessionStartPhase {
-            user: Some(wire_user()),
-        };
-        let start: StartConfig =
-            serde_json::from_value(serde_json::to_value(&start_phase).unwrap()).unwrap();
-        let u = start.user.expect("start dropped the wire user bundle");
-        assert_eq!(u.upn, "alice@contoso.com");
-        assert_eq!(u.wam_token, "tok");
     }
 
     fn request_with_filesystem_policy() -> ExecutionRequest {
@@ -745,41 +666,10 @@ mod tests {
             .unwrap();
     }
 
-    // ====== Entra user bundle validation ======
-
-    #[test]
-    fn validate_provision_accepts_well_formed_user() {
-        let runner = IsolationSessionRunner::new();
-        let cfg = IsolationSessionProvisionConfig {
-            user: Some(well_formed_user()),
-            app_id: None,
-        };
-        runner
-            .validate_provision(&request_with_canonical_network(), Some(&cfg))
-            .unwrap();
-    }
-
-    #[test]
-    fn validate_provision_rejects_malformed_user() {
-        let runner = IsolationSessionRunner::new();
-        let cfg = IsolationSessionProvisionConfig {
-            user: Some(IsolationSessionUser {
-                upn: "no-at-sign".to_string(),
-                wam_token: "tok".to_string(),
-            }),
-            app_id: None,
-        };
-        let err = runner
-            .validate_provision(&ExecutionRequest::default(), Some(&cfg))
-            .unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-    }
-
     // ====== appId validation at the provision hook ======
 
     fn provision_config_with_app_id(app_id: &str) -> IsolationSessionProvisionConfig {
         IsolationSessionProvisionConfig {
-            user: None,
             app_id: Some(app_id.to_string()),
         }
     }
@@ -848,90 +738,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_start_accepts_well_formed_user() {
-        // A user bundle is now allowed at start regardless of the opaque
-        // sandboxId; it only needs to be well-formed.
-        let runner = IsolationSessionRunner::new();
-        let cfg = IsolationSessionStartConfig {
-            user: Some(well_formed_user()),
-        };
-        runner
-            .validate_start(
-                &valid_sandbox_id(),
-                &ExecutionRequest::default(),
-                Some(&cfg),
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn validate_start_rejects_malformed_user() {
-        let runner = IsolationSessionRunner::new();
-        let cfg = IsolationSessionStartConfig {
-            user: Some(IsolationSessionUser {
-                upn: "no-at-sign".to_string(),
-                wam_token: "tok".to_string(),
-            }),
-        };
-        let err = runner
-            .validate_start(
-                &valid_sandbox_id(),
-                &ExecutionRequest::default(),
-                Some(&cfg),
-            )
-            .unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
-    }
-
-    #[test]
-    fn validate_start_local_sandbox_without_user_accepts() {
+    fn validate_start_accepts_a_well_formed_id() {
         let runner = IsolationSessionRunner::new();
         runner
             .validate_start(&valid_sandbox_id(), &ExecutionRequest::default(), None)
             .unwrap();
-    }
-
-    // ====== os_credentials: what actually reaches the OS ======
-
-    #[test]
-    fn os_credentials_absent_bundle_is_the_local_agent_pair() {
-        let (account, token) = os_credentials(None);
-        assert_eq!(account, "");
-        assert_eq!(token, "");
-    }
-
-    #[test]
-    fn os_credentials_trims_the_upn() {
-        // validate_isolation_session_user trims before its shape check, so a
-        // padded UPN passes validation. Transmitting the untrimmed value would
-        // send the OS something the caller was never told was acceptable.
-        let user = IsolationSessionUser {
-            upn: "  alice@contoso.com\t".to_string(),
-            wam_token: "tok".to_string(),
-        };
-        let (account, _) = os_credentials(Some(&user));
-        assert_eq!(account, "alice@contoso.com");
-    }
-
-    #[test]
-    fn os_credentials_passes_the_wam_token_verbatim() {
-        // The token is an opaque bearer credential; trimming could corrupt it.
-        let user = IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "  tok-with-edges  ".to_string(),
-        };
-        let (_, token) = os_credentials(Some(&user));
-        assert_eq!(token, "  tok-with-edges  ");
-    }
-
-    #[test]
-    fn os_credentials_leaves_an_interior_space_in_the_upn_alone() {
-        // Only the edges are trimmed — the value is otherwise verbatim.
-        let user = IsolationSessionUser {
-            upn: " a b@contoso.com ".to_string(),
-            wam_token: "tok".to_string(),
-        };
-        let (account, _) = os_credentials(Some(&user));
-        assert_eq!(account, "a b@contoso.com");
     }
 }

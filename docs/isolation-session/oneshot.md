@@ -142,10 +142,9 @@ interface.
 ```
 
 The one-shot surface takes **no backend configuration at all** — there is no
-`experimental.isolation_session` field the one-shot path reads. The Entra
-`user` bundle is state-aware-only, so supplying it here is just an
-unrecognised key in the deliberately permissive `experimental` block and is
-ignored (the run proceeds as a local, non-Entra agent). Process options
+`experimental.isolation_session` field the one-shot path reads. Anything
+supplied there is just an unrecognised key in the deliberately permissive
+`experimental` block and is ignored (the run proceeds normally). Process options
 (`cwd`, `env`, `timeout`) read from the existing top-level `process` section,
 matching the contract every other backend honors.
 
@@ -255,8 +254,7 @@ the rationale for each disposition, and the error mapping live in
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `experimental.isolation_session.user` | accepted, ignored — Entra is state-aware-only, and one-shot reads no backend config |
-| `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only |
+| `experimental.isolation_session.provision` | accepted, ignored — per-phase config is state-aware-only |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no

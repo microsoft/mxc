@@ -247,7 +247,6 @@ schema:
     // object. Backend- and phase-specific config, when a phase has any, nests
     // under `experimental.<backendKey>.<phase>`, e.g.:
     //   "experimental": { "isolation_session": { "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" } } }
-    //   "experimental": { "isolation_session": { "start": { "user": { ... } } } }
 }
 ```
 

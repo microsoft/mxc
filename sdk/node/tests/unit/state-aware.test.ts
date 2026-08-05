@@ -17,7 +17,7 @@ import {
   parseNonExecResponse,
 } from '../../src/state-aware-helper.js';
 import { MxcError } from '../../src/errors.js';
-import { IsolationSessionUserConfig, SandboxId } from '../../src/state-aware-types.js';
+import { SandboxId } from '../../src/state-aware-types.js';
 import { fakeSpawn, testOptions, platformSkip } from './test-helpers.js';
 
 describe('buildStateAwareEnvelope', () => {
@@ -89,21 +89,6 @@ describe('buildStateAwareEnvelope', () => {
     assert.strictEqual(env.version, '0.6.5-alpha');
   });
 
-  it('nests provision user under experimental.isolation_session.provision', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'isolation_session',
-      containment: 'isolation_session',
-      config: { user: new IsolationSessionUserConfig('alice@contoso.com', 'tok') },
-    });
-    const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      isolation_session: {
-        provision: { user: { upn: 'alice@contoso.com', wamToken: 'tok' } },
-      },
-    });
-  });
-
   it('nests provision appId under experimental.isolation_session.provision', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
@@ -143,25 +128,6 @@ describe('buildStateAwareEnvelope', () => {
     });
     const wire = JSON.parse(JSON.stringify(env));
     assert.strictEqual(wire.experimental, undefined);
-  });
-
-  it('nests start user under experimental.isolation_session.start', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'start',
-      backendKey: 'isolation_session',
-      sandboxId: 'iso:alice@contoso.com',
-      config: {
-        user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
-      },
-    });
-    const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      isolation_session: {
-        start: {
-          user: { upn: 'alice@contoso.com', wamToken: 'tok' },
-        },
-      },
-    });
   });
 
   it('relays correlationVector onto non-provision envelopes and omits it from provision', () => {
@@ -284,7 +250,7 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
       'isolation_session',
       {
         network: { defaultPolicy: 'allow', allowLocalNetwork: true },
-        user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+        appId: 'Contoso.App_8wekyb3d8bbwe',
       },
       testOptions(),
     );
@@ -347,21 +313,19 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
 describe('startSandbox', { skip: platformSkip }, () => {
   afterEach(() => { _resetSpawnImpl(); });
 
-  it('infers backend from sandboxId prefix and nests start user under experimental', async () => {
+  it('infers backend from sandboxId prefix and sends no per-phase start config', async () => {
     const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
     _setSpawnImpl(fake.spawn);
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(
-      id,
-      { user: new IsolationSessionUserConfig('alice@contoso.com', 'tok') },
-      testOptions(),
-    );
+    await startSandbox(id, undefined, testOptions());
     assert.strictEqual(fake.captured.envelope?.phase, 'start');
     assert.strictEqual(fake.captured.envelope?.sandboxId, 'iso:reg-abc:prov-1');
     const wire = JSON.parse(JSON.stringify(fake.captured.envelope));
-    assert.deepStrictEqual(wire.experimental, {
-      isolation_session: { start: { user: { upn: 'alice@contoso.com', wamToken: 'tok' } } },
-    });
+    assert.strictEqual(
+      wire.experimental,
+      undefined,
+      'start takes no per-phase config, so no experimental block should be emitted',
+    );
   });
 
   it('relays the correlationVector from options onto the start envelope', async () => {
