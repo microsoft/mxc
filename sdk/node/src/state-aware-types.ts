@@ -80,7 +80,7 @@ export interface IsolationSessionProvisionConfig {
    * Validated structurally only: no control characters, at most 256
    * characters. Whitespace and case are preserved exactly. An explicitly
    * supplied empty string is a **distinct** value from omitting the field and
-   * round-trips as such; `null` is a second spelling of absent. Rejections
+   * round-trips as such. Rejections
    * surface as `MxcError` with `code: 'policy_validation'`.
    *
    * Provision-phase only — it is fixed for the sandbox's lifetime and is not

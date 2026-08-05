@@ -210,10 +210,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         config: Option<&IsolationSessionStartConfig>,
     ) -> Result<(), MxcError> {
-        // The sandboxId tail is opaque, so start no longer cross-checks it
-        // against the user bundle. A user bundle (Entra) is optional at
-        // start; when present it must be well-formed. The OS validates the
-        // token against the agent user it assigned at provision.
+        // Decode to reject a malformed id before any OS call. Start does not
+        // cross-check the id against the user bundle — the payload carries no
+        // Entra marker. The OS validates the token against the agent user it
+        // assigned at provision.
         extract_agent_user_name(sandbox_id)?;
         if let Some(user) = config.and_then(|c| c.user.as_ref()) {
             validate_isolation_session_user(user)?;
@@ -221,30 +221,39 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
+    // Every id-consuming phase decodes in its validation hook, so a malformed
+    // or legacy id is refused uniformly — and, critically, `--dry-run` (which
+    // stops after validation) agrees with a real invocation about which ids are
+    // acceptable. Validating on only some phases would let a dry run report
+    // success for a request the real call then rejects.
+
     fn validate_exec(
         &self,
-        _sandbox_id: &str,
+        sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
+        extract_agent_user_name(sandbox_id)?;
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_stop(
         &self,
-        _sandbox_id: &str,
+        sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
+        extract_agent_user_name(sandbox_id)?;
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
     fn validate_deprovision(
         &self,
-        _sandbox_id: &str,
+        sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
+        extract_agent_user_name(sandbox_id)?;
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -522,6 +531,39 @@ mod tests {
     fn extract_agent_user_name_rejects_empty_payload() {
         let err = extract_agent_user_name("iso:").unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn every_id_consuming_hook_rejects_a_malformed_id() {
+        // All four hooks must agree, so `--dry-run` (which stops after
+        // validation) cannot report success for an id the real call rejects.
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_canonical_network();
+        let legacy = "iso:wxc-legacy-plaintext";
+        let cases: Vec<(&str, Result<(), MxcError>)> = vec![
+            ("start", runner.validate_start(legacy, &req, None)),
+            ("exec", runner.validate_exec(legacy, &req, None)),
+            ("stop", runner.validate_stop(legacy, &req, None)),
+            (
+                "deprovision",
+                runner.validate_deprovision(legacy, &req, None),
+            ),
+        ];
+        for (phase, result) in cases {
+            let err = result.expect_err(&format!("{phase} must reject a legacy id"));
+            assert_eq!(err.code, MxcErrorCode::MalformedId, "phase {phase}");
+        }
+    }
+
+    #[test]
+    fn every_id_consuming_hook_accepts_a_well_formed_id() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_canonical_network();
+        let id = valid_sandbox_id();
+        runner.validate_start(&id, &req, None).unwrap();
+        runner.validate_exec(&id, &req, None).unwrap();
+        runner.validate_stop(&id, &req, None).unwrap();
+        runner.validate_deprovision(&id, &req, None).unwrap();
     }
 
     // ====== validation-hook phase routing ======

@@ -120,7 +120,13 @@ function Invoke-StateAware {
         [hashtable]$Request,
         [string]$ConfigFile,
         [string]$SandboxId,
-        [switch]$Experimental
+        [switch]$Experimental,
+        # Adds --dry-run: wxc-exec parses, routes, and runs the backend's
+        # validate_<phase> hook, then returns an empty result envelope WITHOUT
+        # performing the phase. Lets a test pin that validation-time rejections
+        # (e.g. a malformed sandboxId) fire identically whether or not the phase
+        # would really run -- the dry-run/execution agreement.
+        [switch]$DryRun
     )
 
     if ($ConfigFile) {
@@ -145,6 +151,7 @@ function Invoke-StateAware {
 
     $argList = @()
     if ($Experimental.IsPresent) { $argList += '--experimental' }
+    if ($DryRun.IsPresent) { $argList += '--dry-run' }
     $argList += @('--config-base64', $b64)
 
     $stdoutFile = [System.IO.Path]::GetTempFileName()
@@ -414,6 +421,141 @@ try {
         Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
         $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
         Assert-True ($msg -match 'newer MXC') "error.message identifies a newer-MXC id (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (every id-consuming phase rejects a legacy id)" {
+        # Run each phase BOTH ways. The real invocation proves the phase itself
+        # refuses the id; the --dry-run invocation proves the refusal happens in
+        # the validation hook, before the phase runs. Both must agree, or a dry
+        # run would report success for a request the real call rejects -- which
+        # is the whole point of decoding in all four hooks rather than just one.
+        foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+            $req = @{ phase = $phase; sandboxId = 'iso:wxc-legacy-plaintext' }
+            if ($phase -eq 'exec') { $req.process = @{ commandLine = 'cmd.exe /c echo unreachable' } }
+
+            $r = Invoke-StateAware -Request $req -Experimental
+            Assert-True ($r.ExitCode -ne 0) "$phase (real): exit code is non-zero"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_id') "$phase (real): error.code is 'malformed_id' (got '$code')"
+
+            $d = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($d.ExitCode -ne 0) "$phase (--dry-run): exit code is non-zero"
+            $dEnv = Parse-Envelope -Stdout $d.Stdout
+            $dCode = if ($dEnv) { $dEnv.error.code } else { '<no envelope>' }
+            Assert-True ($dCode -eq 'malformed_id') "$phase (--dry-run): error.code is 'malformed_id' (got '$dCode')"
+            # The command must never run under either invocation.
+            Assert-True ($r.Stdout -notmatch 'unreachable' -and $d.Stdout -notmatch 'unreachable') "$phase : the id was refused before the phase body ran"
+        }
+    } | Out-Null
+
+    Run-StateAwareTest "dry-run accepts a well-formed id on every id-consuming phase" {
+        # The counterpart to the case above: --dry-run must not reject an id it
+        # should accept, or the agreement would be trivially satisfied by
+        # refusing everything. Provisions a real sandbox so the id is genuine.
+        #
+        # The exit code alone is NOT a discriminator -- a real start/stop/
+        # deprovision also exits 0, and a real exec of `echo` exits 0 too. The
+        # distinguishing observable is the envelope: every dry-run phase
+        # short-circuits to a `result` envelope, whereas a real EXEC emits the
+        # child's output and no envelope at all (DispatchOutcome::ExecCompleted
+        # -> StateAwareExit::ExecCode). Asserting the envelope is what makes
+        # this test fail if --dry-run were silently dropped.
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj -and $null -ne $envObj.result) "provision returned a result envelope"
+        if ($envObj -and $envObj.result) {
+            $id = $envObj.result.sandboxId
+            # The sandbox is REAL, so it must be reclaimed even if an assertion
+            # below throws. Run-StateAwareTest swallows throws, and the suite's
+            # finally reclaims only $script:sandboxId -- which this test does not
+            # set -- so without this the agent user would leak outside the
+            # harness's own leak discipline.
+            try {
+                foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+                    $req = @{ phase = $phase; sandboxId = $id }
+                    if ($phase -eq 'exec') {
+                        # Deliberately exits 1 and prints a marker: if --dry-run
+                        # were dropped this really would run, and BOTH the exit
+                        # code and the absent envelope would flag it.
+                        $req.process = @{ commandLine = 'cmd.exe /c echo DRY_RUN_LEAKED & exit /b 1' }
+                    }
+                    $d = Invoke-StateAware -Request $req -Experimental -DryRun
+                    Assert-True ($d.ExitCode -eq 0) "$phase (--dry-run): exit code = 0 for a well-formed id (got $($d.ExitCode))"
+                    $dEnv = Parse-Envelope -Stdout $d.Stdout
+                    # NOTE the limit of this assertion. For exec it IS a
+                    # discriminator: a real exec emits the child's output and no
+                    # envelope at all. For start/stop/deprovision the real
+                    # backends return `metadata: None`, which renders as the
+                    # same `{"result":{}}` the dry-run short-circuit produces --
+                    # so here it only confirms the phase was routed and
+                    # validated, NOT that the body was skipped. Skipping is
+                    # pinned for all five phases by the call-counting stub tests
+                    # in wxc_common::state_aware_dispatch, which the E2E layer
+                    # cannot express.
+                    Assert-True ($null -ne $dEnv -and $null -ne $dEnv.result) "$phase (--dry-run): returns a result envelope"
+                    if ($phase -eq 'exec') {
+                        # exec is the phase this DOES discriminate: a real run
+                        # would emit the marker, exit 1, and produce no envelope.
+                        Assert-True ($d.Stdout -notmatch 'DRY_RUN_LEAKED') "exec (--dry-run): the command did not execute"
+                    }
+                }
+            } finally {
+                $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental
+                Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
+            }
+        }
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (empty agentUserName in the payload is refused)" {
+        # The name is the addressing key; an empty one is structurally
+        # malformed and must not reach the OS as an empty string.
+        $json = '{"version":1,"agentUserName":""}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'agentUserName') "error.message names agentUserName (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (crafted id carrying an invalid appId is refused)" {
+        # sandboxId is caller-supplied on every post-provision phase, so the
+        # appId guarantee must hold by value, not by provenance.
+        #
+        # The control character MUST be written as the JSON escape \u0007, not
+        # spliced in raw: RFC 8259 forbids a literal U+0000-U+001F inside a
+        # string, so a raw byte fails at JSON *parse* time and the payload never
+        # reaches validate_app_id -- the test would pass for the wrong reason.
+        # Asserting the message names `appId` is what pins that distinction.
+        $json = '{"version":1,"agentUserName":"agent","appId":"has\u0007bell"}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        # malformed_id, NOT policy_validation: a bad id is an id problem, and
+        # the phases that consume one accept no policy.
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'appId') "error.message names appId, proving validate_app_id ran rather than the JSON parser (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (crafted id carrying an oversized appId is refused)" {
+        # The length cap has no JSON-level analogue, so this case can only be
+        # caught by validate_app_id -- it cannot pass for the wrong reason.
+        $long = 'a' * 257
+        $json = '{"version":1,"agentUserName":"agent","appId":"' + $long + '"}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'appId') "error.message names appId (got '$msg')"
     } | Out-Null
 
     # Test 1e: provision rejects non-empty deniedPaths. Backend has no Deny

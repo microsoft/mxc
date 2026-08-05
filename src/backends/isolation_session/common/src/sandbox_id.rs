@@ -198,8 +198,37 @@ pub(super) fn decode(sandbox_id: &str) -> Result<SandboxIdPayload, MxcError> {
         }
     }
 
-    serde_json::from_value(value)
-        .map_err(|e| MxcError::malformed_id(format!("sandbox_id payload has the wrong shape: {e}")))
+    let payload: SandboxIdPayload = serde_json::from_value(value).map_err(|e| {
+        MxcError::malformed_id(format!("sandbox_id payload has the wrong shape: {e}"))
+    })?;
+
+    // Post-shape invariants. Both hold by construction at mint time, so an id
+    // violating either was hand-crafted or corrupted. Both surface as
+    // `malformed_id`, never `policy_validation`: a caller-supplied id being
+    // wrong is an id problem, and the phases that consume an id accept no
+    // policy for a policy error to belong to.
+    if payload.agent_user_name.is_empty() {
+        return Err(MxcError::malformed_id(format!(
+            "sandbox_id payload has an empty `agentUserName`: {sandbox_id:?}"
+        )));
+    }
+    // `appId` is validated at provision, but `sandboxId` is caller-supplied on
+    // every later phase, so provision is not the only way a value can arrive.
+    // Re-checking here makes the guarantee hold by *value* rather than by
+    // provenance — without it, a future consumer reading `app_id` off a decoded
+    // id could see something `validate_app_id` never approved, including the
+    // embedded NUL that check exists to keep away from a `String` -> `HSTRING`
+    // boundary.
+    if let Some(app_id) = payload.app_id.as_deref() {
+        validate_app_id(app_id).map_err(|e| {
+            MxcError::malformed_id(format!(
+                "sandbox_id payload carries an invalid `appId`: {}",
+                e.message
+            ))
+        })?;
+    }
+
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -431,6 +460,69 @@ mod tests {
             let err = decode(&id).unwrap_err();
             assert_eq!(err.code, MxcErrorCode::MalformedId, "payload {json}");
         }
+    }
+
+    #[test]
+    fn decode_rejects_an_empty_agent_user_name() {
+        // The name is the addressing key for every post-provision phase. An
+        // empty one is structurally malformed, and letting it through would
+        // hand `""` to the OS lifecycle calls — which answers "not found",
+        // surfacing as `stale_id` ("re-provision") for a request that was never
+        // well-formed in the first place.
+        let json = r#"{"version":1,"agentUserName":""}"#;
+        let id = format!("iso:{}", URL_SAFE_NO_PAD.encode(json.as_bytes()));
+        let err = decode(&id).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+        assert!(
+            err.message.contains("agentUserName"),
+            "error must name the offending field, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn decode_rejects_an_app_id_that_provision_would_have_refused() {
+        // `sandboxId` is caller-supplied on every post-provision phase, so a
+        // crafted id can carry an `appId` that never passed provision-time
+        // validation. Re-check on decode so the guarantee holds by value, not
+        // by provenance.
+        let oversized = "a".repeat(APP_ID_MAX_CHARS + 1);
+        for app in [oversized.as_str(), "has\u{0}nul", "has\u{7}bell"] {
+            let json = serde_json::json!({
+                "version": CURRENT_VERSION,
+                "agentUserName": "agent",
+                "appId": app,
+            })
+            .to_string();
+            let id = format!("iso:{}", URL_SAFE_NO_PAD.encode(json.as_bytes()));
+            let err = decode(&id).unwrap_err();
+            // `malformed_id`, NOT `policy_validation`: this is a bad id, and
+            // the phases that consume one accept no policy.
+            assert_eq!(
+                err.code,
+                MxcErrorCode::MalformedId,
+                "expected MalformedId for appId {app:?}"
+            );
+            assert!(
+                err.message.contains("appId"),
+                "error must name the offending field, got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn decode_still_accepts_an_app_id_at_exactly_the_cap() {
+        // The decode-side check must be the same check, not a stricter one.
+        let json = serde_json::json!({
+            "version": CURRENT_VERSION,
+            "agentUserName": "agent",
+            "appId": "a".repeat(APP_ID_MAX_CHARS),
+        })
+        .to_string();
+        let id = format!("iso:{}", URL_SAFE_NO_PAD.encode(json.as_bytes()));
+        let got = decode(&id).expect("exactly the cap must round-trip");
+        assert_eq!(got.app_id.map(|a| a.len()), Some(APP_ID_MAX_CHARS));
     }
 
     #[test]

@@ -112,8 +112,26 @@ transparent.
 key order is fixed and the same content always yields the same id string.
 
 **Legacy ids.** Ids minted before this format (`iso:<agentUserName>` in the
-clear) no longer decode and surface as `malformed_id`. This is intended: they
-refer to OS resources that do not survive the change either.
+clear) no longer decode and surface as `malformed_id` on every phase that takes
+an id. **Both** the running session and the agent user account survive a binary
+upgrade: nothing in MXC tears either down when the executable is replaced, and
+outliving the process is the premise of the whole state-aware lifecycle — `exec`
+runs in a different process from `start` and addresses the same live session. A
+session ends at an explicit `stop`, or when `deprovision` removes the agent user
+(which terminates any session still running under it). A sandbox provisioned by
+an older binary should therefore be stopped and deprovisioned **before**
+upgrading.
+
+The *legacy id string* becomes unusable, but the sandbox itself does not become
+unreachable: the payload binds nothing to the binary that minted it, so
+re-encoding the old agent user name as a current payload
+(`{"version":1,"agentUserName":"<old-name>"}`, base64url) produces a valid id
+that addresses the same sandbox. For a legacy id this needs nothing recorded in
+advance — the old format is `iso:<agentUserName>` **in the clear**, so the name
+is readable straight from the stranded id. (Provision also returns it as
+`agentUserName` metadata.) It is a recovery procedure rather than a supported
+migration path, but it means a sandbox stranded by an in-place upgrade can
+always be cleaned up through MXC.
 
 ### Start
 
@@ -341,8 +359,10 @@ whole section for every backend. See the matrix notes above.
   (`provision` carries optional `user`; `start` carries optional `user`;
   `exec` / `stop` / `deprovision` use `()`).
 - `experimental.isolation_session.{provision,start}.user` — Entra cloud-agent
-  credentials. Honoured here; the same field on a one-shot `experimental.isolation_session`
-  is rejected with `policy_validation`.
+  credentials. Honoured here. The one-shot surface takes no backend
+  configuration at all, so the same field on a one-shot
+  `experimental.isolation_session` is an unrecognised key in the permissive
+  `experimental` block and is accepted and ignored.
 
 ## Idempotence per phase
 
