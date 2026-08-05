@@ -10,7 +10,8 @@ lxc_common = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
+# Used by `bwrap_version::run_with_deadline` to collect probe output without
+# pipes, which cannot be drained under a deadline once a descendant inherits
+# the write end.
 tempfile = { workspace = true }
+thiserror = { workspace = true }

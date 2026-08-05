@@ -205,36 +205,25 @@ const BWRAP_PROBE_ARGS: &[&str] = &[
 /// forks, so it can block on a wedged filesystem.
 #[cfg(target_os = "linux")]
 fn probe_bubblewrap() -> Result<(), String> {
-    use bwrap_common::bwrap_version::{wait_with_deadline, PROBE_TIMEOUT};
+    use bwrap_common::bwrap_version::{run_with_deadline, PROBE_TIMEOUT};
     use std::io::ErrorKind;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
-    let child = Command::new("bwrap")
-        .args(BWRAP_PROBE_ARGS)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
+    let mut command = Command::new("bwrap");
+    command.args(BWRAP_PROBE_ARGS);
 
-    let mut child = match child {
-        Ok(child) => child,
+    let output = match run_with_deadline(&mut command, PROBE_TIMEOUT) {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            return Err(format!(
+                "Bubblewrap did not finish a trivial sandbox within {}s on this host",
+                PROBE_TIMEOUT.as_secs()
+            ))
+        }
         Err(e) if e.kind() == ErrorKind::NotFound => {
             return Err("Bubblewrap is not available on this system".to_string())
         }
         Err(e) => return Err(format!("Bubblewrap could not be executed: {e}")),
-    };
-
-    let output = match wait_with_deadline(&mut child, PROBE_TIMEOUT) {
-        Some(Ok(output)) => output,
-        Some(Err(e)) => return Err(format!("Bubblewrap could not be executed: {e}")),
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "Bubblewrap did not finish a trivial sandbox within {}s on this host",
-                PROBE_TIMEOUT.as_secs()
-            ));
-        }
     };
 
     if output.status.success() {

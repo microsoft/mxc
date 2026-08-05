@@ -13,8 +13,9 @@
 //! [`probe_bwrap`] shells out.
 
 use std::fmt;
-use std::io;
-use std::process::{Child, Command, Output, Stdio};
+use std::fs::File;
+use std::io::{self, Read, Seek};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// How long a `bwrap` probe may run before it is treated as a failure.
@@ -156,26 +157,18 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
         },
     };
 
-    let mut child = Command::new("bwrap")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(spawn_failure)?;
-
-    let output = match wait_with_deadline(&mut child, PROBE_TIMEOUT) {
-        Some(result) => result.map_err(spawn_failure)?,
+    let mut command = Command::new("bwrap");
+    command.arg("--version");
+    let output = match run_with_deadline(&mut command, PROBE_TIMEOUT).map_err(spawn_failure)? {
+        Some(output) => output,
         None => {
-            let _ = child.kill();
-            let _ = child.wait();
             return Err(BwrapUnavailable::ProbeFailed {
                 status: None,
                 detail: format!(
                     "did not respond within {}s and was killed",
                     PROBE_TIMEOUT.as_secs()
                 ),
-            });
+            })
         }
     };
 
@@ -191,40 +184,52 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
     check_version_output(&stdout)
 }
 
-/// Collect `child`'s output, or return `None` if it outlives `timeout`.
+/// Run `command` to completion, or kill it and return `None` if it outlives
+/// `timeout`.
 ///
-/// `Child::wait_with_output` has no deadline, so this polls `try_wait` and
-/// only drains the pipes once the process has exited — at which point the
-/// reads return immediately and cannot block on a full pipe.
-pub fn wait_with_deadline(child: &mut Child, timeout: Duration) -> Option<io::Result<Output>> {
-    use std::io::Read;
+/// Output is collected through temporary files rather than pipes on purpose.
+/// A pipe only reaches EOF once *every* write end is closed, so a `bwrap`
+/// wrapper that backgrounds a process inheriting stdout would keep a
+/// `read_to_end` blocked long after the direct child exited — reintroducing
+/// the exact hang this deadline exists to prevent. Reading a file always
+/// terminates, and a descendant that keeps writing to it after we return is
+/// harmless because the file is already unlinked.
+pub fn run_with_deadline(command: &mut Command, timeout: Duration) -> io::Result<Option<Output>> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+    let stdout = tempfile::tempfile()?;
+    let stderr = tempfile::tempfile()?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .spawn()?;
 
     let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
-            Ok(None) => return None,
-            Err(e) => return Some(Err(e)),
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
         }
-    }
-
-    let read_pipe = |pipe: Option<&mut dyn Read>| -> io::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        if let Some(pipe) = pipe {
-            pipe.read_to_end(&mut buf)?;
-        }
-        Ok(buf)
     };
-    Some((|| {
-        let stdout = read_pipe(child.stdout.as_mut().map(|p| p as &mut dyn Read))?;
-        let stderr = read_pipe(child.stderr.as_mut().map(|p| p as &mut dyn Read))?;
-        Ok(Output {
-            status: child.wait()?,
-            stdout,
-            stderr,
-        })
-    })())
+
+    Ok(Some(Output {
+        status,
+        stdout: read_from_start(stdout)?,
+        stderr: read_from_start(stderr)?,
+    }))
+}
+
+fn read_from_start(mut file: File) -> io::Result<Vec<u8>> {
+    file.rewind()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// Validate a raw `bwrap --version` output string against
@@ -521,6 +526,50 @@ mod tests {
         assert!(
             message.contains("os error 13"),
             "OS error should survive: {message}"
+        );
+    }
+
+    /// A `bwrap` wrapper that backgrounds a process keeps the inherited output
+    /// handle open after the direct child exits. Draining a *pipe* in that
+    /// situation blocks until the descendant exits, which is how a probe with a
+    /// wait deadline can still hang; collecting into a file cannot.
+    #[test]
+    #[cfg(unix)]
+    fn deadline_holds_when_a_descendant_inherits_the_output_handles() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10 & echo 'bubblewrap 0.11.0'"]);
+
+        let started = Instant::now();
+        let output = run_with_deadline(&mut command, Duration::from_secs(5))
+            .expect("probe should not error")
+            .expect("the direct child exits immediately");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "returned only after {:?}; the descendant blocked the drain",
+            started.elapsed()
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "bubblewrap 0.11.0"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deadline_kills_a_command_that_outlives_it() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+
+        let started = Instant::now();
+        let outcome = run_with_deadline(&mut command, Duration::from_millis(200))
+            .expect("probe should not error");
+
+        assert!(outcome.is_none(), "expected the deadline to fire");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?} to give up",
+            started.elapsed()
         );
     }
 }
