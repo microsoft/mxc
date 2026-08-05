@@ -175,12 +175,55 @@ settings live under a top-level `seatbelt` key:
 | Policy field | Generated rule | Effect |
 |---|---|---|
 | `readonlyPaths` | `(allow file-read* (subpath …))` | Script can read these subtrees |
-| `readwritePaths` | `(allow file-read* file-write* (subpath …))` | Script can read and write |
-| `deniedPaths` | `(deny file-read* file-write* (subpath …))` emitted **last** | Overrides any broader allow above |
+| `readwritePaths` | `(allow file-read* file-write* network-bind network-outbound (subpath …))` | Script can read and write, and bind/connect AF_UNIX sockets under these subtrees |
+| `deniedPaths` | `(deny file-read* file-write* network-bind network-outbound (subpath …))` emitted **last** | Overrides any broader allow above |
 
 Apple's Seatbelt evaluates rules with last-match-wins semantics within an
 operation, so denies emitted after allows correctly override them. This
 matches MXC's `denied_paths` contract on every other backend.
+
+#### Path resolution
+
+Policy paths are rewritten before they are emitted into the profile:
+
+1. A leading `~` / `~/…` is expanded against `$HOME`.
+2. A leading symlinked root path segment is rewritten to its real target:
+   `/etc`, `/tmp`, `/var` → `/private/…`, and `/home` →
+   `/System/Volumes/Data/home`.
+
+Step 2 is mandatory, not cosmetic. Those root entries are symlinks on macOS,
+and the kernel fully resolves a path before matching it against a profile
+filter — so a rule written against the unresolved path never matches and is
+silently dead. This applies to the automatic `$TMPDIR` grant too, which
+resolves to `/var/folders/…`. `/Users` needs no rewriting: it is a *firmlink*,
+not a symlink, so it is already the canonical path.
+
+#### UNIX-domain sockets
+
+Seatbelt matches AF_UNIX sockets by **path** — `bind()` under `network-bind`
+and `connect()` under `network-outbound` — while the `(local ip)` / `(remote
+ip)` filters used by the network policy cover IP sockets only. MXC therefore
+governs AF_UNIX sockets with the **filesystem** policy, not the network policy:
+both halves are permitted anywhere the sandbox may already create files.
+
+This is deliberate. The socket is a filesystem object reachable only by
+processes that can traverse to its path, so using one where writes are already
+permitted grants no new capability — and Node toolchains (tsx, vite, esbuild,
+jest workers) need it for their IPC pipes. Gating it behind `allowLocalNetwork`
+would force real network ingress on just to run a build. Because the rules are
+path-scoped they never widen IP binding or IP egress, which stay governed by
+`defaultPolicy` and `allowLocalNetwork`.
+
+Two asymmetries are intentional:
+
+- `readonlyPaths` grants **neither** operation. A socket is a bidirectional
+  channel, not a read.
+- `deniedPaths` denies `network-outbound` even though no path-scoped
+  `network-outbound` allow can reach it. `defaultPolicy: "allow"` (and the
+  remote-proxy fallback) emit an *unfiltered* `(allow network-outbound)`, so
+  without the deny the sandbox could `connect()` to a pre-existing socket
+  inside a denied subtree — a Docker, `ssh-agent` or `gpg-agent` socket is a
+  control plane, so that would be an escape.
 
 A baseline of read-only system paths (`/usr/lib`, `/usr/libexec`,
 `/usr/share`, `/System`, `/Library`, `/private/var/db/timezone`,
@@ -194,8 +237,9 @@ independently of the profile.
 
 | Policy | Generated rule |
 |---|---|
-| `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all sockets. |
+| `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all IP sockets. |
 | `defaultPolicy: "allow"` (no host list) | `(allow network-outbound)` plus `(allow network-bind (local ip))` and `(allow system-socket)`. |
+| `allowLocalNetwork: true` | `(allow network-inbound (local ip))` — required in addition to `network-bind` before the kernel will accept `listen()` on an IP socket. Independent of `defaultPolicy`, and unrelated to AF_UNIX sockets (see above). |
 | `allowedHosts` | Accepted for SDK compatibility, but Seatbelt cannot filter DNS names; the profile degrades to allow-all outbound as best-effort. |
 | `blockedHosts` | Rejected during validation because Seatbelt cannot enforce hostname blocks. |
 | `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, the existing allow-all covers it. |
