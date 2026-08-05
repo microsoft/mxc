@@ -140,6 +140,11 @@ unsafe extern "C" fn exit_callback(_exit_code: i32, context: *mut c_void) {
 pub struct ProcessSettings {
     raw: WslcProcessSettings,
     io_ctx: Arc<IoContext>,
+    // Reclaims the SDK's `IoContext` reference if settings build or process
+    // creation fails before a live process adopts it. Disarmed by
+    // `mark_process_created` once a process is created, after which
+    // `exit_callback` (or a deliberate leak on kill) owns reclamation.
+    sdk_io_ref: SdkIoRef,
     _sh: Vec<u8>,
     _dash_c: Vec<u8>,
     _script_cstr: Vec<u8>,
@@ -147,6 +152,38 @@ pub struct ProcessSettings {
     _env_cstrings: Vec<Vec<u8>>,
     _env_ptrs: Vec<PCSTR>,
     _cwd_cstr: Option<Vec<u8>>,
+}
+
+/// Owns an `Arc<IoContext>` reference handed to the SDK and reclaims it on drop
+/// unless disarmed. Used both as a local guard while building settings and as
+/// the stored owner inside [`ProcessSettings`], so any error path before a live
+/// process adopts the reference frees it instead of leaking.
+struct SdkIoRef(Option<*const IoContext>);
+
+impl SdkIoRef {
+    fn none() -> Self {
+        Self(None)
+    }
+
+    /// Disarm reclamation, returning the raw pointer (dropped on the floor by the
+    /// caller so ownership passes to `exit_callback`).
+    fn disarm(&mut self) -> Option<*const IoContext> {
+        self.0.take()
+    }
+}
+
+impl Drop for SdkIoRef {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            // SAFETY: `p` came from `Arc::into_raw`. This runs only when no live
+            // process ever adopted the SDK reference (settings build or process /
+            // container creation failed), so the SDK will never invoke
+            // `exit_callback` for it and reclaiming here is sound.
+            unsafe {
+                drop(Arc::from_raw(p));
+            }
+        }
+    }
 }
 
 impl ProcessSettings {
@@ -206,6 +243,9 @@ impl ProcessSettings {
         // SDK's reference is reclaimed inside `exit_callback`, so a process that
         // is killed without its exit callback firing deliberately leaks the
         // reference rather than freeing it while the SDK may still call back.
+        // Until a process actually adopts the reference, `sdk_io_ref` guards it
+        // so any early return below frees it instead of leaking.
+        let mut sdk_io_ref = SdkIoRef::none();
         if register_callbacks {
             let io_ctx_raw = Arc::into_raw(Arc::clone(&io_ctx)) as *mut c_void;
             let callbacks = WslcProcessCallbacks {
@@ -219,6 +259,7 @@ impl ProcessSettings {
                 drop(Arc::from_raw(io_ctx_raw as *const IoContext));
                 return Err(sdk_error("WslcSetProcessSettingsCallbacks failed", hr, ""));
             }
+            sdk_io_ref = SdkIoRef(Some(io_ctx_raw as *const IoContext));
         }
 
         // Command line: /bin/sh -c <script>. argv points into the sh/dash_c/
@@ -279,6 +320,7 @@ impl ProcessSettings {
         Ok(ProcessSettings {
             raw,
             io_ctx,
+            sdk_io_ref,
             _sh: sh,
             _dash_c: dash_c,
             _script_cstr: script_cstr,
@@ -287,6 +329,21 @@ impl ProcessSettings {
             _env_ptrs: env_ptrs,
             _cwd_cstr: cwd_cstr,
         })
+    }
+
+    /// Transfer ownership of the SDK's `IoContext` reference to the newly-created
+    /// process. After this, `Drop` will not reclaim it — `exit_callback` (or a
+    /// deliberate leak on kill) owns reclamation, preserving the invariant that
+    /// the reference is never freed while the SDK may still call back.
+    ///
+    /// # Safety
+    /// Call exactly once, immediately after a process has been successfully
+    /// created from these settings (`WslcCreateContainerProcess`, or
+    /// `WslcCreateContainer` + `WslcStartContainer` when used as a container
+    /// init). Skipping this after a successful create would let `Drop` free a
+    /// reference the SDK still owns.
+    pub unsafe fn mark_process_created(&mut self) {
+        let _ = self.sdk_io_ref.disarm();
     }
 
     /// The I/O-capture context shared with the SDK callbacks.
@@ -746,6 +803,9 @@ pub unsafe fn exec_in_container(
         return Err(sdk_error("WslcCreateContainerProcess failed", hr, &msg));
     }
     let process_guard = WslcProcessGuard::from_raw(process, sdk.release_process_fn());
+    // The process now owns the SDK's IoContext reference; `exit_callback` will
+    // reclaim it. Disarm the settings guard so it is not freed underneath the SDK.
+    process_settings.mark_process_created();
 
     let mut exit_event: HANDLE = ptr::null_mut();
     let hr = sdk.WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
@@ -768,7 +828,14 @@ pub unsafe fn exec_in_container(
                 wait_ms
             );
             // Kill only this process; the keepalive init keeps the container up.
-            let _ = sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+            let kill_hr =
+                sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+            if kill_hr != S_OK {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr={kill_hr:?}); process may still be running"
+                );
+            }
         }
     }
 

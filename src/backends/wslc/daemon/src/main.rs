@@ -54,7 +54,12 @@ async fn run() -> Result<()> {
     secure_record_root().context("secure state-aware record root")?;
 
     let pid = std::process::id();
-    let pid_creation_time = process_creation_time(pid).unwrap_or(0);
+    // Stamp the record with our own verifiable identity. If we cannot read our
+    // creation time, fail startup rather than publish an unverifiable record: a
+    // record with a bogus creation time fails its own `daemon_alive` liveness
+    // check, so discovery clients would treat this daemon as dead and spawn a
+    // duplicate while it is still serving.
+    let pid_creation_time = process_creation_time(pid).context("read own process creation time")?;
     let pipe_name = mint_pipe_name();
 
     let session = session_manager::spawn().context("spawn WSLc session worker")?;

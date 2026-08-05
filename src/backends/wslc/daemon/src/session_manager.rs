@@ -383,11 +383,10 @@ impl Worker {
         // entry on failure above leaves it retryable.
         self.containers.remove(&config.sandbox_id);
 
-        // Release the shared session (and unload the SDK) once idle.
-        if self.containers.is_empty() {
-            self.session = None;
-            self.sdk = None;
-        }
+        // The shared session (and SDK) stay loaded so a subsequent provision
+        // reuses the already-booted WSL2 VM. The idle watchdog releases them via
+        // `shutdown` once the container count has stayed at zero for the idle
+        // timeout.
         Ok(())
     }
 
@@ -432,7 +431,13 @@ pub fn spawn() -> Result<SessionHandle> {
         .name("wslc-session-worker".to_string())
         .spawn(move || {
             #[cfg(windows)]
-            let _com = ComApartment::enter();
+            let _com = match ComApartment::enter() {
+                Ok(com) => com,
+                Err(e) => {
+                    eprintln!("[wslc-daemon] worker COM initialisation failed: {e:#}");
+                    return;
+                }
+            };
 
             let mut worker = Worker::new();
             while let Some(cmd) = rx.blocking_recv() {
@@ -474,14 +479,16 @@ struct ComApartment;
 
 #[cfg(windows)]
 impl ComApartment {
-    fn enter() -> Self {
+    fn enter() -> Result<Self> {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-        // SAFETY: called once at worker-thread startup; balanced by CoUninitialize
-        // in Drop. A non-success HRESULT (e.g. already-initialised) is benign here.
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        // SAFETY: called once at worker-thread startup. On success the matching
+        // `CoUninitialize` runs in `Drop`; on failure no guard is produced, so
+        // `CoUninitialize` is never called for an apartment we did not enter.
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_err() {
+            anyhow::bail!("CoInitializeEx(MTA) failed: {hr:?}");
         }
-        Self
+        Ok(Self)
     }
 }
 
