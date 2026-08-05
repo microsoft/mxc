@@ -54,16 +54,17 @@ use process_security_environment_spec::process_security_environment_layout::{
     ProcessSecurityEnvironment, ProcessSecurityEnvironmentArgs, SchemaVersion,
 };
 use sandbox_spec::base_container_layout::{
-    finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs, IntegrityLevel,
-    NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
+    endpoint_policy, endpoint_policyArgs, finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs,
+    FilterAction, IntegrityLevel, NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs,
+    SandboxSpec, SandboxSpecArgs,
 };
 use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    CaptureDenialsOutput, ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy,
-    ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsOutput, ContainerPolicy, ExecutionRequest, FailurePhase, NetworkEnforcementMode,
+    NetworkPolicy, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -554,6 +555,47 @@ impl BaseContainerRunner {
         !is_api_not_implemented(err.0)
     }
 
+    // A BaseContainer network policy contains either proxy settings or an egress policy.
+    fn build_network_policy<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        policy: &ContainerPolicy,
+    ) -> flatbuffers::WIPOffset<FbsNetworkPolicy<'a>> {
+        if policy.network_proxy.is_enabled() {
+            let proxy = policy.network_proxy.address.as_ref().map(|address| {
+                let url = builder.create_string(&address.to_url());
+                proxy_info::create(builder, &proxy_infoArgs { url: Some(url) })
+            });
+
+            return FbsNetworkPolicy::create(
+                builder,
+                &NetworkPolicyArgs {
+                    proxy,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let default_action = match &policy.default_network_policy {
+            NetworkPolicy::Allow => FilterAction::allow,
+            NetworkPolicy::Block => FilterAction::deny,
+        };
+        let egress = endpoint_policy::create(
+            builder,
+            &endpoint_policyArgs {
+                default_action,
+                ..Default::default()
+            },
+        );
+
+        FbsNetworkPolicy::create(
+            builder,
+            &NetworkPolicyArgs {
+                egress: Some(egress),
+                ..Default::default()
+            },
+        )
+    }
+
     /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
     ///
     /// Maps `ContainerPolicy` and `UiPolicy` fields to the BaseContainer schema:
@@ -565,7 +607,8 @@ impl BaseContainerRunner {
     /// - `fs_deny` from `policy.denied_paths`
     /// - `disallow_win32k_system_calls` from `ui.disable`
     /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
-    /// - `network_policy.proxy.url` from proxy config
+    /// - `network_policy.egress.default_action` from `policy.default_network_policy` without proxy
+    /// - `network_policy.proxy.url` instead of `egress` when proxy config is enabled
     fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
@@ -614,34 +657,7 @@ impl BaseContainerRunner {
             Some(builder.create_vector(&offsets))
         };
 
-        // Build NetworkPolicy with proxy URL if configured
-        let network_policy = if request.policy.network_proxy.is_enabled() {
-            let proxy_url = request
-                .policy
-                .network_proxy
-                .address
-                .as_ref()
-                .map(|addr| addr.to_url());
-
-            let proxy = if let Some(url) = &proxy_url {
-                let url_offset = builder.create_string(url);
-                Some(proxy_info::create(
-                    &mut builder,
-                    &proxy_infoArgs {
-                        url: Some(url_offset),
-                    },
-                ))
-            } else {
-                None
-            };
-
-            Some(FbsNetworkPolicy::create(
-                &mut builder,
-                &NetworkPolicyArgs { proxy },
-            ))
-        } else {
-            None
-        };
+        let network_policy = Some(Self::build_network_policy(&mut builder, &request.policy));
 
         // UI restrictions
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
@@ -812,6 +828,17 @@ impl BaseContainerRunner {
 
         // Network
         let _ = writeln!(logger, "[network]");
+        if let Some(default_action) = spec
+            .network_policy()
+            .and_then(|np| np.egress())
+            .map(|egress| egress.default_action())
+        {
+            let _ = writeln!(
+                logger,
+                "  network_policy.egress.default_action: {:?}",
+                default_action
+            );
+        }
         let proxy_url = spec
             .network_policy()
             .and_then(|np| np.proxy())
@@ -2798,7 +2825,12 @@ mod tests {
         assert_eq!(deny.len(), 1);
         assert_eq!(deny.get(0), "C:\\secret");
 
-        assert!(spec.network_policy().is_none());
+        let network = spec.network_policy().expect("network_policy should be set");
+        let egress = network.egress().expect("egress should be set");
+        assert_eq!(
+            egress.default_action(),
+            base_container_layout::FilterAction::deny
+        );
     }
 
     #[test]
@@ -2873,7 +2905,12 @@ mod tests {
         assert!(spec.fs_read_only().is_none());
         assert!(spec.fs_deny().is_none());
         assert!(spec.disallow_win32k_system_calls());
-        assert!(spec.network_policy().is_none());
+        let network = spec.network_policy().expect("network_policy should be set");
+        let egress = network.egress().expect("egress should be set");
+        assert_eq!(
+            egress.default_action(),
+            base_container_layout::FilterAction::deny
+        );
     }
 
     #[test]
@@ -2884,6 +2921,27 @@ mod tests {
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
         assert!(spec.capabilities().is_none());
+        let network = spec.network_policy().expect("network_policy should be set");
+        let egress = network.egress().expect("egress should be set");
+        assert_eq!(
+            egress.default_action(),
+            base_container_layout::FilterAction::deny
+        );
+    }
+
+    #[test]
+    fn build_sandbox_spec_network_allow_sets_egress_default_action() {
+        let mut request = ExecutionRequest::default();
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        let network = spec.network_policy().expect("network_policy should be set");
+        let egress = network.egress().expect("egress should be set");
+        assert_eq!(
+            egress.default_action(),
+            base_container_layout::FilterAction::allow
+        );
     }
 
     #[test]
@@ -2982,7 +3040,7 @@ mod tests {
         use wxc_common::models::ProxyAddress;
 
         let mut request = ExecutionRequest::default();
-        request.policy.default_network_policy = NetworkPolicy::Block;
+        request.policy.default_network_policy = NetworkPolicy::Allow;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
@@ -2994,6 +3052,7 @@ mod tests {
         let net = spec.network_policy().expect("network_policy should be set");
         let proxy = net.proxy().expect("proxy should be set");
         assert_eq!(proxy.url(), Some("http://127.0.0.1:8080"));
+        assert!(net.egress().is_none());
     }
 
     #[test]
@@ -3001,7 +3060,13 @@ mod tests {
         let request = ExecutionRequest::default();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
-        assert!(spec.network_policy().is_none());
+        let network = spec.network_policy().expect("network_policy should be set");
+        assert!(network.proxy().is_none());
+        let egress = network.egress().expect("egress should be set");
+        assert_eq!(
+            egress.default_action(),
+            base_container_layout::FilterAction::deny
+        );
     }
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----

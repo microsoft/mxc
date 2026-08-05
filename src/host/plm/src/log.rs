@@ -75,7 +75,10 @@ pub fn run(
     let cwd = std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
-    let parse = parse_events(&trace_file, cwd.as_deref(), verbose);
+    // Discover capability SIDs here, at the CLI boundary, so the parse
+    // itself is deterministic and can be driven with an injected index.
+    let capability_index = crate::extract_caps::discover_capabilities(verbose);
+    let parse = parse_events(&trace_file, cwd.as_deref(), verbose, capability_index);
 
     // Clean up the temp .etl regardless of parse outcome.
     let _ = std::fs::remove_file(&trace_file);
