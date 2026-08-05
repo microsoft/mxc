@@ -143,16 +143,16 @@ pub fn local_network_diagnostic(
     ) {
         (false, false) => Some(
             "WARNING: Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
-             sandbox shares the host network namespace (defaultPolicy='allow', allowedHosts / \
-             blockedHosts, or network.proxy). The sandboxed process can still bind, listen and \
-             accept on host-local addresses. For an unreachable sandbox use defaultPolicy='block' \
-             with no host lists and no proxy, which applies --unshare-net.",
+             sandbox shares the host network namespace (defaultPolicy='allow' or network.proxy). \
+             The sandboxed process can still bind, listen and accept on host-local addresses. For \
+             an unreachable sandbox use defaultPolicy='block' with no proxy, which applies \
+             --unshare-net.",
         ),
         (true, true) => Some(
             "WARNING: Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
-             network namespace. defaultPolicy='block' with no host lists and no proxy applies \
-             --unshare-net, so a listener inside the sandbox is reachable only from within it, \
-             never from the host. Use defaultPolicy='allow' to share the host network namespace.",
+             network namespace. defaultPolicy='block' with no proxy applies --unshare-net, so a \
+             listener inside the sandbox is reachable only from within it, never from the host. \
+             Use defaultPolicy='allow' to share the host network namespace.",
         ),
         _ => None,
     }
