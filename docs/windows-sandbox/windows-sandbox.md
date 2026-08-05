@@ -149,7 +149,7 @@ and conflicting read-only/read-write entries are rejected.
 Filesystem policy is accepted only during `provision` and is immutable
 afterward. Later phases reject filesystem policy. Network and UI policy are not
 accepted by state-aware phases; the guest still enforces its unconditional
-network lockdown. Windows Sandbox does not accept an Entra `user` bundle.
+network lockdown.
 
 ## Security Model
 

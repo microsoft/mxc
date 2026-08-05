@@ -3,14 +3,12 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { inspect } from 'node:util';
 import {
   ConfigsForBackend,
   DeprovisionConfigFor,
   ExecConfigFor,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
-  IsolationSessionUserConfig,
   ProvisionMetadataFor,
   ProvisionResult,
   SandboxId,
@@ -91,20 +89,6 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.ok(cfg);
   });
 
-  it('accepts user only as an IsolationSessionUserConfig instance', () => {
-    const ok: IsolationSessionProvisionConfig = {
-      network,
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
-    };
-    const bare: IsolationSessionProvisionConfig = {
-      network,
-      // @ts-expect-error — user must be constructed via IsolationSessionUserConfig for wamToken redaction.
-      user: { upn: 'alice@contoso.com', wamToken: 'tok' },
-    };
-    assert.strictEqual(ok.user?.upn, 'alice@contoso.com');
-    assert.ok(bare);
-  });
-
   it('accepts an optional appId', () => {
     const cfg: IsolationSessionProvisionConfig = {
       network,
@@ -167,33 +151,12 @@ describe('IsolationSessionStartConfig', () => {
     assert.ok(cfg);
   });
 
-  it('accepts user only as an IsolationSessionUserConfig instance', () => {
-    const ok: IsolationSessionStartConfig = {
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+  it('rejects a backend-specific field (start takes only version)', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — start accepts no backend-specific config.
+      unsupportedSetting: { nested: true },
     };
-    const bare: IsolationSessionStartConfig = {
-      // @ts-expect-error — user must be constructed via IsolationSessionUserConfig for wamToken redaction.
-      user: { upn: 'alice@contoso.com', wamToken: 'tok' },
-    };
-    assert.strictEqual(ok.user?.wamToken, 'tok');
-    assert.ok(bare);
-  });
-});
-
-describe('IsolationSessionUserConfig', () => {
-  it('redacts wamToken under util.inspect', () => {
-    const user = new IsolationSessionUserConfig('alice@contoso.com', 'super-secret');
-    const inspected = inspect(user);
-    assert.ok(inspected.includes('alice@contoso.com'), `got: ${inspected}`);
-    assert.ok(inspected.includes('<redacted>'), `got: ${inspected}`);
-    assert.ok(!inspected.includes('super-secret'), `got: ${inspected}`);
-  });
-
-  it('JSON.stringify preserves both fields for wire serialisation', () => {
-    const user = new IsolationSessionUserConfig('alice@contoso.com', 'super-secret');
-    const json = JSON.parse(JSON.stringify(user));
-    assert.strictEqual(json.upn, 'alice@contoso.com');
-    assert.strictEqual(json.wamToken, 'super-secret');
+    assert.ok(cfg);
   });
 });
 
@@ -262,10 +225,10 @@ describe('WindowsSandboxProvisionConfig', () => {
     assert.deepStrictEqual(cfg.filesystem?.deniedPaths, ['C:\\secrets']);
   });
 
-  it('rejects the Entra user bundle (WindowsSandbox has no Entra surface)', () => {
+  it('rejects an undeclared backend-specific field', () => {
     const cfg: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — windows_sandbox provision has no `user` bundle.
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+      // @ts-expect-error — windows_sandbox provision declares no such field.
+      unsupportedSetting: { nested: true },
     };
     assert.ok(cfg);
   });
@@ -285,7 +248,7 @@ describe('WindowsSandboxProvisionConfig', () => {
 });
 
 describe('WindowsSandboxStartConfig', () => {
-  it('carries only version (no configurationId, no user)', () => {
+  it('carries only version (no configurationId, no backend-specific fields)', () => {
     const ok: WindowsSandboxStartConfig = { version: '0.6.0-alpha' };
     assert.strictEqual(ok.version, '0.6.0-alpha');
 
@@ -295,11 +258,11 @@ describe('WindowsSandboxStartConfig', () => {
     };
     assert.ok(withConfigurationId);
 
-    const withUser: WindowsSandboxStartConfig = {
-      // @ts-expect-error — windows_sandbox start has no Entra `user` bundle.
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+    const withExtra: WindowsSandboxStartConfig = {
+      // @ts-expect-error — windows_sandbox start declares no backend-specific field.
+      unsupportedSetting: { nested: true },
     };
-    assert.ok(withUser);
+    assert.ok(withExtra);
   });
 });
 

@@ -79,10 +79,9 @@ impl ScriptRunner for IsolationSessionRunner {
         let _ = writeln!(logger, "Isolation Session: arguments={}", options.arguments);
         let _ = writeln!(logger, "Isolation Session: interactive={}", interactive);
 
-        // One-shot runs are local agent users only (state-aware handles
-        // Entra). Provision returns the OS-assigned account name; the
-        // manager is then pegged to it for the rest of the lifecycle.
-        let agent_user_name = match IsolationSessionManager::add_user("", "") {
+        // Provision returns the OS-assigned account name; the manager is then
+        // pegged to it for the rest of the lifecycle.
+        let agent_user_name = match IsolationSessionManager::add_user() {
             Ok(provisioned) => {
                 let _ = writeln!(
                     logger,
@@ -99,7 +98,7 @@ impl ScriptRunner for IsolationSessionRunner {
             Err(e) => return e.into(),
         };
 
-        if let Err(e) = manager.start_session("") {
+        if let Err(e) = manager.start_session() {
             // Provision succeeded; start did not. Clean up. stop_session
             // is a no-op on an unstarted session.
             let _ = manager.stop_session();

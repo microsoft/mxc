@@ -270,8 +270,8 @@ type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_sessi
 
 // NOTE: the IsolationSession shapes below are *illustrative* — they show the
 // per-(backend, phase) Config pattern, not the shipped IsolationSession
-// contract. The authoritative shapes (including the Entra `user` bundle on
-// provision and start, and the three-field provision metadata) live in
+// contract. The authoritative shapes (including the provision-phase `appId`
+// and the three-field provision metadata) live in
 // `docs/isolation-session/state-aware-rust.md` and
 // `sdk/node/src/state-aware-types.ts`. The same caveat applies to the worked
 // example in §7.4 and the config-typing example in §10.2.
@@ -309,7 +309,7 @@ interface IsolationSessionProvisionMetadata {
 }
 
 // WindowsSandbox holds a single active sandbox behind a persistent host-side
-// daemon. It has no Entra/user bundle. Filesystem policy is honored at
+// daemon. Filesystem policy is honored at
 // provision and is immutable thereafter (see §10.3).
 
 interface WindowsSandboxProvisionConfig {
@@ -1615,7 +1615,7 @@ documented in the backend's plan doc):
 For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
 applied at provision and frozen for the life of the sandbox; later phases reject it.
 `network` and `ui` are not yet honored at any phase (network isolation is enforced
-unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundle.
+unconditionally by the in-guest agent).
 
 > **Known gap (`deniedPaths`).** WindowsSandbox honors `deniedPaths` only as a
 > best-effort provision-time rejection (a `.wsb` mapped share cannot express a Deny
