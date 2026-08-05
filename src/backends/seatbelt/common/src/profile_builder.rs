@@ -27,7 +27,9 @@
 
 use std::fmt::Write as _;
 
-use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress};
+use wxc_common::models::{
+    ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress,
+};
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
 /// reachability to the resolved address supplied by the runner.
@@ -71,7 +73,8 @@ pub fn build_profile_with_proxy(
     out.push_str(TTY_ALLOW);
 
     // Policy-derived allow rules.
-    write_filesystem_allow(&mut out, request)?;
+    let resolved = ResolvedPaths::from_policy(&request.policy)?;
+    write_filesystem_allow(&mut out, &resolved);
     write_network_rules(&mut out, request, proxy_address);
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request)?;
@@ -79,7 +82,7 @@ pub fn build_profile_with_proxy(
     write_ui_rules(&mut out, request);
 
     // Policy-derived deny rules go LAST so they win on conflict.
-    write_filesystem_deny(&mut out, request)?;
+    write_filesystem_deny(&mut out, &resolved);
 
     Ok(out)
 }
@@ -147,15 +150,55 @@ const TTY_ALLOW: &str = "\
 (allow file-read* (subpath \"/dev/fd\"))
 ";
 
-fn write_filesystem_allow(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
-    let policy = &request.policy;
+/// The policy path lists resolved into the form Seatbelt matches, with the
+/// most-restrictive-wins precedence (`deny` > `readonly` > `readwrite`)
+/// re-applied.
+///
+/// The shared parser applies that precedence to the *raw* strings, which is not
+/// enough once paths are resolved: two spellings of the same path
+/// (`readonlyPaths: ["/private/tmp/x"]` and `readwritePaths: ["/tmp/x"]`)
+/// differ as strings, so both survive the parser, then resolve to the same
+/// filter here. Seatbelt is last-match-wins and the read-write rule is emitted
+/// after the read-only one, so without this the *weaker* grant would win and
+/// silently make a read-only path writable.
+struct ResolvedPaths {
+    readonly: Vec<String>,
+    readwrite: Vec<String>,
+    denied: Vec<String>,
+}
 
-    if !policy.readonly_paths.is_empty() {
+impl ResolvedPaths {
+    fn from_policy(policy: &ContainerPolicy) -> Result<Self, String> {
+        let denied = resolve_all(&policy.denied_paths)?;
+        let readonly = resolve_all(&policy.readonly_paths)?;
+        let mut readwrite = resolve_all(&policy.readwrite_paths)?;
+
+        // `denied` is emitted last and would override either allow anyway, but
+        // dropping the path keeps the emitted profile an honest description of
+        // the effective policy.
+        let mut readonly: Vec<String> = readonly;
+        readonly.retain(|p| !denied.contains(p));
+        readwrite.retain(|p| !denied.contains(p) && !readonly.contains(p));
+
+        Ok(Self {
+            readonly,
+            readwrite,
+            denied,
+        })
+    }
+}
+
+fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
+    paths.iter().map(|p| resolve_policy_path(p)).collect()
+}
+
+fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
+    if !paths.readonly.is_empty() {
         out.push_str(";; --- policy.readonlyPaths ---\n");
-        write_path_rule(out, "allow file-read*", &policy.readonly_paths)?;
+        write_path_rule(out, "allow file-read*", &paths.readonly);
     }
 
-    if !policy.readwrite_paths.is_empty() {
+    if !paths.readwrite.is_empty() {
         // `network-bind` / `network-outbound` under a *path* filter match only
         // AF_UNIX sockets — Seatbelt matches IP sockets with `(local ip)` /
         // `(remote ip)` — so this widens nothing on the IP side. A UNIX socket
@@ -170,17 +213,13 @@ fn write_filesystem_allow(out: &mut String, request: &ExecutionRequest) -> Resul
         write_path_rule(
             out,
             "allow file-read* file-write* network-bind network-outbound",
-            &policy.readwrite_paths,
-        )?;
+            &paths.readwrite,
+        );
     }
-
-    Ok(())
 }
 
-fn write_filesystem_deny(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
-    let policy = &request.policy;
-
-    if !policy.denied_paths.is_empty() {
+fn write_filesystem_deny(out: &mut String, paths: &ResolvedPaths) {
+    if !paths.denied.is_empty() {
         // `network-outbound` is denied here for two reasons. A denied path can
         // sit inside a broader `readwritePaths` subtree, whose allow covers it;
         // and `write_outbound_allow_rules` emits an *unfiltered* `(allow
@@ -193,25 +232,18 @@ fn write_filesystem_deny(out: &mut String, request: &ExecutionRequest) -> Result
         write_path_rule(
             out,
             "deny file-read* file-write* network-bind network-outbound",
-            &policy.denied_paths,
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Emit a single `(<ops> (subpath …)…)` rule over resolved policy paths.
-fn write_path_rule(out: &mut String, ops: &str, paths: &[String]) -> Result<(), String> {
-    let _ = writeln!(out, "({ops}");
-    for p in paths {
-        let _ = writeln!(
-            out,
-            "    (subpath {})",
-            quote_scheme(&resolve_policy_path(p)?)
+            &paths.denied,
         );
     }
+}
+
+/// Emit a single `(<ops> (subpath …)…)` rule over already-resolved paths.
+fn write_path_rule(out: &mut String, ops: &str, paths: &[String]) {
+    let _ = writeln!(out, "({ops}");
+    for p in paths {
+        let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+    }
     out.push_str(")\n");
-    Ok(())
 }
 
 fn write_network_rules(
@@ -907,6 +939,7 @@ mod tests {
         assert!(p.contains("(subpath \"/private/tmp/a\\\"b\\\\c\")"));
     }
 
+    const RO_SECTION: &str = ";; --- policy.readonlyPaths ---";
     const RW_RULE: &str = "(allow file-read* file-write* network-bind network-outbound\n";
     const DENY_RULE: &str = "(deny file-read* file-write* network-bind network-outbound\n";
 
@@ -1025,6 +1058,52 @@ mod tests {
         let p = build_profile(&r).unwrap();
         let deny_idx = p.find(DENY_RULE).expect("deny rule");
         assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn readonly_wins_over_readwrite_for_aliased_spellings() {
+        // The parser's most-restrictive-wins pass compares raw strings, so
+        // these two spellings both survive it and only collide once resolved.
+        // Seatbelt is last-match-wins and readwrite is emitted second, so
+        // without resolved-path precedence the read-only intent would be lost.
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/private/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["/tmp/x".into()];
+        let p = build_profile(&r).unwrap();
+
+        let ro_idx = p.find(RO_SECTION).expect("readonly section");
+        assert!(p[ro_idx..].contains("(subpath \"/private/tmp/x\")"));
+        assert!(
+            !p.contains(RW_RULE),
+            "aliased readwrite entry must be dropped, profile was:\n{p}"
+        );
+    }
+
+    #[test]
+    fn denied_wins_over_aliased_readonly_and_readwrite() {
+        let mut r = req();
+        r.policy.denied_paths = vec!["/private/tmp/x".into()];
+        r.policy.readonly_paths = vec!["/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["//tmp/./x".into()];
+        let p = build_profile(&r).unwrap();
+
+        assert!(!p.contains(RO_SECTION), "profile:\n{p}");
+        assert!(!p.contains(RW_RULE), "profile:\n{p}");
+        let deny_idx = p.find(DENY_RULE).expect("deny rule");
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/x\")"));
+    }
+
+    #[test]
+    fn distinct_paths_survive_resolved_precedence() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp/ro".into()];
+        r.policy.readwrite_paths = vec!["/tmp/rw".into()];
+        let p = build_profile(&r).unwrap();
+
+        let ro_idx = p.find(RO_SECTION).expect("readonly section");
+        assert!(p[ro_idx..].contains("(subpath \"/private/tmp/ro\")"));
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(p[rw_idx..].contains("(subpath \"/private/tmp/rw\")"));
     }
 
     #[test]

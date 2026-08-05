@@ -196,6 +196,14 @@ Policy paths are rewritten before they are emitted into the profile:
    `/etc`, `/tmp`, `/var` → `/private/…`, and `/home` →
    `/System/Volumes/Data/home`.
 
+After resolution, the most-restrictive-wins precedence (`deny` > `readonly` >
+`readwrite`) is re-applied to the **resolved** paths. The shared config parser
+already applies it, but only to the raw strings, so two spellings of the same
+path (`readonlyPaths: ["/private/tmp/x"]` and `readwritePaths: ["/tmp/x"]`)
+survive it and collide only here. Seatbelt is last-match-wins and the read-write
+rule is emitted second, so without this the weaker grant would win and silently
+make a read-only path writable.
+
 Steps 2 and 3 are mandatory, not cosmetic. Those root entries are symlinks on macOS,
 and the kernel fully resolves a path before matching it against a profile
 filter — so a rule written against the unresolved path never matches and is
