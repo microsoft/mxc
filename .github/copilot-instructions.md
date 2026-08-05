@@ -94,6 +94,7 @@ tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, req
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
+cargo test -p wxc_e2e_tests test_wslc_suite # WSLC suite — skips unless wslcsdk.dll (--features wslc) + WSL2 present; only EXECUTES on a nested-virt runner (1ES). CI: .github/workflows/wslc-e2e.yml
 ```
 
 ## Architecture

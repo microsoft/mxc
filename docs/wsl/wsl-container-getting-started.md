@@ -232,6 +232,55 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+## Running the E2E test suite
+
+MXC ships a Rust E2E suite for WSLC in
+[`src/testing/wxc_e2e_tests/tests/e2e_wslc.rs`](../../src/testing/wxc_e2e_tests/tests/e2e_wslc.rs),
+mirroring the MicroVM and Hyperlight suites. It invokes `wxc-exec.exe` directly
+against the core smoke configs (hello-world, exit-code, python-stdlib,
+network-isolated, large-output).
+
+```powershell
+# From src/ — build with WSLC support first so wslcsdk.dll is present:
+cargo build --release --features wslc --target x86_64-pc-windows-msvc
+
+# Pre-pull the images the smoke set needs:
+.\scripts\setup-wslc.ps1 -Image alpine:latest, python:3.12-alpine
+
+# Run the suite:
+cargo test -p wxc_e2e_tests test_wslc_suite -- --nocapture
+```
+
+The suite **skips gracefully** (each test passes as a no-op) when any
+prerequisite is missing, guarded by three checks:
+
+| Guard | Skips when |
+|---|---|
+| `has_wxc_exe()` | `wxc-exec.exe` not built |
+| `has_wslc_sdk()` | `wslcsdk.dll` not next to the binary (build without `--features wslc`) |
+| `has_wsl_runtime()` | `wsl --status` fails (WSL2 not installed) |
+
+### CI: why WSLC can only run on a nested-virt runner
+
+WSLC boots Linux containers inside **WSL2**, which requires **nested
+virtualization** on the host. GitHub-hosted `windows-latest` runners do **not**
+provide nested virt, so — unlike the MicroVM/Hyperlight suites, which run there
+and self-skip on the WHP check — the WSLC suite can only *execute* on a
+nested-virt-capable runner such as a **1ES hosted pool**.
+
+The [`wslc-e2e.yml`](../../.github/workflows/wslc-e2e.yml) workflow targets a
+1ES pool for this reason. Beyond nested virt, the runner image must provide:
+
+- **WSL2 with the `VirtualMachinePlatform` optional feature enabled.** Enabling
+  it normally requires a reboot, which a Stateless (ephemeral) 1ES runner
+  cannot do mid-job — so the durable path is a **1ES Managed Image** with WSL2 +
+  `VirtualMachinePlatform` baked in at image-build time (the same DISM approach
+  `microsoft/ebpf-for-windows` uses to bake in Hyper-V).
+- The **Rust/MSVC toolchain and git** (a raw client image is a bare desktop).
+
+Every runtime-dependent workflow step is gated so the job degrades to a clean
+skip rather than a hard failure when a prerequisite is absent.
+
 ## Troubleshooting
 
 | Error | Cause | Fix |

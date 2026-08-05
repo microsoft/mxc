@@ -1,0 +1,119 @@
+# ============================================================================
+# WSLC E2E Tests — executes the WSL Container backend on a 1ES nested-virt
+# runner. Unlike microvm/hyperlight (which run on GitHub-hosted windows-latest
+# and skip when WHP is absent), WSLC needs WSL2 — which requires nested
+# virtualization — so it can only EXECUTE on a nested-virt-capable 1ES pool.
+#
+# Pool: 1es-mxc-test-2 (REPOSITORY-level, runner group Default; confirmed
+# working). `shell: powershell` because the raw windows-25h2-pro-x64 CLIENT
+# image ships Windows PowerShell 5.1, not pwsh (PS7). Cold-start pickup on the
+# idle Stateless pool is ~10-11 min — the long timeout accounts for that plus
+# an in-image toolchain/WSL setup on first run.
+#
+# IMAGE PREREQUISITES (see docs/wsl/wsl-container-getting-started.md):
+#   The raw client image is a bare desktop. For this workflow to build + run it
+#   needs: git, the Rust/MSVC toolchain, WSL2 with VirtualMachinePlatform
+#   enabled, and the WSLC SDK produced by a `--features wslc` build. Enabling
+#   VirtualMachinePlatform normally needs a reboot, which a Stateless ephemeral
+#   runner cannot do mid-job — so the robust long-term path is a 1ES Managed
+#   Image with WSL2 + VirtualMachinePlatform (and ideally the toolchain) baked
+#   in (the same DISM-at-image-build approach microsoft/ebpf-for-windows uses
+#   for Hyper-V). Every runtime-dependent step below is guarded so the job
+#   degrades to a clean SKIP rather than a hard failure when a prerequisite is
+#   missing.
+# ============================================================================
+name: WSLC E2E Tests
+
+on:
+  push:
+    branches:
+      - user/modanish/1es-github-runner-e2e
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wslc-e2e:
+    name: WXC-Exec WSLC
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=1es-mxc-test-2"
+      - "JobId=wslc-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-rust-toolchain auto-reads rust-toolchain.toml from the repo root
+      # only. Surface src/rust-toolchain.toml there so the pinned toolchain is
+      # honored. Use PowerShell (bare client image may lack bash).
+      - name: Surface toolchain file at repo root
+        shell: powershell
+        run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml -Force
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src -> target
+          key: wslc-e2e-v1
+
+      - name: Build with WSLC support
+        working-directory: src
+        run: cargo build --release --target x86_64-pc-windows-msvc
+             --no-default-features --features wslc
+
+      - name: Ensure WSL2 runtime
+        id: wsl
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "=== WSL runtime check ==="
+          # Best-effort update; do not fail the job if the update path is
+          # unavailable on this image.
+          wsl --update 2>&1 | Write-Host
+          wsl --version 2>&1 | Write-Host
+          wsl --status  2>&1 | Write-Host
+          $available = ($LASTEXITCODE -eq 0)
+          Write-Host "wsl_available = $available"
+          "wsl_available=$($available.ToString().ToLower())" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Pre-pull WSLC images
+        if: steps.wsl.outputs.wsl_available == 'true'
+        shell: powershell
+        run: |
+          $exe = "src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe"
+          ./scripts/setup-wslc.ps1 -Image alpine:latest, python:3.12-alpine -WxcExecPath $exe
+
+      - name: Run WSLC E2E suite
+        if: steps.wsl.outputs.wsl_available == 'true'
+        working-directory: src
+        run: cargo test --release --target x86_64-pc-windows-msvc
+             -p wxc_e2e_tests test_wslc_suite -- --nocapture
+
+      - name: Note skip when WSL unavailable
+        if: steps.wsl.outputs.wsl_available != 'true'
+        shell: powershell
+        run: |
+          Write-Host "::warning::WSL2 runtime not available on this runner image — WSLC suite skipped."
+          Write-Host "The raw client image needs WSL2 + VirtualMachinePlatform baked in (1ES Managed Image)."
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wslc-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log
+            wslc-perf-results.json
