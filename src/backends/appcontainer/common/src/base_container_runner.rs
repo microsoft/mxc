@@ -653,7 +653,7 @@ impl BaseContainerRunner {
         }
     }
 
-    fn uses_process_security_environment(request: &ExecutionRequest) -> bool {
+    pub(crate) fn uses_process_security_environment(request: &ExecutionRequest) -> bool {
         Version::parse(&request.schema_version).is_ok_and(|version| {
             let comparable = Version::new(version.major, version.minor, version.patch);
             comparable >= Version::new(0, 8, 0)

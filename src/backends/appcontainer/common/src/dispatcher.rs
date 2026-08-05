@@ -338,9 +338,9 @@ fn select_backend_with_fallback(
     ),
     DispatchError,
 > {
-    // captureDenials uses the official V2 process-security-environment API,
+    // Schema 0.8+ uses the official process-security-environment API,
     // independently of the legacy SBOX tier probe/fallback chain.
-    if request.policy.capture_denials.is_some() {
+    if BaseContainerRunner::uses_process_security_environment(request) {
         return Ok((
             SelectedBackend::BaseContainer(BaseContainerRunner::new()),
             None,
@@ -627,6 +627,13 @@ mod tests {
         }
     }
 
+    fn schema_0_8_request(policy: ContainerPolicy) -> ExecutionRequest {
+        ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..test_request(policy)
+        }
+    }
+
     fn empty_policy() -> ContainerPolicy {
         ContainerPolicy::default()
     }
@@ -698,13 +705,27 @@ mod tests {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
-        let req = test_request(policy);
+        let req = schema_0_8_request(policy);
 
         let dispatched = dispatch_with_fallback(&req).expect("V2 backend should be selected");
         assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
         assert!(
             !dispatched.has_dacl_guard(),
             "V2 capture must never apply legacy host DACLs"
+        );
+    }
+
+    #[test]
+    fn schema_0_8_without_capture_selects_psec_without_legacy_fallback() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (policy, _tmp) = policy_with_rw_temp();
+        let req = schema_0_8_request(policy);
+
+        let dispatched = dispatch_with_fallback(&req).expect("PSEC backend should be selected");
+        assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
+        assert!(
+            !dispatched.has_dacl_guard(),
+            "schema 0.8+ must bypass the legacy fallback and DACL paths"
         );
     }
     #[test]
