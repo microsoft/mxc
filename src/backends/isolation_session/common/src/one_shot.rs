@@ -52,14 +52,9 @@ impl ScriptRunner for IsolationSessionRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // One-shot runs the full provision → start → exec → stop →
         // deprovision lifecycle in a single process, so provision-phase
-        // semantics apply to the whole call.
-        if let Some(cfg) = request.experimental.isolation_session.as_ref() {
-            if cfg.user.is_some() {
-                return Err(ScriptResponse::error(
-                    "user is not supported in one-shot mode; use the state-aware lifecycle",
-                ));
-            }
-        }
+        // semantics apply to the whole call. The one-shot surface takes no
+        // backend configuration, so there is nothing backend-specific to
+        // validate here — only the cross-cutting stable-surface policy.
         reject_unsupported_lifecycle(request)?;
         validate_provision_policy(request).map_err(ScriptResponse::from)
     }
@@ -144,56 +139,7 @@ impl ScriptRunner for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{
-        ContainerPolicy, ExperimentalConfig, IsolationSessionConfig, IsolationSessionUser,
-        LifecycleConfig, NetworkPolicy,
-    };
-
-    fn well_formed_user() -> IsolationSessionUser {
-        IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "tok".to_string(),
-        }
-    }
-
-    #[test]
-    fn validate_runner_one_shot_rejects_user() {
-        let runner = IsolationSessionRunner::new();
-        let req = ExecutionRequest {
-            experimental: ExperimentalConfig {
-                isolation_session: Some(IsolationSessionConfig {
-                    user: Some(well_formed_user()),
-                }),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let resp = runner.validate_runner(&req).unwrap_err();
-        assert!(
-            resp.error_message
-                .contains("user is not supported in one-shot mode"),
-            "got {}",
-            resp.error_message
-        );
-    }
-
-    #[test]
-    fn validate_runner_one_shot_accepts_no_user() {
-        let runner = IsolationSessionRunner::new();
-        let req = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: true,
-                ..Default::default()
-            },
-            experimental: ExperimentalConfig {
-                isolation_session: Some(IsolationSessionConfig::default()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        runner.validate_runner(&req).unwrap();
-    }
+    use wxc_common::models::{ContainerPolicy, LifecycleConfig, NetworkPolicy};
 
     #[test]
     fn validate_runner_one_shot_rejects_default_network() {

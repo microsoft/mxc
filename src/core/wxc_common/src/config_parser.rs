@@ -9,9 +9,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
+    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -1223,11 +1223,6 @@ fn convert_wire_config(
         } else {
             None
         };
-        let isolation_session = raw_exp
-            .isolation_session
-            .map(|as_cfg| IsolationSessionConfig {
-                user: as_cfg.user.map(Into::into),
-            });
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
@@ -1241,7 +1236,6 @@ fn convert_wire_config(
             test,
             windows_sandbox,
             wslc,
-            isolation_session,
             telemetry,
         }
     } else {
@@ -4120,19 +4114,29 @@ mod tests {
     }
 
     #[test]
-    fn experimental_isolation_user_unknown_field_accepted() {
+    fn one_shot_ignores_isolation_session_user_rather_than_rejecting() {
+        // The one-shot surface takes no backend configuration. `user` used to
+        // be typed here solely so one-shot could reject it; now it is an
+        // unknown key in the deliberately permissive `experimental` block and
+        // is silently ignored, exactly like any other unrecognised key there.
+        // Parsing must succeed and select the backend normally.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("one-shot must accept and ignore a stray isolation_session.user");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
+    }
+
+    #[test]
+    fn one_shot_accepts_empty_isolation_session_block() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let iso = req
-            .experimental
-            .isolation_session
-            .expect("iso config present");
-        let user = iso.user.expect("user present");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
     #[test]
@@ -4876,39 +4880,23 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_absent_from_experimental() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
+    fn isolation_session_section_still_marks_a_configured_backend() {
+        // `experimental.isolation_session` no longer maps to any domain
+        // config, but its presence on the WIRE model is what
+        // `present_backend_sections` reads to detect a configured backend.
+        // Pairing it with another backend section must still be refused, or
+        // removing the domain slot would have silently dropped the check.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}, "wslc": {"image": "alpine:latest"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.isolation_session.is_none());
-    }
-
-    #[test]
-    fn isolation_session_user_field_round_trips_through_one_shot_parser() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        let user = cfg
-            .user
-            .expect("user field should round-trip through the one-shot parser");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
-    }
-
-    #[test]
-    fn isolation_session_user_absent_when_field_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert!(cfg.user.is_none());
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("two backend sections must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("experimental.wslc") || msg.contains("isolation_session"),
+            "expected the conflicting section to be named, got: {msg}"
+        );
     }
 
     #[test]

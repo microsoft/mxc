@@ -28,6 +28,15 @@ import {
 } from '@microsoft/mxc-sdk';
 import { probeStateAwareRuntime, safeDeprovision, sandboxSkipReason } from './test-helpers.js';
 
+/**
+ * Builds a structurally valid `iso:` sandbox id for tests that need to get PAST
+ * id decoding to reach the behaviour under test. The id format is
+ * `iso:<base64url-nopad(JSON)>`; a bare string after the prefix no longer
+ * decodes.
+ */
+const wellFormedSandboxId = (agentUserName: string): string =>
+  `iso:${Buffer.from(JSON.stringify({ version: 1, agentUserName }), 'utf8').toString('base64url')}`;
+
 const platformSkipReason =
   os.platform() !== 'win32' ? 'IsolationSession is Windows-only' : undefined;
 
@@ -300,15 +309,43 @@ describe('IsolationSession state-aware policy validation', { skip: platformSkipR
   });
 
   it('backend refuses a ui policy on a post-provision phase', async () => {
-    // No provision needed: `validate_start` refuses before the sandbox id is
-    // ever resolved against the OS service.
+    // No provision needed: `validate_start` refuses the policy before the
+    // sandbox id is ever resolved against the OS service. The id must still be
+    // STRUCTURALLY valid, though -- decoding happens first, so a malformed id
+    // would short-circuit with `malformed_id` and never exercise the policy
+    // path this test is about.
     await assert.rejects(
       () => startUntyped(
-        'iso:not-a-real-sandbox',
+        wellFormedSandboxId('not-a-real-sandbox'),
         { ui: { disable: false, clipboard: 'all', injection: true } },
         { experimental: true },
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('rejects a structurally invalid sandboxId with malformed_id', async () => {
+    // The companion to the test above: an id that does not decode fails on the
+    // id itself, before any policy check. Pinning both keeps the ordering
+    // honest -- if decoding ever moved after policy validation, one of the two
+    // would flip.
+    await assert.rejects(
+      () => startUntyped('iso:not-a-real-sandbox', {}, { experimental: true }),
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
+    );
+  });
+
+  it('rejects a sandboxId minted by a newer MXC with an actionable message', async () => {
+    const payload = Buffer.from(
+      JSON.stringify({ version: 9999, agentUserName: 'future' }),
+      'utf8',
+    ).toString('base64url');
+    await assert.rejects(
+      () => startUntyped(`iso:${payload}`, {}, { experimental: true }),
+      (err: unknown) =>
+        err instanceof MxcError &&
+        err.code === 'malformed_id' &&
+        /newer MXC/.test(err.message),
     );
   });
 });
