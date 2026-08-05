@@ -392,10 +392,20 @@ pub fn sanitize_identity(identity: &str) -> &str {
     if identity.is_empty() {
         return identity;
     }
-    let opaque = identity.len() <= MAX_IDENTITY_LEN
-        && identity
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
+    // Length cap applies to BOTH accepted shapes. Without this bound on the
+    // `iso:`/`wsb:` shape a caller who chose an overlong `containerId` could
+    // still smuggle a payload through the record by tagging it with a
+    // recognised prefix. Byte length matches the character length here because
+    // both shapes accept only ASCII (`is_ascii_alphanumeric` plus `-`/`_`/`.`
+    // / `:`), so a rejection on `.len()` and a rejection on `.chars().count()`
+    // are equivalent — the byte bound is used to stay consistent with the
+    // existing contract.
+    if identity.len() > MAX_IDENTITY_LEN {
+        return REDACTED_IDENTITY;
+    }
+    let opaque = identity
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
     let mxc_opaque = identity
         .split_once(':')
         .map(|(prefix, token)| {
@@ -632,6 +642,38 @@ mod tests {
                 REDACTED_IDENTITY,
                 "should have been redacted: {id:?}"
             );
+        }
+    }
+
+    /// The length cap applies to both accepted identity shapes, including the
+    /// prefixed `iso:` / `wsb:` shape. Without the bound on the prefixed shape
+    /// a caller could still smuggle a payload of arbitrary length through the
+    /// record by tagging it with a recognised prefix.
+    #[test]
+    fn overlong_prefixed_identities_are_redacted() {
+        for prefix in ["iso", "wsb"] {
+            let token = "a".repeat(MAX_IDENTITY_LEN);
+            let overlong = format!("{}:{}", prefix, token);
+            assert!(overlong.len() > MAX_IDENTITY_LEN);
+            assert_eq!(
+                sanitize_identity(&overlong),
+                REDACTED_IDENTITY,
+                "prefixed identity beyond MAX_IDENTITY_LEN should have been redacted: {overlong:?}"
+            );
+        }
+    }
+
+    /// The length cap is inclusive — a prefixed identity that just fits the
+    /// cap still passes through unredacted, so the tighter bound does not
+    /// accidentally reject well-formed short ids.
+    #[test]
+    fn prefixed_identities_within_len_pass_through() {
+        for prefix in ["iso", "wsb"] {
+            let colon_and_prefix = prefix.len() + 1;
+            let token = "a".repeat(MAX_IDENTITY_LEN - colon_and_prefix);
+            let id = format!("{}:{}", prefix, token);
+            assert_eq!(id.len(), MAX_IDENTITY_LEN);
+            assert_eq!(sanitize_identity(&id), id);
         }
     }
 }

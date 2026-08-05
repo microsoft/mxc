@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Write as IoWrite;
@@ -38,6 +39,14 @@ pub struct Logger {
     /// Accumulates fragments from `fmt::Write::write_str` so that diagnostic
     /// sinks receive whole lines instead of per-argument fragments.
     diag_line_buf: String,
+}
+
+thread_local! {
+    /// Per-thread parking slot for a `Logger` clone whose diagnostic sinks
+    /// (`--log-file` + Windows diagnostic pipe) should be inherited by any
+    /// downstream call that constructs its own logger. See
+    /// [`Logger::install_thread_diagnostic_sink`] for the rationale.
+    static THREAD_DIAG_SINK: RefCell<Option<Logger>> = const { RefCell::new(None) };
 }
 
 impl fmt::Debug for Logger {
@@ -419,6 +428,62 @@ impl Logger {
             diag_pipe: self.diag_pipe.as_ref().and_then(|p| p.try_clone().ok()),
             diag_line_buf: String::new(),
         }
+    }
+
+    /// Publish this logger's diagnostic sinks (`--log-file` handle and, on
+    /// Windows, the diagnostic-console pipe) on the **current thread** so a
+    /// downstream Rust API call whose signature has no `Logger` parameter can
+    /// still route its records to the driver's sinks instead of a discarded
+    /// throwaway buffer.
+    ///
+    /// The concrete need this exists for: `wxc-exec` opens a `--log-file` on
+    /// its main `Logger`, then calls `mxc_engine::run_state_aware`, which
+    /// consumes the parsed request and internally dispatches to a backend's
+    /// `StatefulSandboxBackend::exec` — a trait method that has no `Logger`
+    /// argument. Without this hook, the backend would build a fresh
+    /// `Logger::new(Mode::Buffer)`, wire it to the diagnostic-console pipe
+    /// from the environment, and drop every record into a buffer the caller
+    /// never reads — the `--log-file` sink is silently missing.
+    ///
+    /// The hook stores a `clone_diagnostic_sink` of this logger — the file
+    /// handle is `try_clone`-duplicated (append mode, so a shared file pointer
+    /// is safe) and, on Windows, the diagnostic pipe is duplicated the same
+    /// way (`PIPE_TYPE_MESSAGE`, so each `write_all` remains a discrete
+    /// message that cannot interleave). Publication is per-thread, so
+    /// concurrent runs on different threads never share sinks by accident.
+    ///
+    /// The installed sink is reclaimed with
+    /// [`Logger::clear_thread_diagnostic_sink`]; leaving one installed at
+    /// process exit is harmless (the sinks close with the process).
+    pub fn install_thread_diagnostic_sink(&self) {
+        let clone = self.clone_diagnostic_sink();
+        THREAD_DIAG_SINK.with(|slot| {
+            *slot.borrow_mut() = Some(clone);
+        });
+    }
+
+    /// Clear any diagnostic sink installed on the current thread by
+    /// [`Logger::install_thread_diagnostic_sink`].
+    pub fn clear_thread_diagnostic_sink() {
+        THREAD_DIAG_SINK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+
+    /// Return a fresh `Buffer`-mode logger that inherits the current thread's
+    /// installed diagnostic sinks. If no sink is installed the returned
+    /// logger has no diagnostic sinks — the same result as
+    /// `Logger::new(Mode::Buffer)`.
+    ///
+    /// This is what a Rust API path with no `Logger` parameter should use
+    /// **instead of** `Logger::new(Mode::Buffer)`: identical in the
+    /// no-sink case, but preserves the driver's `--log-file` (and pipe)
+    /// when the driver installed one.
+    pub fn inherit_thread_diagnostic_sink() -> Logger {
+        THREAD_DIAG_SINK.with(|slot| match slot.borrow().as_ref() {
+            Some(sink) => sink.clone_diagnostic_sink(),
+            None => Logger::new(Mode::Buffer),
+        })
     }
 
     /// Emit a security warning through an always-visible channel and retain it

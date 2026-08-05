@@ -87,6 +87,14 @@ pub struct NetworkManager {
     created_rule_names: Vec<String>,
     wsa_initialized: bool,
     proxy_coordinator: ProxyCoordinator,
+    /// The result of the most recent `apply_firewall_rules` call. `None` when
+    /// apply has never been attempted (e.g. `start` returned early on a proxy
+    /// failure). `Some(true)` when apply succeeded — either all requested rules
+    /// were installed, or the policy required no rules at all. `Some(false)`
+    /// when apply failed. Consulted by the caller when building the
+    /// `NetworkPolicyApplied` audit record so `firewall_applied` reflects the
+    /// actual apply outcome rather than the policy *plan*.
+    firewall_apply_ok: Option<bool>,
 }
 
 /// What [`NetworkManager::stop_all`] actually released.
@@ -104,6 +112,34 @@ pub struct NetworkTeardown {
     pub firewall_removal_ok: bool,
     /// Whether an active proxy coordinator was stopped.
     pub proxy_stopped: bool,
+}
+
+/// What [`NetworkManager::remove_firewall_rules`] actually released.
+///
+/// Windows Firewall `Rules.Remove` is per-rule: some can land while others
+/// fail. Reporting the entry count as `rules_removed` when only a subset
+/// actually came out would hide a partial-cleanup failure — the two are kept
+/// distinct here so `stop_all` can carry the truthful count into the audit
+/// record and derive `firewall_removal_ok` from the aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirewallRemoval {
+    /// Number of rules whose `Rules.Remove` call returned success.
+    pub removed: usize,
+    /// Whether every removal succeeded. `false` when at least one rule
+    /// removal failed.
+    pub all_success: bool,
+}
+
+impl Default for FirewallRemoval {
+    /// "Nothing to remove, and that is fine." Written by hand for the same
+    /// reason as [`NetworkTeardown::default`]: the derived default would set
+    /// `all_success: false`, which reads as a failed removal.
+    fn default() -> Self {
+        Self {
+            removed: 0,
+            all_success: true,
+        }
+    }
 }
 
 impl Default for NetworkTeardown {
@@ -153,6 +189,7 @@ impl NetworkManager {
             created_rule_names: Vec::new(),
             wsa_initialized: false,
             proxy_coordinator: ProxyCoordinator::new(),
+            firewall_apply_ok: None,
         }
     }
 
@@ -214,15 +251,50 @@ impl NetworkManager {
         self.created_rule_names.len()
     }
 
+    /// Actual apply outcome of the most recent `apply_firewall_rules` call.
+    ///
+    /// * `None` — apply was never attempted (e.g. `start` returned early on a
+    ///   proxy failure).
+    /// * `Some(true)` — apply succeeded, meaning either all requested rules
+    ///   were installed or the policy required none.
+    /// * `Some(false)` — apply failed.
+    ///
+    /// Used by the caller to derive the `NetworkPolicyApplied` audit record's
+    /// `firewall_applied` field and aggregate `status` from the *observed*
+    /// outcome, not from the policy plan.
+    pub fn firewall_apply_ok(&self) -> Option<bool> {
+        self.firewall_apply_ok
+    }
+
+    /// Whether firewall rules were actually installed by the most recent apply.
+    /// `false` when apply was never attempted, failed, or the policy required
+    /// no rules. This is the truth value the `firewall_applied` audit field
+    /// should carry — the policy-plan value can be true while the actual
+    /// installed rule count is zero.
+    pub fn firewall_applied(&self) -> bool {
+        matches!(self.firewall_apply_ok, Some(true)) && !self.created_rule_names.is_empty()
+    }
+
     pub fn apply_firewall_rules(
         &mut self,
         principal_id: &str,
         policy: &ContainerPolicy,
         logger: &mut Logger,
-    ) -> Result<bool, WxcError> {
+    ) -> Result<(), WxcError> {
+        let outcome = self.apply_firewall_rules_inner(principal_id, policy, logger);
+        self.firewall_apply_ok = Some(outcome.is_ok());
+        outcome
+    }
+
+    fn apply_firewall_rules_inner(
+        &mut self,
+        principal_id: &str,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<(), WxcError> {
         let (default_policy, use_firewall_rules) = Self::initialize_policy(policy, logger);
         if !use_firewall_rules {
-            return Ok(true);
+            return Ok(());
         }
 
         // Open a COM apartment and create the firewall interface for the
@@ -255,7 +327,10 @@ impl NetworkManager {
         if default_policy == DefaultPolicy::Block {
             let block_all_name = format!("{}_BlockAll", rule_prefix);
             if !self.create_rule(&ctx, &block_all_name, NET_FW_ACTION_BLOCK, "", logger)? {
-                return Ok(false);
+                return Err(WxcError::Firewall(format!(
+                    "failed to install primary firewall rule '{}'",
+                    block_all_name
+                )));
             }
             self.created_rule_names.push(block_all_name);
             self.process_host_list(
@@ -269,7 +344,10 @@ impl NetworkManager {
         } else {
             let allow_all_name = format!("{}_AllowAll", rule_prefix);
             if !self.create_rule(&ctx, &allow_all_name, NET_FW_ACTION_ALLOW, "*", logger)? {
-                return Ok(false);
+                return Err(WxcError::Firewall(format!(
+                    "failed to install primary firewall rule '{}'",
+                    allow_all_name
+                )));
             }
             self.created_rule_names.push(allow_all_name);
             self.process_host_list(
@@ -282,7 +360,7 @@ impl NetworkManager {
             )?;
         }
 
-        Ok(true)
+        Ok(())
     }
 
     fn process_host_list(
@@ -370,7 +448,6 @@ impl NetworkManager {
     /// teardown record instead of assuming success. Failures remain non-fatal —
     /// this is a best-effort cleanup path and the return value is diagnostic.
     pub fn stop_all(&mut self, cleanup_policy: bool, logger: &mut Logger) -> NetworkTeardown {
-        let rules_at_entry = self.created_rule_names.len();
         let mut outcome = NetworkTeardown {
             rules_removed: 0,
             firewall_removal_ok: true,
@@ -379,13 +456,16 @@ impl NetworkManager {
 
         if self.rules_applied() && cleanup_policy {
             match self.remove_firewall_rules(logger) {
-                Ok(all_success) => {
-                    outcome.rules_removed = rules_at_entry;
-                    outcome.firewall_removal_ok = all_success;
+                Ok(removal) => {
+                    // `rules_removed` counts *successful* removals only; a
+                    // partial success no longer inflates the count to the
+                    // full list length. `firewall_removal_ok` is the aggregate.
+                    outcome.rules_removed = removal.removed;
+                    outcome.firewall_removal_ok = removal.all_success;
                 }
                 Err(_) => {
-                    // `remove_firewall_rules` failed before it could clear the
-                    // list, so nothing was removed.
+                    // `remove_firewall_rules` failed before it could remove
+                    // anything, so nothing was removed.
                     outcome.firewall_removal_ok = false;
                 }
             }
@@ -397,9 +477,15 @@ impl NetworkManager {
         outcome
     }
 
-    pub fn remove_firewall_rules(&mut self, logger: &mut Logger) -> Result<bool, WxcError> {
+    pub fn remove_firewall_rules(
+        &mut self,
+        logger: &mut Logger,
+    ) -> Result<FirewallRemoval, WxcError> {
         if self.created_rule_names.is_empty() {
-            return Ok(true);
+            return Ok(FirewallRemoval {
+                removed: 0,
+                all_success: true,
+            });
         }
 
         // Re-acquire a fresh firewall interface in its own apartment on the
@@ -415,10 +501,17 @@ impl NetworkManager {
         let rules = unsafe { fw_policy.Rules() }
             .map_err(|e| WxcError::Firewall(format!("Failed to get firewall rules: {}", e)))?;
 
+        // Count *successful* removals, not the entry count. Windows Firewall
+        // `Rules.Remove` returns per-rule success/failure; conflating the two
+        // makes a partially-failed cleanup indistinguishable from a clean one
+        // in the audit record.
+        let mut removed = 0usize;
         let mut all_success = true;
         for rule_name in &self.created_rule_names {
             let bstr_name = BSTR::from(rule_name.as_str());
-            if unsafe { rules.Remove(&bstr_name) }.is_err() {
+            if unsafe { rules.Remove(&bstr_name) }.is_ok() {
+                removed += 1;
+            } else {
                 all_success = false;
             }
         }
@@ -426,7 +519,10 @@ impl NetworkManager {
         if !all_success {
             logger.log_line("Warning: some firewall rules could not be removed");
         }
-        Ok(all_success)
+        Ok(FirewallRemoval {
+            removed,
+            all_success,
+        })
     }
 
     fn ensure_wsa_initialized(&mut self, _logger: &mut Logger) -> Result<(), WxcError> {
@@ -575,6 +671,39 @@ pub fn validate_ip_or_cidr(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `firewall_applied` in the audit record used to come from the policy
+    /// *plan* ("rules will be installed"). With apply now propagating its
+    /// actual outcome, a manager that never even attempted apply reports
+    /// `firewall_applied() == false` — the truth value the audit field should
+    /// carry.
+    #[test]
+    fn firewall_applied_defaults_to_false_when_apply_not_attempted() {
+        let mgr = NetworkManager::new();
+        assert_eq!(mgr.firewall_apply_ok(), None);
+        assert!(!mgr.firewall_applied());
+    }
+
+    /// `stop_all` on a manager that installed nothing reports zero removals
+    /// as a clean teardown, and — regression for finding #7 — the
+    /// `FirewallRemoval` empty-list branch matches.
+    #[test]
+    fn remove_firewall_rules_with_nothing_installed_is_clean() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut manager = NetworkManager::new();
+        let removal = manager.remove_firewall_rules(&mut logger).unwrap();
+        assert_eq!(removal.removed, 0);
+        assert!(removal.all_success);
+    }
+
+    /// `FirewallRemoval::default` must read as "nothing to remove, and that
+    /// is fine". The derived default sets `all_success: false`, which reads
+    /// as a *failed* removal — the opposite of what an empty removal means.
+    #[test]
+    fn firewall_removal_default_is_clean() {
+        assert_eq!(FirewallRemoval::default().removed, 0);
+        assert!(FirewallRemoval::default().all_success);
+    }
 
     #[test]
     fn test_validate_ip_or_cidr_valid_ipv4() {

@@ -616,6 +616,22 @@ fn wait_with_graceful_shutdown(
         .ExitCode()
         .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
     if exit_code != STILL_ACTIVE {
+        // Normal pre-timeout completion. Emit `mxc.ProcessExited` so a
+        // clean run has a terminal audit record. Deliberately NOT emitted
+        // on the graceful-shutdown tiers below — those already emitted
+        // `ProcessTimedOut` and possibly `ProcessKillFailed`, and the run
+        // is not a normal exit.
+        if let Some(logger) = logger.as_mut() {
+            let record = AuditEvent::new(AuditEventName::ProcessExited)
+                .str("backend", "isolation_session")
+                .str(
+                    "identity",
+                    &wxc_common::policy_identity::redact_identity(identity),
+                )
+                .u64("pid", process.ProcessId().unwrap_or_default() as u64)
+                .i64("exit_code", exit_code as i64);
+            logger.log_audit_event(&record);
+        }
         return Ok(exit_code);
     }
 
@@ -680,8 +696,23 @@ fn wait_with_graceful_shutdown(
         }
         return Ok(exit_code);
     }
+    // Successful `Terminate()` — wait up to five seconds for the kill to
+    // land, then verify. If the process is still `STILL_ACTIVE` after the
+    // wait, or `ExitCode()` fails, surface a lifecycle error rather than
+    // returning `-1` as if the process had cleanly exited with that code:
+    // both outcomes are indistinguishable from a real exit code in the
+    // caller's contract, and both mean the terminate did not observably
+    // land. Matches the retry branch above.
     let _ = process.WaitForExit(5000);
-    Ok(process.ExitCode().unwrap_or(-1))
+    let final_exit = process
+        .ExitCode()
+        .map_err(|e| lifecycle_err(format!("get ExitCode after terminate failed: {}", e)))?;
+    if final_exit == STILL_ACTIVE {
+        return Err(lifecycle_err(
+            "isolation-session process remained active after successful terminate",
+        ));
+    }
+    Ok(final_exit)
 }
 
 #[cfg(test)]

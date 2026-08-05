@@ -11,7 +11,7 @@ use std::io::IsTerminal;
 use serde::Serialize;
 
 use wxc_common::id::mint_random_token;
-use wxc_common::logger::{Logger, Mode};
+use wxc_common::logger::Logger;
 use wxc_common::models::{
     ExecutionRequest, IsolationSessionConfig, IsolationSessionProvisionConfig,
 };
@@ -272,7 +272,11 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
         let interactive = std::io::stdout().is_terminal();
         let options = build_process_options(request, interactive);
-        let mut logger = Logger::new(Mode::Buffer);
+        // Inherit any diagnostic sinks (--log-file, diagnostic console pipe)
+        // the driver installed on this thread. When the driver has not
+        // installed anything this behaves identically to `Logger::new(Buffer)`,
+        // so the environment-driven pipe fallback below is still exercised.
+        let mut logger = Logger::inherit_thread_diagnostic_sink();
         let diagnostic_config = wxc_common::diagnostic::DiagnosticConfig::from_environment();
         if diagnostic_config.console_enabled {
             logger.enable_diagnostics(&diagnostic_config);

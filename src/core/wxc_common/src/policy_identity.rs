@@ -40,6 +40,7 @@
 //! | `experimental.telemetry` | Does not affect enforcement. |
 //! | `experimental.isolation_session[.start].user` | Carries a WAM bearer token and a UPN. |
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
+//! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
 //!
 //! `ContainerPolicy::network_proxy` is `#[serde(skip)]`, so the proxy's
@@ -158,10 +159,21 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     // `ContainerPolicy` serialization already omits `network_proxy`
     // (`#[serde(skip)]`), so no credential-bearing proxy URL can reach the hash
     // through this line.
-    root.insert(
-        "policy".into(),
-        serde_json::to_value(policy).unwrap_or(Value::Null),
-    );
+    //
+    // `captureDenials.outputPath` is stripped: it only controls where the
+    // diagnostic JSON deliverable is written and has no effect on enforcement.
+    // Hashing it would perturb the policy identity across otherwise-identical
+    // runs whose only difference is the output-file location — an operator
+    // moving the diagnostic file has not changed the policy the sandbox ran
+    // under. `captureDenials.mode` DOES stay hashed: it decides whether each
+    // recorded access is blocked or allowed, which is an enforcement change.
+    let mut policy_value = serde_json::to_value(policy).unwrap_or(Value::Null);
+    if let Value::Object(policy_map) = &mut policy_value {
+        if let Some(Value::Object(cd)) = policy_map.get_mut("capture_denials") {
+            cd.remove("output_path");
+        }
+    }
+    root.insert("policy".into(), policy_value);
     root.insert("proxy".into(), proxy_projection(request));
     root.insert(
         "lxc".into(),
@@ -449,6 +461,63 @@ mod tests {
         changed.policy.network_proxy.address =
             Some(ProxyAddress::new("localhost".to_string(), 9090));
         assert_ne!(with_8080, policy_hash(&changed));
+    }
+
+    /// `captureDenials.outputPath` decides where the diagnostic JSON file is
+    /// written and has no effect on enforcement. It must not perturb the
+    /// policy identity: moving the output file is a diagnostic-plumbing
+    /// change, not a policy change.
+    #[test]
+    fn capture_denials_output_path_does_not_change_the_hash() {
+        use crate::models::{CaptureDenialsConfig, CaptureDenialsMode};
+
+        let mut baseline = request();
+        baseline.policy.capture_denials = Some(CaptureDenialsConfig {
+            mode: CaptureDenialsMode::Block,
+            output_path: None,
+        });
+        let base = policy_hash(&baseline);
+
+        for path in [
+            Some("C:\\logs\\denials.json".to_string()),
+            Some("D:\\other\\denials.json".to_string()),
+            None,
+        ] {
+            let mut changed = baseline.clone();
+            if let Some(cd) = changed.policy.capture_denials.as_mut() {
+                cd.output_path = path;
+            }
+            assert_eq!(
+                base,
+                policy_hash(&changed),
+                "output_path controls diagnostic plumbing only and must not enter the hash"
+            );
+        }
+    }
+
+    /// `captureDenials.mode` decides whether each recorded access is blocked
+    /// or allowed, which is an enforcement decision. Changing it MUST change
+    /// the hash — this is the other half of the finding-3 contract.
+    #[test]
+    fn capture_denials_mode_changes_the_hash() {
+        use crate::models::{CaptureDenialsConfig, CaptureDenialsMode};
+
+        let mut baseline = request();
+        baseline.policy.capture_denials = Some(CaptureDenialsConfig {
+            mode: CaptureDenialsMode::Block,
+            output_path: Some("C:\\logs\\denials.json".to_string()),
+        });
+        let block_hash = policy_hash(&baseline);
+
+        let mut allow = baseline.clone();
+        if let Some(cd) = allow.policy.capture_denials.as_mut() {
+            cd.mode = CaptureDenialsMode::Allow;
+        }
+        let allow_hash = policy_hash(&allow);
+        assert_ne!(
+            block_hash, allow_hash,
+            "capture_denials.mode is an enforcement decision and MUST enter the hash"
+        );
     }
 
     #[test]

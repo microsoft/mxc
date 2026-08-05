@@ -510,7 +510,16 @@ fn run_state_aware_main(
     // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
     // effective lifecycle policy here before the request is consumed.
     mxc_engine::log_policy_hash(&parsed.request, logger);
+    // Publish the driver's diagnostic sinks (--log-file, and the diagnostic
+    // console pipe on Windows) on this thread so a backend whose
+    // `StatefulSandboxBackend::exec` signature has no `Logger` parameter
+    // can inherit them via `Logger::inherit_thread_diagnostic_sink` instead
+    // of building a throwaway `Logger::new(Mode::Buffer)` and silently
+    // dropping every record. Cleared before this function returns so we
+    // never leak duplicated handles across independent invocations.
+    logger.install_thread_diagnostic_sink();
     let mut outcome = mxc_engine::run_state_aware(parsed, dry_run);
+    Logger::clear_thread_diagnostic_sink();
     let elapsed = started.elapsed();
 
     // Record the sandbox identity join key. For `isolation_session` the

@@ -1303,7 +1303,21 @@ impl AppContainerScriptRunner {
         // success and failure arms — "the policy I tried to install and failed"
         // is as auditable a fact as a successful one.
         if logger.has_diagnostic_sink() {
+            // `firewall_applied` reflects the actual apply outcome (rules
+            // installed), NOT the policy plan. Deriving the audit field from
+            // the plan would report `firewall_applied=true` on a
+            // partially-failed install with zero rules on-device — an operator
+            // reading the record would see a green enforcement claim on a run
+            // whose enforcement never landed.
+            let firewall_applied = network_manager.firewall_applied();
+            // Aggregate status: a proxy-only success with no firewall step
+            // remains a success; a firewall-plan run whose install failed is a
+            // failure regardless of `network_result` (the caller may have kept
+            // the run going after a proxy-only failure). Both terms must be
+            // green for the record to be green.
             let plan = NetworkManager::describe_policy(&request.policy);
+            let firewall_ok = !plan.rules_will_be_installed
+                || matches!(network_manager.firewall_apply_ok(), Some(true));
             let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
                 .str("backend", ContainmentBackend::ProcessContainer.wire_name())
                 .str("identity", sanitize_identity(&self.app_container_name))
@@ -1327,10 +1341,10 @@ impl AppContainerScriptRunner {
                     "firewall_rules_created",
                     network_manager.rule_count() as u64,
                 )
-                .bool("firewall_applied", plan.rules_will_be_installed)
+                .bool("firewall_applied", firewall_applied)
                 .str(
                     "status",
-                    if network_result.is_ok() {
+                    if network_result.is_ok() && firewall_ok {
                         OperationStatus::Success.as_str()
                     } else {
                         OperationStatus::Failure.as_str()
@@ -1361,22 +1375,38 @@ impl AppContainerScriptRunner {
     /// child process was created, so cleanup failures must remain observable.
     fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
         let network = prepared.network_manager.stop_all(!preserve_policy, logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
+        // BFS removal is only attempted when we asked for it; the manager
+        // reports back whether the removal actually landed. Capture the
+        // per-call result so a requested-but-failed removal can downgrade the
+        // aggregate status to `failure`, instead of being silently discarded
+        // and reported as a clean teardown.
+        let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && prepared.bfs_manager.configured()
-            && !preserve_policy
-        {
-            prepared.bfs_manager.remove_configuration(logger);
-        }
+            && !preserve_policy;
+        let bfs_removed = if bfs_requested {
+            prepared.bfs_manager.remove_configuration(logger)
+        } else {
+            false
+        };
         if logger.has_diagnostic_sink() {
-            let (status, skip_reason) =
-                appcontainer_teardown_status(preserve_policy, network.firewall_removal_ok);
+            let (status, skip_reason) = appcontainer_teardown_status_with_bfs(
+                preserve_policy,
+                network.firewall_removal_ok,
+                bfs_requested,
+                bfs_removed,
+            );
             let mut record = AuditEvent::new(AuditEventName::SandboxTornDown)
                 .str("backend", ContainmentBackend::ProcessContainer.wire_name())
-                .str("identity", &self.app_container_name)
+                // The AppContainer profile name is the caller's `containerId`,
+                // i.e. a config value — sanitize identically to the successful
+                // teardown path so caller-supplied non-opaque ids can't reach a
+                // record from the early-failure teardown either.
+                .str("identity", sanitize_identity(&self.app_container_name))
                 .str("tier", self.tier_str())
                 .str("status", status.as_str())
                 .u64("firewall_rules_removed", network.rules_removed as u64)
                 .bool("firewall_removal_ok", network.firewall_removal_ok)
+                .bool("bfs_removed", bfs_removed)
                 .bool("proxy_stopped", network.proxy_stopped)
                 .bool("preserve_policy", preserve_policy)
                 .bool("container_released", false);
@@ -1584,18 +1614,28 @@ impl AppContainerSandboxProcess {
             .prepared
             .network_manager
             .stop_all(!self.preserve_policy, &mut logger);
-        let bfs_removed = self.filesystem_mode == FilesystemMode::Bfs
+        // Whether BFS removal was actually requested this teardown, vs whether
+        // it landed. The two used to be conflated: `bfs_removed` was inferred
+        // from `filesystem_mode` alone, so a failed `remove_configuration`
+        // still recorded `bfs_removed=true` and did not affect `status`.
+        let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && self.prepared.bfs_manager.configured()
             && !self.preserve_policy;
-        if bfs_removed {
-            self.prepared.bfs_manager.remove_configuration(&mut logger);
-        }
+        let bfs_removed = if bfs_requested {
+            self.prepared.bfs_manager.remove_configuration(&mut logger)
+        } else {
+            false
+        };
 
         if !self.audit_enabled() {
             return;
         }
-        let (status, skip_reason) =
-            appcontainer_teardown_status(self.preserve_policy, network.firewall_removal_ok);
+        let (status, skip_reason) = appcontainer_teardown_status_with_bfs(
+            self.preserve_policy,
+            network.firewall_removal_ok,
+            bfs_requested,
+            bfs_removed,
+        );
         let mut record = self
             .audit(AuditEventName::SandboxTornDown)
             .str("status", status.as_str())
@@ -1623,16 +1663,33 @@ impl AppContainerSandboxProcess {
 /// `preserve_policy` is a deliberate request to leave enforcement in place, so
 /// it is `skipped` rather than a success or a failure — the record must not
 /// claim a release that was never attempted.
-fn appcontainer_teardown_status(
+/// Extended teardown-status mapping that additionally accounts for the BFS
+/// removal outcome. A requested-but-failed BFS removal downgrades the aggregate
+/// status to `failure`, so the audit stream cannot show a green
+/// `SandboxTornDown` on a run that left the BFS configuration behind.
+///
+/// `bfs_requested` and `bfs_removed` are independent facts: `bfs_removed` is
+/// meaningful only when `bfs_requested` is true. A caller that did not request
+/// BFS removal (either not the BFS tier, or `preserve_policy`) passes
+/// `bfs_requested = false` and the BFS outcome does not affect the status.
+///
+/// `preserve_policy` is a deliberate request to leave enforcement in place, so
+/// it is `skipped` rather than a success or a failure — the record must not
+/// claim a release that was never attempted.
+fn appcontainer_teardown_status_with_bfs(
     preserve_policy: bool,
     firewall_removal_ok: bool,
+    bfs_requested: bool,
+    bfs_removed: bool,
 ) -> (TeardownStatus, Option<TeardownSkipReason>) {
     if preserve_policy {
-        (
+        return (
             TeardownStatus::Skipped,
             Some(TeardownSkipReason::PreservePolicy),
-        )
-    } else if firewall_removal_ok {
+        );
+    }
+    let bfs_ok = !bfs_requested || bfs_removed;
+    if firewall_removal_ok && bfs_ok {
         (TeardownStatus::Success, None)
     } else {
         (TeardownStatus::Failure, None)
@@ -1782,13 +1839,16 @@ mod tests {
     /// implies a release the code never attempted, and never as a `failure`.
     #[test]
     fn teardown_status_reports_preserve_policy_as_skipped() {
-        use super::appcontainer_teardown_status;
+        use super::appcontainer_teardown_status_with_bfs;
         use wxc_common::audit::{TeardownSkipReason, TeardownStatus};
 
         for firewall_ok in [true, false] {
-            let (status, reason) = appcontainer_teardown_status(true, firewall_ok);
-            assert_eq!(status, TeardownStatus::Skipped);
-            assert_eq!(reason, Some(TeardownSkipReason::PreservePolicy));
+            for (bfs_req, bfs_ok) in [(false, false), (true, true), (true, false)] {
+                let (status, reason) =
+                    appcontainer_teardown_status_with_bfs(true, firewall_ok, bfs_req, bfs_ok);
+                assert_eq!(status, TeardownStatus::Skipped);
+                assert_eq!(reason, Some(TeardownSkipReason::PreservePolicy));
+            }
         }
     }
 
@@ -1797,16 +1857,46 @@ mod tests {
     /// its `Result`.
     #[test]
     fn teardown_status_distinguishes_failed_firewall_removal() {
-        use super::appcontainer_teardown_status;
+        use super::appcontainer_teardown_status_with_bfs;
         use wxc_common::audit::TeardownStatus;
 
         assert_eq!(
-            appcontainer_teardown_status(false, true),
+            appcontainer_teardown_status_with_bfs(false, true, false, false),
             (TeardownStatus::Success, None)
         );
         assert_eq!(
-            appcontainer_teardown_status(false, false),
+            appcontainer_teardown_status_with_bfs(false, false, false, false),
             (TeardownStatus::Failure, None)
+        );
+    }
+
+    /// A failed BFS removal must downgrade the aggregate status to `failure`,
+    /// so a reader cannot look at a green `SandboxTornDown` on a run whose BFS
+    /// configuration was still installed at teardown. Firewall-clean case:
+    /// only the BFS outcome makes the difference.
+    #[test]
+    fn teardown_status_reports_failed_bfs_removal_as_failure() {
+        use super::appcontainer_teardown_status_with_bfs;
+        use wxc_common::audit::TeardownStatus;
+
+        // Requested + landed → success.
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, true, true, true),
+            (TeardownStatus::Success, None)
+        );
+        // Requested + failed → failure, regardless of the firewall outcome.
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, true, true, false),
+            (TeardownStatus::Failure, None)
+        );
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, false, true, false),
+            (TeardownStatus::Failure, None)
+        );
+        // Not requested → does not affect status.
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, true, false, false),
+            (TeardownStatus::Success, None)
         );
     }
 

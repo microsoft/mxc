@@ -432,14 +432,38 @@ fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> 
     result
 }
 
+/// Render a message so it is safe to write to the diagnostic console TTY.
+///
+/// Two orthogonal concerns are handled:
+///
+/// 1. **Control-character hardening.** Anything below `0x20` other than `\t`
+///    or `\n` is escaped, so a rogue client cannot inject terminal escape
+///    sequences (cursor moves, colour changes, title updates) into the shared
+///    console.
+/// 2. **Lossless rendering of high Unicode.** Non-ASCII characters go through
+///    [`char::escape_default`], which emits `\u{NNNN}` for anything outside
+///    the printable ASCII range. The previous implementation masked the
+///    Unicode scalar with `& 0xff` and rendered `\xNN`, which collided for
+///    every pair of characters whose scalars agreed in the low byte (e.g.
+///    `\u{0100}` and `\u{0200}` both rendered as `\x00`).
 fn sanitize_display_text(text: &str) -> String {
-    text.chars()
-        .flat_map(|ch| match ch {
-            '\t' | '\n' => Some(ch).into_iter().collect::<Vec<_>>(),
-            '\u{20}'..='\u{7e}' => vec![ch],
-            _ => format!("\\x{:02X}", ch as u32 & 0xff).chars().collect(),
-        })
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            // `\t` and `\n` are the only sub-`0x20` characters allowed through
+            // literally: they're the ordinary logical structure of a log line
+            // and rendering them as escapes would obscure it.
+            '\t' | '\n' => out.push(ch),
+            '\u{20}'..='\u{7e}' => out.push(ch),
+            // Everything else — control characters, DEL, and every non-ASCII
+            // codepoint — is escaped losslessly. `escape_default` emits `\uNNNN`
+            // form for high Unicode, `\xNN` for `< 0x80` non-printables, and
+            // `\\` / `\'` / `\"` for the corresponding literals; each escape
+            // is uniquely reversible so two distinct scalars can never collide.
+            _ => out.extend(ch.escape_default()),
+        }
+    }
+    out
 }
 
 /// Get the client process ID from a connected pipe handle.
@@ -912,5 +936,56 @@ fn register_ctrl_handler() {
     // The handler function has the correct `unsafe extern "system"` signature.
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(handler), true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_display_text;
+
+    /// The previous implementation masked the Unicode scalar with `& 0xff`,
+    /// so any pair of characters whose scalars agreed in the low byte
+    /// rendered identically (e.g. `\u{0100}` and `\u{0200}` both produced
+    /// `\x00`). `char::escape_default` guarantees a unique escape for every
+    /// distinct scalar. Regression for finding #10.
+    #[test]
+    fn high_unicode_scalars_do_not_collide() {
+        let a = sanitize_display_text("\u{0100}");
+        let b = sanitize_display_text("\u{0200}");
+        assert_ne!(
+            a, b,
+            "distinct scalars must render distinctly: {a:?} vs {b:?}"
+        );
+    }
+
+    /// Printable ASCII passes through unchanged, and `\t` / `\n` remain
+    /// literal (the two allow-listed control characters); every other control
+    /// character — including the terminal escape byte — MUST be escaped so a
+    /// rogue client cannot inject cursor / colour / title sequences into the
+    /// shared console.
+    #[test]
+    fn ascii_and_control_hardening_is_preserved() {
+        assert_eq!(sanitize_display_text("hello"), "hello");
+        assert_eq!(sanitize_display_text("a\tb\nc"), "a\tb\nc");
+        let esc_input = "\x1b[31mX";
+        let esc_output = sanitize_display_text(esc_input);
+        assert!(
+            !esc_output.contains('\x1b'),
+            "raw ESC must not appear in output: {esc_output:?}"
+        );
+    }
+
+    /// Non-ASCII characters render losslessly. `char::escape_default` emits
+    /// `\u{NNNN}` for anything above `0x7F`, so the escaped form uniquely
+    /// decodes back to the original scalar — no `\xNN` low-byte collisions.
+    #[test]
+    fn non_ascii_is_rendered_losslessly() {
+        for ch in ['\u{00e9}', '\u{0100}', '\u{1F600}'] {
+            let rendered = sanitize_display_text(&ch.to_string());
+            assert!(
+                rendered.starts_with("\\u{"),
+                "expected \\u{{NNNN}} form for {ch:?}, got {rendered:?}"
+            );
+        }
     }
 }
