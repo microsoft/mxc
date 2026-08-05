@@ -257,11 +257,13 @@ pub use state_aware::{
     IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
     IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
+    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest, IsolationSessionUser,
     StateAwareIsolationSession,
 };
+pub use state_aware::{
+    IsolationSessionStart, StartExperimental, StartIsolationSession, StartPhase, StartRequest,
+};
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
-pub use state_aware::{StartExperimental, StartPhase, StartRequest};
 pub use state_aware::{
     StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionExperimental, WslcProvisionRequest,
 };

@@ -5,8 +5,11 @@ use crate::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_telemetry, convert_version,
 };
 use crate::error::WxcError;
-use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
-use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+use crate::models::{
+    IsolationSessionProvisionConfig, IsolationSessionStartConfig, IsolationSessionUser,
+    WslcProvisionConfig,
+};
+use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision, StateAwareStart};
 use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -20,12 +23,20 @@ fn convert_state_aware_isolation_session(
         .map(convert_isolation_session_provision)
 }
 
+fn convert_isolation_session_user(value: contract::IsolationSessionUser) -> IsolationSessionUser {
+    let contract::IsolationSessionUser { upn, wam_token } = value;
+    IsolationSessionUser { upn, wam_token }
+}
+
 fn convert_isolation_session_provision(
     value: contract::IsolationSessionProvision,
 ) -> IsolationSessionProvisionConfig {
-    let contract::IsolationSessionProvision { app_id } = value;
+    // Destructure without `..` so a new contract field fails to compile until
+    // it is mapped, rather than being silently dropped.
+    let contract::IsolationSessionProvision { app_id, user } = value;
     IsolationSessionProvisionConfig {
         app_id: app_id.into_option(),
+        user: user.into_option().map(convert_isolation_session_user),
     }
 }
 
@@ -113,8 +124,20 @@ fn convert_wslc_provision_experimental(
     wslc.into_option().and_then(convert_state_aware_wslc)
 }
 
-fn consume_start_experimental(value: contract::StartExperimental) {
-    let contract::StartExperimental {} = value;
+fn convert_start_experimental(value: contract::StartExperimental) -> StateAwareStart {
+    let contract::StartExperimental { isolation_session } = value;
+    match isolation_session.into_option() {
+        Some(value) => {
+            let contract::StartIsolationSession { start } = value;
+            StateAwareStart::IsolationSession(start.into_option().map(|value| {
+                let contract::IsolationSessionStart { user } = value;
+                IsolationSessionStartConfig {
+                    user: user.into_option().map(convert_isolation_session_user),
+                }
+            }))
+        }
+        None => StateAwareStart::Absent,
+    }
 }
 
 fn consume_exec_experimental(value: contract::ExecExperimental) {
@@ -258,11 +281,11 @@ pub(super) fn start_into_input(
         telemetry,
         experimental,
     } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_start_experimental(experimental);
-    }
+    let config = experimental
+        .into_option()
+        .map_or(StateAwareStart::Absent, convert_start_experimental);
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id })
+    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id, config })
 }
 
 pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwareInput, WxcError> {

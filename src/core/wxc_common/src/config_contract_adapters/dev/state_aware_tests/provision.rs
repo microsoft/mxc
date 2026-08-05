@@ -4,7 +4,7 @@
 use super::common::{adapt, assert_clean_common, assert_common_matches_legacy};
 use crate::config_parser::legacy_payload_reference::extract;
 use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
-use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision, StateAwareStart};
 use crate::wire;
 use mxc_config_contract::dev as contract;
 
@@ -362,6 +362,12 @@ fn non_provision_phases_reject_backend_payloads_and_invalid_wrappers() {
             ""
         };
         for backend in ["isolation_session", "windows_sandbox", "wslc"] {
+            // `start` + `isolation_session` is the one accepted combination: it
+            // carries the Entra credential bundle. Its own coverage is in
+            // `start_accepts_the_isolation_session_section` below.
+            if phase == "start" && backend == "isolation_session" {
+                continue;
+            }
             let experimental = serde_json::json!({backend: {phase: {}}});
             let json = format!(
                 r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{experimental}}}"#
@@ -379,6 +385,47 @@ fn non_provision_phases_reject_backend_payloads_and_invalid_wrappers() {
             r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{{}},"experimental":{{}}}}"#
         );
         assert!(contract::parse_request(&json).is_err(), "{json}");
+    }
+}
+
+#[test]
+fn start_accepts_the_isolation_session_section() {
+    // Presence distinctions must survive adaptation. `Absent` means the backend
+    // section itself was omitted; `IsolationSession(None)` means the section was
+    // present but carried no start block — the same distinction provision draws.
+    let cases = [
+        (r#""experimental":{}"#, None),
+        (r#""experimental":{"isolation_session":{}}"#, Some(None)),
+        (
+            r#""experimental":{"isolation_session":{"start":{}}}"#,
+            Some(Some(None)),
+        ),
+        (
+            r#""experimental":{"isolation_session":{"start":{"user":{"upn":"alice@contoso.com","wamToken":"tok"}}}}"#,
+            Some(Some(Some(("alice@contoso.com", "tok")))),
+        ),
+    ];
+
+    for (experimental, expected) in cases {
+        let json = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"id",{experimental}}}"#
+        );
+        let (_common, operation) = adapt(&json);
+        let StateAwareOperation::Start { config, .. } = operation else {
+            panic!("wrong operation: {json}");
+        };
+        let observed = match config {
+            StateAwareStart::Absent => None,
+            StateAwareStart::IsolationSession(config) => {
+                Some(config.map(|config| config.user.map(|user| (user.upn, user.wam_token))))
+            }
+        };
+        let expected = expected.map(|section| {
+            section.map(|user| {
+                user.map(|(upn, token): (&str, &str)| (upn.to_owned(), token.to_owned()))
+            })
+        });
+        assert_eq!(observed, expected, "{json}");
     }
 }
 

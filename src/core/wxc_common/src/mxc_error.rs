@@ -558,8 +558,8 @@ mod tests {
     #[test]
     fn display_without_api_failure_is_code_and_message_only() {
         assert_eq!(
-            MxcError::policy_validation("appId must not contain control characters").to_string(),
-            "policy_validation: appId must not contain control characters"
+            MxcError::policy_validation("user.upn must contain '@'").to_string(),
+            "policy_validation: user.upn must contain '@'"
         );
     }
 

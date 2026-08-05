@@ -222,6 +222,10 @@ export interface IsolationSessionProvision {
    * Optional application identifier carried by the sandbox identity.
    */
   appId?: string;
+  /**
+   * Optional Entra credentials selecting a cloud-agent sandbox. Absent provisions a local agent user.
+   */
+  user?: IsolationSessionUser;
 }
 
 /**
@@ -272,6 +276,34 @@ export interface IsolationSessionProvisionRequest {
    * Exact development contract version.
    */
   version: Version;
+}
+
+/**
+ * IsolationSession settings accepted at start.
+ *
+ * The `sandboxId` returned by provision carries no Entra marker, so an Entra-backed sandbox re-supplies the bundle here for the OS to validate against the agent user it assigned at provision.
+ */
+export interface IsolationSessionStart {
+  /**
+   * Optional Entra credentials for an Entra-backed sandbox.
+   */
+  user?: IsolationSessionUser;
+}
+
+/**
+ * Entra cloud-agent credentials accepted by the IsolationSession lifecycle.
+ *
+ * Both members are required when the bundle is supplied. `wam_token` is an opaque bearer credential passed verbatim to the OS-side service; MXC stores nothing. Shape validation (UPN containing `@`, non-empty token) is a backend semantic invariant and surfaces as `policy_validation`, not here.
+ */
+export interface IsolationSessionUser {
+  /**
+   * Entra user principal name for the cloud-agent identity.
+   */
+  upn: string;
+  /**
+   * Web Account Manager token authenticating the UPN.
+   */
+  wamToken: string;
 }
 
 export type LaunchMethod = "exec" | "open";
@@ -749,6 +781,20 @@ export interface Seatbelt {
  * Experimental settings accepted by the `start` phase.
  */
 export interface StartExperimental {
+  /**
+   * Optional IsolationSession start-phase settings.
+   */
+  isolation_session?: StartIsolationSession;
+}
+
+/**
+ * IsolationSession settings accepted by a start request.
+ */
+export interface StartIsolationSession {
+  /**
+   * Optional start-phase settings.
+   */
+  start?: IsolationSessionStart;
 }
 
 export type StartPhase = "start";

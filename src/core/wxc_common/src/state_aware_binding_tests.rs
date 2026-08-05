@@ -27,6 +27,7 @@ enum Config {
 
 trait Case: Sized {
     type ProvisionConfig;
+    type StartConfig;
     const BACKEND: &'static str;
     const PREFIX: &'static str;
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config;
@@ -41,6 +42,7 @@ struct Wslc;
 
 impl Case for Isolation {
     type ProvisionConfig = IsolationSessionProvisionConfig;
+    type StartConfig = IsolationSessionStartConfig;
     const BACKEND: &'static str = "isolation_session";
     const PREFIX: &'static str = "iso";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
@@ -57,6 +59,7 @@ impl Case for Isolation {
 
 impl Case for WindowsSandbox {
     type ProvisionConfig = ();
+    type StartConfig = ();
     const BACKEND: &'static str = "windows_sandbox";
     const PREFIX: &'static str = "wsb";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
@@ -71,6 +74,7 @@ impl Case for WindowsSandbox {
 
 impl Case for Wslc {
     type ProvisionConfig = WslcProvisionConfig;
+    type StartConfig = ();
     const BACKEND: &'static str = "wslc";
     const PREFIX: &'static str = "wslc";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
@@ -154,7 +158,7 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
     const ID_PREFIX: &'static str = C::PREFIX;
     const BACKEND_KEY: &'static str = C::BACKEND;
     type ProvisionConfig = C::ProvisionConfig;
-    type StartConfig = ();
+    type StartConfig = C::StartConfig;
     type ExecConfig = ();
     type StopConfig = ();
     type DeprovisionConfig = ();
@@ -181,7 +185,7 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
         &self,
         id: &str,
         request: &ExecutionRequest,
-        config: Option<&()>,
+        config: Option<&C::StartConfig>,
     ) -> Result<(), MxcError> {
         self.observe(true, Phase::Start, Some(id), request, unit(config), None)
     }
@@ -238,7 +242,7 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
         &mut self,
         id: &str,
         request: &ExecutionRequest,
-        config: Option<()>,
+        config: Option<C::StartConfig>,
     ) -> Result<StartResult<()>, MxcError> {
         self.observe(
             false,
@@ -308,7 +312,7 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
     }
 }
 
-fn unit(config: Option<&()>) -> Config {
+fn unit<T>(config: Option<&T>) -> Config {
     config.map_or(Config::Absent, |_| Config::Unit)
 }
 

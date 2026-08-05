@@ -4,6 +4,10 @@
 use crate::dev::{OptionalField, Telemetry, Version};
 use serde::Deserialize;
 
+mod isolation_session;
+
+pub use isolation_session::{IsolationSessionStart, StartIsolationSession};
+
 string_marker! {
     /// The `start` phase of the state-aware configuration contract.
     pub struct StartPhase => "start";
@@ -13,7 +17,11 @@ string_marker! {
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StartExperimental {}
+pub struct StartExperimental {
+    /// Optional IsolationSession start-phase settings.
+    #[serde(rename = "isolation_session", default)]
+    pub isolation_session: OptionalField<StartIsolationSession>,
+}
 
 /// A complete state-aware `start` request.
 #[derive(Debug, Deserialize)]

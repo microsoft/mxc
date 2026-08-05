@@ -293,15 +293,49 @@ fn rejects_forbidden_fields() {
 
 #[test]
 fn rejects_backend_experimental_fields() {
+    // `isolation_session` is deliberately absent: start accepts that section for
+    // the Entra credential bundle. Every other backend key stays rejected.
     for field in [
         r#""test": {}"#,
         r#""windows_sandbox": {}"#,
-        r#""isolation_session": {}"#,
         r#""wslc": {}"#,
         r#""seatbelt": {}"#,
         r#""macos_sandbox": {}"#,
     ] {
         let json = request_with_additional_fields(&format!(r#""experimental": {{{field}}}"#));
+        assert_invalid(&json);
+    }
+}
+
+#[test]
+fn accepts_isolation_session_start_section() {
+    for section in [
+        r#""isolation_session": {}"#,
+        r#""isolation_session": {"start": {}}"#,
+        r#""isolation_session": {"start": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}"#,
+    ] {
+        let json = request_with_additional_fields(&format!(r#""experimental": {{{section}}}"#));
+        assert_valid(&json);
+    }
+}
+
+#[test]
+fn rejects_malformed_isolation_session_start_section() {
+    for section in [
+        // Unknown members stay closed at every nesting level.
+        r#""isolation_session": {"provision": {}}"#,
+        r#""isolation_session": {"start": {"unknownField": "value"}}"#,
+        r#""isolation_session": {"start": {"user": {"upn": "a@b.com", "wamToken": "tok", "extra": 1}}}"#,
+        // Both members of the bundle are required when it is supplied.
+        r#""isolation_session": {"start": {"user": {"upn": "a@b.com"}}}"#,
+        r#""isolation_session": {"start": {"user": {"wamToken": "tok"}}}"#,
+        // Wrong types for the bundle and its members.
+        r#""isolation_session": {"start": {"user": null}}"#,
+        r#""isolation_session": {"start": {"user": "alice"}}"#,
+        r#""isolation_session": {"start": {"user": {"upn": 1, "wamToken": "tok"}}}"#,
+        r#""isolation_session": {"start": {"user": {"upn": "a@b.com", "wamToken": 1}}}"#,
+    ] {
+        let json = request_with_additional_fields(&format!(r#""experimental": {{{section}}}"#));
         assert_invalid(&json);
     }
 }

@@ -33,6 +33,28 @@ export type StateAwareContainmentBackend = Extract<
 export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
+const ISO_USER_INSPECT = Symbol.for('nodejs.util.inspect.custom');
+
+/**
+ * Entra credentials, supplied at provision to opt into an Entra-backed
+ * sandbox and at start to authenticate the session. `wamToken` is treated
+ * as a secret: `util.inspect` and `console.log` redact it. `JSON.stringify`
+ * is unaffected — the wire envelope carries the token verbatim.
+ */
+export class IsolationSessionUserConfig {
+  readonly upn: string;
+  readonly wamToken: string;
+
+  constructor(upn: string, wamToken: string) {
+    this.upn = upn;
+    this.wamToken = wamToken;
+  }
+
+  [ISO_USER_INSPECT](): string {
+    return `IsolationSessionUserConfig { upn: '${this.upn}', wamToken: '<redacted>' }`;
+  }
+}
+
 /** The exact contract currently registered for state-aware requests. */
 export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
 
@@ -52,6 +74,12 @@ interface StateAwareConfig {
 // implements. TypeScript rejects passing fields outside this set.
 
 export interface IsolationSessionProvisionConfig extends StateAwareConfig {
+  /**
+   * Optional Entra credentials. When supplied, provisioning uses the Entra
+   * identity for the sandbox; the same `user` must be supplied to
+   * `startSandbox`. Hosts that don't support this surface `backend_unavailable`.
+   */
+  user?: IsolationSessionUserConfig;
   /**
    * Optional identifier for the calling application.
    *
@@ -110,7 +138,14 @@ export type IsolationSessionNetworkConfig =
       proxy?: never;
     };
 
-export type IsolationSessionStartConfig = StateAwareConfig;
+export interface IsolationSessionStartConfig extends StateAwareConfig {
+  /**
+   * Entra credentials for an Entra-backed sandbox. Supply the same UPN used
+   * at provision, with a current WAM token; the OS validates the token
+   * against the agent user assigned at provision.
+   */
+  user?: IsolationSessionUserConfig;
+}
 
 export interface IsolationSessionExecConfig extends StateAwareConfig {
   process: ProcessConfig;
@@ -134,9 +169,9 @@ export interface IsolationSessionProvisionMetadata {
 }
 
 // WindowsSandbox per-(backend, phase) Configs. WindowsSandbox holds a single
-// active sandbox behind a persistent host-side daemon. Filesystem policy
-// (readwrite/readonly/denied HOST paths) is honored at provision and is
-// immutable thereafter.
+// active sandbox behind a persistent host-side daemon. Unlike IsolationSession
+// it has no Entra/`user` bundle. Filesystem policy (readwrite/readonly/denied
+// HOST paths) is honored at provision and is immutable thereafter.
 
 export interface WindowsSandboxProvisionConfig extends StateAwareConfig {
   /**

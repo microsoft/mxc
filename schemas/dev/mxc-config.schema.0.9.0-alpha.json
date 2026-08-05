@@ -445,6 +445,10 @@
         "appId": {
           "description": "Optional application identifier carried by the sandbox identity.",
           "type": "string"
+        },
+        "user": {
+          "$ref": "#/definitions/IsolationSessionUser",
+          "description": "Optional Entra credentials selecting a cloud-agent sandbox. Absent provisions a local agent user."
         }
       },
       "type": "object"
@@ -501,6 +505,36 @@
         "network",
         "phase",
         "version"
+      ],
+      "type": "object"
+    },
+    "IsolationSessionStart": {
+      "additionalProperties": false,
+      "description": "IsolationSession settings accepted at start.\n\nThe `sandboxId` returned by provision carries no Entra marker, so an Entra-backed sandbox re-supplies the bundle here for the OS to validate against the agent user it assigned at provision.",
+      "properties": {
+        "user": {
+          "$ref": "#/definitions/IsolationSessionUser",
+          "description": "Optional Entra credentials for an Entra-backed sandbox."
+        }
+      },
+      "type": "object"
+    },
+    "IsolationSessionUser": {
+      "additionalProperties": false,
+      "description": "Entra cloud-agent credentials accepted by the IsolationSession lifecycle.\n\nBoth members are required when the bundle is supplied. `wam_token` is an opaque bearer credential passed verbatim to the OS-side service; MXC stores nothing. Shape validation (UPN containing `@`, non-empty token) is a backend semantic invariant and surfaces as `policy_validation`, not here.",
+      "properties": {
+        "upn": {
+          "description": "Entra user principal name for the cloud-agent identity.",
+          "type": "string"
+        },
+        "wamToken": {
+          "description": "Web Account Manager token authenticating the UPN.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upn",
+        "wamToken"
       ],
       "type": "object"
     },
@@ -1340,6 +1374,23 @@
     "StartExperimental": {
       "additionalProperties": false,
       "description": "Experimental settings accepted by the `start` phase.",
+      "properties": {
+        "isolation_session": {
+          "$ref": "#/definitions/StartIsolationSession",
+          "description": "Optional IsolationSession start-phase settings."
+        }
+      },
+      "type": "object"
+    },
+    "StartIsolationSession": {
+      "additionalProperties": false,
+      "description": "IsolationSession settings accepted by a start request.",
+      "properties": {
+        "start": {
+          "$ref": "#/definitions/IsolationSessionStart",
+          "description": "Optional start-phase settings."
+        }
+      },
       "type": "object"
     },
     "StartPhase": {

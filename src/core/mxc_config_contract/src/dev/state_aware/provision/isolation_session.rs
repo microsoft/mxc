@@ -150,6 +150,22 @@ impl schemars::JsonSchema for IsolationSessionNetwork {
     }
 }
 
+/// Entra cloud-agent credentials accepted by the IsolationSession lifecycle.
+///
+/// Both members are required when the bundle is supplied. `wam_token` is an
+/// opaque bearer credential passed verbatim to the OS-side service; MXC stores
+/// nothing. Shape validation (UPN containing `@`, non-empty token) is a backend
+/// semantic invariant and surfaces as `policy_validation`, not here.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsolationSessionUser {
+    /// Entra user principal name for the cloud-agent identity.
+    pub upn: String,
+    /// Web Account Manager token authenticating the UPN.
+    pub wam_token: String,
+}
+
 /// IsolationSession settings accepted during provisioning.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -158,6 +174,10 @@ pub struct IsolationSessionProvision {
     /// Optional application identifier carried by the sandbox identity.
     #[serde(default)]
     pub app_id: OptionalField<String>,
+    /// Optional Entra credentials selecting a cloud-agent sandbox. Absent
+    /// provisions a local agent user.
+    #[serde(default)]
+    pub user: OptionalField<IsolationSessionUser>,
 }
 
 /// State-aware IsolationSession experimental settings.

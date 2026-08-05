@@ -27,7 +27,7 @@ pub use isolation_session::{
     IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
     IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
+    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest, IsolationSessionUser,
     StateAwareIsolationSession,
 };
 pub use windows_sandbox::{

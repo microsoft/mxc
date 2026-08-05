@@ -124,12 +124,15 @@ pub fn state_aware_policy_hash(
 fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
     match operation {
         StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
-            IsolationSessionProvisionConfig { app_id },
+            IsolationSessionProvisionConfig { app_id, user },
         ))) => {
             let mut config = Map::new();
             if let Some(app_id) = app_id {
                 config.insert("appId".into(), Value::String(app_id.clone()));
             }
+            // Entra credentials are an identity, not policy: `wamToken` is a
+            // bearer secret and `upn` names an account. Neither is projected.
+            let _excluded_entra_user = user;
             Value::Object(config)
         }
         StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(WslcProvisionConfig {
@@ -150,11 +153,14 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             | StateAwareProvision::WindowsSandbox
             | StateAwareProvision::Wslc(None),
         ) => Value::Null,
-        // Sandbox IDs are not policy and can contain account identities.
+        // The start-phase Entra bundle is an identity, not policy: `wamToken`
+        // is a bearer secret and `upn` names an account.
         StateAwareOperation::Start {
             sandbox_id: _excluded_sandbox_id,
-        }
-        | StateAwareOperation::Exec {
+            config: _excluded_entra_user,
+        } => Value::Null,
+        // Sandbox IDs are not policy and can contain account identities.
+        StateAwareOperation::Exec {
             sandbox_id: _excluded_sandbox_id,
         }
         | StateAwareOperation::Stop {
@@ -448,6 +454,7 @@ fn is_upn_shaped(identity: &str) -> bool {
 mod tests {
     use super::*;
     use crate::models::{ContainmentBackend, ProxyAddress};
+    use crate::state_aware_operation::StateAwareStart;
 
     fn request() -> ExecutionRequest {
         let mut r = ExecutionRequest {
@@ -882,6 +889,7 @@ mod tests {
             (
                 StateAwareOperation::Start {
                     sandbox_id: "wsb:deadbeef".into(),
+                    config: StateAwareStart::Absent,
                 },
                 "start",
             ),

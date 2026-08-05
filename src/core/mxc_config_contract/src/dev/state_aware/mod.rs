@@ -70,7 +70,7 @@ pub use provision::{
     IsolationSessionContainment, IsolationSessionDirectionalNetwork, IsolationSessionLegacyNetwork,
     IsolationSessionLegacyNetworkAllow, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
+    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest, IsolationSessionUser,
     StateAwareIsolationSession,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
@@ -80,5 +80,7 @@ pub use provision::{
 pub use provision::{
     WindowsSandboxContainment, WindowsSandboxExperimental, WindowsSandboxProvisionRequest,
 };
-pub use start::{StartExperimental, StartPhase, StartRequest};
+pub use start::{
+    IsolationSessionStart, StartExperimental, StartIsolationSession, StartPhase, StartRequest,
+};
 pub use stop::{StopExperimental, StopPhase, StopRequest};

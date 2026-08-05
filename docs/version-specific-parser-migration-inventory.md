@@ -49,8 +49,8 @@ The differential harness continues to record the seven exact-stricter results
 so later contract changes cannot accidentally weaken the exact boundary. It
 also compares every corpus document through the public loader and the exact
 parser oracle. The retained rolling characterization is platform-sensitive:
-Windows records 333 equivalent accepts and 14 shared rejections, while Linux
-records 332 equivalent accepts and 15 shared rejections. Both retain seven
+Windows records 335 equivalent accepts and 14 shared rejections, while Linux
+records 334 equivalent accepts and 15 shared rejections. Both retain seven
 classified exact-stricter rejections, no exact-looser acceptance, and no
 accepted-model mismatch. Assertion failures list the shared-rejection files so
 future platform-specific movement is attributable rather than represented only
