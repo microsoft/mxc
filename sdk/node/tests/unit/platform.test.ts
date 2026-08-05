@@ -371,12 +371,61 @@ describe('isolation_session availability gate', () => {
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
-  it('always reports processcontainer as the default on Windows (no build gate)', { skip: !isWindows }, () => {
-    // Even on a hypothetical sub-24H2 build the SDK now reports support;
-    // the runtime gate has moved into the native binary.
-    _setWindowsBuildQuery(() => ({ major: 22000, minor: 0 }));
+  it('reports processcontainer as the default on a build at or above the floor', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => ({ major: 26100, minor: 0 }));
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
     assert.strictEqual(support.availableMethods[0], 'processcontainer');
+  });
+});
+
+// `processcontainer`'s product floor is Windows 11 24H2 (build 26100). Below
+// it the SDK must report the host as unsupported rather than let callers
+// discover the gap at spawn time.
+describe('processcontainer build gate', () => {
+  beforeEach(() => {
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setWindowsBuildQuery(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('reports unsupported below build 26100', { skip: !isWindows }, () => {
+    // 22000 = Windows 11 21H2, 22631 = 23H2, 19045 = Windows 10 22H2.
+    for (const major of [19045, 22000, 22631, 26099]) {
+      _resetPlatformSupportCache();
+      _setWindowsBuildQuery(() => ({ major, minor: 0 }));
+      const support = getPlatformSupport();
+      assert.ok(!support.isSupported, `build ${major} should be unsupported`);
+      assert.ok(
+        !support.availableMethods.includes('processcontainer'),
+        `build ${major} must not offer processcontainer`,
+      );
+      assert.match(support.reason ?? '', new RegExp(`${major}`));
+      // Windows Sandbox has its own, lower floor, so it may still be listed —
+      // but it is experimental-only and must not make the host supported.
+      assert.ok(!support.availableMethods.includes('isolation_session'));
+    }
+  });
+
+  it('reports supported at or above build 26100', { skip: !isWindows }, () => {
+    for (const major of [26100, 26200, 26600]) {
+      _resetPlatformSupportCache();
+      _setWindowsBuildQuery(() => ({ major, minor: 0 }));
+      const support = getPlatformSupport();
+      assert.ok(support.isSupported, `build ${major} should be supported`);
+      assert.ok(support.availableMethods.includes('processcontainer'));
+    }
+  });
+
+  it('reports supported when the build cannot be read', { skip: !isWindows }, () => {
+    // A registry read failure must not disable sandboxing on a host that is
+    // in fact supported.
+    _setWindowsBuildQuery(() => null);
+    const support = getPlatformSupport();
+    assert.ok(support.isSupported);
+    assert.ok(support.availableMethods.includes('processcontainer'));
   });
 });

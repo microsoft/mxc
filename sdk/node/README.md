@@ -334,7 +334,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux: neither LXC nor Bubblewrap on PATH. On macOS: schema version < `0.6.0-alpha`. | Install LXC/Bubblewrap, or switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux: LXC is not installed and Bubblewrap cannot sandbox — `bwrap` is missing, or it is installed but cannot create a user namespace. On Windows: the host build is below 26100 (24H2) and no other containment backend is available. On macOS: schema version < `0.6.0-alpha`. | Install LXC/Bubblewrap; on a hardened kernel, enable unprivileged user namespaces (`kernel.unprivileged_userns_clone=1`) or allow `bwrap` in AppArmor. On macOS, switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |

@@ -63,20 +63,24 @@ type WindowsBuild = { major: number; minor: number } | null;
  * Default implementation that reads `CurrentBuild` / `UBR` from the
  * registry. Replaceable via {@link _setWindowsBuildQuery} in tests so we
  * can exercise the IsolationSession version gate deterministically.
+ *
+ * `UBR` is only needed for the IsolationSession minor-build gate, so an
+ * unreadable `UBR` degrades to `minor: 0` rather than discarding
+ * `CurrentBuild` — otherwise a missing revision value would silently bypass
+ * the `processcontainer` build floor.
  */
 function defaultWindowsBuildQuery(): WindowsBuild {
   const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
   const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
-  const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
-  if (!currentBuild || !ubrValue) {
+  if (!currentBuild) {
     return null;
   }
   const major = parseInt(currentBuild, 10);
-  const minor = Number(ubrValue);
-  if (isNaN(major) || isNaN(minor)) {
+  if (isNaN(major)) {
     return null;
   }
-  return { major, minor };
+  const minor = Number(queryWindowsRegistry(registryPath, 'UBR'));
+  return { major, minor: isNaN(minor) ? 0 : minor };
 }
 
 let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
@@ -85,6 +89,13 @@ let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
 export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
   windowsBuildQuery = fn ?? defaultWindowsBuildQuery;
 }
+
+/**
+ * Minimum Windows build the `processcontainer` backend supports — 26100
+ * (Windows 11 24H2). This is the product floor documented in the README and in
+ * `docs/process-container/os-version-support.md`.
+ */
+const MIN_PROCESSCONTAINER_BUILD = 26100;
 
 /**
  * Check whether the host supports the IsolationSession backend.
@@ -273,12 +284,13 @@ function computeSupport(): PlatformSupport {
     // are installed; callers pick via the containment field.
     const methods: ContainmentBackend[] = [];
     if (isLxcAvailable()) methods.push('lxc');
-    if (isBubblewrapAvailable()) methods.push('bubblewrap');
+    const bubblewrap = probeBubblewrap();
+    if (bubblewrap.ok) methods.push('bubblewrap');
     if (methods.length > 0) {
       support.isSupported = true;
       support.availableMethods = methods;
     } else {
-      support.reason = 'Neither LXC nor Bubblewrap is available on this system';
+      support.reason = `No Linux containment backend is usable: LXC is not installed, and bubblewrap ${bubblewrap.detail}`;
     }
     return support;
   }
@@ -288,14 +300,37 @@ function computeSupport(): PlatformSupport {
     return support;
   }
 
-  support.isSupported = true;
-  support.availableMethods = ['processcontainer'];
+  // The host build is the real gate on Windows: below the product floor
+  // `processcontainer` fails at spawn rather than at detection. An unreadable
+  // registry leaves the build unknown, which is treated as modern so a
+  // detection failure never declares a supported host unsupported.
+  const build = windowsBuildQuery();
+  const methods: ContainmentBackend[] = [];
+  if (!build || build.major >= MIN_PROCESSCONTAINER_BUILD) {
+    methods.push('processcontainer');
+  }
+  // Windows Sandbox and IsolationSession have their own floors, so a host
+  // below the processcontainer floor may still have them. They are reported,
+  // but they are experimental-only backends and callers reach them by opting
+  // in explicitly, so they cannot carry `isSupported` — that flag is what
+  // guards the default `processcontainer` spawn.
   if (isWindowsSandboxAvailable()) {
-    support.availableMethods.push('windows_sandbox');
+    methods.push('windows_sandbox');
   }
   if (isIsoSessionSupported()) {
-    support.availableMethods.push('isolation_session');
+    methods.push('isolation_session');
   }
+  support.availableMethods = methods;
+
+  if (!methods.includes('processcontainer')) {
+    const alternatives = methods.length > 0 ? ` (experimental backends available: ${methods.join(', ')})` : '';
+    support.reason =
+      `Windows build ${build?.major} is below ${MIN_PROCESSCONTAINER_BUILD}, ` +
+      `the minimum supported build (Windows 11 24H2)${alternatives}`;
+    return support;
+  }
+
+  support.isSupported = true;
   populateIsolationFromProbe(support);
   return support;
 }
@@ -313,15 +348,95 @@ function isLxcAvailable(): boolean {
 }
 
 /**
- * Check if Bubblewrap (bwrap) is available on the system
+ * Arguments for a minimal end-to-end containment probe.
+ *
+ * `bwrap --version` only prints a banner — it never creates a namespace — so
+ * it passes on hosts where unprivileged user namespaces are disabled
+ * (`kernel.unprivileged_userns_clone=0`) or where AppArmor denies `bwrap`
+ * (Ubuntu 23.10+), both of which then fail at every spawn.
+ *
+ * The shape mirrors a real run: the same namespaces the Bubblewrap backend
+ * unshares, plus `--proc` / `--dev`, and `--clearenv` so the payload is
+ * resolved through `execvp`'s built-in `/bin:/usr/bin` default rather than the
+ * caller's `PATH`. Binds use `--ro-bind-try` on the few directories a shell
+ * needs — binding `/` instead would make the probe fail on any host with an
+ * awkward submount, since `bwrap` treats a failed submount remount as fatal.
+ *
+ * Kept in step with the engine's `BWRAP_PROBE_ARGS`
+ * (`src/core/mxc_engine/src/platform.rs`), which is pinned against the
+ * production argument builder by a unit test.
  */
-function isBubblewrapAvailable(): boolean {
+const BWRAP_PROBE_ARGS = [
+  '--unshare-user',
+  '--unshare-pid',
+  '--unshare-ipc',
+  '--unshare-uts',
+  '--unshare-net',
+  '--ro-bind-try',
+  '/bin',
+  '/bin',
+  '--ro-bind-try',
+  '/usr/bin',
+  '/usr/bin',
+  '--ro-bind-try',
+  '/lib',
+  '/lib',
+  '--ro-bind-try',
+  '/lib64',
+  '/lib64',
+  '--ro-bind-try',
+  '/usr/lib',
+  '/usr/lib',
+  '--ro-bind-try',
+  '/usr/lib64',
+  '/usr/lib64',
+  '--proc',
+  '/proc',
+  '--dev',
+  '/dev',
+  '--clearenv',
+  '--',
+  'sh',
+  '-c',
+  'exit 0',
+];
+
+/** Outcome of {@link probeBubblewrap}; `detail` is empty when `ok`. */
+type BubblewrapProbe = { ok: boolean; detail: string };
+
+/**
+ * Check whether Bubblewrap can actually create a sandbox on this system,
+ * reporting bwrap's own diagnostic when it can't.
+ */
+function probeBubblewrap(): BubblewrapProbe {
   try {
-    execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
+    execFileSync('bwrap', BWRAP_PROBE_ARGS, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: 5000,
+    });
+    return { ok: true, detail: '' };
+  } catch (error) {
+    return { ok: false, detail: bwrapFailureDetail(error) };
   }
+}
+
+/** Reduce a failed bwrap run to a single length-capped line for a `reason`. */
+function bwrapFailureDetail(error: unknown): string {
+  const MAX_LEN = 200;
+  const { code, stderr } = (error ?? {}) as { code?: string; stderr?: Buffer | string };
+  if (code === 'ENOENT') {
+    return 'not installed';
+  }
+  const line = (stderr?.toString() ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) {
+    return 'failed with no diagnostic output';
+  }
+  // Spread so the cap counts code points and never splits a surrogate pair.
+  const chars = [...line];
+  return chars.length > MAX_LEN ? `${chars.slice(0, MAX_LEN).join('')}…` : line;
 }
 
 /**
