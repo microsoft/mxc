@@ -253,12 +253,14 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
-/// Configuration specific to the Isolation Session backend.
+/// State-aware start-phase config for the Isolation Session backend.
+/// Nested under `experimental.isolation_session.start`. Carries the Entra
+/// WAM token again for a cloud-agent sandbox — the `sandboxId` payload does
+/// not carry it. The one-shot surface takes no backend configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct IsolationSessionConfig {
-    /// Optional Entra cloud-agent credentials. Honored on the state-aware
-    /// `start` phase; rejected by the one-shot path.
+pub struct IsolationSessionStartConfig {
+    /// Optional Entra cloud-agent credentials.
     pub user: Option<IsolationSessionUser>,
 }
 
@@ -294,9 +296,17 @@ impl From<crate::wire::IsolationUser> for IsolationSessionUser {
 /// credentials when the caller wants a cloud-agent sandbox; absent for
 /// local sandboxes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
     pub user: Option<IsolationSessionUser>,
+    /// Optional identifier for the calling application — the Package Family
+    /// Name for a packaged app, any string otherwise. Carried verbatim into
+    /// the `sandboxId`; MXC does not interpret or verify it.
+    ///
+    /// An explicitly-supplied empty string is a **distinct** value from an
+    /// absent one and round-trips as such. A JSON `null` is a second spelling
+    /// of absent.
+    pub app_id: Option<String>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -683,9 +693,6 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
-    /// Isolation Session backend (experimental).
-    #[serde(rename = "isolation_session")]
-    pub isolation_session: Option<IsolationSessionConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
 }
@@ -922,11 +929,11 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_config_carries_optional_user() {
+    fn isolation_session_start_config_carries_optional_user() {
         let wire = json!({
             "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
         });
-        let parsed: IsolationSessionConfig = serde_json::from_value(wire).unwrap();
+        let parsed: IsolationSessionStartConfig = serde_json::from_value(wire).unwrap();
         assert!(parsed.user.is_some());
     }
 }

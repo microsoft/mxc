@@ -126,30 +126,43 @@ export interface Filesystem {
 }
 
 /**
- * IsolationSession backend config. Carries the one-shot `user` field and the per-phase state-aware nesting for the phases that take config (`provision` / `start`). `stop`, `deprovision`, and `exec` take no per-phase config payload: `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.
+ * IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision` / `start`). The one-shot surface takes no backend configuration at all. `stop`, `deprovision`, and `exec` take no per-phase config payload: `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.
  */
 export interface IsolationSession {
   /**
    * State-aware provision-phase configuration.
    */
-  provision?: IsolationSessionPhase | null;
+  provision?: IsolationSessionProvisionPhase | null;
   /**
    * State-aware start-phase configuration.
    */
-  start?: IsolationSessionPhase | null;
+  start?: IsolationSessionStartPhase | null;
+  [k: string]: unknown;
+}
+
+/**
+ * Provision-phase IsolationSession configuration (state-aware lifecycle).
+ * 
+ * Split from the start phase rather than shared: the two phases accept different fields, and a shared type would advertise every field on both in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
+ */
+export interface IsolationSessionProvisionPhase {
   /**
-   * Optional Entra cloud-agent user bundle (one-shot).
+   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
+   */
+  appId?: string | null;
+  /**
+   * Entra cloud-agent user bundle for this phase.
    */
   user?: IsolationUser | null;
   [k: string]: unknown;
 }
 
 /**
- * Per-phase IsolationSession configuration (state-aware lifecycle).
+ * Start-phase IsolationSession configuration (state-aware lifecycle).
  */
-export interface IsolationSessionPhase {
+export interface IsolationSessionStartPhase {
   /**
-   * Entra cloud-agent user bundle for this phase.
+   * Entra cloud-agent user bundle for this phase. Re-supplied at start because the `sandboxId` payload does not carry the WAM token.
    */
   user?: IsolationUser | null;
   [k: string]: unknown;

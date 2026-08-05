@@ -1190,6 +1190,7 @@ dependencies = [
 name = "isolation_session_common"
 version = "0.7.0"
 dependencies = [
+ "base64",
  "isolation_session_bindings",
  "serde",
  "serde_json",

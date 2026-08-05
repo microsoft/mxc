@@ -218,7 +218,7 @@ pub enum MxcRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::IsolationSessionConfig;
+    use crate::models::IsolationSessionStartConfig;
     use crate::mxc_error::MxcErrorCode;
     use serde::Deserialize;
     use serde_json::json;
@@ -489,7 +489,7 @@ mod tests {
         let parsed = parsed_with_experimental(Some(exp), Phase::Start);
 
         let error = parsed
-            .deserialize_config::<IsolationSessionConfig>("isolation_session", "start")
+            .deserialize_config::<IsolationSessionStartConfig>("isolation_session", "start")
             .unwrap_err();
 
         assert!(error
@@ -613,7 +613,7 @@ mod tests {
         let parsed = parsed_with_source(source_text, Phase::Start);
 
         let err = parsed
-            .deserialize_config::<IsolationSessionConfig>("isolation_session", "start")
+            .deserialize_config::<IsolationSessionStartConfig>("isolation_session", "start")
             .unwrap_err();
 
         assert!(

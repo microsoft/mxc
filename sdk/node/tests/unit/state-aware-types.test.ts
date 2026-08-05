@@ -104,9 +104,45 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.strictEqual(ok.user?.upn, 'alice@contoso.com');
     assert.ok(bare);
   });
+
+  it('accepts an optional appId', () => {
+    const cfg: IsolationSessionProvisionConfig = {
+      network,
+      appId: 'Contoso.App_8wekyb3d8bbwe',
+    };
+    assert.strictEqual(cfg.appId, 'Contoso.App_8wekyb3d8bbwe');
+  });
+
+  it('accepts an empty appId as a value distinct from omitting it', () => {
+    // A future OS API may assign meaning to the empty string, so the SDK must
+    // not treat it as equivalent to absent.
+    const empty: IsolationSessionProvisionConfig = { network, appId: '' };
+    const absent: IsolationSessionProvisionConfig = { network };
+    assert.strictEqual(empty.appId, '');
+    assert.strictEqual(absent.appId, undefined);
+    assert.ok('appId' in empty);
+    assert.ok(!('appId' in absent));
+  });
+
+  it('rejects a non-string appId', () => {
+    const cfg: IsolationSessionProvisionConfig = {
+      network,
+      // @ts-expect-error — appId is a string.
+      appId: 42,
+    };
+    assert.ok(cfg);
+  });
 });
 
 describe('IsolationSessionStartConfig', () => {
+  it('rejects appId (provision-only; fixed for the sandbox lifetime)', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — appId is accepted only at provision.
+      appId: 'Contoso.App_8wekyb3d8bbwe',
+    };
+    assert.ok(cfg);
+  });
+
   it('rejects cross-cutting fields the matrix marks as rejected', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — start phase does not honor filesystem.

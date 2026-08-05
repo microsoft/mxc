@@ -49,14 +49,20 @@ contract (including fields not yet exposed via the SDK).
 | `version` | string | SDK `SUPPORTED_VERSION` | Schema-version override. |
 | `network` | `{ defaultPolicy: 'allow'; allowLocalNetwork: true }` | — (**required**) | Unrestricted-network acknowledgment. The container runs on a network MXC cannot filter or deny (outbound open; a process inside can listen on a port reachable from outside via localhost), so the caller must explicitly acknowledge it. This exact value is the only one accepted; any other network policy (or omission) is rejected at provision, and `network` is not accepted on the post-provision phases (the posture is fixed at provision). |
 | `user` | `IsolationSessionUserConfig` | absent | Optional Entra credentials (see below). |
+| `appId` | string | absent | Optional identifier for the calling application — the Package Family Name for a packaged app, any string otherwise. MXC neither interprets nor verifies it: it is carried verbatim inside the returned `SandboxId` so later phases recover it without the caller re-supplying it. Nothing consumes it yet; it is accepted now so a future OS contract acting on the calling application's identity needs no breaking change. Validated structurally only (no control characters, at most 256 characters); rejections surface as `MxcError` with `code: 'policy_validation'`. Whitespace and case are preserved exactly, and an explicitly supplied empty string is a **distinct** value from omitting the field. Provision-phase only — it is fixed for the sandbox's lifetime, and the `IsolationSessionStartConfig` type rejects it at compile time. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | OS-assigned account name. Diagnostic only — not used as an addressing key. |
+| `agentUserName` | string | OS-assigned account name, also carried inside the `SandboxId` where it is the addressing key for later phases. |
 | `agentUserSid` | string | SID of the agent user. Diagnostic only. |
 | `ephemeralWorkspacePath` | string | A directory shared between the caller and this isolated user for staging files into the session. Each isolated user sees only its own workspace; the caller can access every concurrent sandbox's workspace. Deleted when the sandbox is deprovisioned. Does not change the working directory. |
+
+`appId` is deliberately **not** echoed in the metadata — the caller supplied the
+value, so returning it would be redundant surface. The `SandboxId` remains
+**opaque** to callers: the payload is an MXC implementation detail, and nothing
+in the SDK parses past the `iso:` prefix.
 
 ### Start
 
