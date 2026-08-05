@@ -359,13 +359,23 @@ fn is_bare_json_key(key: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// Maximum length of a sanitized identity. Long enough for the two shapes MXC
-/// mints itself (`sandbox-<16 hex>` = 24 chars, `wxc-<token>`), short enough
-/// that a caller cannot smuggle a payload through the field.
+/// Maximum length of a sanitized identity. Long enough for the MXC-minted
+/// shapes (`sandbox-<16 hex>` = 24 chars, `iso:`/`wsb:` state-aware ids),
+/// short enough that a caller cannot smuggle a payload through the field.
 const MAX_IDENTITY_LEN: usize = 64;
 
 /// Placeholder written when a caller-supplied identity is not an opaque token.
 pub const REDACTED_IDENTITY: &str = "redacted";
+
+/// Literal identity written by `AppContainerRunner`/`BaseContainerRunner` when
+/// the caller left `containerId` empty. Not caller-controlled, so it is always
+/// safe to log.
+const DEFAULT_CLI_IDENTITY: &str = "CLI";
+
+/// Length of the hex portion of a `sandbox-<hex>` identity minted by
+/// `sandbox_tracking::generate_sandbox_identity` (8 bytes of CSPRNG
+/// randomness rendered as lowercase hex).
+const SANDBOX_ID_HEX_LEN: usize = 16;
 
 /// Render a sandbox identity so it is safe to write to a diagnostic log file.
 ///
@@ -374,38 +384,51 @@ pub const REDACTED_IDENTITY: &str = "redacted";
 /// AppContainer profile name, which is the caller-supplied `containerId`
 /// straight out of the config. That makes it a *config value*, and config values
 /// must never reach a record (see the module-level content rules) — a caller can
-/// otherwise put a UPN, a path, a ticket number, or an arbitrary string into the
-/// audit stream.
+/// otherwise put a UPN, a path, a ticket number, or any other arbitrary string
+/// into the audit stream. Character and length checks alone cannot distinguish
+/// a caller-chosen opaque-looking string (e.g. `alice`, `ticket-1234`) from a
+/// value MXC actually minted, so this function does not attempt to recognise
+/// "opaque-looking" input at all.
 ///
-/// This function therefore allows through only identities that are recognisably
-/// opaque tokens:
+/// Instead it allows through only the closed set of shapes MXC itself
+/// produces, unconditionally redacting every caller-supplied `containerId`:
 ///
-/// * bounded length ([`MAX_IDENTITY_LEN`]);
-/// * ASCII alphanumeric plus `-`, `_`, and `.` only — with the two MXC-minted
-///   `iso:<token>` and `wsb:<token>` shapes also accepted; no `@` (UPN), no
-///   `\` or `/` (path), no whitespace, no control characters.
+/// * [`DEFAULT_CLI_IDENTITY`] — the literal default used when `containerId`
+///   is empty;
+/// * `sandbox-<16 lowercase hex>` — minted by
+///   `sandbox_tracking::generate_sandbox_identity` for the BaseContainer
+///   backend;
+/// * `iso:<token>` / `wsb:<token>` — state-aware sandbox ids minted by the
+///   IsolationSession / Windows Sandbox backends, bounded by
+///   [`MAX_IDENTITY_LEN`] and restricted to opaque token characters.
 ///
 /// Anything else becomes [`REDACTED_IDENTITY`]. That loses the join key for
-/// callers who chose a non-opaque `containerId`, which is the correct trade: a
+/// callers who chose their own `containerId`, which is the correct trade: a
 /// record with no join key is recoverable, a leaked identifier is not.
 pub fn sanitize_identity(identity: &str) -> &str {
     if identity.is_empty() {
         return identity;
     }
-    // Length cap applies to BOTH accepted shapes. Without this bound on the
-    // `iso:`/`wsb:` shape a caller who chose an overlong `containerId` could
-    // still smuggle a payload through the record by tagging it with a
-    // recognised prefix. Byte length matches the character length here because
-    // both shapes accept only ASCII (`is_ascii_alphanumeric` plus `-`/`_`/`.`
-    // / `:`), so a rejection on `.len()` and a rejection on `.chars().count()`
-    // are equivalent — the byte bound is used to stay consistent with the
-    // existing contract.
+    if identity == DEFAULT_CLI_IDENTITY {
+        return identity;
+    }
+    if let Some(hex) = identity.strip_prefix("sandbox-") {
+        if hex.len() == SANDBOX_ID_HEX_LEN
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return identity;
+        }
+        return REDACTED_IDENTITY;
+    }
+    // Length cap applies before shape-checking the `iso:`/`wsb:` prefix. Without
+    // this bound a caller who chose an overlong `containerId` could still
+    // smuggle a payload through the record by tagging it with a recognised
+    // prefix.
     if identity.len() > MAX_IDENTITY_LEN {
         return REDACTED_IDENTITY;
     }
-    let opaque = identity
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
     let mxc_opaque = identity
         .split_once(':')
         .map(|(prefix, token)| {
@@ -416,7 +439,7 @@ pub fn sanitize_identity(identity: &str) -> &str {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
         })
         .unwrap_or(false);
-    if opaque || mxc_opaque {
+    if mxc_opaque {
         identity
     } else {
         REDACTED_IDENTITY
@@ -609,14 +632,12 @@ mod tests {
     }
 
     #[test]
-    fn opaque_identities_pass_sanitization_unchanged() {
+    fn mxc_minted_identities_pass_sanitization_unchanged() {
         for id in [
             "sandbox-a3f1c8e40029bd17",
-            "wxc-abcd1234",
             "iso:wxc-abcd1234",
             "wsb:deadbeef",
             "CLI",
-            "my.container_id-7",
             "",
         ] {
             assert_eq!(sanitize_identity(id), id);
@@ -624,11 +645,19 @@ mod tests {
     }
 
     /// A caller-supplied `containerId` becomes the AppContainer profile name and
-    /// therefore the sandbox identity. It is a config value, so anything that is
-    /// not recognisably an opaque token must not reach a record.
+    /// therefore the sandbox identity. It is a config value, so it must always be
+    /// redacted regardless of shape — character/length checks cannot prove a
+    /// value is opaque rather than caller-chosen (e.g. `alice`, `ticket-1234`,
+    /// or a standalone `wxc-`-looking token that did not come through the
+    /// `iso:`/`wsb:` minting path).
     #[test]
-    fn non_opaque_caller_identities_are_redacted() {
+    fn caller_supplied_identities_are_always_redacted() {
         for id in [
+            "alice",
+            "secret",
+            "ticket-1234",
+            "my.container_id-7",
+            "wxc-abcd1234",
             "alice@contoso.com",
             "C:\\Users\\alice\\secret",
             "/home/alice/secret",
@@ -636,6 +665,26 @@ mod tests {
             "has\"quote",
             "has\nnewline",
             &"x".repeat(MAX_IDENTITY_LEN + 1),
+        ] {
+            assert_eq!(
+                sanitize_identity(id),
+                REDACTED_IDENTITY,
+                "should have been redacted: {id:?}"
+            );
+        }
+    }
+
+    /// A `sandbox-` prefix alone does not grant a pass: the hex portion must be
+    /// exactly [`SANDBOX_ID_HEX_LEN`] lowercase hex characters, matching
+    /// `sandbox_tracking::generate_sandbox_identity`'s output shape.
+    #[test]
+    fn malformed_sandbox_prefixed_identities_are_redacted() {
+        for id in [
+            "sandbox-",
+            "sandbox-abc",
+            "sandbox-A3F1C8E40029BD17",
+            "sandbox-a3f1c8e40029bd17extra",
+            "sandbox-not-hex-at-all!!",
         ] {
             assert_eq!(
                 sanitize_identity(id),

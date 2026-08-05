@@ -335,22 +335,35 @@ impl Logger {
         self.diag_accumulate("\n");
     }
 
+    /// Renders `msg` (possibly multi-line) into timestamped lines and issues a
+    /// **single** `write_all` for the whole assembled buffer.
+    ///
+    /// Two clones of the same `Logger` (or two processes) can append to the
+    /// same file concurrently. `File::write_all` on most platforms does not
+    /// guarantee a single syscall's data lands atomically relative to a
+    /// concurrent writer once split across multiple `write`/`write_all` calls,
+    /// so building the complete line(s) first and writing them in one call
+    /// keeps the on-disk format's one-record-per-line invariant even under
+    /// concurrent appenders.
     fn write_timestamped_file(file: &mut File, msg: &str, terminate: bool) {
+        use std::fmt::Write as _;
         let secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let lines: Vec<&str> = msg.split('\n').collect();
+        let mut out = String::with_capacity(msg.len() + lines.len() * 16);
         for (index, line) in lines.iter().enumerate() {
             let is_trailing_empty_line = index + 1 == lines.len() && line.is_empty();
             if is_trailing_empty_line && msg.ends_with('\n') {
                 break;
             }
-            let _ = write!(file, "[{}] {}", secs, line.trim_end_matches('\r'));
+            let _ = write!(out, "[{}] {}", secs, line.trim_end_matches('\r'));
             if index + 1 < lines.len() || terminate {
-                let _ = file.write_all(b"\n");
+                out.push('\n');
             }
         }
+        let _ = file.write_all(out.as_bytes());
     }
 
     /// Emit a structured [`AuditEvent`](crate::audit::AuditEvent) as a single

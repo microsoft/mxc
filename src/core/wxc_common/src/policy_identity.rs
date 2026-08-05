@@ -605,10 +605,9 @@ mod tests {
     }
 
     #[test]
-    fn opaque_identities_pass_through_unredacted() {
+    fn mxc_minted_identities_pass_through_unredacted() {
         for id in [
             "sandbox-a3f1c8e40029bd17",
-            "wxc-abcd1234",
             "iso:wxc-abcd1234",
             "wsb:deadbeef",
             "CLI",
@@ -643,14 +642,15 @@ mod tests {
     }
 
     /// A caller-supplied `containerId` becomes the sandbox identity on the
-    /// ProcessContainer path, so non-opaque values must be redacted rather than
-    /// echoed into a record.
+    /// ProcessContainer path, so it must be redacted rather than echoed into a
+    /// record — even when it happens to look like an opaque token, since
+    /// character/length checks alone cannot prove it wasn't chosen by the
+    /// caller (e.g. `alice`, `ticket-1234`).
     #[test]
-    fn non_opaque_identities_are_redacted() {
-        assert_eq!(
-            redact_identity("C:\\Users\\alice\\ticket-1234"),
-            crate::audit::REDACTED_IDENTITY
-        );
+    fn caller_supplied_identities_are_redacted() {
+        for id in ["C:\\Users\\alice\\ticket-1234", "alice", "ticket-1234"] {
+            assert_eq!(redact_identity(id), crate::audit::REDACTED_IDENTITY);
+        }
     }
 
     #[test]

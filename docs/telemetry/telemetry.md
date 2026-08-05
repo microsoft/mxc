@@ -332,10 +332,14 @@ collected by a fleet log agent.
   redaction marker instead of a user identifier. A truncated SHA-256 is not used:
   a low-entropy identity could be recovered by dictionary attack. The cost is
   that these sandboxes have no MXC-side join key in the local log.
-* **No caller-supplied identifiers verbatim.** Sandbox identities derived from
-  configuration are retained only when they are bounded, opaque tokens (ASCII
-  alphanumeric plus `-`, `_`, `.`, ≤64 chars); anything else is replaced with
-  `redacted`.
+* **No caller-supplied identifiers verbatim.** A sandbox identity derived from
+  configuration (the AppContainer profile name is the caller's `containerId`)
+  is retained only when it matches one of the closed set of shapes MXC itself
+  mints — the literal default `CLI`, `sandbox-<16 hex>`, or the state-aware
+  `iso:<token>` / `wsb:<token>` ids (≤64 chars, opaque token characters only).
+  Any other `containerId` the caller chose is replaced with `redacted`,
+  regardless of how opaque it looks — character/length checks alone cannot
+  prove a value wasn't caller-chosen.
 * **Counts, not names, for network rules.** Rule names can contain host and
   process identifiers, so only counts are recorded.
 
