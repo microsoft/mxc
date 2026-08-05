@@ -224,9 +224,16 @@ fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
             }
             FsIntent::ReadOnly => {
                 write_path_rule(out, "allow file-read*", &subpath);
-                // The read allow alone cannot take write or socket authority
-                // back from a shallower read-write rule — an `allow` never
-                // denies — so the removal has to be explicit.
+                // The read allow names only `file-read*`, so it says nothing
+                // about write or socket ops and cannot displace a shallower
+                // read-write grant — the removal has to be explicit.
+                //
+                // This deny survives the unfiltered `(allow network-outbound)`
+                // that `write_network_rules` emits below under
+                // `defaultPolicy: "allow"`: last-match-wins applies between
+                // rules that carry a filter, and an unfiltered rule does not
+                // override a path-filtered one. Pinned by
+                // `readonly_socket_strip_survives_a_default_allow_outbound`.
                 write_path_rule(
                     out,
                     "deny file-write* network-bind network-outbound",
