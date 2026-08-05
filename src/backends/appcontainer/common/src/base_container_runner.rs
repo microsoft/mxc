@@ -1101,8 +1101,8 @@ impl BaseContainerRunner {
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
-        // The normal BaseContainer path uses the SBOX one-shot API. The V2
-        // capture path uses only the process-security-environment APIs.
+        // Schema versions through 0.7 use the SBOX one-shot API. Schema 0.8+
+        // uses only the process-security-environment APIs.
         let create_process_in_sandbox = if !use_process_security_environment {
             let api = match Self::load_api() {
                 Ok(f) => f,
@@ -1885,9 +1885,9 @@ impl SandboxBackend for BaseContainerRunner {
                     ))
                 })?;
         }
-        // deniedPaths reaches ordinary BaseContainer through SBOX and capture
-        // through PSEC. Each path has a distinct support query; fail closed
-        // rather than silently dropping the deny policy.
+        // deniedPaths reaches schema <=0.7 BaseContainer through SBOX and
+        // schema 0.8+ through PSEC. Each path has a distinct support query;
+        // fail closed rather than silently dropping the deny policy.
         if !request.policy.denied_paths.is_empty() {
             let deny_supported = if use_process_security_environment {
                 self.capture_support
