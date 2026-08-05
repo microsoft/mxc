@@ -179,9 +179,11 @@ settings live under a top-level `seatbelt` key:
 | `readonlyPaths` (nested under a read-write path) | `(deny file-write* network-bind network-outbound (subpath …))` | Removes write and socket authority a shallower read-write rule would otherwise grant |
 | `deniedPaths` | `(deny file-read* file-write* network-bind network-outbound (subpath …))` emitted **last** | Overrides any broader allow above |
 
-Apple's Seatbelt evaluates rules with last-match-wins semantics within an
-operation, so denies emitted after allows correctly override them. This
-matches MXC's `denied_paths` contract on every other backend.
+Apple's Seatbelt evaluates rules with last-match-wins semantics between rules
+that carry a **filter**, so denies emitted after allows correctly override them.
+This matches MXC's `denied_paths` contract on every other backend. An
+*unfiltered* rule does not participate: a later `(allow network-outbound)` with
+no filter will not override an earlier path-scoped deny.
 
 `readonlyPaths` and `readwritePaths` are emitted **shallow-to-deep**, one rule
 per path, using the same ordering the Linux backends apply

@@ -1132,6 +1132,28 @@ mod tests {
     }
 
     #[test]
+    fn readonly_socket_strip_survives_a_default_allow_outbound() {
+        // `defaultPolicy: "allow"` emits an unfiltered `(allow
+        // network-outbound)` *after* the filesystem section. Seatbelt does not
+        // let an unfiltered rule override a path-filtered one, so the
+        // read-only strip still governs AF_UNIX `connect()` under that
+        // subtree. Verified against `sandbox-exec`: with both rules present in
+        // this order, connecting to a pre-existing socket there is EPERM,
+        // while the same profile without the strip connects fine.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.readonly_paths = vec!["/tmp/ro".into()];
+        let p = build_profile(&r).unwrap();
+
+        let strip_idx = p.find(RO_STRIP).expect("read-only strip");
+        assert!(p[strip_idx..].contains("(subpath \"/private/tmp/ro\")"));
+        assert!(
+            p.find("(allow network-outbound)\n").expect("default allow") > strip_idx,
+            "this test is only meaningful while the unfiltered allow comes last, profile:\n{p}"
+        );
+    }
+
+    #[test]
     fn readonly_wins_over_readwrite_for_aliased_spellings() {
         // The parser's most-restrictive-wins pass compares raw strings, so
         // these two spellings both survive it and only collide once resolved.
