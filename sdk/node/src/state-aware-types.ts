@@ -68,6 +68,26 @@ export interface IsolationSessionProvisionConfig {
    */
   user?: IsolationSessionUserConfig;
   /**
+   * Optional identifier for the calling application. For a packaged
+   * application this is the Package Family Name; for an unpackaged one it may
+   * be any string — MXC does not interpret or verify it.
+   *
+   * Carried verbatim inside the returned `SandboxId` so later lifecycle
+   * phases can recover it without the caller re-supplying it. Nothing
+   * consumes it yet; it is accepted now so a future OS contract that acts on
+   * the calling application's identity does not require a breaking change.
+   *
+   * Validated structurally only: no control characters, at most 256
+   * characters. Whitespace and case are preserved exactly. An explicitly
+   * supplied empty string is a **distinct** value from omitting the field and
+   * round-trips as such. Rejections
+   * surface as `MxcError` with `code: 'policy_validation'`.
+   *
+   * Provision-phase only — it is fixed for the sandbox's lifetime and is not
+   * accepted on any later phase.
+   */
+  appId?: string;
+  /**
    * Unrestricted-network acknowledgment (**required**). The isolation session
    * container runs on a network MXC cannot filter or deny — outbound is open,
    * and a process inside can listen on a port reachable from outside via

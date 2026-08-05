@@ -1,9 +1,13 @@
 {
   "version": "0.6.0-alpha",
-  "containerId": "isolation-session-one-shot-user-rejected",
+  "containerId": "isolation-session-one-shot-user-ignored",
   "containment": "isolation_session",
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
   "process": {
-    "commandLine": "echo unreachable",
+    "commandLine": "echo ONE_SHOT_USER_IGNORED",
     "cwd": "C:\\",
     "env": [],
     "timeout": 30000

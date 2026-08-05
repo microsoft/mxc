@@ -104,6 +104,47 @@ describe('buildStateAwareEnvelope', () => {
     });
   });
 
+  it('nests provision appId under experimental.isolation_session.provision', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: { appId: 'Contoso.App_8wekyb3d8bbwe' },
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.deepStrictEqual(wire.experimental, {
+      isolation_session: {
+        provision: { appId: 'Contoso.App_8wekyb3d8bbwe' },
+      },
+    });
+  });
+
+  it('emits an explicitly empty appId rather than dropping it', () => {
+    // Empty is a distinct value from absent; dropping it here would silently
+    // change what the caller asked for.
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: { appId: '' },
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.deepStrictEqual(wire.experimental, {
+      isolation_session: { provision: { appId: '' } },
+    });
+  });
+
+  it('omits the experimental block entirely when no appId is supplied', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: {},
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.strictEqual(wire.experimental, undefined);
+  });
+
   it('nests start user under experimental.isolation_session.start', () => {
     const env = buildStateAwareEnvelope({
       phase: 'start',
