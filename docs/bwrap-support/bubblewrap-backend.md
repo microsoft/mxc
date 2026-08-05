@@ -164,9 +164,10 @@ Example:
 Bubblewrap supports two network modes:
 
 **Full block** (`defaultPolicy: "block"`, no host lists) — uses
-`--unshare-net` for complete network namespace isolation. No network stack
-is available inside the sandbox (including loopback). Runs fully
-unprivileged.
+`--unshare-net` for complete network namespace isolation. The sandbox gets a
+private network stack with only its own loopback (bwrap brings `lo` up), so
+nothing outside the sandbox is reachable and nothing outside can reach in.
+Runs fully unprivileged.
 
 ```json
 {
@@ -200,6 +201,30 @@ iptables.
 
 **Full allow** (`defaultPolicy: "allow"`, no host lists) — the sandbox
 shares the host network namespace with no restrictions.
+
+#### `allowLocalNetwork` is not independently enforceable
+
+`network.allowLocalNetwork` controls whether the sandboxed process may
+`bind()`/`listen()` on local IPs and accept **inbound** connections. It says
+nothing about *outbound* reachability of loopback or RFC1918 addresses —
+that is governed by `defaultPolicy` / `allowedHosts` / `blockedHosts`.
+
+Bubblewrap has no inbound-only primitive. Unprivileged bwrap has no veth
+interface to scope iptables to, and seccomp cannot dereference the `sockaddr`
+passed to `bind()`, so an AF_INET-only filter is not expressible. The
+namespace choice alone decides the outcome:
+
+| `allowLocalNetwork` | Namespace | Result |
+|---------------------|-----------|--------|
+| `false` (default) | private (`--unshare-net`) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
+| `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
+| `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
+| `true` | shared with host | Honored |
+
+Rows 2 and 3 emit a `WARNING:` line to the runner log at preflight rather
+than failing silently. Windows (AppContainer's `privateNetworkClientServer`
+capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)
+enforce the field at the syscall level; this divergence is Linux-specific.
 
 ### Process Settings
 

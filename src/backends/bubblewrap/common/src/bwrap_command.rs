@@ -101,6 +101,63 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/mnt/wsl/resolv.conf",
 ];
 
+/// Whether the sandbox gets its own network namespace (`--unshare-net`) rather
+/// than sharing the host's.
+///
+/// Full isolation applies only when the default policy denies outbound, no
+/// per-host rules need iptables on the shared namespace, and no loopback proxy
+/// has to stay reachable.
+fn uses_private_netns(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> bool {
+    request.policy.default_network_policy == NetworkPolicy::Block
+        && request.policy.allowed_hosts.is_empty()
+        && request.policy.blocked_hosts.is_empty()
+        && proxy_address.is_none()
+}
+
+/// Describe an `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
+/// `None` when the sandbox's namespace already matches the request.
+///
+/// `allowLocalNetwork` governs whether the sandboxed process may bind/listen on
+/// local IPs and accept **inbound** connections (it says nothing about outbound
+/// reachability of local addresses — that is `defaultPolicy`/`allowedHosts`).
+/// Bubblewrap has no inbound-only primitive: the sandbox either gets a private
+/// network namespace or shares the host's, and neither can be narrowed further.
+/// Unprivileged bwrap has no veth to scope iptables to, and seccomp cannot
+/// dereference the `sockaddr` passed to `bind`, so an AF_INET-only filter is not
+/// expressible. The namespace choice therefore decides the outcome, and this
+/// returns the mismatch so the runner can say so out loud rather than dropping
+/// the field silently.
+///
+/// The private-namespace arm satisfies `false` only at the sandbox boundary:
+/// bwrap brings `lo` up inside the new namespace, so sandbox processes can still
+/// bind and connect to each other over their own loopback. That stays inside the
+/// caller's trust boundary — those processes already share pipes, files and the
+/// mount namespace — so it is not warned about.
+pub fn local_network_diagnostic(
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+) -> Option<&'static str> {
+    match (
+        request.policy.allow_local_network,
+        uses_private_netns(request, proxy_address),
+    ) {
+        (false, false) => Some(
+            "WARNING: Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
+             sandbox shares the host network namespace (defaultPolicy='allow', allowedHosts / \
+             blockedHosts, or network.proxy). The sandboxed process can still bind, listen and \
+             accept on host-local addresses. For an unreachable sandbox use defaultPolicy='block' \
+             with no host lists and no proxy, which applies --unshare-net.",
+        ),
+        (true, true) => Some(
+            "WARNING: Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
+             network namespace. defaultPolicy='block' with no host lists and no proxy applies \
+             --unshare-net, so a listener inside the sandbox is reachable only from within it, \
+             never from the host. Use defaultPolicy='allow' to share the host network namespace.",
+        ),
+        _ => None,
+    }
+}
+
 /// Build the complete `bwrap` argument list, masking **every** denied path as a
 /// directory (`--tmpfs`).
 ///
@@ -154,12 +211,7 @@ pub fn build_args_classified(
     // applies iptables rules separately. When a network proxy is active we
     // also keep the host network namespace so the sandbox can reach the
     // loopback proxy.
-    let has_host_rules =
-        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
-    let full_block = request.policy.default_network_policy == NetworkPolicy::Block
-        && !has_host_rules
-        && proxy_address.is_none();
-    if full_block {
+    if uses_private_netns(request, proxy_address) {
         args.push("--unshare-net".into());
     }
 
@@ -323,6 +375,56 @@ mod tests {
             !args.contains(&"--unshare-net".to_string()),
             "should omit --unshare-net when host rules require iptables"
         );
+    }
+
+    // ------- allowLocalNetwork diagnostic tests -------------------------
+
+    #[test]
+    fn local_network_denied_under_private_netns_is_not_warned() {
+        // Default policy (block, no host lists, no proxy) applies
+        // --unshare-net: nothing outside can reach in, so allowLocalNetwork=false
+        // is satisfied at the sandbox boundary and needs no warning.
+        let r = base_request();
+        assert!(!r.policy.allow_local_network);
+        assert!(local_network_diagnostic(&r, None).is_none());
+    }
+
+    #[test]
+    fn local_network_denied_on_shared_netns_warns() {
+        let mut r = base_request();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let msg = local_network_diagnostic(&r, None).expect("shared netns cannot honor the deny");
+        assert!(msg.contains("allowLocalNetwork=false"));
+    }
+
+    #[test]
+    fn local_network_denied_with_host_rules_warns() {
+        let mut r = base_request();
+        r.policy.blocked_hosts = vec!["evil.example.com".into()];
+        assert!(local_network_diagnostic(&r, None).is_some());
+    }
+
+    #[test]
+    fn local_network_denied_with_proxy_warns() {
+        let r = base_request();
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
+        assert!(local_network_diagnostic(&r, Some(&addr)).is_some());
+    }
+
+    #[test]
+    fn local_network_allowed_under_private_netns_warns() {
+        let mut r = base_request();
+        r.policy.allow_local_network = true;
+        let msg = local_network_diagnostic(&r, None).expect("--unshare-net isolates the listener");
+        assert!(msg.contains("allowLocalNetwork=true"));
+    }
+
+    #[test]
+    fn local_network_allowed_on_shared_netns_is_honored() {
+        let mut r = base_request();
+        r.policy.allow_local_network = true;
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        assert!(local_network_diagnostic(&r, None).is_none());
     }
 
     #[test]
