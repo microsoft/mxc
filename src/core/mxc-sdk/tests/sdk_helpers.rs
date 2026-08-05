@@ -198,8 +198,6 @@ fn build_request_then_run_seatbelt() {
 #[test]
 fn platform_support_linux_methods_are_lxc_or_bubblewrap() {
     let support = platform_support();
-    // `platform_support` reports host-available Linux backends, which are
-    // `lxc` and/or `bubblewrap` depending on what the host has installed.
     for method in &support.available_methods {
         assert!(
             method == "lxc" || method == "bubblewrap",
@@ -213,9 +211,7 @@ fn platform_support_linux_methods_are_lxc_or_bubblewrap() {
 fn platform_support_windows_includes_processcontainer() {
     let support = platform_support();
     assert!(support.is_supported, "reason: {:?}", support.reason);
-    // `processcontainer` is the universal Windows floor; `windows_sandbox` may
-    // additionally appear when its optional feature is enabled on the host, so
-    // the exact vector is host-dependent.
+    // `windows_sandbox` may also appear, so the exact vector is host-dependent.
     assert!(
         support
             .available_methods

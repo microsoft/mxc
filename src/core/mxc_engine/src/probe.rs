@@ -3,49 +3,32 @@
 
 //! Host backend-availability probe — the read-only [`available_backends`] API.
 //!
-//! Answers **"what can I use here?"**, not "what is the full capability matrix
-//! of this machine?". It reports only the containment backends the current host
-//! can actually run, so a caller can pick a backend at startup without
-//! attempting an execution. A backend's **absence** means "not currently
-//! usable, for any reason" — for per-backend diagnostics and reasons the tool is
-//! `wxc-exec --probe`, not this API.
-//!
-//! Each capability is detected once, in Rust, reusing the same detectors backend
-//! dispatch uses (so there is a single source of truth the TypeScript SDK can
-//! later project rather than re-checking). Backend names are the
-//! [`wxc_common::wire::Containment`] wire names and tier names are the canonical
-//! `IsolationTier::as_str()` strings, so both flow from serde rather than being
-//! hand-re-encoded.
-//!
-//! This is intentionally **separate** from [`platform_support`](crate::platform_support):
-//! that answers the narrower "which backends can `mxc-sdk` itself launch?"
-//! question, whereas this answers the broader host-capability question and
-//! additionally reports each backend's effective isolation tier.
+//! Reports only the containment backends the current host can run, each with
+//! its effective isolation tier when it has a tier ladder. Answers "what can I
+//! use here?"; a backend's absence means "not currently usable, for any reason".
+//! Separate from [`platform_support`](crate::platform_support), which answers the
+//! narrower "what can `mxc-sdk` itself launch?" question and reports no tier.
 
 use serde::Serialize;
 
 /// One host-available backend, plus its effective isolation tier (if any).
 ///
 /// Serializes to camelCase JSON such as `{"backend":"seatbelt"}` or
-/// `{"backend":"processcontainer","tier":"appcontainer-dacl"}`. The `tier` field
-/// is **omitted** (never serialized as `null`) when the backend has no tier
-/// ladder.
+/// `{"backend":"processcontainer","tier":"appcontainer-dacl"}`; `tier` is
+/// omitted (never `null`) when the backend has no tier ladder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableBackend {
-    /// Canonical [`wxc_common::wire::Containment`] wire name, e.g.
-    /// `"processcontainer"`, `"seatbelt"`, `"bubblewrap"`.
+    /// Canonical [`wxc_common::wire::Containment`] wire name.
     pub backend: String,
-    /// The highest-isolation tier the host supports for this backend, when the
-    /// backend has a tier ladder; `None` for backends with no tiers. The string
-    /// values are the canonical `IsolationTier::as_str()` names, and the field
-    /// is omitted from JSON when `None`.
+    /// Highest-isolation tier the host supports for this backend (a canonical
+    /// `IsolationTier::as_str()` name); `None`, and omitted from JSON, for
+    /// backends with no tier ladder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
 }
 
 impl AvailableBackend {
-    /// A backend with no tier ladder.
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn tierless(backend: &str) -> Self {
         Self {
@@ -54,7 +37,6 @@ impl AvailableBackend {
         }
     }
 
-    /// A backend reporting its effective (highest-reachable) isolation tier.
     #[cfg(target_os = "windows")]
     fn tiered(backend: &str, tier: &str) -> Self {
         Self {
@@ -66,23 +48,12 @@ impl AvailableBackend {
 
 /// Probe the host and return only the backends it can currently run.
 ///
-/// An empty `Vec` means "no backend this API can currently affirm on this host"
-/// (e.g. an unsupported platform, Linux with neither `bwrap` nor `lxc`, or macOS
-/// without `sandbox-exec`) — it is a normal result, not an error.
+/// An empty `Vec` is a normal result (unsupported platform, or Linux with
+/// neither `bwrap` nor `lxc`), not an error. Order is stable but callers should
+/// match by `backend` name, not position.
 ///
-/// Results are returned in a stable order, but callers should **match by
-/// `backend` name, not by position**, so the order is free to change.
-///
-/// This performs live host detection (subprocess spawns such as `bwrap`/`lxc-ls`
-/// on Linux, DISM on Windows, a DLL load for `wslc`) and is **not cached**, so it
-/// is intended to be read once at startup rather than polled in a hot loop. Some
-/// underlying detectors cache their own result for the process lifetime.
-///
-/// The named `tier` is a **ceiling**, not a guarantee: it is the strongest
-/// isolation the host is capable of for that backend. A real request can still
-/// end up on a weaker tier when policy options force one (e.g. `deniedPaths` on
-/// a host without native deny support). This walk performs none of those
-/// policy-dependent checks.
+/// Not cached — read once at startup, not in a hot loop. The reported `tier` is
+/// a ceiling: policy can still force a weaker tier at dispatch.
 pub fn available_backends() -> Vec<AvailableBackend> {
     #[cfg(target_os = "macos")]
     {
@@ -105,8 +76,6 @@ pub fn available_backends() -> Vec<AvailableBackend> {
 #[cfg(target_os = "macos")]
 fn macos_backends() -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
-    // Seatbelt is usable when the App Sandbox driver is installed. Mirrors the
-    // `platform_support()` macOS check.
     if std::path::Path::new("/usr/bin/sandbox-exec").exists() {
         backends.push(AvailableBackend::tierless("seatbelt"));
     }
@@ -116,9 +85,6 @@ fn macos_backends() -> Vec<AvailableBackend> {
 #[cfg(target_os = "linux")]
 fn linux_backends() -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
-    // `bubblewrap` requires a new-enough `bwrap` for every flag the argument
-    // builder emits; `lxc` is a shallow `lxc-ls --version` check. Neither has a
-    // tier ladder.
     if bwrap_common::bwrap_version::probe_bwrap().is_ok() {
         backends.push(AvailableBackend::tierless("bubblewrap"));
     }
@@ -132,20 +98,16 @@ fn linux_backends() -> Vec<AvailableBackend> {
 fn windows_backends() -> Vec<AvailableBackend> {
     use appcontainer_common::fallback_detector::is_base_container_usable;
 
-    // `processcontainer` is the universal Windows floor, always reachable; it is
-    // the only backend with a within-backend tier ladder, so it carries its
-    // effective (highest-reachable) tier.
+    // `processcontainer` is always present and the only backend with a tier
+    // ladder, so it carries its effective (highest-reachable) tier.
     let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
     let mut backends = vec![AvailableBackend::tiered("processcontainer", tier.as_str())];
 
-    // `windows_sandbox` is host-available when its optional feature is enabled;
-    // it has no tier ladder.
     if windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
         backends.push(AvailableBackend::tierless("windows_sandbox"));
     }
 
-    // `wslc` is available when its runtime SDK (`wslcsdk.dll`) loads and every
-    // required export resolves. Only compiled when the `wslc` feature is on.
+    // Available when the `wslcsdk.dll` runtime loads and all exports resolve.
     #[cfg(feature = "wslc")]
     if wslc_common::wslc_bindings::WslcSdk::load().is_ok() {
         backends.push(AvailableBackend::tierless("wslc"));
@@ -154,12 +116,10 @@ fn windows_backends() -> Vec<AvailableBackend> {
     backends
 }
 
-/// Select the effective process-container isolation tier from the reachability
-/// of each rung, strongest first: BaseContainer → AppContainerBfs →
-/// AppContainerDacl (the universal floor).
-///
-/// Split from the host detectors so the precedence is unit-testable without a
-/// real Windows host or the `tier2_bfs` build feature.
+/// Effective process-container tier, strongest reachable rung first:
+/// BaseContainer → AppContainerBfs → AppContainerDacl. Split from the host
+/// detectors so precedence is testable without a real Windows host or the
+/// `tier2_bfs` feature.
 #[cfg(target_os = "windows")]
 fn select_tier(
     base_container_usable: bool,
@@ -180,8 +140,6 @@ mod tests {
     use super::*;
     use wxc_common::wire::Containment;
 
-    /// The wire name serde emits for a `Containment` variant, without the JSON
-    /// quotes.
     fn wire_name(containment: &Containment) -> String {
         serde_json::to_string(containment)
             .expect("Containment serializes")
@@ -189,8 +147,6 @@ mod tests {
             .to_string()
     }
 
-    /// Every `Containment` wire name, so tests can assert a reported backend is a
-    /// real backend rather than a hardcoded expectation.
     fn all_wire_names() -> Vec<String> {
         [
             Containment::Process,
@@ -210,9 +166,6 @@ mod tests {
         .collect()
     }
 
-    /// The canonical isolation-tier strings, mirrored from
-    /// `IsolationTier::as_str()`. Kept in the test so a rename of the ladder's
-    /// serialized names is caught here as well as at the source.
     const CANONICAL_TIERS: [&str; 3] = ["base-container", "appcontainer-bfs", "appcontainer-dacl"];
 
     #[test]
@@ -247,9 +200,8 @@ mod tests {
         }
     }
 
-    /// Every backend-name literal the probe can *ever* emit — across all
-    /// platforms and features, not just those this host exercises. Must mirror
-    /// the string literals in the per-platform arms of `available_backends`.
+    /// Every backend literal the probe can emit, across all platforms/features —
+    /// must mirror the per-platform arms of `available_backends`.
     const EMITTABLE_BACKENDS: [&str; 6] = [
         "seatbelt",
         "bubblewrap",
@@ -259,11 +211,9 @@ mod tests {
         "wslc",
     ];
 
-    /// Complements [`every_reported_backend_is_a_real_wire_name`], which only
-    /// sees the subset of backends detected on the current host. This checks the
-    /// full literal set unconditionally, so a typo in an arm that this host or
-    /// feature does not exercise (e.g. `"wslc"`, gated behind both Windows and
-    /// the `wslc` feature) still can't drift from the canonical wire names.
+    /// Complements [`every_reported_backend_is_a_real_wire_name`] (host subset)
+    /// by checking every literal unconditionally, so a typo in an arm this host
+    /// or feature doesn't exercise (e.g. `"wslc"`) still can't drift.
     #[test]
     fn all_emittable_backend_literals_are_real_wire_names() {
         let known = all_wire_names();
@@ -287,8 +237,7 @@ mod tests {
         }
     }
 
-    /// Guards against the `CANONICAL_TIERS` list above drifting from the actual
-    /// `IsolationTier::as_str()` output.
+    /// Guards `CANONICAL_TIERS` against drift from `IsolationTier::as_str()`.
     #[cfg(target_os = "windows")]
     #[test]
     fn canonical_tier_strings_match_isolation_tier() {
@@ -317,17 +266,13 @@ mod tests {
     #[test]
     fn tier_precedence_prefers_the_strongest_reachable_rung() {
         use appcontainer_common::fallback_detector::IsolationTier;
-        // BaseContainer wins whenever it is usable, regardless of tier2_bfs.
+        // BaseContainer wins whenever usable, regardless of tier2_bfs.
         assert_eq!(select_tier(true, false), IsolationTier::BaseContainer);
         assert_eq!(select_tier(true, true), IsolationTier::BaseContainer);
-        // Otherwise AppContainerBfs is chosen only when the feature is compiled.
         assert_eq!(select_tier(false, true), IsolationTier::AppContainerBfs);
-        // The DACL floor is the fallback when nothing higher is reachable.
         assert_eq!(select_tier(false, false), IsolationTier::AppContainerDacl);
     }
 
-    /// `processcontainer` is a Windows-only tier ladder; it must never appear in
-    /// the probe result on other platforms.
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn processcontainer_never_appears_off_windows() {
