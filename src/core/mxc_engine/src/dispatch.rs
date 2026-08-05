@@ -225,6 +225,7 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
+            capture_denials: None,
         }
     }
 
@@ -285,6 +286,7 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
+            capture_denials: None,
         };
         let mut request = build_request(&policy, None).expect("build_request");
         request.set_script("echo hi");

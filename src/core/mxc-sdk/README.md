@@ -21,6 +21,7 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: Some(10_000),
+    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("echo hello");
@@ -51,6 +52,38 @@ dirs), [`user_profile_policy`], and [`temporary_files_policy`].
 [`platform_support`] is the Rust port of `getPlatformSupport` — reports host
 support and the available containment backends.
 
+## Denial capture (Windows)
+
+`SandboxPolicy::capture_denials` enables the Windows ProcessContainer's
+learning-mode capture: the runner records every access the policy does not
+grant and writes them to a JSON denials document.
+
+```rust
+use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
+use mxc_sdk::SandboxPolicy;
+
+let policy = SandboxPolicy {
+    version: "0.7.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+    capture_denials: Some(CaptureDenialsSection {
+        // `Block` (the default) keeps deny-by-default and records the denial;
+        // `Allow` runs permissively and records what *would* have been denied.
+        mode: CaptureDenialsMode::Block,
+        // Absolute path; a per-run id is stamped into the stem
+        // (`denials.json` -> `denials.<run-id>.json`). `None` uses a managed temp.
+        output_path: None,
+    }),
+};
+```
+
+`Allow` relaxes containment for the run — it is reported through `warnings()`.
+Read the resulting file path and denial summary from `output_metadata()` after
+the process terminates. The section is ignored on Linux and macOS, whose
+backends have no learning-mode API.
+
 ## Live stdio + kill (streaming)
 
 [`spawn_sandbox`] returns a [`Sandbox`] you can drive
@@ -67,6 +100,7 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: None,
+    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("cat"); // echoes stdin until EOF
