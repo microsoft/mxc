@@ -1222,26 +1222,6 @@ impl BaseContainerRunner {
         let ac_sid_str = derive_sid_string_from_name(&identity);
         let _ = writeln!(logger, "AppContainerSID: {ac_sid_str}");
 
-        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
-        // where BFS cannot enforce filesystem policy.
-        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
-            &request.policy.readonly_paths,
-            &request.policy.readwrite_paths,
-        ) {
-            let _ = writeln!(
-                logger,
-                "Error: Pre-launch diagnostic [{}]: {}",
-                diag.kind, diag.message
-            );
-            return Err(ScriptResponse {
-                exit_code: -1,
-                error_message: diag.message.clone(),
-                standard_err: diag.message,
-                failure_phase: FailurePhase::LaunchFailed,
-                ..Default::default()
-            });
-        }
-
         // 4. Call Experimental_CreateProcessInSandbox.
         //    If the OS returns ERROR_NOT_SUPPORTED (0x32) and we passed a non-null
         //    environment block, this is a downlevel build that doesn't support the
