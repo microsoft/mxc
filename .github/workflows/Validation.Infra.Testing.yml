@@ -1,4 +1,4 @@
-name: Validation Infrastructure PR Tests
+name: Validation Infrastructure Testing
 
 on:
   push:

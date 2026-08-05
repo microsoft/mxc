@@ -27,6 +27,7 @@ for command_name in curl python3; do
 done
 
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mxc-seatbelt-tests.XXXXXX")"
+TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
 PASSED=0
 FAILED=0
 FAILURES=""
@@ -241,6 +242,7 @@ JSON
 start_host_server() {
     local server_script="$TEST_ROOT/server.py"
     local port_file="$TEST_ROOT/server.port"
+    rm -f "$port_file"
     cat >"$server_script" <<'PYTHON'
 import http.server
 import socketserver
@@ -461,20 +463,24 @@ JSON
 test_proxy_traffic_filtering() {
     local control_config="$TEST_ROOT/proxy-filtering-control.json"
     local config="$TEST_ROOT/proxy-filtering.json"
-    if ! curl --noproxy '*' --fail --silent --max-time 10 \
-        https://example.com >/dev/null; then
-        echo "Host direct-egress baseline failed"
+    if [[ -z "${HOST_SERVER_PORT:-}" ]] ||
+        ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        start_host_server || return 1
+    fi
+    if ! curl --noproxy '*' --fail --silent --max-time 2 \
+        "http://127.0.0.1:$HOST_SERVER_PORT" >/dev/null; then
+        echo "Host local-server baseline failed"
         return 1
     fi
 
-    cat >"$control_config" <<'JSON'
+    cat >"$control_config" <<JSON
 {
   "version": "0.7.0-alpha",
   "containerId": "ci-seatbelt-proxy-filtering-control",
   "containment": "seatbelt",
   "process": {
-    "commandLine": "curl --fail --silent --show-error --max-time 10 https://example.com >/dev/null && echo PROXY_CONTROL_OK",
-    "timeout": 15000
+    "commandLine": "curl --fail --silent --show-error --max-time 5 http://127.0.0.1:$HOST_SERVER_PORT >/dev/null && echo PROXY_CONTROL_OK",
+    "timeout": 10000
   },
   "network": {
     "defaultPolicy": "allow",
@@ -497,14 +503,14 @@ JSON
         return 1
     fi
 
-    cat >"$config" <<'JSON'
+    cat >"$config" <<JSON
 {
   "version": "0.7.0-alpha",
   "containerId": "ci-seatbelt-proxy-filtering",
   "containment": "seatbelt",
   "process": {
-    "commandLine": "set -e; curl --fail --silent --show-error --max-time 10 https://api.github.com/zen >/dev/null; echo PROXY_ALLOWED; if curl --fail --silent --max-time 5 https://example.com >/dev/null 2>&1; then echo PROXY_FILTER_LEAK; exit 1; else echo PROXY_FILTERED; fi; if curl --noproxy '*' --fail --silent --max-time 5 https://example.com >/dev/null 2>&1; then echo PROXY_DIRECT_BYPASS_OBSERVED; else echo PROXY_DIRECT_BLOCKED_OBSERVED; fi",
-    "timeout": 30000
+    "commandLine": "set -e; curl --fail --silent --show-error --max-time 5 http://127.0.0.1:$HOST_SERVER_PORT >/dev/null; echo PROXY_ALLOWED; if curl --fail --silent --max-time 5 http://localhost:$HOST_SERVER_PORT >/dev/null 2>&1; then echo PROXY_FILTER_LEAK; exit 1; else echo PROXY_FILTERED; fi; if curl --noproxy '*' --fail --silent --max-time 5 http://localhost:$HOST_SERVER_PORT >/dev/null 2>&1; then echo PROXY_DIRECT_BYPASS_OBSERVED; else echo PROXY_DIRECT_BLOCKED_OBSERVED; fi",
+    "timeout": 20000
   },
   "network": {
     "defaultPolicy": "block",
@@ -512,7 +518,7 @@ JSON
       "builtinTestServer": true
     },
     "allowedHosts": [
-      "api.github.com"
+      "127.0.0.1"
     ]
   }
 }

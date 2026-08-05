@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   resolve:
-    name: Resolve ${{ inputs.plan }} matrix
+    name: resolve "${{ inputs.plan }}" test matrix
     runs-on: ubuntu-latest
     outputs:
       windows: ${{ steps.matrix.outputs.windows }}
@@ -31,7 +31,7 @@ jobs:
         run: node scripts/ci/resolve-test-matrix.mjs --plan "${{ inputs.plan }}"
 
   windows:
-    name: ${{ matrix.backend || 'Windows tests' }}
+    name: ${{ matrix.os }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
     needs: resolve
     if: needs.resolve.outputs.has_windows == 'true'
     strategy:
@@ -88,7 +88,7 @@ jobs:
           retention-days: 7
 
   linux:
-    name: ${{ matrix.backend || 'Linux tests' }}
+    name: ${{ matrix.os }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
     needs: resolve
     if: needs.resolve.outputs.has_linux == 'true'
     strategy:
@@ -151,7 +151,7 @@ jobs:
           retention-days: 7
 
   macos:
-    name: ${{ matrix.backend || 'macOS tests' }}
+    name: ${{ matrix.os }} / ${{ matrix.architecture }} / ${{ matrix.backend }}
     needs: resolve
     if: needs.resolve.outputs.has_macos == 'true'
     strategy:
