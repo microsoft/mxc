@@ -163,11 +163,11 @@ Example:
 
 Bubblewrap supports two network modes:
 
-**Full block** (`defaultPolicy: "block"`, no host lists) — uses
-`--unshare-net` for complete network namespace isolation. The sandbox gets a
-private network stack with only its own loopback (bwrap brings `lo` up), so
-nothing outside the sandbox is reachable and nothing outside can reach in.
-Runs fully unprivileged.
+**Full block** (`defaultPolicy: "block"`, no host lists, no `network.proxy`)
+— uses `--unshare-net` for complete network namespace isolation. The sandbox
+gets a private network stack with only its own loopback (bwrap brings `lo`
+up), so nothing outside the sandbox is reachable and nothing outside can
+reach in. Runs fully unprivileged.
 
 ```json
 {

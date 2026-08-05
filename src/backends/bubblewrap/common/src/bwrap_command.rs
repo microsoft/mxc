@@ -114,7 +114,7 @@ fn uses_private_netns(request: &ExecutionRequest, proxy_address: Option<&ProxyAd
         && proxy_address.is_none()
 }
 
-/// Describe an `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
+/// Describe a `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
 /// `None` when the sandbox's namespace already matches the request.
 ///
 /// `allowLocalNetwork` governs whether the sandboxed process may bind/listen on
