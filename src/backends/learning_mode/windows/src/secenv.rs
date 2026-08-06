@@ -43,6 +43,7 @@ use windows::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW, STARTUPINFOW,
 };
+use windows::Win32::System::WindowsProgramming::IsApiSetImplemented;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 use wxc_common::string_util;
 
@@ -50,6 +51,9 @@ use crate::LearningModeError;
 
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
+const SECURITY_ENVIRONMENT_API_SET_NAME: &str = "api-win-appmodel-processmodel~securityenvironment";
+const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
+    c"api-win-appmodel-processmodel~securityenvironment";
 
 /// No special behaviour when creating the security environment
 /// (`PROCESS_SECURITY_ENVIRONMENT_FLAGS` value `0`).
@@ -334,6 +338,11 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
     }
 }
 
+fn is_security_environment_api_set_implemented() -> bool {
+    // SAFETY: the contract is a valid static null-terminated string.
+    unsafe { IsApiSetImplemented(PCSTR(SECURITY_ENVIRONMENT_API_SET.as_ptr().cast())).as_bool() }
+}
+
 impl SecurityEnvironmentApi {
     /// Load `processmodel.dll` and resolve the 2-phase security-environment exports.
     ///
@@ -346,6 +355,8 @@ impl SecurityEnvironmentApi {
     /// [`supports_deny_paths`](Self::supports_deny_paths) result is memoized too.
     ///
     /// # Errors
+    /// - [`LearningModeError::ApiSetUnavailable`] if the security-environment
+    ///   API-set named group is not implemented.
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
     /// - [`LearningModeError::ExportMissing`] if any required export is absent.
     pub fn load() -> Result<Self, LearningModeError> {
@@ -355,6 +366,13 @@ impl SecurityEnvironmentApi {
 
     /// Perform the actual DLL load and export resolution, bypassing the cache.
     fn load_uncached() -> Result<Self, LearningModeError> {
+        if !is_security_environment_api_set_implemented() {
+            return Err(LearningModeError::ApiSetUnavailable {
+                api: "process security-environment",
+                api_set: SECURITY_ENVIRONMENT_API_SET_NAME,
+            });
+        }
+
         let dll = string_util::to_wide(PROCESSMODEL_DLL);
 
         // SAFETY: `dll` is a valid null-terminated wide string that outlives the call.
@@ -546,6 +564,10 @@ fn last_error() -> u32 {
 /// resolved. Returns an all-`None` report if the DLL itself cannot be loaded.
 #[must_use]
 pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
+    if !is_security_environment_api_set_implemented() {
+        return SecurityEnvironmentExportReport::default();
+    }
+
     let dll = string_util::to_wide(PROCESSMODEL_DLL);
     // SAFETY: `dll` is a valid null-terminated wide string that outlives the call;
     // `LOAD_LIBRARY_SEARCH_SYSTEM32` restricts the search to System32.
@@ -658,7 +680,9 @@ mod tests {
             Err(e) => assert!(
                 matches!(
                     e,
-                    LearningModeError::DllLoad(_) | LearningModeError::ExportMissing { .. }
+                    LearningModeError::ApiSetUnavailable { .. }
+                        | LearningModeError::DllLoad(_)
+                        | LearningModeError::ExportMissing { .. }
                 ),
                 "unexpected error variant: {e}"
             ),

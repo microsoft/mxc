@@ -71,6 +71,16 @@ pub use secenv::{
 /// behind a stringified surrogate.
 #[derive(Debug, Clone, Error)]
 pub enum LearningModeError {
+    /// The named API-set group for an API surface is not implemented by this
+    /// Windows build.
+    #[error("API set `{api_set}` is not implemented; this OS build lacks the required {api} API")]
+    ApiSetUnavailable {
+        /// The API surface guarded by the named group.
+        api: &'static str,
+        /// The API-set contract queried with `IsApiSetImplemented`.
+        api_set: &'static str,
+    },
+
     /// `processmodel.dll` itself could not be loaded from System32.
     #[error("failed to load processmodel.dll: {0}")]
     DllLoad(String),

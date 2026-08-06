@@ -4,9 +4,10 @@
 //! `BaseContainerRunner` — executes scripts through the Windows BaseContainer APIs.
 //!
 //! Schema versions through 0.7 use the legacy `SandboxSpec` / one-shot
-//! `Experimental_CreateProcessInSandbox` path. Schema 0.8 and later use the
+//! `Experimental_CreateProcessInSandbox` path. Schema 0.8 and later prefer the
 //! PSEC 1.0 / `CreateProcessSecurityEnvironment` two-phase contract and attach
-//! the resulting environment to `CreateProcessW`.
+//! the resulting environment to `CreateProcessW`, but temporarily fall back to
+//! the legacy SBOX contract when PSEC is unavailable.
 
 use std::ffi::c_void;
 use std::fmt::Write;
@@ -25,8 +26,8 @@ use learning_mode_windows::{
 use semver::Version;
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
-    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED,
+    ERROR_NOT_SUPPORTED, E_NOTIMPL, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -228,6 +229,10 @@ const SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX: u64 = 0x0000_0000_0000_0001;
 /// assumed bit 1). When clear, `deniedPaths` is rejected at launch and callers
 /// must rely on default-deny plus explicit `readwrite`/`readonly` grants.
 const SANDBOX_CAP_FS_DENY: u64 = 0x0000_0000_0000_0002;
+/// `SANDBOX_CAP_NETWORK_PROXY`: when set, SBOX uses the model-2 proxy
+/// contract, which requires an AppContainer proxy peer identity that MXC does
+/// not yet provide.
+const SANDBOX_CAP_NETWORK_PROXY: u64 = 0x0000_0000_0000_0004;
 const CAPTURE_API_AVAILABLE_LOG: &str =
     "captureDenials: learning-mode trace API available (processmodel.dll)";
 const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
@@ -245,9 +250,25 @@ fn is_api_not_implemented(err: u32) -> bool {
     err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
 }
 
+/// The schema 0.8 proxy compatibility path deliberately selects transitional
+/// SBOX because PSEC cannot yet supply the proxy peer identity. If that older
+/// contract reports `ERROR_NOT_SUPPORTED`, expose it as backend availability
+/// without changing error classification for unrelated SBOX policies.
+fn is_schema_0_8_proxy_fallback_unavailable(
+    err: u32,
+    request: &ExecutionRequest,
+    use_process_security_environment: bool,
+) -> bool {
+    err == ERROR_NOT_SUPPORTED.0
+        && !use_process_security_environment
+        && BaseContainerRunner::schema_prefers_process_security_environment(request)
+        && request.policy.network_proxy.is_enabled()
+}
+
 fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningModeError) -> bool {
     match error {
-        learning_mode_windows::LearningModeError::DllLoad(_)
+        learning_mode_windows::LearningModeError::ApiSetUnavailable { .. }
+        | learning_mode_windows::LearningModeError::DllLoad(_)
         | learning_mode_windows::LearningModeError::ExportMissing { .. } => true,
         learning_mode_windows::LearningModeError::HResultCall { code, .. } => *code == E_NOTIMPL.0,
         learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
@@ -338,12 +359,21 @@ enum ResolvedNetworkPolicy<'a> {
     Egress(&'a NetworkPolicy),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SboxProxyContract {
+    LegacyOrUnknown,
+    Unavailable,
+    Model2PeerIdentity,
+}
+
 /// Script runner that uses `Experimental_CreateProcessInSandbox` API
 /// to launch a sandboxed process.
 pub struct BaseContainerRunner {
     proxy_coordinator: ProxyCoordinator,
     capture_factory: Arc<dyn CaptureSessionFactory>,
     capture_support: Arc<dyn CapturePlatformSupport>,
+    #[cfg(test)]
+    psec_usable_override: Option<bool>,
 }
 
 impl Default for BaseContainerRunner {
@@ -352,6 +382,8 @@ impl Default for BaseContainerRunner {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory: Arc::new(RealCaptureSessionFactory),
             capture_support: Arc::new(RealCapturePlatformSupport),
+            #[cfg(test)]
+            psec_usable_override: None,
         }
     }
 }
@@ -387,6 +419,7 @@ impl BaseContainerRunner {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory,
             capture_support: Arc::new(RealCapturePlatformSupport),
+            psec_usable_override: Some(true),
         }
     }
 
@@ -399,6 +432,7 @@ impl BaseContainerRunner {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory,
             capture_support,
+            psec_usable_override: Some(true),
         }
     }
 
@@ -425,10 +459,53 @@ impl BaseContainerRunner {
     /// symbol-present? Resolves enablement up front so tier selection
     /// never picks a Tier 1 that cannot launch:
     ///
-    /// 1. `Experimental_QuerySandboxSupport`, when present, is authoritative.
-    /// 2. Otherwise, probe the create API itself (older builds lack the query).
-    /// 3. If even the create symbol is absent, the OS is down-level.
+    /// 1. Probe the PSEC create/close contract.
+    /// 2. Otherwise query transitional SBOX support when available.
+    /// 3. Otherwise probe the SBOX create API itself.
     pub fn is_base_container_usable() -> bool {
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
+            return forced == "1";
+        }
+        if Self::is_process_security_environment_usable() {
+            return true;
+        }
+        Self::is_legacy_base_container_usable()
+    }
+
+    /// Whether PSEC can create and close a minimal security environment on
+    /// this host. Export presence and the support query alone are insufficient
+    /// on transitional builds where the API surface exists before the feature
+    /// is enabled.
+    pub fn is_process_security_environment_usable() -> bool {
+        static USABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *USABLE.get_or_init(|| {
+            let request = ExecutionRequest {
+                schema_version: "0.8.0-alpha".to_string(),
+                ..Default::default()
+            };
+            let specification = Self::build_process_security_environment_spec(&request);
+            SecurityEnvironmentApi::load()
+                .and_then(|api| api.create(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE))
+                .and_then(|environment| {
+                    let startup_info = SecurityEnvironmentStartupInfo::new(
+                        STARTUPINFOW::default(),
+                        environment.raw(),
+                        &[],
+                    );
+                    environment.close();
+                    startup_info.map(drop)
+                })
+                .is_ok()
+        })
+    }
+
+    /// Whether the transitional SBOX BaseContainer contract is usable.
+    fn is_legacy_base_container_usable() -> bool {
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
+            return forced == "1";
+        }
         match Self::query_sandbox_create_capability() {
             Some(enabled) => enabled,
             None => Self::probe_create_process_feature_enabled(),
@@ -445,14 +522,8 @@ impl BaseContainerRunner {
     /// rejected at launch. Tier 3 (AppContainer + DACL) enforces `deniedPaths`
     /// via DENY ACEs independently of this bit.
     pub fn base_container_supports_deny_paths() -> bool {
-        let Some(query) = Self::load_query_sandbox_support() else {
-            return false;
-        };
-        let mut capabilities: u64 = 0;
-        // SAFETY: `query` is the resolved export; `capabilities` is a valid
-        // out-param.
-        let succeeded = unsafe { query(&mut capabilities) };
-        Self::decode_deny_capability(succeeded, capabilities)
+        Self::query_sandbox_capabilities()
+            .is_some_and(|capabilities| Self::decode_deny_capability(1, capabilities))
     }
 
     /// Decode a `QuerySandboxSupport` result for the deny-paths capability.
@@ -468,6 +539,13 @@ impl BaseContainerRunner {
     /// itself failed), so the caller must probe another way rather than assume
     /// "unusable".
     fn query_sandbox_create_capability() -> Option<bool> {
+        Self::query_sandbox_capabilities()
+            .map(|capabilities| Self::decode_create_capability(1, capabilities))
+    }
+
+    /// Query the capability-aware SBOX contract. `None` means the export is
+    /// absent or the query failed, so callers must use the legacy probe path.
+    fn query_sandbox_capabilities() -> Option<u64> {
         let query = Self::load_query_sandbox_support()?;
         let mut capabilities: u64 = 0;
         // SAFETY: `query` is the resolved export; `capabilities` is a valid
@@ -479,13 +557,45 @@ impl BaseContainerRunner {
         if ok == 0 {
             return None;
         }
-        Some(Self::decode_create_capability(ok, capabilities))
+        Some(capabilities)
     }
 
     /// Decode a `QuerySandboxSupport` result: the create-process capability is
     /// present only when the call succeeded (`ok != 0`) and the bit is set.
     fn decode_create_capability(ok: i32, capabilities: u64) -> bool {
         ok != 0 && (capabilities & SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX) != 0
+    }
+
+    /// Whether the request can use the legacy SBOX contract selected by MXC.
+    ///
+    /// A successful support query identifies the capability-aware OS contract:
+    /// with `SANDBOX_CAP_NETWORK_PROXY` clear, proxy is unavailable; with it
+    /// set, proxy requires `allowed_appcontainer_peer` and an AppContainer-hosted
+    /// proxy. MXC supports neither shape yet, so proxy requests use the
+    /// AppContainer fallback. Query-less builds retain the older SBOX proxy
+    /// behavior.
+    fn legacy_sbox_compatible_with_request(
+        request: &ExecutionRequest,
+        queried_capabilities: Option<u64>,
+    ) -> bool {
+        if !request.policy.network_proxy.is_enabled() {
+            return true;
+        }
+
+        matches!(
+            Self::decode_sbox_proxy_contract(queried_capabilities),
+            SboxProxyContract::LegacyOrUnknown
+        )
+    }
+
+    fn decode_sbox_proxy_contract(queried_capabilities: Option<u64>) -> SboxProxyContract {
+        match queried_capabilities {
+            None => SboxProxyContract::LegacyOrUnknown,
+            Some(capabilities) if (capabilities & SANDBOX_CAP_NETWORK_PROXY) != 0 => {
+                SboxProxyContract::Model2PeerIdentity
+            }
+            Some(_) => SboxProxyContract::Unavailable,
+        }
     }
 
     /// Resolve `Experimental_QuerySandboxSupport`; `None` if not present.
@@ -653,11 +763,86 @@ impl BaseContainerRunner {
         }
     }
 
-    pub(crate) fn uses_process_security_environment(request: &ExecutionRequest) -> bool {
+    pub(crate) fn schema_prefers_process_security_environment(request: &ExecutionRequest) -> bool {
         Version::parse(&request.schema_version).is_ok_and(|version| {
             let comparable = Version::new(version.major, version.minor, version.patch);
             comparable >= Version::new(0, 8, 0)
         })
+    }
+
+    fn should_use_process_security_environment(
+        request: &ExecutionRequest,
+        psec_usable: bool,
+        psec_supports_deny_paths: bool,
+    ) -> bool {
+        if !Self::schema_prefers_process_security_environment(request) || !psec_usable {
+            return false;
+        }
+        if request.policy.capture_denials.is_some() {
+            return true;
+        }
+        !request.policy.least_privilege_mode
+            && !request.policy.network_proxy.is_enabled()
+            && (request.policy.denied_paths.is_empty() || psec_supports_deny_paths)
+    }
+
+    fn process_security_environment_usable(&self) -> bool {
+        #[cfg(test)]
+        if let Some(usable) = self.psec_usable_override {
+            return usable;
+        }
+        Self::is_process_security_environment_usable()
+    }
+
+    fn uses_process_security_environment(&self, request: &ExecutionRequest) -> bool {
+        let supports_deny_paths = request.policy.capture_denials.is_some()
+            || request.policy.denied_paths.is_empty()
+            || self.capture_support.supports_deny_paths().unwrap_or(false);
+        Self::should_use_process_security_environment(
+            request,
+            self.process_security_environment_usable(),
+            supports_deny_paths,
+        )
+    }
+
+    pub(crate) fn is_usable_for_request(request: &ExecutionRequest) -> bool {
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
+            return forced == "1";
+        }
+        let psec_usable = Self::is_process_security_environment_usable();
+        if request.policy.capture_denials.is_some() {
+            return Self::schema_prefers_process_security_environment(request) && psec_usable;
+        }
+        let psec_supports_deny_paths = request.policy.denied_paths.is_empty()
+            || SecurityEnvironmentApi::load()
+                .and_then(|api| api.supports_deny_paths())
+                .unwrap_or(false);
+        if Self::should_use_process_security_environment(
+            request,
+            psec_usable,
+            psec_supports_deny_paths,
+        ) {
+            return true;
+        }
+        if !Self::legacy_sbox_compatible_with_request(request, Self::query_sandbox_capabilities()) {
+            return false;
+        }
+        Self::is_legacy_base_container_usable()
+    }
+
+    pub(crate) fn supports_deny_paths_for_request(request: &ExecutionRequest) -> bool {
+        let psec_supports_deny_paths = SecurityEnvironmentApi::load()
+            .and_then(|api| api.supports_deny_paths())
+            .unwrap_or(false);
+        if Self::should_use_process_security_environment(
+            request,
+            Self::is_process_security_environment_usable(),
+            psec_supports_deny_paths,
+        ) {
+            return true;
+        }
+        crate::fallback_detector::base_container_supports_deny_paths()
     }
 
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
@@ -1058,7 +1243,7 @@ impl BaseContainerRunner {
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
 
         let capture_denials = request.policy.capture_denials.clone();
-        let use_process_security_environment = Self::uses_process_security_environment(&request);
+        let use_process_security_environment = self.uses_process_security_environment(&request);
         let spec_bytes = if !use_process_security_environment {
             let bytes = Self::build_sandbox_spec(&request);
             Self::log_sandbox_spec(&bytes, logger);
@@ -1418,11 +1603,11 @@ impl BaseContainerRunner {
         let current_env_ptr = env_ptr;
         let current_creation_flags = creation_flags;
 
-        // Schema 0.8 and later launch through a process security environment.
-        // captureDenials additionally starts a learning-mode trace before child
-        // launch; otherwise the environment alone owns the PSEC policy. Both
-        // owners are RAII guards, so early returns close the environment (and
-        // discard an unsealed trace) without leaking broker state.
+        // Schema 0.8 and later prefer a process security environment when its
+        // runtime probe succeeds. During the SBOX-to-PSEC transition, ordinary
+        // requests fall back to the legacy contract when PSEC is unavailable.
+        // captureDenials still requires PSEC because SBOX cannot provide the
+        // environment handle needed to key the trace.
         let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
         let mut security_environment: Option<ProcessSecurityEnvironment> = None;
         if use_process_security_environment {
@@ -1666,7 +1851,12 @@ impl BaseContainerRunner {
 
             // Classify a disabled-feature error as BackendUnavailable; any
             // other launch error stays LaunchFailed.
-            let failure_phase = if is_api_not_implemented(err.0) {
+            let failure_phase = if is_api_not_implemented(err.0)
+                || is_schema_0_8_proxy_fallback_unavailable(
+                    err.0,
+                    &request,
+                    use_process_security_environment,
+                ) {
                 FailurePhase::BackendUnavailable
             } else {
                 FailurePhase::LaunchFailed
@@ -1854,11 +2044,23 @@ struct BaseChild {
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         let capture_denials = request.policy.capture_denials.is_some();
-        let use_process_security_environment = Self::uses_process_security_environment(request);
-        if capture_denials && !use_process_security_environment {
+        let schema_prefers_process_security_environment =
+            Self::schema_prefers_process_security_environment(request);
+        let use_process_security_environment = self.uses_process_security_environment(request);
+        if capture_denials && !schema_prefers_process_security_environment {
             return Err(ScriptResponse::error(
                 "processContainer.captureDenials requires schema version 0.8.0 or later",
             ));
+        }
+        if capture_denials && !use_process_security_environment {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(
+                    "processContainer.captureDenials requires the official process \
+                     security-environment APIs; this host can only use a legacy \
+                     ProcessContainer fallback",
+                )
+            });
         }
         if use_process_security_environment && request.policy.least_privilege_mode {
             return Err(ScriptResponse::error(
@@ -1895,9 +2097,9 @@ impl SandboxBackend for BaseContainerRunner {
                     ))
                 })?;
         }
-        // deniedPaths reaches schema <=0.7 BaseContainer through SBOX and
-        // schema 0.8+ through PSEC. Each path has a distinct support query;
-        // fail closed rather than silently dropping the deny policy.
+        // deniedPaths reaches BaseContainer through whichever contract the
+        // runtime probe selected. Each path has a distinct support query; fail
+        // closed rather than silently dropping the deny policy.
         if !request.policy.denied_paths.is_empty() {
             let deny_supported = if use_process_security_environment {
                 self.capture_support
@@ -2770,9 +2972,51 @@ mod tests {
     fn is_api_not_implemented_classifies_disabled_feature() {
         assert!(is_api_not_implemented(ERROR_CALL_NOT_IMPLEMENTED.0));
         assert!(is_api_not_implemented(E_NOTIMPL.0 as u32));
-        // ERROR_INVALID_PARAMETER (87) and success are ordinary, not "disabled".
+        // ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER, and success are not
+        // globally classified as disabled-feature failures.
+        assert!(!is_api_not_implemented(ERROR_NOT_SUPPORTED.0));
         assert!(!is_api_not_implemented(87));
         assert!(!is_api_not_implemented(0));
+    }
+
+    #[test]
+    fn error_not_supported_is_backend_unavailable_only_for_schema_0_8_proxy_fallback() {
+        let mut proxy_request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..Default::default()
+        };
+        proxy_request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        assert!(is_schema_0_8_proxy_fallback_unavailable(
+            ERROR_NOT_SUPPORTED.0,
+            &proxy_request,
+            false
+        ));
+        assert!(!is_schema_0_8_proxy_fallback_unavailable(
+            ERROR_NOT_SUPPORTED.0,
+            &proxy_request,
+            true
+        ));
+
+        proxy_request.schema_version = "0.7.0-alpha".to_string();
+        assert!(!is_schema_0_8_proxy_fallback_unavailable(
+            ERROR_NOT_SUPPORTED.0,
+            &proxy_request,
+            false
+        ));
+
+        let ordinary_request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..Default::default()
+        };
+        assert!(!is_schema_0_8_proxy_fallback_unavailable(
+            ERROR_NOT_SUPPORTED.0,
+            &ordinary_request,
+            false
+        ));
     }
 
     #[test]
@@ -2882,6 +3126,53 @@ mod tests {
         assert!(BaseContainerRunner::decode_deny_capability(
             1,
             cap | SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
+        ));
+    }
+
+    #[test]
+    fn legacy_sbox_proxy_compatibility_uses_appcontainer_on_query_aware_hosts() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request, None
+        ));
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request,
+            Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX)
+        ));
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request,
+            Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_NETWORK_PROXY)
+        ));
+        assert_eq!(
+            BaseContainerRunner::decode_sbox_proxy_contract(None),
+            SboxProxyContract::LegacyOrUnknown
+        );
+        assert_eq!(
+            BaseContainerRunner::decode_sbox_proxy_contract(Some(
+                SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX
+            )),
+            SboxProxyContract::Unavailable
+        );
+        assert_eq!(
+            BaseContainerRunner::decode_sbox_proxy_contract(Some(
+                SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_NETWORK_PROXY
+            )),
+            SboxProxyContract::Model2PeerIdentity
+        );
+    }
+
+    #[test]
+    fn legacy_sbox_non_proxy_requests_ignore_proxy_contract_capability() {
+        let request = ExecutionRequest::default();
+
+        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request,
+            Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_NETWORK_PROXY)
         ));
     }
 
@@ -3018,7 +3309,7 @@ mod tests {
     }
 
     #[test]
-    fn process_security_environment_routing_uses_schema_version() {
+    fn process_security_environment_preference_uses_schema_version() {
         for (version, expected) in [
             ("", false),
             ("0.6.0-alpha", false),
@@ -3032,11 +3323,71 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                BaseContainerRunner::uses_process_security_environment(&request),
+                BaseContainerRunner::schema_prefers_process_security_environment(&request),
                 expected,
                 "schema version {version}"
             );
         }
+    }
+
+    #[test]
+    fn schema_0_8_uses_psec_only_when_runtime_probe_succeeds() {
+        let request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..Default::default()
+        };
+
+        assert!(BaseContainerRunner::should_use_process_security_environment(&request, true, true));
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(&request, false, true)
+        );
+    }
+
+    #[test]
+    fn schema_0_8_proxy_uses_legacy_contract() {
+        let mut request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..Default::default()
+        };
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(&request, true, true)
+        );
+        assert!(
+            !runner.uses_process_security_environment(&request),
+            "schema 0.8 proxy requests must build the legacy SBOX contract"
+        );
+    }
+
+    #[test]
+    fn schema_0_8_least_privilege_uses_legacy_contract() {
+        let mut request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..Default::default()
+        };
+        request.policy.least_privilege_mode = true;
+
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(&request, true, true)
+        );
+    }
+
+    #[test]
+    fn schema_0_8_denied_paths_use_legacy_contract_when_psec_lacks_support() {
+        let mut request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..Default::default()
+        };
+        request.policy.denied_paths = vec![r"C:\secret".to_string()];
+
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(&request, true, false)
+        );
     }
 
     #[test]
@@ -3447,8 +3798,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_rejects_psec_with_least_privilege() {
-        let runner = BaseContainerRunner::new();
+    fn validate_runner_allows_schema_0_8_least_privilege_via_legacy_contract() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         let mut request = ExecutionRequest {
             schema_version: "0.8.0-alpha".to_string(),
             dry_run: true,
@@ -3456,16 +3807,14 @@ mod tests {
         };
         request.policy.least_privilege_mode = true;
 
-        let error = runner
+        runner
             .validate(&request)
-            .expect_err("PSEC cannot represent leastPrivilege");
-
-        assert!(error.error_message.contains("leastPrivilege"));
+            .expect("leastPrivilege should route through the legacy SBOX contract");
     }
 
     #[test]
-    fn validate_runner_rejects_psec_with_proxy() {
-        let runner = BaseContainerRunner::new();
+    fn validate_runner_allows_schema_0_8_proxy_via_legacy_contract() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         let mut request = ExecutionRequest {
             schema_version: "0.8.0-alpha".to_string(),
             dry_run: true,
@@ -3476,11 +3825,9 @@ mod tests {
             builtin_test_server: false,
         };
 
-        let error = runner
+        runner
             .validate(&request)
-            .expect_err("PSEC proxy requires peer identity plumbing");
-
-        assert!(error.error_message.contains("network.proxy"));
+            .expect("network.proxy should route through the legacy SBOX contract");
     }
 
     #[test]
