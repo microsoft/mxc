@@ -42,20 +42,18 @@ use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLE
 /// literal to avoid pulling in that whole feature for one constant.
 const SW_SHOWNORMAL: i32 = 1;
 
-/// Maximum time to wait for an elevated `plm.exe` child to exit
-/// before giving up and returning an error. Chosen to be well beyond
-/// the wall-clock cost of `plm start` / `plm stop` (which are
-/// dominated by `wpr.exe` invocations that complete in a few seconds)
-/// while still avoiding an unbounded hang if the child wedges (e.g.
-/// waiting on a stuck WPR kernel session).
+/// Maximum time to wait for an elevated `plm.exe` child to exit before
+/// giving up and returning an error.
 ///
-/// Note: 30 s may be too short if `plm stop` has to merge a
-/// multi-GB ETL. PLM is intended to be run against a single
-/// end-to-end flow or unit test at a time, so traces should stay
-/// well under that bound in the supported usage. If a real-world
-/// workload trips this timeout, revisit the bound (or switch to a
-/// Ctrl-C-driven cancel) rather than raising it blindly.
-const PLM_ELEVATED_WAIT_MS: u32 = 30_000;
+/// `plm stop` parses the captured ETL trace inline, which its own
+/// progress message ("Beginning event parsing, this may take several
+/// minutes") flags as a multi-minute operation on a large trace. The
+/// bound therefore has to comfortably exceed that parse cost while still
+/// avoiding an unbounded hang if the child wedges (e.g. waiting on a
+/// stuck WPR kernel session). Ten minutes leaves ample headroom for the
+/// supported "single end-to-end flow / unit test at a time" workload; a
+/// child still alive after that is treated as wedged and terminated.
+const PLM_ELEVATED_WAIT_MS: u32 = 600_000;
 
 /// Result of an elevated `plm.exe` invocation.
 pub struct ElevatedRun {

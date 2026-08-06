@@ -305,7 +305,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > }
 > ```
 >
-> This forwards host `127.0.0.1:3000` → container `:3000`. TCP only — UDP is rejected at parse time because the shipped runtime (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL`.
+> This forwards host `127.0.0.1:3000` → container `:3000`. TCP only — UDP is rejected at parse time because the shipped runtime returns `E_NOTIMPL`.
 >
 > **⚠️ Needs to change — policy-driven posture.** The `ingress.hostLoopback` / `allowLocalNetwork` policy field is parsed (`config_parser.rs:88-89,1095-1096`) but the WSLC runner never consults it — only the imperative `portMappings` list has any effect. There is no way to express a blanket `hostLoopback: "allow"` default (host-loopback to every exposed port) or source-scoped inbound filtering (allow `127.0.0.1`/`::1` only, deny other host interfaces). Wiring the policy field and enforcing a default inbound posture needs the VM-level network policy API (SDK dep #1), since MXC has no host-side access to the container's interface inside the VM.
 

@@ -452,9 +452,9 @@ pub struct Wslc {
     pub gpu: Option<bool>,
     /// Storage path override.
     pub storage_path: Option<String>,
-    /// Host → container port forwards. Only TCP is currently supported by the
-    /// vendored WSLC SDK runtime (Microsoft.WSL.Containers 2.8.1); the parser
-    /// rejects `udp` because the shipped runtime returns `E_NOTIMPL`.
+    /// Host → container port forwards. Only TCP is currently supported; the
+    /// parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL`
+    /// for UDP port mappings.
     pub port_mappings: Option<Vec<PortMapping>>,
 }
 

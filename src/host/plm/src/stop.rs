@@ -9,6 +9,11 @@ use chrono::Local;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
+use crate::config::{
+    deny_file_set, initialize_filesystem, load_config, update_from_access_events,
+    write_added_paths_summary,
+};
+use crate::event_parser::parse_events;
 use crate::wpr_path::wpr_command;
 
 pub struct StopOptions {
@@ -34,20 +39,12 @@ pub struct WprExeStopper;
 
 impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
-        // Capture stdio rather than inheriting so a successful `wpr
-        // -stop` doesn't leak wpr chatter into any wrapping tool (e.g.
-        // `wxc-exec --audit`). On non-zero exit we replay the captured
-        // streams so operators can still see wpr's own diagnostic.
         let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        let output = cmd
-            .args(["-stop", &trace_file.to_string_lossy()])
-            .output()
-            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))?;
-        if !output.status.success() {
-            crate::start::replay_wpr_output("stop", &output);
-        }
-        Ok(output.status)
+        cmd.arg("-stop")
+            .arg(trace_file)
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
     }
 }
 
@@ -65,9 +62,10 @@ fn stop_plm_trace(trace_file: &Path) -> Result<()> {
 }
 
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
-/// to its canonical form. Exposed even though the self-access filter
-/// consumer isn't wired here, so the canonicalize fallback chain is
-/// pinned by tests.
+/// to its canonical form. Consumed by `update_from_access_events` as
+/// the self-access filter: events referencing this path are dropped
+/// from the adjusted config so the container never grants itself
+/// broad access to its own binary directory.
 ///
 /// Fallback chain:
 ///   1. `canonicalize(opt.bin_path)` if `Some`
@@ -96,20 +94,25 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>". The sub-second
-    // component makes parallel PLM runs finishing in the same second
-    // land in distinct directories.
+    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
+    // Including PID + sub-second component avoids collisions when
+    // parallel PLM tasks finish in the same second.
     let log_dir = opts.log_dir.unwrap_or_else(|| {
-        let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
+        let stamp = format!(
+            "{}_pid{}",
+            Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
+            std::process::id()
+        );
         exe_dir.join("logs").join(stamp)
     });
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
-    // Resolve bin_path so the operator-facing warning path is
-    // exercised and the canonical form is on disk for downstream
-    // consumers, even though the self-access filter isn't wired here.
-    let (_bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
+    // Resolve bin_path to its canonical form so the self-access filter
+    // in `config::update_from_access_events` can compare it against the
+    // verbatim-prefixed paths ETW emits. The fallback chain is in
+    // `resolve_bin_path`.
+    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
     if let Some(w) = warning {
         eprintln!("[plm] warning: {w}");
     }
@@ -127,19 +130,76 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         p
     };
 
-    println!("Trace captured at {}.", trace_file.display());
-
-    // `config_path` / `adjusted_config_path` are accepted today so the
-    // wxc-exec --audit harness can pass them through without breaking
-    // for downstream consumers.
-    if let Some(p) = opts.config_path.as_ref() {
-        let _ = p;
+    if opts.verbose {
+        println!("Beginning event parsing, this may take several minutes");
     }
+
+    // Current directory at parse time -- events under this path are
+    // treated as test scaffolding noise and skipped.
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
+
+    let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
+
+    let config_path = match opts.config_path.as_ref() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    // Load the source config into memory FIRST, before any disk
+    // side effect touches the log directory. If the source is
+    // unreadable or malformed we want to bail before we've
+    // produced a half-populated log_dir (bare trace.etl + no
+    // config, no adjusted).
+    let base_config = load_config(config_path)?;
+
+    // Copy the original config alongside the trace unconditionally
+    // so operators always have a snapshot of the exact input that
+    // produced this run's `trace.etl`, even when the parse yielded
+    // nothing mergeable. The copy MUST land on disk before we
+    // attempt any edit-and-save cycle below: it's the operator's
+    // only record of the pre-edit state, and losing it turns an
+    // Adjusted_*.json into an un-auditable delta.
+    let leaf = config_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".into());
+    let dest_config = log_dir.join(&leaf);
+    std::fs::copy(config_path, &dest_config)
+        .with_context(|| format!("failed to copy {}", config_path.display()))?;
+
+    if parse.is_empty() {
+        // Nothing mergeable -- skip producing an Adjusted_*.json (which
+        // would be byte-identical to the input and confuse the harness's
+        // diff-based pass/fail signal).
+        return Ok(());
+    }
+
+    // Edit the pre-loaded copy of the config in memory rather than
+    // re-reading `dest_config` — this avoids a read-after-write on
+    // Windows where an AV filter can occasionally serve a stale or
+    // empty buffer for a file that `std::fs::copy` just wrote.
+    let mut config = base_config;
+    initialize_filesystem(&mut config)?;
+    let deny = deny_file_set(&config);
+
+    let bin_path_s = bin_path.to_string_lossy().into_owned();
+    let added = update_from_access_events(
+        &mut config,
+        &bin_path_s,
+        &parse.valid_access_events,
+        &deny,
+        opts.verbose,
+    )?;
+
+    write_added_paths_summary(&added, opts.verbose);
+
+    // `adjusted_config_path` is accepted today so the wxc-exec --audit
+    // harness can pass it through; the Adjusted_*.json writer arrives
+    // in the next PR (config-generation).
     if let Some(p) = opts.adjusted_config_path.as_ref() {
         let _ = p;
-    }
-    if opts.verbose {
-        println!("verbose logging is a no-op in this build.");
     }
 
     Ok(())
