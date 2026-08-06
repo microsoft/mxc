@@ -30,19 +30,27 @@ MXC configures the BaseContainer client, but it does not create or start the
 proxy. Start the proxy before `wxc-exec.exe` and keep it alive for the complete
 client lifetime.
 
-The client and proxy must satisfy all of these requirements:
+The BaseContainer client and proxy security environments must both have
+`privateNetworkClientServer`. MXC adds it to the BaseContainer client. The
+proxy also needs `internetClient` when it connects to external destinations.
+It must listen on the loopback address and port in
+`runtimeConfig.networkProxy`.
 
-1. Both AppContainers have the `privateNetworkClientServer` capability. MXC
-   adds it to the BaseContainer client. The proxy package or profile must
-   declare it explicitly.
-2. The proxy has `internetClient` if it connects to external destinations.
-3. The proxy listens on the loopback address and port used by
-   `runtimeConfig.networkProxy`.
-4. `processContainer.network.allowedPeer` is the proxy's single AppContainer
-   identity. For a packaged proxy, use its package family name.
-5. Windows Firewall authorizes inbound TCP traffic to the proxy executable.
-   Scoped AppContainer loopback rules do not bypass the firewall's
-   block-inbound-to-non-allowed-apps policy.
+Windows supports two proxy identity/setup models:
+
+1. **Unpackaged AppContainer proxy.** Create the proxy with an AppContainer
+   profile, give it `privateNetworkClientServer` (and `internetClient` when
+   needed), set `allowedPeer` to the profile name, and install an inbound
+   Windows Firewall application rule that permits the proxy executable to
+   receive the scoped loopback connection.
+2. **Packaged proxy.** Install or loosely register the proxy as a package, set
+   `allowedPeer` to its package family name, and declare the proxy executable's
+   inbound firewall/loopback authorization in the package manifest.
+
+Without one of these identities plus its firewall authorization, the process
+inside the BaseContainer cannot connect to the proxy. The scoped peer rules
+created from `allowedPeer` do not by themselves bypass Windows Firewall's
+block-inbound-to-non-allowed-apps policy.
 
 Proxy mode and direct `network.egress.allow` or `network.egress.deny` rules are
 mutually exclusive.
@@ -100,8 +108,10 @@ After installing or registering the package:
 
 The repository's runnable test implementation is
 [`run_base_container_network_tests.ps1`](../../../scripts/run_base_container_network_tests.ps1).
-Its minimal package manifest is under
+The script launches the Rust E2E test; its minimal package manifest is under
 [`AppContainerProxyPackage`](../../../scripts/AppContainerProxyPackage/).
+The test package also declares a temporary app-execution alias so the Rust
+harness can launch it with arguments without a C# or COM activation shim.
 
 ## Unpackaged AppContainer proxy
 

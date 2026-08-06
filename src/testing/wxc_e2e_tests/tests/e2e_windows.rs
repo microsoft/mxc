@@ -7,16 +7,20 @@
 //! PowerShell test scripts, so failures can be debugged from Rust test code.
 //! Tests skip gracefully when prerequisites (binaries or features) are missing.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use wxc_e2e_tests::{
     assert_exit, assert_pwsh, assert_python, assert_success,
     assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_snapshot,
-    has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature, has_wxc_exe, repo_root,
-    run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example, run_wxc_state_aware,
-    test_configs_dir, TempDirs,
+    has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature, has_wxc_exe,
+    host_prepped_optin, repo_root, run_test_driver, run_wxc_config, run_wxc_config_value,
+    run_wxc_example, run_wxc_state_aware, test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
@@ -261,15 +265,405 @@ fn microvm_network_blocked() {
     );
 }
 
-fn processcontainer_proxy() {
-    let config = test_configs_dir().join("proxy_builtin_test.json");
-    if !config.exists() {
-        println!("SKIPPED: proxy config not found: {}", config.display());
+const NETWORK_CONFIG_DIR: &str = "processcontainer/networking";
+const TEST_PROXY_PUBLISHER_ID: &str = "s9y1p3hwd5qda";
+
+fn schema_supports_processcontainer_network_v08() -> bool {
+    let schema = repo_root()
+        .join("schemas")
+        .join("dev")
+        .join("mxc-config.schema.0.8.0-dev.json");
+    let Ok(contents) = fs::read_to_string(schema) else {
+        return false;
+    };
+
+    contents.contains("\"egress\"")
+        && contents.contains("\"runtimeConfig\"")
+        && contents.contains("\"allowedPeer\"")
+}
+
+fn run_network_config(config_file: &str) -> wxc_e2e_tests::CommandResult {
+    run_wxc_config(
+        &format!("{NETWORK_CONFIG_DIR}/{config_file}"),
+        &["--experimental"],
+    )
+}
+
+fn host_can_reach_public_dns() -> bool {
+    let Ok(output) = Command::new("nslookup.exe")
+        .args(["example.com", "8.8.8.8"])
+        .output()
+    else {
+        return false;
+    };
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    output.status.success()
+        && (combined.contains("Address:") || combined.contains("Addresses:"))
+        && !combined.contains("timed out")
+        && !combined.contains("No response from server")
+}
+
+fn copy_directory(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", destination.display()));
+    for entry in fs::read_dir(source)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source.display()))
+    {
+        let entry = entry.expect("package template entry should be readable");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_directory(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to copy {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
+}
+
+fn powershell_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn run_powershell(script: &str) -> std::process::Output {
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to launch PowerShell: {error}"))
+}
+
+struct PackagedTestProxy {
+    child: Child,
+    package_name: String,
+    shutdown_file: PathBuf,
+    temp_root: PathBuf,
+    port: u16,
+    package_family_name: String,
+}
+
+impl PackagedTestProxy {
+    fn start() -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let package_name = format!("Microsoft.Mxc.TestProxy.{unique:x}");
+        let app_alias = format!("mxc-test-proxy-{unique:x}.exe");
+        let package_family_name = format!("{package_name}_{TEST_PROXY_PUBLISHER_ID}");
+        let temp_root = std::env::temp_dir().join(format!("mxc-test-proxy-package-{unique:x}"));
+        let package_root = temp_root.join("package");
+        let template = repo_root()
+            .join("tests")
+            .join("scripts")
+            .join("AppContainerProxyPackage");
+        copy_directory(&template, &package_root);
+
+        let proxy_exe = wxc_e2e_tests::find_binary("wxc-test-proxy.exe")
+            .expect("wxc-test-proxy.exe should be available");
+        fs::copy(&proxy_exe, package_root.join("wxc-test-proxy.exe"))
+            .expect("test proxy should copy into package staging");
+
+        let manifest_path = package_root.join("AppxManifest.xml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .expect("proxy package manifest should be readable")
+            .replace("__PACKAGE_NAME__", &package_name)
+            .replace("__APP_ALIAS__", &app_alias);
+        fs::write(&manifest_path, manifest).expect("proxy package manifest should be writable");
+
+        let register_script = format!(
+            "$ErrorActionPreference = 'Stop'; \
+             Add-AppxPackage -Register '{}' -ForceApplicationShutdown; \
+             if (-not (Get-AppxPackage -Name '{}')) {{ throw 'Package registration failed.' }}",
+            powershell_literal(&manifest_path.display().to_string()),
+            powershell_literal(&package_name),
+        );
+        let registration = run_powershell(&register_script);
+        assert!(
+            registration.status.success(),
+            "failed to register test proxy package\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&registration.stdout),
+            String::from_utf8_lossy(&registration.stderr)
+        );
+
+        let local_state = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .expect("LOCALAPPDATA should be set")
+            .join("Packages")
+            .join(&package_family_name)
+            .join("LocalState");
+        fs::create_dir_all(&local_state).expect("package LocalState should be creatable");
+        let ready_file = local_state.join("ready");
+        let shutdown_file = local_state.join("shutdown");
+        let _ = fs::remove_file(&ready_file);
+        let _ = fs::remove_file(&shutdown_file);
+
+        let alias_path = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .expect("LOCALAPPDATA should be set")
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join(&app_alias);
+        let alias_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !alias_path.exists() && std::time::Instant::now() < alias_deadline {
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            alias_path.exists(),
+            "packaged proxy execution alias was not registered: {}",
+            alias_path.display()
+        );
+
+        let mut child = Command::new(&alias_path)
+            .arg("--ready-file")
+            .arg(&ready_file)
+            .arg("--cleanup-event")
+            .arg(format!("Local\\mxc-unused-{unique:x}"))
+            .arg("--parent-pid")
+            .arg(std::process::id().to_string())
+            .arg("--shutdown-file")
+            .arg(&shutdown_file)
+            .arg("--allow-host")
+            .arg("example.com")
+            .spawn()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to launch packaged proxy through {}: {error}",
+                    alias_path.display()
+                )
+            });
+
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !ready_file.exists() && std::time::Instant::now() < ready_deadline {
+            if let Some(status) = child
+                .try_wait()
+                .expect("packaged proxy status should be readable")
+            {
+                panic!("packaged proxy exited before becoming ready: {status}");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            ready_file.exists(),
+            "timed out waiting for packaged proxy ready file"
+        );
+        let port = fs::read_to_string(&ready_file)
+            .expect("proxy ready file should be readable")
+            .trim()
+            .parse()
+            .expect("proxy ready file should contain a port");
+
+        println!("Packaged proxy: {package_family_name}, port {port}");
+        Self {
+            child,
+            package_name,
+            shutdown_file,
+            temp_root,
+            port,
+            package_family_name,
+        }
+    }
+}
+
+impl Drop for PackagedTestProxy {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.shutdown_file, "");
+        for _ in 0..30 {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+
+        let remove_script = format!(
+            "Get-AppxPackage -Name '{}' | Remove-AppxPackage -ErrorAction SilentlyContinue",
+            powershell_literal(&self.package_name)
+        );
+        let _ = run_powershell(&remove_script);
+        let _ = fs::remove_dir_all(&self.temp_root);
+    }
+}
+
+fn proxy_test_config(name: &str, command: &str, proxy: &PackagedTestProxy) -> serde_json::Value {
+    serde_json::json!({
+        "version": "0.8.0-dev",
+        "containerId": format!("CLI-{name}"),
+        "containment": "processcontainer",
+        "process": {
+            "commandLine": format!(
+                "powershell.exe -NoProfile -NonInteractive -Command \"{command}\""
+            ),
+            "timeout": 30000
+        },
+        "filesystem": { "readonlyPaths": ["C:\\Windows"] },
+        "ui": { "disable": false },
+        "network": {
+            "egress": { "default": "deny" },
+            "ingress": { "hostLoopback": "deny" }
+        },
+        "runtimeConfig": {
+            "networkProxy": format!("http://127.0.0.1:{}", proxy.port)
+        },
+        "processContainer": {
+            "network": { "allowedPeer": proxy.package_family_name }
+        }
+    })
+}
+
+fn assert_proxy_case(name: &str, command: &str, expected: &str, proxy: &PackagedTestProxy) {
+    let result = run_wxc_config_value(
+        name,
+        &proxy_test_config(name, command, proxy),
+        &["--experimental"],
+    );
+    assert_success(&result);
+    let combined = result.combined_output_with_decoded_base64();
+    assert!(
+        combined.contains(expected),
+        "{name} output did not contain {expected:?}\n{combined}"
+    );
+}
+
+fn processcontainer_network_v08() {
+    for config in [
+        "base_container_network_allow.json",
+        "base_container_network_deny.json",
+    ] {
+        let result = run_network_config(config);
+        if result.is_missing_process_prerequisite() {
+            println!("SKIPPED: ProcessContainer runtime prerequisites are unavailable");
+            return;
+        }
+        assert_success(&result);
+    }
+
+    let proxy = PackagedTestProxy::start();
+
+    if !schema_supports_processcontainer_network_v08() {
+        println!(
+            "SKIPPED: schema 0.8 ProcessContainer networking is not present; \
+             legacy 0.7 cases and packaged proxy startup passed"
+        );
         return;
     }
 
-    let result = run_test_driver(&config, &["--debug", "--proxy"]);
-    assert_success(&result);
+    for config in [
+        "base_container_network_v08_default_deny_tcp_blocked.json",
+        "base_container_network_v08_allow_ip_tcp443.json",
+        "base_container_network_v08_allow_cidr_except_blocked.json",
+        "base_container_network_v08_allow_port_range_tcp443.json",
+        "base_container_network_v08_multiple_rules.json",
+        "base_container_network_v08_deny_overrides_allow.json",
+        "base_container_network_v08_allow_any_protocol_tcp443.json",
+        "base_container_network_v08_deny_udp53.json",
+    ] {
+        assert_success(&run_network_config(config));
+    }
+
+    if host_can_reach_public_dns() {
+        assert_success(&run_network_config(
+            "base_container_network_v08_allow_udp53.json",
+        ));
+    } else {
+        println!("SKIPPED: host network cannot reach public UDP/53 at 8.8.8.8");
+    }
+
+    let invalid = run_network_config("base_container_network_v08_proxy_with_egress_invalid.json");
+    let invalid_output = invalid.combined_output_with_decoded_base64();
+    assert_ne!(invalid.code, Some(0), "invalid proxy+egress config ran");
+    assert!(
+        invalid_output.contains("requires deny-default egress with no direct allow/deny rules"),
+        "unexpected proxy+egress validation output\n{invalid_output}"
+    );
+
+    let blocked_loopback_port = if proxy.port < u16::MAX {
+        proxy.port + 1
+    } else {
+        proxy.port - 1
+    };
+
+    assert_proxy_case(
+        "B1_winhttp_allowed_domain_through_proxy",
+        "$request = New-Object -ComObject WinHttp.WinHttpRequest.5.1; \
+         try { $request.Open('GET', 'https://example.com/', $false); $request.Send(); \
+         if ($request.Status -ge 200 -and $request.Status -lt 400) { \
+         Write-Output 'OK:B1_winhttp_allowed'; exit 0 } } catch { }; exit 1",
+        "OK:B1_winhttp_allowed",
+        &proxy,
+    );
+    assert_proxy_case(
+        "B1_curl_allowed_domain_through_proxy",
+        "Write-Output ('HTTP_PROXY={0}; HTTPS_PROXY={1}' -f $env:HTTP_PROXY, \
+         $env:HTTPS_PROXY); & curl.exe --max-time 15 https://example.com/ | Out-Null; \
+         if ($LASTEXITCODE -eq 0) { Write-Output 'OK:B1_curl_allowed'; exit 0 }; exit 1",
+        "OK:B1_curl_allowed",
+        &proxy,
+    );
+    assert_proxy_case(
+        "B2_non_allowed_domain_blocked_at_proxy",
+        "$request = New-Object -ComObject WinHttp.WinHttpRequest.5.1; \
+         try { $request.Open('GET', 'https://www.microsoft.com/', $false); $request.Send(); \
+         if ($request.Status -eq 403) { Write-Output 'OK:B2_domain_blocked'; exit 0 } \
+         } catch { }; exit 1",
+        "OK:B2_domain_blocked",
+        &proxy,
+    );
+    assert_proxy_case(
+        "B3_raw_external_tcp_blocked",
+        "$client = [Net.Sockets.TcpClient]::new(); \
+         try { $connected = $client.ConnectAsync('1.1.1.1', 443).Wait(5000) } \
+         catch { $connected = $false } finally { $client.Dispose() }; \
+         if (-not $connected) { Write-Output 'OK:B3_raw_tcp_blocked'; exit 0 }; exit 1",
+        "OK:B3_raw_tcp_blocked",
+        &proxy,
+    );
+    assert_proxy_case(
+        "B4_arbitrary_loopback_port_blocked",
+        &format!(
+            "$client = [Net.Sockets.TcpClient]::new(); \
+             try {{ $connected = $client.ConnectAsync('127.0.0.1', \
+             {blocked_loopback_port}).Wait(3000) }} catch {{ $connected = $false }} \
+             finally {{ $client.Dispose() }}; if (-not $connected) {{ \
+             Write-Output 'OK:B4_loopback_blocked'; exit 0 }}; exit 1"
+        ),
+        "OK:B4_loopback_blocked",
+        &proxy,
+    );
+    assert_proxy_case(
+        "B5_proxy_loopback_port_reachable",
+        &format!(
+            "$client = [Net.Sockets.TcpClient]::new(); \
+             try {{ $connected = $client.ConnectAsync('127.0.0.1', {}).Wait(5000) }} \
+             catch {{ $connected = $false }} finally {{ $client.Dispose() }}; \
+             if ($connected) {{ Write-Output 'OK:B5_proxy_reachable'; exit 0 }}; exit 1",
+            proxy.port
+        ),
+        "OK:B5_proxy_reachable",
+        &proxy,
+    );
+    assert_proxy_case(
+        "B6_direct_external_udp53_blocked",
+        "$output = (& nslookup.exe example.com 8.8.8.8 2>&1) -join \
+         [Environment]::NewLine; if ($output -match \
+         'timed out|No response from server|UnKnown') { \
+         Write-Output 'OK:B6_udp53_blocked'; exit 0 }; exit 1",
+        "OK:B6_udp53_blocked",
+        &proxy,
+    );
 }
 
 /// Drives `processContainer.captureDenials` end to end and asserts the
@@ -543,12 +937,11 @@ fn test_microvm_suite() {
 }
 
 #[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled and elevation
-fn test_processcontainer_proxy() {
-    if !cached_has_test_driver() {
+fn test_processcontainer_network_v08() {
+    if !cached_has_wxc_exe() || !host_prepped_optin() {
         return;
     }
-    with_test_lock(processcontainer_proxy);
+    with_test_lock(processcontainer_network_v08);
 }
 
 #[test]

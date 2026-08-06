@@ -62,10 +62,12 @@ for CIDR exceptions, multiple protocols, and explicit deny rules.
 ### ProcessContainer Network Proxy
 
 Proxy mode denies direct egress and permits the BaseContainer to communicate
-only with one loopback AppContainer proxy. The proxy must already be running,
-both AppContainers need `privateNetworkClientServer`, and the proxy executable
-needs inbound firewall authorization. A packaged proxy can own that
-authorization through an MSIX/AppX `windows.firewallRules` declaration.
+only with one loopback proxy identity. The proxy must already be running, both
+the BaseContainer client and proxy security environments need
+`privateNetworkClientServer`, and the proxy executable needs inbound firewall
+authorization. Use either an unpackaged AppContainer profile with an
+administrator-installed firewall rule or a package family with an MSIX/AppX
+`windows.firewallRules` declaration.
 
 See the
 [`proxy example and setup guide`](../tests/examples/processcontainer/networking/README.md)

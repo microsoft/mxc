@@ -1,11 +1,12 @@
 # ProcessContainer networking test configs
 
 This directory contains the config-driven ProcessContainer networking matrix
-used by
-[`run_base_container_network_tests.ps1`](../../../scripts/run_base_container_network_tests.ps1).
-The runner executes the legacy cases now and automatically skips the
-forward-looking schema 0.8 cases until `egress`, `runtimeConfig`, and
-`allowedPeer` appear in the checked-in dev schema.
+used by the Rust `wxc_e2e_tests` harness. The thin
+[`run_base_container_network_tests.ps1`](../../../scripts/run_base_container_network_tests.ps1)
+launcher builds the required binaries and selects that test. The Rust harness
+executes the legacy cases now and automatically skips the forward-looking
+schema 0.8 cases until `egress`, `runtimeConfig`, and `allowedPeer` appear in
+the checked-in dev schema.
 
 The matrix covers:
 

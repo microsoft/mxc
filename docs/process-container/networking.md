@@ -45,10 +45,11 @@ implementation lands.
 
 ### Model 2: proxy-only egress (recommended)
 
-- **Capabilities:** both the sandbox client and proxy server AppContainers have
-  `privateNetworkClientServer`. The proxy additionally has `internetClient` so
-  it can reach allowed external destinations. A loopback exemption permits the
-  client to communicate only with the single named proxy peer.
+- **Capabilities:** both the BaseContainer client and proxy security
+  environments have `privateNetworkClientServer`. The proxy additionally has
+  `internetClient` so it can reach allowed external destinations. A loopback
+  exemption permits the client to communicate only with the single named proxy
+  peer.
 - **Enforcement:** The per-container WinHTTP proxy. With no internetClient, the only reachable egress is the loopback proxy; the system drops everything else. MXC resolves the proxy container's SID at launch to scope the loopback exemption.
 
 ```jsonc
@@ -71,10 +72,10 @@ implementation lands.
 
 The proxy endpoint (e.g., 127.0.0.1:8080) is runtime metadata for the process
 container backend and not part of the shared network policy. MXC resolves the
-single `allowedPeer` AppContainer SID at launch to scope the loopback exemption
-and adds `privateNetworkClientServer` to the BaseContainer client. The
-caller-created proxy AppContainer must also have `privateNetworkClientServer`;
-it needs `internetClient` as well if it connects to external destinations.
+single `allowedPeer` identity at launch to scope the loopback exemption and
+adds `privateNetworkClientServer` to the BaseContainer client. The proxy
+security environment must also have `privateNetworkClientServer`; it needs
+`internetClient` as well if it connects to external destinations.
 
 For a packaged proxy, `allowedPeer` is its package family name (for example,
 the value returned by
@@ -94,15 +95,19 @@ application authorization. The scoped loopback rules created from
 `allowedPeer` are necessary, but they do not bypass the firewall's
 block-inbound-to-non-allowed-apps policy.
 
-Use one of these ownership models:
+Use one of these identity and firewall ownership models:
 
-- Package the proxy as MSIX/AppX and declare a
+- Run an unpackaged proxy in an AppContainer profile and install an inbound
+  application rule for its executable with administrator privileges. Use the
+  profile name as `allowedPeer`.
+- Package the proxy as MSIX/AppX, use its package family name as `allowedPeer`,
+  and declare a
   `desktop2:Extension Category="windows.firewallRules"` inbound TCP rule for
   the proxy executable. This keeps firewall authorization owned by the package
   and removes it when the package is uninstalled.
-- For an unpackaged AppContainer, install an inbound application rule for the
-  proxy executable with administrator privileges and remove it when the proxy
-  is uninstalled.
+
+Without one of these setups, the BaseContainer process cannot connect to the
+proxy even when both sides have `privateNetworkClientServer`.
 
 The
 [`ProcessContainer networking examples`](../../tests/examples/processcontainer/networking/README.md)
