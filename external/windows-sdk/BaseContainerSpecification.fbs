@@ -83,8 +83,57 @@ table proxy_info {
     url:string;
 }
 
+// Default stance for traffic not matched by any rule (allow or deny).
+enum FilterAction : byte { deny, allow }
+
+// L4 protocol for a port rule. "any" matches all protocols.
+enum IpProtocol : byte { any, tcp, udp, icmpv4, icmpv6 }
+
+// A destination subnet: an IP address literal plus a prefix length.
+table ip_subnet {
+    // IPv4/IPv6 address literal, no prefix suffix (e.g. "140.82.112.0", "0.0.0.0", "::").
+    address:string;
+    // Prefix length (subnet width). 0 means match-any for the family.
+    prefix_length:ubyte = 0;
+}
+
+// A destination: a subnet with optional exclusions carved out.
+table destination_rule {
+    subnet:ip_subnet;
+    // Exclusion subnets within `subnet` (Kubernetes ipBlock.except style).
+    except:[ip_subnet];
+}
+
+// A destination port/protocol. Omit `port` (0) to match all ports.
+table port_rule {
+    protocol:IpProtocol = any;
+    port:uint16 = 0;
+    // Inclusive end of a port range; 0 means a single `port`.
+    end_port:uint16 = 0;
+}
+
+// One endpoint rule: match any listed destination AND any listed port. Direction-neutral so the
+// same shape can back ingress rules later (NetworkPolicy.egress applies it as egress today).
+table endpoint_rule {
+    destinations:[destination_rule];
+    ports:[port_rule];
+}
+
+// An allow/deny policy over endpoint rules; an explicit deny overrides an allow. Applied as
+// egress via NetworkPolicy.egress (direction-neutral so ingress can reuse this table).
+table endpoint_policy {
+    default_action:FilterAction = deny;
+    allow:[endpoint_rule];
+    deny:[endpoint_rule];
+}
+
 table NetworkPolicy {
     proxy:proxy_info;
+    egress:endpoint_policy;
+
+    // The proxied client's single AppContainer proxy moniker: the peer it may loopback with.
+    // Set only on the client's spec; the proxy never learns its clients.
+    allowed_appcontainer_peer:string;
 }
 
 root_type SandboxSpec;
