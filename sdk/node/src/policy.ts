@@ -368,7 +368,13 @@ export function getAvailableToolsPolicy(
 
     return {
         readonlyPaths: filtered,
-        readwritePaths: deduplicatePaths(pwshPolicy.readwritePaths),
+        // Write grants get the system-critical check too — a `USERPROFILE`
+        // under `%WINDIR%` (the SYSTEM account's `config\systemprofile`, say)
+        // would otherwise yield a read-write grant inside a protected system
+        // directory. They are deliberately *not* existence-filtered:
+        // PowerShell creates the PSReadLine history directory on first use.
+        readwritePaths: deduplicatePaths(pwshPolicy.readwritePaths)
+            .filter(dirPath => !isSystemCriticalPath(dirPath)),
     };
 }
 

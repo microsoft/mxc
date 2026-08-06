@@ -330,9 +330,19 @@ pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPol
         .filter(|dir| directory_exists(dir) && !is_system_critical_path(dir))
         .collect();
 
+    // Write grants get the system-critical check too — a `USERPROFILE` under
+    // `%WINDIR%` (the SYSTEM account's `config\systemprofile`, say) would
+    // otherwise yield a read-write grant inside a protected system directory.
+    // They are deliberately *not* existence-filtered: PowerShell creates the
+    // PSReadLine history directory on first use.
+    let readwrite_paths: Vec<String> = deduplicate_paths(&pwsh.readwrite_paths)
+        .into_iter()
+        .filter(|dir| !is_system_critical_path(dir))
+        .collect();
+
     FilesystemPolicyResult {
         readonly_paths,
-        readwrite_paths: deduplicate_paths(&pwsh.readwrite_paths),
+        readwrite_paths,
     }
 }
 
@@ -945,6 +955,47 @@ mod tests {
             result.readonly_paths.is_empty(),
             "a filesystem root must never be granted: {:?}",
             result.readonly_paths
+        );
+    }
+
+    /// The PSReadLine write grant is derived from `USERPROFILE`, which can
+    /// legitimately sit under `%WINDIR%` — the SYSTEM account's profile is
+    /// `C:\Windows\System32\config\systemprofile`. A read-write grant there
+    /// would breach the system-critical invariant, so it must be filtered.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn tool_paths_never_grant_write_access_under_windir() {
+        use super::available_tools_policy;
+        use std::fs;
+
+        let unique = format!(
+            "mxc_pwsh_rw_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let ps_home = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&ps_home).expect("create temp $PSHOME");
+        fs::write(ps_home.join("pwsh.exe"), b"").expect("create fake pwsh.exe");
+
+        let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let env = vec![
+            ("PATH".to_string(), ps_home.to_string_lossy().into_owned()),
+            (
+                "USERPROFILE".to_string(),
+                format!("{win_dir}\\System32\\config\\systemprofile"),
+            ),
+        ];
+        let result = available_tools_policy(Some(&env));
+
+        let _ = fs::remove_dir_all(&ps_home);
+
+        assert!(
+            result.readwrite_paths.is_empty(),
+            "no write grant may land under %WINDIR%: {:?}",
+            result.readwrite_paths
         );
     }
 

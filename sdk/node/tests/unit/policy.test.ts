@@ -117,6 +117,25 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
             'A filesystem root must never be granted — it exposes the whole volume',
         );
     });
+
+    // The PSReadLine write grant is derived from USERPROFILE, which can
+    // legitimately sit under %WINDIR% — the SYSTEM account's profile is
+    // C:\Windows\System32\config\systemprofile. Only a real Windows host can
+    // exercise this: mocking `process.platform` leaves the imported `path`
+    // module POSIX, so the backslash-based %WINDIR% comparison never matches.
+    // The equivalent semantics are covered on every host by the
+    // 'Windows path semantics' suite below.
+    it('should not grant write access under %WINDIR%', { skip: process.platform !== 'win32' }, () => {
+        const pwshDir = createFakePwshDir();
+        const env = {
+            PATH: pwshDir,
+            USERPROFILE: path.join(process.env['WINDIR'] || 'C:\\Windows', 'System32', 'config', 'systemprofile'),
+        };
+        const result = getAvailableToolsPolicy(env);
+        assert.deepStrictEqual(result.readwritePaths, [],
+            'No write grant may land under %WINDIR%',
+        );
+    });
 });
 
 describe('isSystemCriticalPath - Windows path semantics', () => {
@@ -163,6 +182,9 @@ describe('isSystemCriticalPath - Windows path semantics', () => {
             'C:\\Windows\\..\\Windows\\System32',
             '\\\\?\\C:\\Windows\\System32',
             '\\\\.\\C:\\Windows',
+            // The SYSTEM account's USERPROFILE — the PSReadLine write grant
+            // derived from it must be rejected.
+            'C:\\Windows\\System32\\config\\systemprofile\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine',
         ]) {
             assert.strictEqual(isCritical(dir), true, `${dir} must be system-critical`);
         }
