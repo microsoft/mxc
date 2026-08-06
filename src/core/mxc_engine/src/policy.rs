@@ -832,8 +832,9 @@ fn build_wire_config(
 
     // Mirror the SDK's host-rule validation: Unix backends accept host lists
     // without `allowOutbound`; only Windows ProcessContainer requires it. WSLC
-    // is a Linux container (its rules are host-side), so it accepts them too —
-    // matching the SDK's `acceptsHostRulesWithoutOutbound`.
+    // skips this gate so the config parser can reject its (unenforceable)
+    // per-host filtering with a precise message instead of the generic
+    // require-`allowOutbound` error here.
     // NB: Seatbelt can't actually enforce hostnames (`profile_builder` degrades a
     // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
     // anyway to stay consistent with the SDK rather than diverging — keeping the
@@ -1393,22 +1394,25 @@ mod tests {
     }
 
     #[test]
-    fn wslc_accepts_host_rules_without_allow_outbound() {
-        // WSLC enforces host rules container-side, so — like the SDK — it does
-        // not require `allowOutbound` alongside `allowedHosts`.
+    fn wslc_rejects_per_host_filtering() {
+        // WSLc cannot enforce per-host egress filtering (containers lack
+        // CAP_NET_ADMIN), so allowedHosts with a default-block policy is
+        // rejected at build time rather than silently ignored.
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
             allowed_hosts: vec!["example.com".to_string()],
             ..Default::default()
         });
+        let err = build_request_with_containment(
+            &policy,
+            &Containment::Wslc(WslcSection::default()),
+            None,
+        )
+        .expect_err("WSLc must reject per-host egress filtering");
         assert!(
-            build_request_with_containment(
-                &policy,
-                &Containment::Wslc(WslcSection::default()),
-                None
-            )
-            .is_ok(),
-            "allowedHosts without allowOutbound must be accepted for WSLC"
+            err.message.contains("per-host egress filtering"),
+            "got: {}",
+            err.message
         );
     }
 }
