@@ -97,29 +97,29 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $features = 'Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform'
-          $states = @{}
-          foreach ($f in $features) { $states[$f] = (Get-WindowsOptionalFeature -Online -FeatureName $f).State }
-          $allEnabled = -not (($features | ForEach-Object { $states[$_] -ne 'Enabled' }) -contains $true)
-          if ($allEnabled) {
-            Write-Host "WSL2 features already Enabled on this persisted VM — proceeding."
-            "ready=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $features = @('Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform')
+          $disabled = @()
+          foreach ($f in $features) {
+            $state = (Get-WindowsOptionalFeature -Online -FeatureName $f).State
+            Write-Host ("{0} = {1}" -f $f, $state)
+            if ($state -ne 'Enabled') { $disabled += $f }
+          }
+          if ($disabled.Count -eq 0) {
+            Write-Host 'WSL2 features already Enabled on this persisted VM. Proceeding.'
+            'ready=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             exit 0
           }
-          Write-Host "WSL2 features not all enabled: $(($states.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')"
           $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          Write-Host "Running elevated: $isAdmin"
-          foreach ($f in $features) {
-            if ($states[$f] -ne 'Enabled') {
-              Write-Host "Enabling $f ..."
-              $p = Start-Process dism.exe -ArgumentList '/online','/enable-feature',"/featurename:$f",'/all','/norestart' -Wait -PassThru -NoNewWindow
-              Write-Host "  dism exit $($p.ExitCode)"
-              if ($p.ExitCode -notin @(0,3010)) { throw "dism enable $f failed ($($p.ExitCode))" }
-            }
+          Write-Host ("Running elevated: {0}" -f $isAdmin)
+          foreach ($f in $disabled) {
+            Write-Host ("Enabling {0} ..." -f $f)
+            $proc = Start-Process dism.exe -ArgumentList '/online','/enable-feature',"/featurename:$f",'/all','/norestart' -Wait -PassThru -NoNewWindow
+            Write-Host ("  dism exit {0}" -f $proc.ExitCode)
+            if (@(0,3010) -notcontains $proc.ExitCode) { throw ("dism enable {0} failed ({1})" -f $f, $proc.ExitCode) }
           }
-          "ready=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "::warning::WSL2 features enabled on this stateful VM; rebooting to finalize. This job will end — re-run the workflow and the next job on this persisted VM will have WSL2 ready."
-          shutdown /r /t 15 /c "WSL2 feature finalize reboot (1ES stateful pool)"
+          'ready=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host '::warning::WSL2 features enabled on this stateful VM; rebooting to finalize. This job will end; re-run the workflow and the next job on this persisted VM will have WSL2 ready.'
+          shutdown /r /t 15 /c "WSL2 feature finalize reboot"
           Start-Sleep -Seconds 180
 
       # setup-rust-toolchain auto-reads rust-toolchain.toml from the repo root
