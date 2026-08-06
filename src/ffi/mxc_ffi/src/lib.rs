@@ -141,6 +141,8 @@ pub struct MxcRunResult {
     pub stderr_utf8: *mut c_char,
     /// Error message (UTF-8, NUL-terminated) when `status != 0`, else null.
     pub error_utf8: *mut c_char,
+    /// Structured output metadata JSON (UTF-8, NUL-terminated), or null.
+    pub output_metadata_json_utf8: *mut c_char,
 }
 
 impl MxcRunResult {
@@ -152,6 +154,7 @@ impl MxcRunResult {
             stdout_utf8: ptr::null_mut(),
             stderr_utf8: ptr::null_mut(),
             error_utf8: ptr::null_mut(),
+            output_metadata_json_utf8: ptr::null_mut(),
         }
     }
 
@@ -168,6 +171,7 @@ impl MxcRunResult {
         free_cstr(&mut self.stdout_utf8);
         free_cstr(&mut self.stderr_utf8);
         free_cstr(&mut self.error_utf8);
+        free_cstr(&mut self.output_metadata_json_utf8);
     }
 }
 
@@ -292,6 +296,21 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
                 WaitOutcome::Exited(code) => (code, 0),
                 WaitOutcome::TimedOut => (-1, 1),
             };
+            let output_metadata_json_utf8 = match output
+                .output_metadata
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()
+            {
+                Ok(Some(json)) => alloc_cstring(&json),
+                Ok(None) => ptr::null_mut(),
+                Err(error) => {
+                    return MxcRunResult::error(
+                        MXC_STATUS_BACKEND_ERROR,
+                        format!("failed to serialize sandbox output metadata: {error}"),
+                    )
+                }
+            };
             MxcRunResult {
                 status: MXC_STATUS_SUCCESS,
                 exit_code,
@@ -299,6 +318,7 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
                 stdout_utf8: alloc_cstring(&output.stdout),
                 stderr_utf8: alloc_cstring(&output.stderr),
                 error_utf8: ptr::null_mut(),
+                output_metadata_json_utf8,
             }
         }
         Err(e) => MxcRunResult::error(status_from_error_code(e.code), e.message),

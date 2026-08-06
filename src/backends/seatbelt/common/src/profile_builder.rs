@@ -27,7 +27,10 @@
 
 use std::fmt::Write as _;
 
-use wxc_common::models::{ClipboardPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress};
+use wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
+use wxc_common::models::{
+    ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress,
+};
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
 /// reachability to the resolved address supplied by the runner.
@@ -71,7 +74,8 @@ pub fn build_profile_with_proxy(
     out.push_str(TTY_ALLOW);
 
     // Policy-derived allow rules.
-    write_filesystem_allow(&mut out, request)?;
+    let resolved = ResolvedPaths::from_policy(&request.policy)?;
+    write_filesystem_allow(&mut out, &resolved);
     write_network_rules(&mut out, request, proxy_address);
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request)?;
@@ -79,7 +83,7 @@ pub fn build_profile_with_proxy(
     write_ui_rules(&mut out, request);
 
     // Policy-derived deny rules go LAST so they win on conflict.
-    write_filesystem_deny(&mut out, request)?;
+    write_filesystem_deny(&mut out, &resolved);
 
     Ok(out)
 }
@@ -147,43 +151,126 @@ const TTY_ALLOW: &str = "\
 (allow file-read* (subpath \"/dev/fd\"))
 ";
 
-fn write_filesystem_allow(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
-    let policy = &request.policy;
-
-    if !policy.readonly_paths.is_empty() {
-        out.push_str(";; --- policy.readonlyPaths ---\n");
-        out.push_str("(allow file-read*\n");
-        for p in &policy.readonly_paths {
-            let _ = writeln!(out, "    (subpath {})", quote_scheme(&policy_path(p)?));
-        }
-        out.push_str(")\n");
-    }
-
-    if !policy.readwrite_paths.is_empty() {
-        out.push_str(";; --- policy.readwritePaths ---\n");
-        out.push_str("(allow file-read* file-write*\n");
-        for p in &policy.readwrite_paths {
-            let _ = writeln!(out, "    (subpath {})", quote_scheme(&policy_path(p)?));
-        }
-        out.push_str(")\n");
-    }
-
-    Ok(())
+/// The policy path lists resolved into the form Seatbelt matches, with the
+/// most-restrictive-wins precedence (`deny` > `readonly` > `readwrite`)
+/// re-applied.
+///
+/// The shared parser applies that precedence to the *raw* strings, which is not
+/// enough once paths are resolved: two spellings of the same path
+/// (`readonlyPaths: ["/private/tmp/x"]` and `readwritePaths: ["/tmp/x"]`)
+/// differ as strings, so both survive the parser, then resolve to the same
+/// filter here. Seatbelt is last-match-wins and the read-write rule is emitted
+/// after the read-only one, so without this the *weaker* grant would win and
+/// silently make a read-only path writable.
+struct ResolvedPaths {
+    readonly: Vec<String>,
+    readwrite: Vec<String>,
+    denied: Vec<String>,
 }
 
-fn write_filesystem_deny(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
-    let policy = &request.policy;
+impl ResolvedPaths {
+    fn from_policy(policy: &ContainerPolicy) -> Result<Self, String> {
+        let denied = resolve_all(&policy.denied_paths)?;
+        let readonly = resolve_all(&policy.readonly_paths)?;
+        let mut readwrite = resolve_all(&policy.readwrite_paths)?;
 
-    if !policy.denied_paths.is_empty() {
-        out.push_str(";; --- policy.deniedPaths (override broader allow rules) ---\n");
-        out.push_str("(deny file-read* file-write*\n");
-        for p in &policy.denied_paths {
-            let _ = writeln!(out, "    (subpath {})", quote_scheme(&policy_path(p)?));
-        }
-        out.push_str(")\n");
+        // `denied` is emitted last and would override either allow anyway, but
+        // dropping the path keeps the emitted profile an honest description of
+        // the effective policy.
+        let mut readonly: Vec<String> = readonly;
+        readonly.retain(|p| !denied.contains(p));
+        readwrite.retain(|p| !denied.contains(p) && !readonly.contains(p));
+
+        Ok(Self {
+            readonly,
+            readwrite,
+            denied,
+        })
+    }
+}
+
+fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
+    paths.iter().map(|p| resolve_policy_path(p)).collect()
+}
+
+fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
+    if paths.readonly.is_empty() && paths.readwrite.is_empty() {
+        return;
     }
 
-    Ok(())
+    // Emit shallow-to-deep, one rule per path, using the same ordering the
+    // Linux backends apply (`wxc_common::filesystem_resolve`). Seatbelt is
+    // last-match-wins between rules that carry a filter, so ordering by depth
+    // makes the *deepest* intent win at every path — a `readonlyPaths` entry
+    // nested inside a broader `readwritePaths` subtree stays read-only rather
+    // than inheriting the parent's write grant. `deniedPaths` is deliberately
+    // not part of this plan: it is emitted last so it outranks these filtered
+    // allows regardless of depth.
+    out.push_str(";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---\n");
+    for mount in resolve_path_plan(&paths.readwrite, &paths.readonly, &[]) {
+        let subpath = [mount.path.clone()];
+        match mount.intent {
+            FsIntent::ReadWrite => {
+                // `network-bind` / `network-outbound` under a *path* filter
+                // match only AF_UNIX sockets — Seatbelt matches IP sockets with
+                // `(local ip)` / `(remote ip)` — so this widens nothing on the
+                // IP side. Both halves are needed: Node toolchains (tsx, vite,
+                // esbuild, jest) bind an IPC pipe and then connect to it.
+                write_path_rule(
+                    out,
+                    "allow file-read* file-write* network-bind network-outbound",
+                    &subpath,
+                );
+            }
+            FsIntent::ReadOnly => {
+                write_path_rule(out, "allow file-read*", &subpath);
+                // The read allow names only `file-read*`, so it says nothing
+                // about write or socket ops and cannot displace a shallower
+                // read-write grant — the removal has to be explicit.
+                //
+                // This deny survives the unfiltered `(allow network-outbound)`
+                // that `write_network_rules` emits below under
+                // `defaultPolicy: "allow"`: last-match-wins applies between
+                // rules that carry a filter, and an unfiltered rule does not
+                // override a path-filtered one. Pinned by
+                // `readonly_socket_strip_survives_a_default_allow_outbound`.
+                write_path_rule(
+                    out,
+                    "deny file-write* network-bind network-outbound",
+                    &subpath,
+                );
+            }
+            FsIntent::Denied => unreachable!("denied paths are not part of this plan"),
+        }
+    }
+}
+
+fn write_filesystem_deny(out: &mut String, paths: &ResolvedPaths) {
+    if !paths.denied.is_empty() {
+        // `network-outbound` is denied here for two reasons. A denied path can
+        // sit inside a broader `readwritePaths` subtree, whose allow covers it;
+        // and `write_outbound_allow_rules` emits an *unfiltered* `(allow
+        // network-outbound)` under `defaultPolicy: "allow"` and the
+        // remote-proxy fallback. Either would otherwise let the sandbox
+        // `connect()` to a UNIX socket inside a denied subtree and talk to
+        // whatever listens there. A Docker / ssh-agent / gpg-agent socket is a
+        // control plane, so that would be an escape.
+        out.push_str(";; --- policy.deniedPaths (override broader allow rules) ---\n");
+        write_path_rule(
+            out,
+            "deny file-read* file-write* network-bind network-outbound",
+            &paths.denied,
+        );
+    }
+}
+
+/// Emit a single `(<ops> (subpath …)…)` rule over already-resolved paths.
+fn write_path_rule(out: &mut String, ops: &str, paths: &[String]) {
+    let _ = writeln!(out, "({ops}");
+    for p in paths {
+        let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+    }
+    out.push_str(")\n");
 }
 
 fn write_network_rules(
@@ -463,6 +550,90 @@ fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
     out.push_str(")\n");
 }
 
+/// Resolve a caller-supplied policy path into the form Seatbelt matches:
+/// expand a leading `~`, normalize redundant lexical segments, then rewrite the
+/// symlinked macOS root directories.
+///
+/// All three steps are required. See [`expand_tilde`], [`normalize_lexical`]
+/// and [`resolve_macos_root_symlinks`].
+pub(crate) fn resolve_policy_path(path: &str) -> Result<String, String> {
+    let expanded = expand_tilde(path)?;
+    Ok(resolve_macos_root_symlinks(&normalize_lexical(&expanded)?))
+}
+
+/// Collapse the lexical spellings of a path that leave a Seatbelt rule dead:
+/// repeated separators (`//tmp`), `.` segments (`/./tmp`), and a trailing `/`.
+///
+/// The kernel canonicalizes an accessed path before matching it against a
+/// profile filter, but it does not canonicalize the filter, so `(subpath
+/// "//tmp/secret")` never matches anything. For `deniedPaths` that fails
+/// **open**, so these spellings have to be folded away rather than passed
+/// through.
+///
+/// A `..` segment is rejected instead of being resolved. macOS resolves `..`
+/// *physically* — after following symlinks — so resolving it lexically can move
+/// the rule somewhere else entirely: `/tmp/..` is `/private`, not `/`. Silently
+/// widening an allow rule to `/` would be worse than the dead rule, and leaving
+/// it in place keeps the deny fail-open, so an unresolvable path is a config
+/// error the caller must fix by passing the resolved path.
+fn normalize_lexical(path: &str) -> Result<String, String> {
+    if path.split('/').any(|seg| seg == "..") {
+        return Err(format!(
+            "Filesystem path '{path}' contains a '..' segment. macOS resolves '..' after \
+             following symlinks, so the generated sandbox rule could not be matched \
+             reliably; specify the fully resolved path instead."
+        ));
+    }
+
+    let joined = path
+        .split('/')
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Ok(if path.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    })
+}
+
+/// The macOS root directories that are symlinks, and their targets.
+///
+/// `/etc`, `/tmp`, and `/var` point into `/private`; `/home` points at the
+/// data volume. `/Users` is deliberately absent — it is a *firmlink*, not a
+/// symlink, so `/Users/...` is already the canonical path the kernel matches.
+const MACOS_SYMLINKED_ROOTS: [(&str, &str); 4] = [
+    ("/etc", "/private/etc"),
+    ("/tmp", "/private/tmp"),
+    ("/var", "/private/var"),
+    ("/home", "/System/Volumes/Data/home"),
+];
+
+/// Rewrite a leading symlinked macOS root directory to its real target.
+///
+/// The kernel resolves a path fully before matching it against a profile's
+/// `subpath` / `literal` filters, so a rule written against the unresolved
+/// path is dead: `(subpath "/tmp/work")` never matches, because the kernel
+/// only ever sees `/private/tmp/work`. That silently voided every policy path
+/// under these roots — including the automatic `$TMPDIR` grant, which resolves
+/// to `/var/folders/...` on macOS.
+///
+/// Only a whole leading path segment is rewritten, so `/variable` is left
+/// alone. Paths already written against the real target pass through
+/// unchanged, because none of the targets is itself under a symlinked root.
+fn resolve_macos_root_symlinks(path: &str) -> String {
+    for (root, target) in MACOS_SYMLINKED_ROOTS {
+        let Some(rest) = path.strip_prefix(root) else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with('/') {
+            return format!("{target}{rest}");
+        }
+    }
+    path.to_string()
+}
+
 /// Expand a leading `~` or `~/` to the current user's home directory.
 /// Returns an error if `HOME` is not set and the path requires expansion.
 pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
@@ -478,51 +649,6 @@ pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
     } else {
         Ok(path.to_string())
     }
-}
-
-/// Normalize a caller-supplied policy path for emission into the profile:
-/// expand a leading `~`, then rewrite the macOS root symlinks to the
-/// `/private`-anchored form Seatbelt actually matches against.
-fn policy_path(path: &str) -> Result<String, String> {
-    Ok(resolve_private_root(&expand_tilde(path)?))
-}
-
-/// Rewrite the three macOS root symlinks — `/etc`, `/tmp`, and `/var` — to the
-/// `/private` locations they resolve to.
-///
-/// Seatbelt evaluates `subpath`/`literal` filters against the *resolved* path
-/// the kernel sees, and on macOS `/etc`, `/tmp`, and `/var` are symlinks into
-/// `/private`. A filter spelled `(subpath "/var/folders/...")` therefore matches
-/// nothing at all: the access is checked as `/private/var/folders/...`. Without
-/// this rewrite a caller-supplied path under any of those roots is silently
-/// dropped on the floor — the grant is emitted, the profile loads, and the
-/// access is still denied.
-///
-/// That bites in practice because the ordinary spelling of `$TMPDIR`
-/// (`_CS_DARWIN_USER_TEMP_DIR`) is `/var/folders/<a>/<b>/T/`, so a caller who
-/// passes `$TMPDIR` straight through to `readwritePaths` would get no usable
-/// grant. It applies to `readonlyPaths`, `readwritePaths`, and `deniedPaths`
-/// alike, so the last-match-wins ordering between the three lists stays
-/// meaningful no matter which spelling each entry happened to use. It also
-/// matches the rest of this builder, where every hardcoded macOS path is
-/// already `/private`-anchored.
-///
-/// The rewrite is purely lexical and never widens a grant: it replaces only a
-/// leading whole `/etc`, `/tmp`, or `/var` component with its `/private`
-/// equivalent, and leaves every other path — including one already spelled
-/// under `/private` — untouched.
-fn resolve_private_root(path: &str) -> String {
-    for root in ["etc", "tmp", "var"] {
-        let Some(rest) = path.strip_prefix('/').and_then(|p| p.strip_prefix(root)) else {
-            continue;
-        };
-        // Only a whole leading component matches, so `/var` and `/var/data` are
-        // rewritten but `/variable` is left alone.
-        if rest.is_empty() || rest.starts_with('/') {
-            return format!("/private/{root}{rest}");
-        }
-    }
-    path.to_string()
 }
 
 /// Quote a string for use as a TinyScheme string literal, escaping
@@ -596,93 +722,6 @@ mod tests {
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow file-read* file-write*"));
         assert!(p.contains("(subpath \"/private/tmp/output\")"));
-    }
-
-    #[test]
-    fn resolve_private_root_rewrites_macos_root_symlinks() {
-        // `/etc`, `/tmp`, and `/var` are symlinks into `/private`, and Seatbelt
-        // matches resolved paths, so each must be rewritten.
-        for (input, want) in [
-            ("/var", "/private/var"),
-            ("/var/data", "/private/var/data"),
-            ("/tmp", "/private/tmp"),
-            ("/tmp/output", "/private/tmp/output"),
-            ("/etc/hosts", "/private/etc/hosts"),
-            (
-                "/var/folders/ab/cd1234/T",
-                "/private/var/folders/ab/cd1234/T",
-            ),
-        ] {
-            assert_eq!(resolve_private_root(input), want, "rewriting {input}");
-        }
-    }
-
-    #[test]
-    fn resolve_private_root_leaves_other_paths_untouched() {
-        // Only a whole leading `/etc`, `/tmp`, or `/var` component is rewritten;
-        // nothing else is touched, and the rewrite is not applied twice.
-        for path in [
-            "/private/var/folders/ab/cd1234/T",
-            "/private/tmp/output",
-            "/private/etc/hosts",
-            "/variable",          // `/var` is not a whole component here
-            "/etcetera",          // ditto for `/etc`
-            "/tmpfs",             // ditto for `/tmp`
-            "/Users/someone/var", // not a *leading* component
-            "/opt/tools",
-            "/",
-            "",
-        ] {
-            assert_eq!(
-                resolve_private_root(path),
-                path,
-                "should not rewrite {path}"
-            );
-        }
-    }
-
-    #[test]
-    fn darwin_tmpdir_grant_is_emitted_in_private_form() {
-        // The ordinary `$TMPDIR` spelling is `/var/folders/<a>/<b>/T`; emitting
-        // it verbatim would match nothing, so it must reach the profile as
-        // `/private/var/folders/...`.
-        let mut r = req();
-        r.policy.readwrite_paths = vec!["/var/folders/ab/cd1234/T".into()];
-        let p = build_profile(&r).unwrap();
-        assert!(p.contains("(subpath \"/private/var/folders/ab/cd1234/T\")"));
-        assert!(!p.contains("(subpath \"/var/folders/ab/cd1234/T\")"));
-    }
-
-    #[test]
-    fn denied_path_overrides_allow_across_spellings() {
-        // A deny written in the `/private` form must still override an allow
-        // written in the plain form (and vice versa), because both sides are
-        // normalized before emission.
-        for (rw, denied) in [
-            (
-                "/var/folders/ab/cd1234/T",
-                "/private/var/folders/ab/cd1234/T/secret",
-            ),
-            (
-                "/private/var/folders/ab/cd1234/T",
-                "/var/folders/ab/cd1234/T/secret",
-            ),
-        ] {
-            let mut r = req();
-            r.policy.readwrite_paths = vec![rw.into()];
-            r.policy.denied_paths = vec![denied.into()];
-            let p = build_profile(&r).unwrap();
-            let allow = p
-                .find("(subpath \"/private/var/folders/ab/cd1234/T\")")
-                .unwrap_or_else(|| panic!("missing normalized allow for {rw}"));
-            let deny = p
-                .find("(subpath \"/private/var/folders/ab/cd1234/T/secret\")")
-                .unwrap_or_else(|| panic!("missing normalized deny for {denied}"));
-            assert!(
-                deny > allow,
-                "the deny must follow the allow so it wins on last-match ({rw} / {denied})"
-            );
-        }
     }
 
     #[test]
@@ -831,8 +870,9 @@ mod tests {
 
     #[test]
     fn allow_local_network_emits_inbound_rule() {
-        // server.listen() on macOS needs `network-inbound` in addition to
-        // `network-bind` — the kernel rejects listen() with EPERM otherwise.
+        // server.listen() on macOS is governed by `network-inbound`, not
+        // `network-bind` — with only `network-bind (local ip)` the bind()
+        // succeeds and the kernel then rejects listen() with EPERM.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Allow;
         r.policy.allow_local_network = true;
@@ -925,6 +965,287 @@ mod tests {
         r.policy.readonly_paths = vec!["/tmp/a\"b\\c".into()];
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(subpath \"/private/tmp/a\\\"b\\\\c\")"));
+    }
+
+    const FS_SECTION: &str =
+        ";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---";
+    const RO_STRIP: &str = "(deny file-write* network-bind network-outbound\n";
+
+    /// The policy-derived filesystem section, excluding the always-emitted
+    /// baseline rules that also start with `(allow file-read*`.
+    fn fs_section(profile: &str) -> &str {
+        profile
+            .find(FS_SECTION)
+            .map(|i| &profile[i..])
+            .unwrap_or("")
+    }
+    const RW_RULE: &str = "(allow file-read* file-write* network-bind network-outbound\n";
+    const DENY_RULE: &str = "(deny file-read* file-write* network-bind network-outbound\n";
+
+    #[test]
+    fn readwrite_paths_emit_unix_socket_ops() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        let p = build_profile(&r).unwrap();
+        let idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(p[idx..].contains("(subpath \"/private/tmp/output\")"));
+    }
+
+    #[test]
+    fn readwrite_unix_socket_ops_are_independent_of_network_policy() {
+        // AF_UNIX bind/connect follow the filesystem policy, so a default-deny
+        // network policy with allowLocalNetwork off must still permit them.
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allow_local_network = false;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains(RW_RULE));
+        assert!(!p.contains("network-inbound"));
+        assert!(!p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn denied_paths_deny_outbound_under_default_allow() {
+        // `defaultPolicy: allow` emits a bare `(allow network-outbound)`, which
+        // on its own grants AF_UNIX `connect()`. A denied subtree must still
+        // deny it. Position relative to that unfiltered allow is deliberately
+        // not asserted: an unfiltered rule cannot override a path-filtered one
+        // in either direction, so pinning the order would encode a constraint
+        // that does not exist. The orderings that *do* matter — deny after the
+        // filtered read-write allows — are covered by
+        // `denied_paths_appear_after_allows_to_override` and
+        // `denied_paths_deny_unix_socket_ops_after_allows`.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+        let deny_idx = p.find(DENY_RULE).expect("deny must cover network-outbound");
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn readonly_paths_do_not_get_unix_socket_ops() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp/input".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains(RW_RULE));
+        // The only socket mention for a read-only path is the explicit removal.
+        assert!(!p.contains("allow network-bind"));
+        assert!(fs_section(&p).contains(RO_STRIP));
+    }
+
+    #[test]
+    fn denied_paths_deny_unix_socket_ops_after_allows() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+        let deny_idx = p.find(DENY_RULE).expect("deny must cover socket ops");
+        let allow_idx = p.find(RW_RULE).expect("allow rule");
+        assert!(
+            deny_idx > allow_idx,
+            "deny must follow allow so last-match-wins re-denies the socket path"
+        );
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn lexical_spellings_normalize_to_the_same_rule() {
+        // Each of these accesses `/private/tmp/secret` at the kernel level, so
+        // each must produce the same filter — otherwise a deny written with a
+        // redundant spelling is dead and fails open.
+        for spelling in [
+            "/tmp/secret",
+            "//tmp/secret",
+            "/./tmp/secret",
+            "/tmp//secret",
+            "/tmp/./secret/",
+            "///tmp/secret//",
+        ] {
+            assert_eq!(
+                resolve_policy_path(spelling).unwrap(),
+                "/private/tmp/secret",
+                "spelling {spelling} must normalize"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_normalization_is_idempotent_and_preserves_root() {
+        assert_eq!(resolve_policy_path("/").unwrap(), "/");
+        assert_eq!(resolve_policy_path("//").unwrap(), "/");
+        let once = resolve_policy_path("//tmp/./secret/").unwrap();
+        assert_eq!(resolve_policy_path(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn parent_segments_are_rejected_rather_than_resolved() {
+        // `/tmp/..` is `/private` on macOS, not `/`, so resolving lexically
+        // would silently widen an allow and leave a deny dead.
+        for path in ["/private/var/../tmp", "/tmp/..", "/..", "/a/b/../c"] {
+            let err = resolve_policy_path(path).unwrap_err();
+            assert!(err.contains(".."), "{path} must be rejected, got {err}");
+        }
+        // A path merely *containing* dots in a segment name is fine.
+        assert_eq!(
+            resolve_policy_path("/tmp/..secret").unwrap(),
+            "/private/tmp/..secret"
+        );
+    }
+
+    #[test]
+    fn denied_path_with_redundant_spelling_still_denies() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["//tmp/./secret/".into()];
+        let p = build_profile(&r).unwrap();
+        let deny_idx = p.find(DENY_RULE).expect("deny rule");
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn nested_readonly_keeps_write_away_from_broader_readwrite() {
+        // `/tmp` resolves to `/private/tmp`, which is an ancestor of the
+        // read-only entry. The read-only `allow` names only `file-read*`, so
+        // it says nothing about write or socket ops and cannot displace the
+        // broader grant on its own — hence the explicit removal, emitted
+        // *after* the read-write allow.
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        let strip_idx = p.find(RO_STRIP).expect("read-only must strip write");
+        assert!(
+            strip_idx > rw_idx,
+            "deepest intent must be emitted last, profile:\n{p}"
+        );
+        assert!(p[strip_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn nested_readwrite_still_wins_inside_broader_readonly() {
+        // The mirror case: the deeper read-write entry must survive, otherwise
+        // depth ordering would have simply inverted the bug.
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/build".into()];
+        let p = build_profile(&r).unwrap();
+
+        let strip_idx = p.find(RO_STRIP).expect("read-only strip");
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(
+            rw_idx > strip_idx,
+            "deeper readwrite must win, profile:\n{p}"
+        );
+        assert!(p[rw_idx..].contains("(subpath \"/private/tmp/build\")"));
+    }
+
+    #[test]
+    fn readonly_socket_strip_survives_a_default_allow_outbound() {
+        // `defaultPolicy: "allow"` emits an unfiltered `(allow
+        // network-outbound)`. The read-only strip still governs AF_UNIX
+        // `connect()` under that subtree, because an unfiltered rule does not
+        // override a path-filtered one. Verified end-to-end against
+        // `mxc-exec-mac` with a listener created outside the sandbox: this
+        // policy denies `connect()` with EPERM, while the same policy with the
+        // path moved to `readwrite_paths` connects.
+        //
+        // Emission order relative to the unfiltered allow is deliberately not
+        // asserted — it has no bearing on the outcome.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.readonly_paths = vec!["/tmp/ro".into()];
+        let p = build_profile(&r).unwrap();
+
+        let strip_idx = p.find(RO_STRIP).expect("read-only strip");
+        assert!(p[strip_idx..].contains("(subpath \"/private/tmp/ro\")"));
+    }
+
+    #[test]
+    fn readonly_wins_over_readwrite_for_aliased_spellings() {
+        // The parser's most-restrictive-wins pass compares raw strings, so
+        // these two spellings both survive it and only collide once resolved.
+        // Seatbelt is last-match-wins and readwrite is emitted second, so
+        // without resolved-path precedence the read-only intent would be lost.
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/private/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["/tmp/x".into()];
+        let p = build_profile(&r).unwrap();
+
+        assert!(fs_section(&p).contains("(subpath \"/private/tmp/x\")"));
+        assert!(
+            !p.contains(RW_RULE),
+            "aliased readwrite entry must be dropped, profile was:\n{p}"
+        );
+    }
+
+    #[test]
+    fn denied_wins_over_aliased_readonly_and_readwrite() {
+        let mut r = req();
+        r.policy.denied_paths = vec!["/private/tmp/x".into()];
+        r.policy.readonly_paths = vec!["/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["//tmp/./x".into()];
+        let p = build_profile(&r).unwrap();
+
+        assert!(!p.contains(FS_SECTION), "profile:\n{p}");
+        assert!(!p.contains(RW_RULE), "profile:\n{p}");
+        let deny_idx = p.find(DENY_RULE).expect("deny rule");
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/x\")"));
+    }
+
+    #[test]
+    fn distinct_paths_survive_resolved_precedence() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp/ro".into()];
+        r.policy.readwrite_paths = vec!["/tmp/rw".into()];
+        let p = build_profile(&r).unwrap();
+
+        assert!(fs_section(&p).contains("(subpath \"/private/tmp/ro\")"));
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(p[rw_idx..].contains("(subpath \"/private/tmp/rw\")"));
+    }
+
+    #[test]
+    fn macos_root_symlinks_are_resolved() {
+        assert_eq!(resolve_macos_root_symlinks("/tmp"), "/private/tmp");
+        assert_eq!(resolve_macos_root_symlinks("/var"), "/private/var");
+        assert_eq!(resolve_macos_root_symlinks("/etc"), "/private/etc");
+        assert_eq!(
+            resolve_macos_root_symlinks("/var/folders/qj/T"),
+            "/private/var/folders/qj/T"
+        );
+        assert_eq!(
+            resolve_macos_root_symlinks("/home/me"),
+            "/System/Volumes/Data/home/me"
+        );
+    }
+
+    #[test]
+    fn macos_root_resolution_only_matches_whole_segments() {
+        // A prefix that merely starts with the same letters is not a match.
+        assert_eq!(resolve_macos_root_symlinks("/variable"), "/variable");
+        assert_eq!(resolve_macos_root_symlinks("/tmpfs/x"), "/tmpfs/x");
+        assert_eq!(resolve_macos_root_symlinks("/etcd"), "/etcd");
+        assert_eq!(resolve_macos_root_symlinks("/homebrew"), "/homebrew");
+        // Already-resolved and unrelated paths pass through untouched.
+        assert_eq!(
+            resolve_macos_root_symlinks("/private/tmp/x"),
+            "/private/tmp/x"
+        );
+        assert_eq!(resolve_macos_root_symlinks("/Users/me/w"), "/Users/me/w");
+        assert_eq!(resolve_macos_root_symlinks(""), "");
+    }
+
+    #[test]
+    fn macos_root_resolution_is_idempotent() {
+        // Re-resolving a resolved path must be a no-op — no target is itself
+        // under a symlinked root.
+        for (_, target) in MACOS_SYMLINKED_ROOTS {
+            assert_eq!(resolve_macos_root_symlinks(target), target);
+        }
     }
 
     #[test]

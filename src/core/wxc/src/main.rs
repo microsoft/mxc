@@ -21,7 +21,7 @@ use wxc_common::config_parser::{
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
@@ -118,14 +118,11 @@ struct Cli {
     #[arg(long = "force-reclaim")]
     force_reclaim: bool,
 
-    /// Audit mode: inject the `permissiveLearningMode` capability into the
-    /// AppContainer policy so denied operations are logged but allowed.
-    /// Windows-only — the PLM trace pipeline (WPR/ETW) and the runner-side
-    /// `request.audit` consumer (AppContainer) have no cross-platform
-    /// counterpart, so accepting the flag elsewhere would print a misleading
-    /// "restrictions will NOT be enforced" warning while the bubblewrap/
-    /// seatbelt backends silently ignore both the flag and the injected
-    /// capability.
+    /// Audit mode: drive the permissive-learning-mode (PLM) WPR/ETW trace
+    /// pipeline for a developer inner-loop run — inject `permissiveLearningMode`
+    /// and record every access check to a trace. Windows ProcessContainer only:
+    /// the PLM trace/capability path is not honored by Windows Sandbox, WSLC,
+    /// IsolationSession, or the other containment backends.
     #[cfg(target_os = "windows")]
     #[arg(long)]
     audit: bool,
@@ -190,6 +187,36 @@ fn has_cli_command(cli: &Cli) -> bool {
     !cli.command.is_empty()
 }
 
+fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
+    capabilities.retain(|capability| !capability.eq_ignore_ascii_case("learningModeLogging"));
+    if capabilities
+        .iter()
+        .any(|capability| capability.eq_ignore_ascii_case("permissiveLearningMode"))
+    {
+        false
+    } else {
+        capabilities.push("permissiveLearningMode".to_string());
+        true
+    }
+}
+
+const AUDIT_CAPTURE_DENIALS_CONFLICT_MSG: &str =
+    "--audit cannot be combined with processContainer.captureDenials; use captureDenials.mode: \"allow\" for permissive capture";
+
+fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
+    if request.containment != ContainmentBackend::ProcessContainer {
+        return Err(format!(
+            "--audit is only supported with the Windows ProcessContainer backend; \
+             resolved containment is '{}'",
+            request.containment.wire_name()
+        ));
+    }
+    if request.policy.capture_denials.is_some() {
+        return Err(AUDIT_CAPTURE_DENIALS_CONFLICT_MSG.to_string());
+    }
+    Ok(())
+}
+
 fn command_override_from_cli(
     cli: &Cli,
     context: CommandLineContext,
@@ -233,7 +260,7 @@ fn apply_command_override(
     }
 }
 
-/// The correlation-vector action a state-aware phase should take, decided purely
+/// The plan for producing this phase's correlation vector, derived
 /// from the phase and the relayed value. Returned by [`plan_correlation_vector`]
 /// so the seed-vs-spin decision is unit-testable without touching the RNG/clock;
 /// the caller executes the plan against the (nondeterministic) operators.
@@ -299,6 +326,16 @@ fn inject_correlation_vector(outcome: &mut Result<DispatchOutcome, MxcError>, cv
             );
         }
     }
+}
+
+/// On a state-aware dispatch failure, record the error only on the auxiliary
+/// diagnostic sinks (`--log-file` and the diagnostic pipe) via
+/// [`Logger::log_diagnostic_line`]. It is deliberately kept out of the primary
+/// console/buffer output so it never interleaves with the stdout response
+/// envelope; the failure reason still reaches the client through the JSON error
+/// envelope on stdout.
+fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
+    logger.log_diagnostic_line(&error.to_string());
 }
 
 /// Drives the state-aware dispatch flow. On envelope success, writes the
@@ -401,6 +438,13 @@ fn run_state_aware_main(
         elapsed,
     );
 
+    // On dispatch failure, route the error to the auxiliary diagnostic sinks
+    // only (log file / diagnostic pipe) — never the primary buffer/stderr — so
+    // the stdout error envelope written below stays the single client-facing
+    // channel and is not shadowed by a duplicate on stderr.
+    if let Err(error) = &outcome {
+        log_state_aware_dispatch_error(logger, error);
+    }
     // Diagnostic buffer flushes to stderr regardless of success/failure so it
     // never interleaves with the stdout envelope.
     let buffered = logger.get_buffer().to_string();
@@ -980,10 +1024,6 @@ fn main() {
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
-    #[cfg(target_os = "windows")]
-    {
-        request.audit = cli.audit;
-    }
 
     // ── Telemetry init (experimental) ───────────────────────────────
     let telemetry_active = if request.experimental_enabled {
@@ -1027,30 +1067,30 @@ fn main() {
     apply_command_override(&mut request, command_override.as_deref(), &mut logger);
 
     // --audit injects permissiveLearningMode so denied operations are logged
-    // but allowed. Works in both debug and release builds; in release the
-    // runner-side rejection is relaxed because request.audit is set.
-    // Windows-only: the flag itself only exists on Windows (see `Cli::audit`).
+    // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
+    // developer inner-loop flow. The capability names are reserved from direct
+    // config use, so --audit is the supported permissive entry point until the
+    // dedicated captureDenials mapping lands.
+    // Windows ProcessContainer only: reject every other resolved backend before
+    // mutating the policy or starting the PLM trace.
     //
-    // Downstream capability lookups are case-sensitive (the AppContainer
-    // runner does exact string matches against the JSON capability name),
-    // so the "already present?" check here matches case-sensitively too.
-    // An operator who explicitly wrote a mis-cased spelling in the config
-    // gets a second, correctly-cased entry appended rather than silently
-    // relying on the mis-cased one that downstream lookups will ignore.
+    // Permissive mode is the effective mode when audit is requested, so remove
+    // deny-and-record before injecting it. Comparisons are case-insensitive
+    // because Windows derives capability SIDs case-insensitively.
     #[cfg(target_os = "windows")]
-    if cli.audit
-        && !request
-            .policy
-            .capabilities
-            .iter()
-            .any(|c| c == "permissiveLearningMode")
-    {
-        request
-            .policy
-            .capabilities
-            .push("permissiveLearningMode".to_string());
+    if cli.audit {
+        if let Err(message) = validate_audit_request(&request) {
+            eprintln!("Error: {message}");
+            telemetry::emit_early_exit(
+                telemetry_active,
+                &request.containment,
+                telemetry::FailureReason::ConfigError,
+            );
+            process::exit(1);
+        }
+        let injected = apply_permissive_learning_mode(&mut request.policy.capabilities);
         logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
-        if cli.audit_verbose {
+        if injected && cli.audit_verbose {
             eprintln!(
                 "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
             );
@@ -1074,12 +1114,10 @@ fn main() {
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
     let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
-        && !request
-            .policy
-            .capabilities
-            .iter()
-            .any(|c| c == "learningModeLogging")
-    {
+        && !request.policy.capabilities.iter().any(|c| {
+            c.eq_ignore_ascii_case("learningModeLogging")
+                || c.eq_ignore_ascii_case("permissiveLearningMode")
+        }) {
         request
             .policy
             .capabilities
@@ -1212,17 +1250,16 @@ fn main() {
         }
         mark_audit_active();
         _audit_guard = Some(AuditTraceGuard);
-        // previously this was
-        // `let _ = run_plm_command(...)`, which discarded the failure
-        // status. If plm start failed (missing plm.exe, wpr session
-        // conflict not resolved, etc.), the workload ran with
-        // `permissiveLearningMode` injected into the sandbox policy
-        // but with zero WPR recording — an empty Adjusted_*.json
-        // looked like "no denials." Bail explicitly on start failure
-        // so the operator sees the error and the policy isn't
-        // silently relaxed.
+        // Bail explicitly on `plm start` failure rather than
+        // discarding the failure status. If plm start failed
+        // (missing plm.exe, wpr session conflict not resolved,
+        // etc.), the workload would run with `permissiveLearningMode`
+        // injected into the sandbox policy but with zero WPR
+        // recording — an empty Adjusted_*.json looks like "no
+        // denials." Bailing lets the operator see the error and the
+        // policy isn't silently relaxed.
         //
-        // bracket the spawn with
+        // Bracket the spawn with
         // AUDIT_START_IN_FLIGHT so the console-control handler waits
         // for it to drain before deciding whether to issue `wpr
         // -cancel` (closes the Ctrl+C race where cancel arrives
@@ -1267,13 +1304,13 @@ fn main() {
     // its exit code. Done before the runner is dropped so the trace
     // tooling sees a fully-quiesced workload.
     //
-    // only clear `AUDIT_ACTIVE` when `plm stop` actually
-    // succeeded. Previously the flag was cleared unconditionally,
-    // which silently leaked the kernel ETW session whenever stop
-    // failed (missing plm.exe, spawn fail, wpr -stop non-zero) and
-    // simultaneously turned `AuditTraceGuard::drop` and the Ctrl-C
-    // handler into no-ops. On failure we now leave the flag set so
-    // the stack guard's `Drop` runs `wpr -cancel` for us.
+    // Only clear `AUDIT_ACTIVE` when `plm stop` actually
+    // succeeded. Clearing it unconditionally would silently leak
+    // the kernel ETW session whenever stop failed (missing
+    // plm.exe, spawn fail, wpr -stop non-zero) and simultaneously
+    // turn `AuditTraceGuard::drop` and the Ctrl-C handler into
+    // no-ops. On failure, leave the flag set so the stack guard's
+    // `Drop` runs `wpr -cancel` for us.
     #[cfg(target_os = "windows")]
     if cli.audit {
         let mut stop_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from("stop")];
@@ -1346,6 +1383,16 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+    if let Some(pointer) = response
+        .output_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.capture_denials.as_ref())
+    {
+        match serde_json::to_string(pointer) {
+            Ok(line) => eprintln!("{line}"),
+            Err(error) => eprintln!("failed to serialize captureDenials output pointer: {error}"),
+        }
+    }
 
     // Emit a structured JSON error envelope on stderr for SDK/caller consumption
     // when the runner produced an error message (one-shot flows only).
@@ -1363,7 +1410,6 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use wxc_common::encoding::base64_encode;
     use wxc_common::logger::Mode;
-    use wxc_common::models::ContainmentBackend;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::MxcRequest;
 
@@ -1379,6 +1425,94 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    #[test]
+    fn audit_mode_replaces_deny_and_record_capability() {
+        let mut capabilities = vec![
+            "internetClient".to_string(),
+            "LearningModeLogging".to_string(),
+        ];
+
+        assert!(apply_permissive_learning_mode(&mut capabilities));
+        assert!(capabilities
+            .iter()
+            .any(|capability| capability == "permissiveLearningMode"));
+        assert!(!capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("learningModeLogging")));
+        assert!(capabilities
+            .iter()
+            .any(|capability| capability == "internetClient"));
+        assert!(!apply_permissive_learning_mode(&mut capabilities));
+    }
+
+    #[test]
+    fn audit_mode_only_accepts_process_container() {
+        let mut request = ExecutionRequest {
+            containment: ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        };
+        assert!(validate_audit_request(&request).is_ok());
+
+        for containment in [
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::MicroVm,
+        ] {
+            let containment_name = containment.wire_name();
+            request.containment = containment;
+            let error = validate_audit_request(&request)
+                .expect_err("non-ProcessContainer backend must reject --audit");
+            assert!(error.contains(containment_name));
+        }
+    }
+
+    #[test]
+    fn audit_mode_rejects_both_capture_denials_modes() {
+        use wxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
+
+        for mode in [CaptureDenialsMode::Block, CaptureDenialsMode::Allow] {
+            let mut request = ExecutionRequest {
+                containment: ContainmentBackend::ProcessContainer,
+                ..Default::default()
+            };
+            request.policy.capture_denials = Some(CaptureDenialsConfig {
+                mode,
+                output_path: None,
+            });
+
+            let error = validate_audit_request(&request)
+                .expect_err("--audit and captureDenials must be mutually exclusive");
+            assert_eq!(error, AUDIT_CAPTURE_DENIALS_CONFLICT_MSG);
+            assert!(error.contains(r#"mode: "allow""#));
+        }
+    }
+
+    #[test]
+    fn state_aware_dispatch_errors_use_only_auxiliary_diagnostic_sinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let error = MxcError::malformed_request(
+            "Invalid configuration at `experimental.wslc.start.portMappings[0].windowsPort`",
+        );
+
+        log_state_aware_dispatch_error(&mut logger, &error);
+
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the JSON envelope must retain primary output ownership"
+        );
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("experimental.wslc.start.portMappings[0].windowsPort")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1671,6 +1805,7 @@ mod tests {
             sandbox_id: Some("iso:wxc-1234".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
 
         let err = command_override_context_for_state_aware(&parsed, true).unwrap_err();

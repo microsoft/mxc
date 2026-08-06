@@ -30,7 +30,8 @@ pub struct PlatformSupport {
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
 /// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
 /// capabilities come from the in-process fallback probe rather than a
-/// `wxc-exec --probe` subprocess.
+/// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
+/// WSL Container runtime (requires the `wslc` feature).
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
@@ -52,25 +53,34 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "linux")]
     {
-        if command_succeeds("bwrap", &["--version"]) {
-            PlatformSupport {
+        // Presence alone is not enough: `bwrap` must also be new enough for
+        // every flag the argument builder emits (see
+        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`).
+        match bwrap_common::bwrap_version::probe_bwrap() {
+            Ok(_) => PlatformSupport {
                 is_supported: true,
                 available_methods: vec!["bubblewrap".to_string()],
                 ..Default::default()
-            }
-        } else {
-            PlatformSupport {
-                reason: Some("Bubblewrap is not available on this system".to_string()),
+            },
+            Err(err) => PlatformSupport {
+                reason: Some(err.to_string()),
                 ..Default::default()
-            }
+            },
         }
     }
 
     #[cfg(target_os = "windows")]
     {
+        let mut available_methods = vec!["processcontainer".to_string()];
+        // WSLC is an additional, opt-in backend rather than a fallback: report
+        // it only when the host can actually run it (WSL2 + the WSLC runtime),
+        // which is the same preflight the runner performs.
+        if wslc_available() {
+            available_methods.push("wslc".to_string());
+        }
         PlatformSupport {
             is_supported: true,
-            available_methods: vec!["processcontainer".to_string()],
+            available_methods,
             ..Default::default()
         }
     }
@@ -84,17 +94,17 @@ pub fn platform_support() -> PlatformSupport {
     }
 }
 
-/// Returns true when `program args...` exits successfully — used to probe for
-/// the presence of `bwrap` on Linux.
-#[cfg(target_os = "linux")]
-fn command_succeeds(program: &str, args: &[&str]) -> bool {
-    use std::process::{Command, Stdio};
-    Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// Whether this host can run the WSL Container backend, probing the WSLC
+/// runtime the same way the runner's preflight does. Always `false` when the
+/// backend isn't compiled in, so the caller needs no `cfg` of its own.
+#[cfg(target_os = "windows")]
+fn wslc_available() -> bool {
+    #[cfg(feature = "wslc")]
+    {
+        wslc_common::is_available()
+    }
+    #[cfg(not(feature = "wslc"))]
+    {
+        false
+    }
 }

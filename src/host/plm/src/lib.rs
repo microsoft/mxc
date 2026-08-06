@@ -10,6 +10,7 @@ pub mod access_failure;
 pub mod config;
 pub mod coordination;
 pub mod event_parser;
+pub mod extract_caps;
 pub mod profile_gen;
 
 #[cfg(target_os = "windows")]

@@ -5,8 +5,8 @@
 //!
 //! The single home for resolving a parsed state-aware request to its backend
 //! and driving the per-phase flow. It centralizes the backend-specific
-//! construction that previously lived inline in `wxc-exec` so the binary can
-//! shrink to a thin CLI shell.
+//! construction that would otherwise live inline in `wxc-exec` so the binary
+//! can shrink to a thin CLI shell.
 //!
 //! Backends whose `StatefulSandboxBackend` impl lives in a `backends/*` crate
 //! (which depends on `wxc_common`, so the construction can't live inside
@@ -174,6 +174,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
 
         let error = run_state_aware(parsed, false).unwrap_err();

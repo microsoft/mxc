@@ -556,6 +556,44 @@ pub struct ContainerPolicy {
     pub ui: UiPolicy,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+    /// Windows denial capture (from `processContainer.captureDenials`). When
+    /// `Some`, the runner records the sandboxed process's ungranted access
+    /// attempts to a learning-mode ETL trace. `None` disables capture.
+    pub capture_denials: Option<CaptureDenialsConfig>,
+}
+
+/// Windows denial-capture settings (from `processContainer.captureDenials`).
+/// The presence of this struct on [`ContainerPolicy::capture_denials`] enables
+/// capture; the runner records the sandboxed process's ungranted access
+/// attempts to a learning-mode ETL trace. [`CaptureDenialsConfig::mode`]
+/// decides whether each recorded access is blocked (default) or allowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureDenialsConfig {
+    /// How each ungranted access check is handled while it is recorded.
+    /// Defaults to [`CaptureDenialsMode::Block`].
+    pub mode: CaptureDenialsMode,
+    /// Absolute path where the JSON denials output file is written — the
+    /// deliverable a consuming application reads. The runner inserts a per-run
+    /// identifier into the file stem (`denials.json` ->
+    /// `denials.<run-id>.json`) so concurrent and sequential captures don't
+    /// collide, and reports the actual path on stderr. When `None`, the runner
+    /// falls back to a managed per-run temporary file and prints its path on
+    /// stderr. (The intermediate ETL trace is an internal runner temp that is
+    /// decoded then deleted.)
+    pub output_path: Option<String>,
+}
+
+/// How `captureDenials` handles each ungranted access check while recording it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureDenialsMode {
+    /// The access stays denied and the denial is recorded; deny-by-default
+    /// containment is preserved. Safe default.
+    #[default]
+    Block,
+    /// The access is allowed and recorded (audit mode); deny-by-default is
+    /// relaxed for the run. Security-sensitive — the runner warns.
+    Allow,
 }
 
 /// Port mapping for host↔container port forwarding.
@@ -705,9 +743,6 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
-    /// Audit mode: when true, `permissiveLearningMode` is permitted even in
-    /// release builds (with a security warning). Set by the `--audit` CLI flag.
-    pub audit: bool,
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)
@@ -758,6 +793,9 @@ pub struct ScriptResponse {
     /// Indicates at what phase the failure occurred.
     #[serde(default)]
     pub failure_phase: FailurePhase,
+    /// Structured metadata produced after the sandboxed process exits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_metadata: Option<Box<SandboxOutputMetadata>>,
 }
 
 impl Default for ScriptResponse {
@@ -769,8 +807,40 @@ impl Default for ScriptResponse {
             error_message: String::new(),
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
+            output_metadata: None,
         }
     }
+}
+
+/// Structured outputs produced by optional sandbox features.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxOutputMetadata {
+    /// Location and summary of a captureDenials output document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_denials: Option<CaptureDenialsOutput>,
+}
+
+/// Location and summary of a captureDenials output document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDenialsOutput {
+    /// Discriminator used by line-oriented CLI consumers.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Absolute path to the JSON denials output file.
+    pub output_path: String,
+    /// Exit code of the sandboxed child.
+    pub exit_code: i32,
+    /// Count of unique denials written.
+    pub total_denials: usize,
+    /// Whether the emitted denial set was truncated.
+    pub denied_resources_truncated: bool,
+}
+
+impl CaptureDenialsOutput {
+    /// The fixed `type` discriminator value.
+    pub const KIND: &'static str = "captureDenials";
 }
 
 impl ScriptResponse {

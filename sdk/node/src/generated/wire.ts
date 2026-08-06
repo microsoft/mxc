@@ -38,6 +38,25 @@ export interface BaseProcessUi {
 }
 
 /**
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.
+ */
+export interface CaptureDenials {
+  /**
+   * How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block` when omitted.
+   */
+  mode?: CaptureDenialsMode | null;
+  /**
+   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file that is decoded then deleted.)
+   */
+  outputPath?: string | null;
+}
+
+/**
+ * How `captureDenials` handles each ungranted access check while recording it.
+ */
+export type CaptureDenialsMode = "block" | "allow";
+
+/**
  * Clipboard access level.
  */
 export type ClipboardPolicy = "none" | "read" | "write" | "all";
@@ -296,11 +315,15 @@ export interface Process {
  */
 export interface ProcessContainer {
   /**
-   * AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+   * AppContainer capabilities (e.g. `internetClient`, `registryRead`). Each array entry must contain exactly one capability name; commas are rejected because BaseContainer uses commas as its wire delimiter. `learningModeLogging` and `permissiveLearningMode` are reserved and rejected here; use `learningMode`, `--audit`, or the dedicated denial capture configuration instead.
    */
   capabilities?: string[] | null;
   /**
-   * AppContainer permissive learning mode.
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the learning-mode OS API.
+   */
+  captureDenials?: CaptureDenials | null;
+  /**
+   * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.
    */
   learningMode?: boolean | null;
   /**

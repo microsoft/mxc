@@ -2,6 +2,7 @@
 members = [
     "core/wxc",
     "core/wxc_common",
+    "core/learning_mode_core",
     "core/lxc",
     "core/mxc_darwin",
     "core/mxc-sdk",
@@ -22,6 +23,7 @@ members = [
     "backends/nanvix/build_common",
     "backends/nanvix/binaries",
     "backends/nanvix/runner",
+    "backends/learning_mode/windows",
     "backends/lxc/common",
     "backends/bubblewrap/common",
     "backends/wslc/common",
@@ -95,6 +97,8 @@ windows = { version = "0.62", features = [
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_path_to_error = "0.1"
+unicode-general-category = "1"
 thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
@@ -109,6 +113,8 @@ windows_sandbox_common = { path = "backends/windows_sandbox/common" }
 windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
 isolation_session_common = { path = "backends/isolation_session/common" }
 hyperlight_common = { path = "backends/hyperlight/common" }
+learning_mode_windows = { path = "backends/learning_mode/windows" }
+learning_mode_core = { path = "core/learning_mode_core" }
 nanvix_runner = { path = "backends/nanvix/runner" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }

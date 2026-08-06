@@ -8,11 +8,8 @@
 //!     prefixes -> DOS form),
 //!   * the post-XPath filters (current-directory, drive-letter,
 //!     self-access, invalid filename chars),
-//!   * the per-event accumulator helper that pushes the resulting
-//!     access event into `ParseAccumulator`.
-//!
-//! ACE-blob → capability-name extraction lands in a later PR; this PR
-//! only collects file paths and access masks.
+//!   * the per-event accumulator helper that feeds the DACL ACE blob
+//!     through `extract_caps` and pushes the resulting access event.
 //!
 //! `ParseAccumulator` (in `event_parser`) owns the mutable state;
 //! `consume_access_failure` is the only public entry point.
@@ -28,13 +25,65 @@ pub(crate) const FILE_PATH_INDEX: usize = 2;
 const APP_PATH_INDEX: usize = 3;
 const ACCESS_MASK_INDEX: usize = 5;
 
-/// Per-event consume helper for `EventID=14`. Applies the post-XPath
-/// filters and pushes a `LearningModeAccessEvent` into
-/// `acc.valid_access_events` on success.
+/// Per-event consume helper for `EventID=14`. Walks the DACL ACE blob
+/// through `extract_caps`, applies the post-XPath filters, and pushes a
+/// `LearningModeAccessEvent` into `acc.valid_access_events` on success.
 pub(crate) fn consume_access_failure(acc: &mut ParseAccumulator, mut ev: ParsedEvent) {
+    if let Some(idx) = ev.complex_data_4_idx {
+        // Borrow rather than clone — the ACE hex blob was already pushed
+        // by `parse_event_xml`; the other EventData slots taken below
+        // (0/1/3) live at different indices so this is safe.
+        if let Some(blob) = ev.event_data.get(idx) {
+            let blob_str = blob.as_str();
+            if !blob_str.trim().is_empty() {
+                // Fail closed. The walker inserts matches as it goes, so
+                // a blob that is valid up to a corrupt tail would
+                // otherwise contribute capabilities from a record we
+                // know is malformed. Since the blob is
+                // attacker-influenceable and the output is a security
+                // policy, stage matches in a scratch set and promote
+                // them only if the entire walk succeeds; on failure the
+                // staged matches are dropped and the record is counted
+                // as data loss.
+                acc.ace_walk.matches.clear();
+                let outcome = crate::extract_caps::extract_caps_into(
+                    blob_str,
+                    &acc.capability_index,
+                    acc.verbose,
+                    &mut acc.ace_walk,
+                );
+                match outcome {
+                    Ok(()) => {
+                        // Promote the staged names. `drain` reuses the
+                        // staging set's capacity for the next event, and
+                        // the membership test means a `String` is
+                        // allocated only the first time the trace sees a
+                        // given capability.
+                        for name in acc.ace_walk.matches.drain() {
+                            if !acc.requested_capabilities.contains(name) {
+                                acc.requested_capabilities.insert(name.to_string());
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        acc.ace_walk.matches.clear();
+                        acc.parse_failures += 1;
+                        if acc.verbose {
+                            eprintln!(
+                                "Failed to decode DACL ACE blob for an EventID=14 event; \
+                                 discarding its capabilities: {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Pull the file path. Absent paths typically mean capability-only
-    // resource accesses; the capability-extraction PR will use the
-    // DACL ACE blob for those, but this PR drops them.
+    // resource accesses whose capability has already been collected
+    // from the DACL above. Take the slot out via `mem::take` so we can
+    // normalise + trim in place without a second `String` allocation.
     let mut file_path = match ev.event_data.get_mut(FILE_PATH_INDEX) {
         Some(s) if !s.is_empty() => std::mem::take(s),
         _ => return,
@@ -226,7 +275,14 @@ pub(crate) fn is_skippable(
     current_directory: Option<&str>,
     verbose: bool,
 ) -> bool {
-    crate::event_parser::ParseAccumulator::new(current_directory, verbose).is_skippable(file_path)
+    // An empty capability index is fine: `is_skippable` only consults the
+    // cached CWD / drive-letter state, not the capability index.
+    crate::event_parser::ParseAccumulator::new(
+        current_directory,
+        verbose,
+        crate::extract_caps::CapabilityIndex::for_test(&[]),
+    )
+    .is_skippable(file_path)
 }
 
 /// Shared `EventID=14` XML fixture used by tests in this module and
@@ -256,6 +312,13 @@ pub(crate) fn make_event_xml(file_path: &str, mask_hex: &str) -> String {
 mod tests {
     use super::*;
     use crate::event_parser::parse_events_from_xml;
+    use crate::extract_caps::CapabilityIndex;
+
+    /// These tests exercise path handling, not ACE matching, so they
+    /// inject an index that resolves nothing.
+    fn no_caps() -> CapabilityIndex {
+        CapabilityIndex::for_test(&[])
+    }
 
     #[test]
     fn normalize_file_path_strips_nt_object_prefix() {
@@ -339,7 +402,7 @@ mod tests {
             make_event_xml("C:\\Users\\test\\foo.txt", "0x1"),
             make_event_xml("C:\\Users\\test\\bar.txt", "0x2"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(result.valid_access_events.len(), 2);
         assert_eq!(
             result.valid_access_events[0].file_path,
@@ -364,7 +427,7 @@ mod tests {
             "<not-an-event/>".to_string(),
             valid_b,
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(
             result.valid_access_events.len(),
             2,
@@ -408,7 +471,7 @@ mod tests {
     #[test]
     fn consume_drops_mount_point_manager() {
         let xmls = [make_event_xml("\\Device\\MountPointManager", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -420,7 +483,7 @@ mod tests {
             make_event_xml("C:\\repo\\src\\main.rs", "0x1"),
             make_event_xml("C:\\other\\x.txt", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), Some("C:\\repo"), false);
+        let result = parse_events_from_xml(xmls.iter(), Some("C:\\repo"), false, no_caps());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\other\\x.txt");
     }
@@ -433,7 +496,7 @@ mod tests {
             make_event_xml("abc", "0x1"),
             make_event_xml("\\\\server\\share\\x", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -442,7 +505,7 @@ mod tests {
     #[test]
     fn consume_drops_invalid_filename_chars() {
         let xmls = [make_event_xml("C:\\foo*bar.txt", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert!(result.valid_access_events.is_empty());
     }
 
@@ -456,7 +519,7 @@ mod tests {
             "\\Device\\HarddiskVolume3\\Tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(device.iter(), None, false)
+        assert!(parse_events_from_xml(device.iter(), None, false, no_caps())
             .valid_access_events
             .is_empty());
 
@@ -465,7 +528,7 @@ mod tests {
             "C:\\Tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(dos.iter(), None, false)
+        assert!(parse_events_from_xml(dos.iter(), None, false, no_caps())
             .valid_access_events
             .is_empty());
 
@@ -475,7 +538,7 @@ mod tests {
             "\\Device\\HarddiskVolume3\\tools\\app.exe",
             "0x1",
         )];
-        assert!(parse_events_from_xml(cased.iter(), None, false)
+        assert!(parse_events_from_xml(cased.iter(), None, false, no_caps())
             .valid_access_events
             .is_empty());
     }
@@ -491,7 +554,7 @@ mod tests {
             "\\Device\\HarddiskVolume3\\Tools\\app.exe",
             "0x1",
         )];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(result.valid_access_events[0].file_path, "C:\\app.exe");
     }
@@ -501,7 +564,7 @@ mod tests {
     #[test]
     fn consume_keeps_normal_valid_event() {
         let xmls = [make_event_xml("C:\\Users\\test\\doc.txt", "0x1")];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(result.valid_access_events.len(), 1);
         assert_eq!(
             result.valid_access_events[0].file_path,
@@ -520,7 +583,7 @@ mod tests {
             make_event_xml("C:\\USERS\\TEST\\DUP.TXT", "0x2"),
             make_event_xml("C:\\Users\\test\\dup.txt", "0x1"),
         ];
-        let result = parse_events_from_xml(xmls.iter(), None, false);
+        let result = parse_events_from_xml(xmls.iter(), None, false, no_caps());
         assert_eq!(
             result.valid_access_events.len(),
             1,
