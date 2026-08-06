@@ -15,12 +15,12 @@ jobs:
     name: Resolve deps through MxcDependencies feed
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Surface toolchain file at repo root
         run: cp src/rust-toolchain.toml rust-toolchain.toml
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           override: false
           rustflags: ''
