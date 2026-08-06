@@ -36,6 +36,13 @@ permissions:
 jobs:
   wslc-e2e:
     name: WXC-Exec WSLC
+    # Default every `run:` step to Windows PowerShell 5.1 (always present on the
+    # image). The Windows default shell is pwsh, but the bare client image does
+    # not reliably ship pwsh on PATH, so steps without an explicit shell (the
+    # cargo build/test steps) would otherwise fail.
+    defaults:
+      run:
+        shell: powershell
     runs-on:
       - self-hosted
       - "1ES.Pool=1es-mxc-e2e-windows-25h2-wsl2"
@@ -52,11 +59,36 @@ jobs:
         shell: powershell
         run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml -Force
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: x86_64-pc-windows-msvc
-          override: false
-          rustflags: ''
+      # The bare 1ES client image has no rustup/cargo and no bash, so we can't
+      # use actions-rust-lang/setup-rust-toolchain (it runs internal bash steps
+      # and fails with "bash: command not found"). Install rustup directly in
+      # PowerShell; rust-toolchain.toml (surfaced at repo root above) pins
+      # channel 1.93, which rustup installs and selects automatically.
+      - name: Install Rust toolchain
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Write-Host "Installing rustup..."
+            $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $init -UseBasicParsing
+            & $init -y --default-toolchain none --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed ($LASTEXITCODE)" }
+            $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+            $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $env:Path = "$cargoBin;$env:Path"
+          }
+          # Install the exact channel pinned by rust-toolchain.toml (repo root),
+          # reading it from the file so there is no drift with the pin.
+          $chan = ([regex]::Match((Get-Content rust-toolchain.toml -Raw), 'channel\s*=\s*"([^"]+)"')).Groups[1].Value
+          if (-not $chan) { throw "could not parse channel from rust-toolchain.toml" }
+          Write-Host "Pinned Rust channel: $chan"
+          rustup toolchain install $chan --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install $chan failed ($LASTEXITCODE)" }
+          rustup target add --toolchain $chan x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed ($LASTEXITCODE)" }
+          rustc "+$chan" --version
+          cargo "+$chan" --version
 
       - name: Point cargo at the MxcDependencies feed
         uses: ./.github/actions/setup-cargo-feed
