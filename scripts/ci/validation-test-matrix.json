@@ -231,8 +231,8 @@
       }
     },
     {
-      "id": "rhel-10.2",
-      "displayName": "RHEL 10.2",
+      "id": "rhel-10",
+      "displayName": "RHEL 10",
       "family": "linux",
       "architectures": {
         "x64": {
@@ -463,7 +463,7 @@
         ]
       },
       {
-        "os": "rhel-10.2",
+        "os": "rhel-10",
         "backends": [
           "bubblewrap"
         ]
@@ -509,7 +509,7 @@
         ]
       },
       {
-        "os": "rhel-10.2",
+        "os": "rhel-10",
         "backends": [
           "hyperlight",
           "lxc"
@@ -532,7 +532,37 @@
         ]
       },
       {
+        "os": "windows-24h2",
+        "backends": [
+          "process-t3"
+        ]
+      },
+      {
+        "os": "windows-23h2",
+        "backends": [
+          "process-t3"
+        ]
+      },
+      {
         "os": "ubuntu-26.04",
+        "backends": [
+          "bubblewrap"
+        ]
+      },
+      {
+        "os": "ubuntu-24.04",
+        "backends": [
+          "bubblewrap"
+        ]
+      },
+      {
+        "os": "rhel-10",
+        "backends": [
+          "bubblewrap"
+        ]
+      },
+      {
+        "os": "debian-13",
         "backends": [
           "bubblewrap"
         ]
