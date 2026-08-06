@@ -33,6 +33,7 @@ const LEGACY_ACE_ACCESS_MASK_OFFSET: usize = 8;
 const LEGACY_ACE_HEADER_SIZE: usize = 12;
 const SID_FIXED_HEADER_SIZE: usize = 8;
 const SID_SUB_AUTHORITY_SIZE: usize = 4;
+const MAX_DACL_HEX_CHARS: usize = 256 * 1024;
 
 const KNOWN_CAPABILITIES: &[&str] = &[
     "internetClient",
@@ -180,6 +181,8 @@ const LEGACY_CAPABILITY_SIDS: &[(&str, &str)] = &[
 enum DaclDecodeError {
     #[error("DACL property is not valid hexadecimal")]
     InvalidHex,
+    #[error("DACL property exceeds the {MAX_DACL_HEX_CHARS}-character decode limit")]
+    InputTooLarge,
     #[error("DACL ACE at offset {0} is truncated")]
     TruncatedAce(usize),
     #[error("DACL contains an unsupported callback ACE at offset {0}")]
@@ -288,6 +291,7 @@ fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> H
         parts
             .props
             .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("ComplexData"))
             .filter_map(|(_, value)| value.strip_prefix("hex:"))
             .collect()
     } else {
@@ -358,14 +362,23 @@ fn property_is_empty(parts: &DecodedEventParts, property: &str) -> bool {
 }
 
 fn is_dacl_property(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.contains("dacl")
-        || name.contains("securitydescriptor")
-        || name.contains("security_descriptor")
-        || name.contains("ace")
+    contains_ascii_case_insensitive(name, "dacl")
+        || contains_ascii_case_insensitive(name, "securitydescriptor")
+        || contains_ascii_case_insensitive(name, "security_descriptor")
+        || contains_ascii_case_insensitive(name, "ace")
+}
+
+fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, DaclDecodeError> {
+    if value.len() > MAX_DACL_HEX_CHARS {
+        return Err(DaclDecodeError::InputTooLarge);
+    }
     let mut bytes = Vec::with_capacity(value.len() / 2);
     let mut high = None;
     for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
@@ -683,6 +696,14 @@ mod tests {
     }
 
     #[test]
+    fn unidentified_capability_does_not_scan_unrelated_binary_property() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let names = extract_names(&parts("Payload", hex(&legacy_ace(1, &sid))), &index);
+        assert!(names.is_empty());
+    }
+
+    #[test]
     fn named_file_event_does_not_scan_unrelated_binary_property() {
         let sid = sid();
         let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
@@ -718,6 +739,22 @@ mod tests {
         let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
         assert!(extract_names(&parts("Dacl", hex(&legacy_ace(0, &sid))), &index).is_empty());
         assert!(extract_names(&parts("Dacl", "00".to_string()), &index).is_empty());
+    }
+
+    #[test]
+    fn rejects_oversized_dacl_property_before_decoding() {
+        let value = "00".repeat(MAX_DACL_HEX_CHARS / 2 + 1);
+        assert!(matches!(
+            decode_hex(&value),
+            Err(DaclDecodeError::InputTooLarge)
+        ));
+    }
+
+    #[test]
+    fn dacl_property_matching_is_ascii_case_insensitive() {
+        assert!(is_dacl_property("Security_DESCRIPTOR"));
+        assert!(is_dacl_property("dAcLaCe"));
+        assert!(!is_dacl_property("Payload"));
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! consistent without wasting cycles on unsupported encodings.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use windows::core::GUID;
 use windows::Win32::System::Diagnostics::Etw::{
@@ -615,7 +616,6 @@ fn format_property_value_with_pointer_size(
             let mut rendered = String::with_capacity(4 + declared_length * 2);
             rendered.push_str("hex:");
             for byte in bytes {
-                use std::fmt::Write;
                 let _ = write!(rendered, "{byte:02X}");
             }
             (rendered, declared_length)
