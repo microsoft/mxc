@@ -1,8 +1,8 @@
 # PLM — Permissive Learning Mode
 
-`plm.exe` is the Windows-only trace driver for permissive learning mode. Long-form, it captures the access-denied events emitted by Windows' permissive sandbox layer, decodes them into structured findings, and merges those findings back into an MXC container config so the next enforcing run succeeds.
+`plm.exe` is the Windows-only legacy WPR trace helper for Learning Mode. It captures both `learningModeLogging` block events and `permissiveLearningMode` allow events, then delegates ETL decoding to the same canonical `learning_mode_windows::EtlDenialAnalyzer` used by `captureDenials`.
 
-This PR introduces **capability extraction**: `EventID=14` DACL ACE blobs are decoded into AppContainer capability names via `extract_caps`, and those names are merged into `processContainer.capabilities`. UI relaxation arrives in a subsequent PR.
+The canonical analyzer decodes filesystem, capability, registry, and UI findings from both provider shapes. The standalone `extract-caps` command remains available only as a low-level ACE diagnostic.
 
 PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mode-permissive-learning-mode); the standalone CLI documented here is for capturing traces, interactive iteration, and debugging the parser itself.
 
@@ -10,9 +10,9 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 
 1. **Capture** — `plm start` calls `wpr -start <plm.wprp>!AccessFailureProfile -filemode`, enabling the `Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode` and `Microsoft-Windows-Kernel-General` ETW providers in a secure realtime collector.
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs `EventID=14` / `EventID=27` for every access that *would* have been denied.
-3. **Stop** — `plm stop` calls `wpr -stop <trace.etl>` and walks the `.etl` with `EvtQuery` / `EvtRender`.
-4. **Parse** — for each `EventID=14`, the parser pulls the file path / access mask and decodes the DACL ACE blob into AppContainer capability names. `EventID=27` UI relaxation lands in a later PR.
-5. **Merge** — file paths are added to `filesystem.readwritePaths` / `filesystem.readonlyPaths`; capability names are added to `processContainer.capabilities` (deduplicated case-insensitively against any capabilities already authored there, then sorted); results are written as `Adjusted_<name>.json` next to the captured trace.
+3. **Stop** — `plm stop` calls `wpr -stop <trace.etl>` and analyzes the sealed ETL through `EtlDenialAnalyzer`.
+4. **Emit** — canonical findings are written to `denials.json` in the log directory, and a one-line JSON result reports the trace, denials, and optional adjusted-config paths.
+5. **Merge (temporary compatibility)** — file and capability denials are adapted into the existing adjusted-config generator until the shared regeneration engine replaces it.
 
 > **Capability merge caveats.** Capabilities are only merged into a `processContainer` block — backends that cannot express AppContainer capabilities (LXC, Windows Sandbox, …) are left untouched and the discovered set is reported on stderr instead. The reserved names `learningModeLogging` and `permissiveLearningMode` are never written back, because `processContainer.capabilities` rejects them.
 
@@ -24,8 +24,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 | `src/start.rs`          | `wpr -cancel` (best-effort) + `wpr -start …!AccessFailureProfile -filemode`       |
 | `src/stop.rs`           | `wpr -stop` (or skip with `--trace-file`) + parse + FS/capability merge           |
 | `src/log.rs`            | Interactive mode: Enter to start, Enter to stop, then diff vs a blank config      |
-| `src/event_parser.rs`   | `EvtQuery` / `EvtRender` walk; shared `ParseAccumulator` + per-event dispatcher   |
-| `src/access_failure.rs` | `EventID=14` decoder: file-path normalization, post-XPath filters, ACE blob -> capabilities |
+| `src/analysis.rs`       | Canonical ETL analysis, denials JSON emission, and temporary config-generator adapter |
 | `src/access_event.rs`   | `LearningModeAccessEvent` plain struct                                            |
 | `src/extract_caps.rs`   | DACL ACE blob decoder; resolves capability SIDs via `DeriveCapabilitySidsFromName` |
 | `src/config.rs`         | JSON load/mutate; FS + capability merge into containment-backend section          |
@@ -53,10 +52,13 @@ Stops the active trace (or accepts a previously captured one).
 
 ```powershell
 plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
-             [--trace-file <path>] [--verbose-logging]
+             [--trace-file <path> | --trace-output <path>]
+             [--exit-code <code>] [--verbose-logging]
 ```
 
-`--config-path` drives an in-memory merge of discovered file paths and capabilities against the input config and persists the result as `Adjusted_<name>.json` in the log directory. The adjusted config is written next to the operator's config snapshot in `--log-dir`; there is deliberately no flag to redirect it to an arbitrary path, because `plm.exe` runs elevated and an operator-named output path would be an admin-privileged arbitrary-write primitive. The write is atomic (temp file in the same directory, then rename over the destination) so a downstream enforcing run never observes a truncated policy.
+`--trace-output` selects the exact ETL destination passed to `wpr -stop`; it cannot be combined with `--trace-file`, which re-processes an existing ETL. `--exit-code` is copied into the canonical `denials.json` summary.
+
+`--config-path` temporarily preserves the existing adjusted-config behavior. The adjusted config is written next to the operator's config snapshot in `--log-dir`; there is deliberately no flag to redirect it independently. The write is atomic so a downstream enforcing run never observes a truncated policy.
 
 ### `plm extract-caps`
 
@@ -93,7 +95,7 @@ The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`); on
 
 - **Windows-only.** Uses `wpr.exe` and Job-Object UI-limit semantics that have no portable equivalent.
 - **Deny matching is enforced on literal, lexically-normalized paths only.** `config::normalize_path` strips verbatim/device prefixes, lowercases, collapses separators, and rejects ADS / `.` / `..`, but it is filesystem-free and does **not** resolve directory junctions, symlinks/reparse points, or 8.3 short names. 8.3 short-name aliases of a denied directory are detected lexically and refused promotion (fail-closed), but a junction/symlink alias (e.g. `C:\work\link` → `C:\Secrets`) is a lexically distinct path that will **not** match a deny entry and can therefore be promoted into the persisted `Adjusted_*.json`. Operators must deny the canonical target path; aliasing the target through a reparse point is a known gap. See the deny-matching code in `src/config.rs`.
-- **No UI extraction yet.** `plm stop` writes `Adjusted_<name>.json` with the discovered file paths and AppContainer capabilities. UI-policy extraction (`EventID=27`) arrives in a subsequent PR.
+- The compatibility adjusted-config generator consumes file and capability denials only. UI regeneration moves to the shared opt-in regeneration engine; UI denials are already present in `denials.json`.
 
 ## See also
 
