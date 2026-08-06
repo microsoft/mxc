@@ -27,11 +27,11 @@ agent. All of this happens through
 Rust bindings auto-generated from a private WinMD; the OS-side API is gated
 on an internal Windows feature flag.
 
-This v0.1 implementation is a **one-shot runner** — every `wxc-exec`
+This implementation is a **one-shot runner** — every `wxc-exec`
 invocation pays the full lifecycle cost. A two-layer architecture
 (`IsolationSessionManager` for lifecycle methods, `IsolationSessionRunner`
-for the one-shot ScriptRunner glue) keeps the option open for a future
-stateful API where the manager's methods can be invoked separately.
+for the one-shot ScriptRunner glue) is what let the state-aware lifecycle
+reuse the manager's methods individually.
 
 ## How It Works
 
@@ -84,13 +84,12 @@ The runner is split into two layers:
   to the OS-side API. Methods: `new`, `add_user`, `start_session`,
   `create_process`, `stop_session`, `deprovision_agent_user`.
 - **`IsolationSessionRunner`** — thin one-shot `ScriptRunner` impl that
-  drives the manager's methods in order. Disposable when a stateful path
-  lands.
+  drives the manager's methods in order.
 
-This split is forward-looking: a future stateful API (deferred to follow-up
-work) can host the manager directly and let the caller invoke methods
-explicitly across multiple exec calls without changing the manager's
-interface.
+This split is what the state-aware lifecycle builds on: it hosts the manager
+directly and invokes its methods explicitly across separate `wxc-exec`
+invocations, without changing the manager's interface. See
+[`state-aware-rust.md`](state-aware-rust.md).
 
 ## File Map
 
@@ -280,10 +279,6 @@ The full field-by-field table is in
 
 **Deferred to follow-up work:**
 
-- **Stateful API.** Hosting `IsolationSessionManager` directly so a single
-  provisioned agent + session can host multiple `wxc-exec` invocations
-  without re-paying the lifecycle cost. The manager / runner split exists
-  precisely to make this migration straightforward later.
 - **TypeScript SDK exposure.** Adding a one-shot isolation-session config
   surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
   workloads programmatically **on the one-shot path**. Today the one-shot
@@ -347,10 +342,6 @@ The following were observed during VM testing and are accepted for v0.1.
   (qualitatively, not quantitatively measured). Documented for awareness;
   if it regresses materially, the runner can be reshaped to return the
   `ScriptResponse` ahead of teardown.
-- **Agent-user deprovision returning a non-success status.** Initially observed
-  as a stderr warning on an earlier OS build. No longer surfacing on the
-  current OS build. The one-shot path stops the session and removes the agent
-  user before returning, so the warning was non-functional even when present.
 - **Intermittent `IdentityNotFound` (status 4) immediately after VM boot.**
   Observed once, resolved by a VM restart. Cause unconfirmed; suspected to
   be an Isolation Session service initialization race. Re-runs on a settled VM
@@ -364,7 +355,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | OS API not present on older Windows builds | the IsolationSession feature is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
-| One-shot lifecycle is heavy (full provision → start per call) | Accepted for v0.1; experimental flag indicates rough edges. Stateful API is the planned mitigation |
+| One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path; the experimental flag indicates rough edges. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
 | Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user before returning |
 
 ## Prerequisites
@@ -439,6 +430,5 @@ entry point.
 
 | Workload type | Why |
 |---|---|
-| Interactive shells / REPLs | The runner does not pipe stdin |
 | GUI applications | No display server inside the session; only stdout/stderr captured |
 | Long-running daemons | Process is expected to exit within `process.timeout` |

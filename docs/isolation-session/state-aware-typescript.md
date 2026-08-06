@@ -103,7 +103,11 @@ const opts: SandboxSpawnOptions = { experimental: true };
 
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
-  {},
+  // Required. The container's network cannot be filtered or denied, so
+  // provision accepts only this explicit acknowledgment of that posture —
+  // and the config argument itself is mandatory for this backend precisely
+  // because the field is.
+  { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
   opts,
 );
 

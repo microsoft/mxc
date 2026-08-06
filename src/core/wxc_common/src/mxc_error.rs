@@ -138,12 +138,11 @@ pub struct MxcError {
 /// Renders `code: message`, then the API detail in brackets when present —
 /// e.g. `backend_error: The provision was not found. [IsoSessionOps.StopSessionAsync 0x80070490]`.
 ///
-/// The bracketed suffix exists because `message` is now the API's own text
+/// The bracketed suffix exists because `message` carries the API's own text
 /// alone; without it a consumer that only logs the error (`error!("{e}")`,
-/// `e.to_string()`) would lose the operation and status that used to be
-/// concatenated into the message. This affects **rendering only** — the wire
-/// envelope still carries `message` bare, with the components in their own
-/// fields.
+/// `e.to_string()`) would lose the operation and status. This affects
+/// **rendering only** — the wire envelope still carries `message` bare, with
+/// the components in their own fields.
 impl fmt::Display for MxcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
@@ -521,9 +520,9 @@ mod tests {
 
     // ── Display keeps the diagnostic detail a logger would otherwise lose ─
 
-    /// `message` is the API's own text alone now, so a consumer that only
-    /// logs the error would lose the operation and status that used to be
-    /// concatenated into it. `Display` re-attaches them.
+    /// `message` carries the API's own text alone, so a consumer that only
+    /// logs the error would lose the operation and status. `Display`
+    /// re-attaches them.
     #[test]
     fn display_appends_operation_and_native_code() {
         let err = MxcError::backend_error("The provision was not found.")
@@ -547,8 +546,8 @@ mod tests {
         );
     }
 
-    /// A failure MXC raises itself has no API detail, so the rendering is
-    /// unchanged from before the structured fields existed.
+    /// A failure MXC raises itself has no API detail, so the rendering has
+    /// nothing to append.
     #[test]
     fn display_without_api_failure_is_code_and_message_only() {
         assert_eq!(

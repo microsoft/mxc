@@ -25,12 +25,17 @@ import {
   startSandbox,
   stopSandbox,
 } from '@microsoft/mxc-sdk';
-import { probeStateAwareRuntime, safeDeprovision, sandboxSkipReason } from './test-helpers.js';
+import {
+  probeIsolationSessionFeature,
+  probeStateAwareRuntime,
+  safeDeprovision,
+  sandboxSkipReason,
+} from './test-helpers.js';
 
 /**
  * Builds a structurally valid `iso:` sandbox id for tests that need to get PAST
  * id decoding to reach the behaviour under test. The id format is
- * `iso:<base64url-nopad(JSON)>`; a bare string after the prefix no longer
+ * `iso:<base64url-nopad(JSON)>`; a bare string after the prefix does not
  * decodes.
  */
 const wellFormedSandboxId = (agentUserName: string): string =>
@@ -44,6 +49,21 @@ const platformSkipReason =
 // non-Windows host.
 const skipReason =
   platformSkipReason ?? sandboxSkipReason ?? (await probeStateAwareRuntime('isolation_session'));
+
+// Gate for the policy-validation suite far below. Its rationale lives at that
+// `describe`; what must stay HERE is the `await`.
+//
+// Every top-level `await` in this file has to happen before the first
+// `describe` registers. `run-tests.js` runs the suite with `--test-force-exit`,
+// and the runner force-exits once the tests it knows about have finished -- so
+// a `describe` that registers after a later top-level await is silently
+// dropped: no tests, no failure, exit 0. That is not hypothetical, it is what
+// this line did when it sat next to its own `describe`, and it is invisible
+// precisely where it matters most: CI sets `MXC_SKIP_OS_BUILD_DEPENDENT_TESTS`,
+// which makes `skipReason` above short-circuit without awaiting, leaving this
+// as the first suspension in the module.
+const policyValidationSkipReason =
+  platformSkipReason ?? (await probeIsolationSessionFeature());
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
@@ -187,7 +207,14 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 // CI. These assertions cover the full chain this feature depends on — Rust
 // envelope serialisation → dispatcher → SDK parse → typed `MxcError` — which
 // is exactly the path where drift would otherwise go unnoticed.
-describe('IsolationSession state-aware policy validation', { skip: platformSkipReason }, () => {
+//
+// The gate is therefore the platform check plus a feature-presence probe, and
+// deliberately not the suite-wide `skipReason`: the runtime probe would skip
+// these on every host without IsolationSession runtime support, which is the
+// coverage loss this block exists to avoid. It is computed at the top of the
+// file rather than here because its `await` must precede the first `describe`
+// -- see the note there before moving it back.
+describe('IsolationSession state-aware policy validation', { skip: policyValidationSkipReason }, () => {
   // The TypeScript type makes `network` required (and pins its value) at
   // provision, but a plain-JS caller can bypass that. These assert the backend
   // itself refuses a missing or non-canonical network acknowledgment — the

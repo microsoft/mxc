@@ -286,7 +286,6 @@ interface IsolationSessionProvisionConfig {
 
 interface IsolationSessionStartConfig {
   version?: string;
-  configurationId?: 'small' | 'medium' | 'large' | 'composable';
 }
 
 interface IsolationSessionExecConfig {
@@ -529,8 +528,8 @@ const opts: SandboxSpawnOptions = { experimental: true };
 // Provision — cross-cutting fields apply at this phase per the IS honor matrix (§10.3).
 const { sandboxId } = await provisionSandbox('isolation_session', provisionConfig, opts);
 
-// Start — backend-specific config picks the session size.
-await startSandbox(sandboxId, { configurationId: 'small' }, opts);
+// Start — IsolationSession takes no per-phase config here.
+await startSandbox(sandboxId, undefined, opts);
 
 // Exec — buffered convenience for short workloads.
 const result = await execInSandboxAsync(
@@ -690,8 +689,8 @@ defined in §6.1, lifting backend-specific fields into the nested experimental b
 ```typescript
 interface ExperimentalStateAwareConfigs {
   isolation_session?: {
-    start?: { configurationId?: 'small' | 'medium' | 'large' | 'composable' };
-    // provision, exec, stop, deprovision omitted — IsolationSession has no
+    provision?: { appId?: string };
+    // start, exec, stop, deprovision omitted — IsolationSession has no
     // backend-specific config for those phases.
   };
   // future state-aware-capable backends add typed entries here
@@ -852,7 +851,7 @@ const { sandboxId } = await provisionSandbox(
   config,
   { experimental: true },
 );
-// sandboxId = "iso:reg-abc:prov-123"
+// sandboxId = "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 ```
 
 ```json
@@ -866,22 +865,26 @@ const { sandboxId } = await provisionSandbox(
 
 ```rust
 // Parser deserializes the JSON above into an ExecutionRequest with
-//   request.policy.readwrite_paths = ["C:\\workspace"]
 //   request.policy.default_network_policy = NetworkPolicy::Allow
-//   request.policy.allowed_hosts = ["api.anthropic.com"]
+//   request.policy.allow_local_network = true
+//   request.policy.network_specified = true
 // (and the other top-level wire fields populated as today's one-shot path
-// already populates them). The dispatcher then calls:
+// already populates them). No filesystem policy appears because this backend
+// refuses it at every phase, and the network policy must be exactly the
+// canonical acknowledgment shown above. The dispatcher then calls:
 backend.provision(&request, /* config */ None)
 // returns Ok(ProvisionResult {
-//     sandbox_id: "iso:reg-abc:prov-123".into(),
+//     sandbox_id: "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
 //         agent_user_name: "_iso_abc_123".into(),
+//         agent_user_sid: "S-1-5-21-1001".into(),
+//         ephemeral_workspace_path: "C:\\ProgramData\\...\\_iso_abc_123".into(),
 //     }),
 // })
 ```
 
 ```json
-{ "result": { "sandboxId": "iso:reg-abc:prov-123", "metadata": { "agentUserName": "_iso_abc_123" } } }
+{ "result": { "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", "metadata": { "agentUserName": "_iso_abc_123", "agentUserSid": "S-1-5-21-1001", "ephemeralWorkspacePath": "C:\\ProgramData\\...\\_iso_abc_123" } } }
 ```
 
 #### Phase 2 — start
@@ -889,7 +892,7 @@ backend.provision(&request, /* config */ None)
 ```typescript
 await startSandbox(
   sandboxId,
-  { configurationId: 'small' },
+  undefined,
   { experimental: true },
 );
 ```
@@ -898,18 +901,18 @@ await startSandbox(
 {
   "version": "0.6.0-alpha",
   "phase": "start",
-  "sandboxId": "iso:reg-abc:prov-123",
-  "experimental": { "isolation_session": { "start": { "configurationId": "small" } } }
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 ```rust
-// Dispatcher deserializes `experimental.isolation_session.start` into
-// IsolationSessionStartConfig { configuration_id: Small }, then calls:
+// `start` carries no per-phase config for this backend — its StartConfig is
+// `()`, so the envelope above has no `experimental` block and the dispatcher
+// passes None:
 backend.start(
-    "iso:reg-abc:prov-123",
+    "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
     &request,
-    Some(IsolationSessionStartConfig { configuration_id: Small }),
+    /* config */ None,
 )
 // returns Ok(StartResult { metadata: None })
 ```
@@ -933,7 +936,7 @@ const r = await execInSandboxAsync(
 {
   "version": "0.6.0-alpha",
   "phase": "exec",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
   "process": { "commandLine": "echo hello", "timeout": 5000 }
 }
 ```
@@ -942,7 +945,7 @@ const r = await execInSandboxAsync(
 // Parser populates request.script_code = "echo hello", request.script_timeout =
 // 5000 from the wire-format `process` block (same path as one-shot). The
 // dispatcher then calls:
-backend.exec("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(ExecHandle { ... pipe handles + waiter ... })
 ```
 
@@ -964,12 +967,12 @@ await stopSandbox(sandboxId, {}, { experimental: true });
 {
   "version": "0.6.0-alpha",
   "phase": "stop",
-  "sandboxId": "iso:reg-abc:prov-123"
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 ```rust
-backend.stop("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.stop("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(StopResult { metadata: None })
 ```
 
@@ -987,12 +990,12 @@ await deprovisionSandbox(sandboxId, {}, { experimental: true });
 {
   "version": "0.6.0-alpha",
   "phase": "deprovision",
-  "sandboxId": "iso:reg-abc:prov-123"
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 ```rust
-backend.deprovision("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.deprovision("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(DeprovisionResult { metadata: None })
 ```
 
@@ -1003,8 +1006,8 @@ backend.deprovision("iso:reg-abc:prov-123", &request, /* config */ None)
 #### Mapping summary
 
 The SDK auto-wraps backend-specific config under `experimental.<backend>.<phase>` when
-serialising state-aware calls — consumers write `configurationId` directly on the
-`IsolationSessionStartConfig`, the SDK builds the nested wire form. Cross-cutting
+serialising state-aware calls — consumers write `appId` directly on the
+`IsolationSessionProvisionConfig`, the SDK builds the nested wire form. Cross-cutting
 fields (`filesystem` / `network` / `ui`) on a per-(backend, phase) Config map directly
 to top-level wire fields — they are already wire-format-aligned in the Config, so the
 SDK passes them through unchanged. Cross-backend exec fields (`commandLine`, `cwd`,
@@ -1574,28 +1577,34 @@ phase) Config from §6.1; it is a strict superset of the wire shape, adding
 as `applied` (§10.3).
 
 ```rust
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IsolationSessionStartConfig {
-    pub configuration_id: IsolationSessionConfigurationId,
+pub struct IsolationSessionProvisionConfig {
+    pub app_id: Option<String>,
 }
 ```
 
 ```typescript
-interface IsolationSessionStartConfig {
+interface IsolationSessionProvisionConfig {
   version?: string;
-  configurationId?: 'small' | 'medium' | 'large' | 'composable';
+  appId?: string;
+  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 ```
 
 The TypeScript Config carries `version` (which the SDK serialises to the top-level
-wire `version` field) plus any cross-cutting fields the matrix marks `applied` for
-that phase (none for IsolationSession's `start`). The Rust struct receives only what
-the wire's `experimental.isolation_session.start` block carries —
-`{ "configurationId": "small" }` — because that is what the dispatcher deserialises
-into `Self::StartConfig` (§9.3). The SDK is responsible for splitting the consumer
-Config into top-level wire fields (cross-cutting, `version`) and the experimental
-sub-block; Rust sees only the post-split shape.
+wire `version` field) plus any cross-cutting fields the matrix marks as honored for
+that phase (for IsolationSession's `provision`, the required `network`
+acknowledgment). The Rust struct receives only what the wire's
+`experimental.isolation_session.provision` block carries —
+`{ "appId": "Contoso.App_8wekyb3d8bbwe" }` — because that is what the dispatcher
+deserialises into `Self::ProvisionConfig` (§9.3). The SDK is responsible for splitting
+the consumer Config into top-level wire fields (cross-cutting, `version`) and the
+experimental sub-block; Rust sees only the post-split shape.
+
+`provision` is used here because it is IsolationSession's **only** phase with a
+per-phase config; `start`, `exec`, `stop` and `deprovision` declare `()` and reject
+any payload in their slot.
 
 ### 10.3 Cross-cutting policy honor matrix
 
@@ -1603,14 +1612,24 @@ Each backend declares which phases honor which cross-cutting field (`filesystem`
 `network`, `ui`). The matrix shape is the proposal-level contract: a row per
 cross-cutting field, a column per phase, with values from the closed set
 `applied` / `rejected` / `ignored`. Specific values per backend are documented in each
-backend's plan doc (§11.6). For IsolationSession, illustrative values (final values
-documented in the backend's plan doc):
+backend's plan doc (§11.6). The IsolationSession row set below mirrors the shipped
+backend; the authoritative statement lives in
+[`isolation-session/state-aware-rust.md`](../isolation-session/state-aware-rust.md):
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
 | `filesystem` | rejected | rejected | rejected | rejected | rejected |
-| `network` | applied | rejected | rejected | rejected | rejected |
-| `ui` | ignored | ignored | ignored | ignored | ignored |
+| `network` | required | rejected | rejected | rejected | rejected |
+| `ui` | rejected | rejected | rejected | rejected | rejected |
+
+`network` at provision is `required` rather than `applied`: the backend cannot filter
+or deny the container network, so nothing is enforced — the caller must supply the
+canonical unrestricted-network acknowledgment (`defaultPolicy=allow` +
+`allowLocalNetwork=true`, no host rules, no proxy) and every other value, including an
+absent policy, is refused. `ui` is `rejected` rather than `ignored`: an isolation
+session isolates the *host's* UI from contained code but does not deny that code UI
+capabilities, so no `ui` posture would be truthful and the section is refused rather
+than silently dropped. An omitted `ui` is accepted and applies no restriction.
 
 For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
 applied at provision and frozen for the life of the sandbox; later phases reject it.
@@ -1874,16 +1893,17 @@ per-stage configs stay under `experimental.<backend>.<phase>`.
 `experimental.<backend>.<phase>` to top-level `<backend>.<phase>`. The
 `experimental: true` SDK option is no longer required for that backend's state-aware
 calls (and the executor stops gating them behind `--experimental`). For example, a
-`start` call against IsolationSession migrates from this shape:
+`provision` call against IsolationSession migrates from this shape:
 
 ```json
 {
   "version": "0.6.0-alpha",
-  "phase": "start",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "experimental": {
     "isolation_session": {
-      "start": { "configurationId": "small" }
+      "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
     }
   }
 }
@@ -1894,10 +1914,11 @@ to this shape after the backend's state-aware path graduates:
 ```json
 {
   "version": "0.7.0-alpha",
-  "phase": "start",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "isolation_session": {
-    "start": { "configurationId": "small" }
+    "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
   }
 }
 ```

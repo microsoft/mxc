@@ -82,20 +82,31 @@ impl IsolationSessionManager {
 
     /// Provisions an agent user and returns its provision-time facts (the
     /// OS-assigned account name — which addresses every subsequent lifecycle
-    /// op — plus the agent SID and the shared ephemeral workspace path).
+    /// op — plus the agent SID and the shared ephemeral workspace path),
+    /// together with a manager already pegged to that account.
+    ///
+    /// The manager is returned rather than left to the caller to build with
+    /// [`Self::new`] because building it separately would activate the service
+    /// a second time. That second activation can fail *after* the agent user
+    /// has been minted, and at that point the account cannot be removed —
+    /// removal needs the very service instance that just failed to activate —
+    /// so the sandbox would leak with no way to clean it up. Handing back the
+    /// instance `add_user` already holds removes that window entirely.
+    ///
+    /// Once the API reports success the account exists, so every failure after
+    /// that point deprovisions best-effort rather than abandoning it. The sole
+    /// exception is a failure to read the account name itself, which leaves
+    /// nothing to address a removal to.
     ///
     /// The OS interface takes an optional account name and token; MXC always
-    /// passes empty strings, which selects a local agent user. Because the
-    /// account name is not known until this returns, the caller constructs the
-    /// manager via `new` afterward — hence an associated function rather than
-    /// a method.
+    /// passes empty strings, which selects a local agent user.
     ///
     /// Note: the in-proc API exposes no session-lifetime knob, so `lifecycle`
     /// cannot be honored here. Unsupported values are refused by the calling
     /// surface rather than ignored — one-shot rejects `destroyOnExit: false`
     /// and `preservePolicy: true` in `validate_runner`, and the state-aware
     /// parser rejects the whole `lifecycle` section.
-    pub(super) fn add_user() -> Result<ProvisionedUser, IsolationSessionError> {
+    pub(super) fn add_user() -> Result<(ProvisionedUser, Self), IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
         let async_op = ops
             .AddUserAsync(&HSTRING::new(), &HSTRING::new())
@@ -123,6 +134,42 @@ impl IsolationSessionManager {
         let agent_user_name = user_result
             .AgentUserName()
             .map_err(|e| transport_err(op::ADD_USER, "get AgentUserName failed", &e))?;
+
+        // Past this point the OS account exists and `agent_user_name` is the
+        // key that removes it, so build the manager now rather than after the
+        // remaining getters. That makes every subsequent failure recoverable:
+        // the removal key and a live service instance are both already in hand.
+        //
+        // A failure of `AgentUserName()` above is the one case with no
+        // in-process remedy — without the name there is nothing to address a
+        // removal to — so it is left to propagate.
+        let manager = Self {
+            agent_user_name: agent_user_name.clone(),
+            ops,
+        };
+
+        let provisioned = match Self::read_remaining_facts(&user_result, &agent_user_name) {
+            Ok(provisioned) => provisioned,
+            Err(e) => {
+                // Best-effort: returning here without this would abandon an
+                // account we are still able to remove.
+                let _ = manager.deprovision_agent_user();
+                return Err(e);
+            }
+        };
+
+        Ok((provisioned, manager))
+    }
+
+    /// Reads the provision-time facts that remain after the agent user name.
+    ///
+    /// Split out of [`Self::add_user`] so that a failure in any of them lands
+    /// on one error path, where the freshly created account can be removed
+    /// instead of orphaned.
+    fn read_remaining_facts(
+        user_result: &IsoSessionUserResult,
+        agent_user_name: &HSTRING,
+    ) -> Result<ProvisionedUser, IsolationSessionError> {
         let agent_user_sid = user_result
             .AgentUserSid()
             .map_err(|e| transport_err(op::ADD_USER, "get AgentUserSid failed", &e))?;
@@ -207,9 +254,12 @@ impl IsolationSessionManager {
         //   - Relay thread handles: RAII-closed via `OwnedHandle` after we
         //     `WaitForSingleObject` on each.
         //
-        // Lifetime: relay-param structs are stack-allocated; we wait on
-        // every spawned thread (INFINITE for stdout/stderr, bounded for
-        // stdin) before this function returns.
+        // Lifetime: each relay's param struct is moved to the heap and owned
+        // by its thread, which frees it on exit. Joining is therefore not
+        // required for memory safety — an early return that abandons a relay
+        // leaves it reading memory it owns, not a dead frame. We still join on
+        // the normal path (INFINITE for stdout/stderr, bounded for stdin) so
+        // all output is drained before the call returns.
         // A getter that errors is a backend failure, not an absent stream:
         // propagate it rather than coercing to 0, which downstream treats as
         // "no handle" and silently skips the corresponding stdio relay. A
@@ -279,26 +329,28 @@ impl IsolationSessionManager {
             None
         };
 
-        let mut stdout_params = PipeRelayParams {
-            h_read: HANDLE(stdout_handle_val as *mut core::ffi::c_void),
-            h_write: wxc_stdout,
-        };
-        let mut stderr_params = PipeRelayParams {
-            h_read: HANDLE(stderr_handle_val as *mut core::ffi::c_void),
-            h_write: wxc_stderr,
-        };
         let stdout_relay: Option<OwnedHandle> = if stdout_handle_val != 0 {
             Some(
-                unsafe { create_relay_thread(&mut stdout_params) }
-                    .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?,
+                unsafe {
+                    create_relay_thread(PipeRelayParams {
+                        h_read: HANDLE(stdout_handle_val as *mut core::ffi::c_void),
+                        h_write: wxc_stdout,
+                    })
+                }
+                .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?,
             )
         } else {
             None
         };
         let stderr_relay: Option<OwnedHandle> = if stderr_handle_val != 0 {
             Some(
-                unsafe { create_relay_thread(&mut stderr_params) }
-                    .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?,
+                unsafe {
+                    create_relay_thread(PipeRelayParams {
+                        h_read: HANDLE(stderr_handle_val as *mut core::ffi::c_void),
+                        h_write: wxc_stderr,
+                    })
+                }
+                .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?,
             )
         } else {
             None
@@ -320,13 +372,14 @@ impl IsolationSessionManager {
 
         let stdin_h_write = HANDLE(stdin_handle_val as *mut core::ffi::c_void);
         let stdin_h_stop = stdin_stop_owned.get();
-        let mut stdin_relay_state = if stdin_handle_val == 0 {
+        let stdin_relay_state = if stdin_handle_val == 0 {
             StdinRelayKind::None
         } else if options.interactive {
             // Clone the WinRT process handle so the relay thread holds
             // its own ref-counted reference (WinRT clone = AddRef). The
             // closure is `'static + Send`; the cloned ref moves onto the
-            // relay thread with the closure.
+            // relay thread with the closure, and is released when the
+            // thread frees the params it owns.
             let process_for_resize = process.clone();
             StdinRelayKind::Console(ConsoleRelayParams {
                 h_read: wxc_stdin,
@@ -345,7 +398,9 @@ impl IsolationSessionManager {
             })
         };
 
-        let stdin_relay: Option<OwnedHandle> = match &mut stdin_relay_state {
+        // Matched by value: the params move into the spawn call, which puts
+        // them on the heap under the relay thread's ownership.
+        let stdin_relay: Option<OwnedHandle> = match stdin_relay_state {
             StdinRelayKind::None => None,
             StdinRelayKind::Pipe(params) => Some(
                 unsafe { create_relay_thread_with_stop(params) }

@@ -20,11 +20,10 @@
     and this script to the host, then run it directly in cmd.exe or
     PowerShell on that host.
 
-    Prerequisite probes (skip if missing --not a failure):
-      - IsoSessionApp.dll present in System32
-      - WinRT activatable class IsoSessionOps registered
-      - wxc-exec.exe responds to a state-aware request without
-        backend_unavailable (catches feature-flag-off builds)
+    Prerequisite probe (skip if unavailable -- not a failure):
+      - `wxc-exec --probe` reports `probes.isolationSessionAvailable`. This
+        single signal covers an OS that cannot activate the isolation session
+        API as well as a binary built without `--features isolation_session`.
 
 .PARAMETER WxcExePath
     Path to wxc-exec.exe. Default probes the host-arch target dir, then
@@ -86,17 +85,77 @@ Write-Host "`nIsolationSession State-Aware E2E Tests" -ForegroundColor Cyan
 Write-Host "=======================================" -ForegroundColor Cyan
 Write-Host "Binary: $WxcExec`n" -ForegroundColor Gray
 
-# ---------------- Prerequisite probes ----------------
+# ---------------- Backend-availability probe ----------------
+#
+# Decided by `wxc-exec --probe` → `probes.isolationSessionAvailable`, which
+# covers both an unsupported host and a binary built without
+# `--features isolation_session`.
+#
+# Availability is asked of the binary under test rather than inferred from a
+# DLL path or a registered class name. A check that names a specific runtime
+# artifact stops tracking what the code actually activates, and a gate that no
+# longer reflects the thing it guards can pass or skip for the wrong reason.
+# Asking the binary what it supports cannot drift.
+function Get-IsolationSessionProbe {
+    param([string]$Exe)
 
-if (-not (Test-Path 'C:\Windows\System32\IsoSessionApp.dll')) {
-    Write-Host "SKIPPED: IsoSessionApp.dll not present in System32" -ForegroundColor Yellow
-    exit 0
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prevPref = $ErrorActionPreference
+    try {
+        # This script runs under `$ErrorActionPreference = "Stop"`, which turns
+        # a native command's stderr output into a terminating error. The probe
+        # is expected to write to stderr on a host carrying leftover state, so
+        # relax it for the duration of the call — the same idiom used around
+        # the wxc-exec invocation in Run-IsolationSessionTest below.
+        $ErrorActionPreference = "Continue"
+        $stdout = (& $Exe --probe 2>$errFile) | Out-String
+        $exitCode = $LASTEXITCODE
+        $stderr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+    } catch {
+        return @{ Status = 'error'; Detail = "could not run '$Exe --probe': $($_.Exception.Message)" }
+    } finally {
+        $ErrorActionPreference = $prevPref
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $stderrNote = if ([string]::IsNullOrWhiteSpace($stderr)) { '' } else { " stderr: $($stderr.Trim())" }
+
+    if ($exitCode -ne 0) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe exited $exitCode.$stderrNote" }
+    }
+    $parsed = $null
+    try { $parsed = $stdout | ConvertFrom-Json } catch {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe did not emit valid JSON.$stderrNote" }
+    }
+    if ($null -eq $parsed -or $null -eq $parsed.probes) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes' object.$stderrNote" }
+    }
+    if ($parsed.probes.PSObject.Properties.Name -notcontains 'isolationSessionAvailable') {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes.isolationSessionAvailable' field.$stderrNote" }
+    }
+    # Only a literal boolean is meaningful. Treating anything else as `false`
+    # would recreate the conflation this function exists to remove: a value of
+    # `null`, a string, or a number is a malformed answer, not a statement that
+    # the backend is unavailable, and it gets the same infrastructure-failure
+    # treatment as a missing field.
+    $value = $parsed.probes.isolationSessionAvailable
+    if ($value -is [bool]) {
+        if ($value) { return @{ Status = 'available' } }
+        return @{ Status = 'unavailable' }
+    }
+    return @{ Status = 'error'; Detail = "wxc-exec --probe reported a non-boolean 'probes.isolationSessionAvailable' ($(if ($null -eq $value) { 'null' } else { "'$value'" })).$stderrNote" }
 }
 
-$IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
-if (-not (Test-Path $IsoSessionOpsKey)) {
-    Write-Host "SKIPPED: Windows.AI.IsolationSession.IsoSessionOps WinRT class not registered" -ForegroundColor Yellow
+$probeResult = Get-IsolationSessionProbe -Exe $WxcExec
+if ($probeResult.Status -eq 'unavailable') {
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
     exit 0
+}
+if ($probeResult.Status -ne 'available') {
+    Write-Host "FAILED: could not determine whether the isolation session backend is available." -ForegroundColor Red
+    Write-Host "  $($probeResult.Detail)" -ForegroundColor Red
+    Write-Host "  This is an infrastructure failure, not an unsupported host, so it is not a skip." -ForegroundColor Red
+    exit 1
 }
 
 # ---------------- Helpers ----------------
@@ -219,18 +278,24 @@ function Envelope-Arm {
     '<unknown>'
 }
 
-# ---------------- Backend-availability probe ----------------
+# ---------------- Provision smoke check ----------------
 
-# Sends a state-aware provision request and surfaces a `backend_unavailable`
-# envelope as a SKIP. This catches feature-flag-off builds without raising
-# false test failures. On a healthy build the probe successfully creates an
-# agent user, so we immediately deprovision the throwaway sandbox -- without
-# this, every test run would leak one local agent user.
+# Availability was already settled by the `--probe` gate near the top of this
+# script, so this is a functional smoke check rather than a second gate. It
+# provisions once and immediately deprovisions, both to confirm the lifecycle
+# works before running the full corpus and so the check does not leak an agent
+# user.
+#
+# A `backend_unavailable` or `unsupported_phase` envelope here *contradicts*
+# the earlier probe, so it is a failure rather than a skip — two gates that can
+# disagree about whether the suite should run is exactly the ambiguity the
+# single `--probe` gate exists to remove.
 $probe = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
-if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
-    Write-Host "SKIPPED: wxc-exec reports backend_unavailable (likely built without --features isolation_session)" -ForegroundColor Yellow
-    exit 0
+if ($null -ne $probeEnv -and $probeEnv.error.code -in @('backend_unavailable', 'unsupported_phase')) {
+    Write-Host "FAILED: --probe reported the backend available, but provision returned '$($probeEnv.error.code)'." -ForegroundColor Red
+    Write-Host "  Stdout: $($probe.Stdout)" -ForegroundColor Gray
+    exit 1
 }
 if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
     $probeSandboxId = [string]$probeEnv.result.sandboxId
@@ -398,10 +463,10 @@ try {
 
     # Test 1d: id-format rejections. Both run entirely in the decoder, before
     # any OS call, so they need no sandbox and leave nothing to clean up.
-    Run-StateAwareTest "malformed_id (legacy plaintext sandboxId rejected)" {
-        # Pre-change ids were `iso:<agentUserName>` in the clear. They are no
-        # longer addressable -- an accepted consequence of the format change.
-        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = 'iso:wxc-legacy-plaintext' } -Experimental
+    Run-StateAwareTest "malformed_id (undecodable sandboxId rejected)" {
+        # A tail that is not a valid encoded payload is refused by the decoder,
+        # before any OS call.
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = 'iso:not-a-valid-payload' } -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -423,14 +488,14 @@ try {
         Assert-True ($msg -match 'newer MXC') "error.message identifies a newer-MXC id (got '$msg')"
     } | Out-Null
 
-    Run-StateAwareTest "malformed_id (every id-consuming phase rejects a legacy id)" {
+    Run-StateAwareTest "malformed_id (every id-consuming phase rejects an undecodable id)" {
         # Run each phase BOTH ways. The real invocation proves the phase itself
         # refuses the id; the --dry-run invocation proves the refusal happens in
         # the validation hook, before the phase runs. Both must agree, or a dry
         # run would report success for a request the real call rejects -- which
         # is the whole point of decoding in all four hooks rather than just one.
         foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
-            $req = @{ phase = $phase; sandboxId = 'iso:wxc-legacy-plaintext' }
+            $req = @{ phase = $phase; sandboxId = 'iso:not-a-valid-payload' }
             if ($phase -eq 'exec') { $req.process = @{ commandLine = 'cmd.exe /c echo unreachable' } }
 
             $r = Invoke-StateAware -Request $req -Experimental
@@ -558,9 +623,10 @@ try {
         Assert-True ($msg -match 'appId') "error.message names appId (got '$msg')"
     } | Out-Null
 
-    # Test 1e: provision rejects non-empty deniedPaths. Backend has no Deny
-    # ACE primitive, so any deniedPaths request must be rejected (consistent
-    # with how readwrite/readonly are accepted but denied is not). Uses a
+    # Test 1e: provision rejects non-empty deniedPaths. The backend has no
+    # host-folder-sharing primitive at all, so the whole filesystem policy is
+    # refused at every phase (see the note above Lifecycle B) -- deniedPaths
+    # included. This test pins the deniedPaths arm of that rule. Uses a
     # separate throwaway sandbox -- never reaches the OS-side service since
     # validate_provision_policy rejects up-front, so no cleanup needed.
     Run-StateAwareTest "provision (deniedPaths rejected)" {
@@ -867,9 +933,9 @@ try {
         } | Out-Null
     }
 
-    # Test 10: deprovision tears down the agent user and unregisters the
-    # client. After this test, $sandboxId is no longer addressable -- the
-    # finally block below skips its cleanup pass when this test ran.
+    # Test 10: deprovision tears down the agent user. After this test,
+    # $sandboxId is no longer addressable -- the finally block below skips
+    # its cleanup pass when this test ran.
     if ($stoppedOk) {
         $deprovPassed = Run-StateAwareTest "deprovision (full lifecycle through deprovision)" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:sandboxId -Experimental
@@ -956,9 +1022,9 @@ try {
 
 # ---------------- Lifecycle B: Filesystem policy rejection ----------------
 
-# Filesystem policy is no longer accepted at any lifecycle phase. Provision
-# with readwrite/readonly policy now fails before creating a sandbox, so no
-# cleanup is needed.
+# Filesystem policy is not accepted at any lifecycle phase. Provision with
+# readwrite/readonly policy fails before creating a sandbox, so no cleanup
+# is needed.
 Run-StateAwareTest "filesystem: provision rejected" {
     $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
@@ -1387,6 +1453,15 @@ $passed = $total - $failed
 
 Write-Host ""
 Write-Host "==========================" -ForegroundColor Cyan
+# A suite that executed nothing is not a pass — see the equivalent guard in
+# run_isolation_session_tests.ps1. It cannot fire on an unsupported host:
+# that case exits at the availability probe near the top of the script and
+# stays a clean skip.
+if ($total -eq 0) {
+    Write-Host "FAILED: backend was available but no tests executed" -ForegroundColor Red
+    Write-Host "  A zero-execution run cannot substantiate anything; treating it as a failure." -ForegroundColor Red
+    exit 1
+}
 if ($failed -eq 0) {
     Write-Host "$passed/$total passed" -ForegroundColor Green
     exit 0

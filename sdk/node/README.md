@@ -398,7 +398,10 @@ spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) 
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
 // State-aware lifecycle (currently `isolation_session` and `windows_sandbox` — both Windows-only)
-provisionSandbox(containment, config?, options?) → Promise<ProvisionResult>
+// `config` on provisionSandbox is required for backends whose provision config
+// has a required member (isolation_session: the network acknowledgment) and
+// optional otherwise (windows_sandbox).
+provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)       → IPty             // streaming
 execInSandboxAsync(sandboxId, config, options?)  → Promise<ExecResult>

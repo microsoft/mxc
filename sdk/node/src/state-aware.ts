@@ -9,6 +9,7 @@ import { diagLog } from './diagnostic.js';
 import {
   DeprovisionConfigFor,
   DeprovisionResult,
+  EveryBackendConfigIsOptional,
   ExecConfigFor,
   ExecResult,
   ProvisionConfigFor,
@@ -30,14 +31,36 @@ import {
 } from './state-aware-helper.js';
 
 /**
+ * Trailing parameters of {@link provisionSandbox}: the config is required
+ * unless *every* backend in `C` has an all-optional provision config. See
+ * {@link EveryBackendConfigIsOptional} for why the check is written over the
+ * backend union rather than over the union of configs.
+ */
+export type ProvisionArgs<C extends StateAwareContainmentBackend> =
+  EveryBackendConfigIsOptional<C> extends true
+    ? [config?: ProvisionConfigFor<C>, options?: SandboxSpawnOptions]
+    : [config: ProvisionConfigFor<C>, options?: SandboxSpawnOptions];
+
+/**
  * Provisions a state-aware sandbox of the requested backend. Returns a
  * branded sandbox id and any provision-time metadata the backend produces.
+ *
+ * The config parameter is **required for backends whose provision config has
+ * a required member**, and optional otherwise — see {@link ProvisionArgs}.
+ * Without that, a config type could declare a field as required and still be
+ * skipped entirely by omitting the argument, which is a guarantee the type
+ * appears to offer but does not enforce. IsolationSession relies on this: its
+ * unrestricted-network acknowledgment is mandatory, and the backend refuses a
+ * provision that omits it.
  */
 export async function provisionSandbox<C extends StateAwareContainmentBackend>(
   containment: C,
-  config?: ProvisionConfigFor<C>,
-  options: SandboxSpawnOptions = {},
+  ...rest: ProvisionArgs<C>
 ): Promise<ProvisionResult<C>> {
+  const [config, options = {}] = rest as [
+    ProvisionConfigFor<C> | undefined,
+    SandboxSpawnOptions | undefined,
+  ];
   const envelope = buildStateAwareEnvelope({
     phase: 'provision',
     backendKey: containment,

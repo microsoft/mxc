@@ -73,7 +73,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let config = config.unwrap_or_default();
         let app_id = config.app_id;
-        let provisioned = IsolationSessionManager::add_user().map_err(map_lifecycle_error)?;
+        // The manager is discarded here — each post-provision phase builds its
+        // own from the `sandboxId`. Taking it anyway keeps a single provisioning
+        // path with `one_shot`, and proves the service instance that minted the
+        // user is live rather than re-activating to find out.
+        let (provisioned, _manager) =
+            IsolationSessionManager::add_user().map_err(map_lifecycle_error)?;
 
         // `appId` rides inside the id so later phases recover it without the
         // caller re-supplying it. Nothing consumes it yet; it is carried for a
@@ -170,7 +175,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     }
 
     // Every id-consuming phase decodes in its validation hook, so a malformed
-    // or legacy id is refused uniformly — and, critically, `--dry-run` (which
+    // id is refused uniformly — and, critically, `--dry-run` (which
     // stops after validation) agrees with a real invocation about which ids are
     // acceptable. Validating on only some phases would let a dry run report
     // success for a request the real call then rejects.
@@ -423,17 +428,8 @@ mod tests {
 
     #[test]
     fn extract_agent_user_name_recovers_a_name_containing_a_colon() {
-        // The delimited format this replaced could not represent this at all.
         let id = sandbox_id::encode(&SandboxIdPayload::new("has:a:colon", None)).unwrap();
         assert_eq!(extract_agent_user_name(&id).unwrap(), "has:a:colon");
-    }
-
-    #[test]
-    fn extract_agent_user_name_rejects_a_legacy_plaintext_id() {
-        // Old ids were `iso:<agentUserName>` in the clear. They are no longer
-        // addressable; this is an accepted consequence of the format change.
-        let err = extract_agent_user_name("iso:wxc-abcd1234").unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
     #[test]
@@ -460,18 +456,18 @@ mod tests {
         // validation) cannot report success for an id the real call rejects.
         let runner = IsolationSessionRunner::new();
         let req = request_with_canonical_network();
-        let legacy = "iso:wxc-legacy-plaintext";
+        let undecodable = "iso:not-a-valid-payload";
         let cases: Vec<(&str, Result<(), MxcError>)> = vec![
-            ("start", runner.validate_start(legacy, &req, None)),
-            ("exec", runner.validate_exec(legacy, &req, None)),
-            ("stop", runner.validate_stop(legacy, &req, None)),
+            ("start", runner.validate_start(undecodable, &req, None)),
+            ("exec", runner.validate_exec(undecodable, &req, None)),
+            ("stop", runner.validate_stop(undecodable, &req, None)),
             (
                 "deprovision",
-                runner.validate_deprovision(legacy, &req, None),
+                runner.validate_deprovision(undecodable, &req, None),
             ),
         ];
         for (phase, result) in cases {
-            let err = result.expect_err(&format!("{phase} must reject a legacy id"));
+            let err = result.expect_err(&format!("{phase} must reject an undecodable id"));
             assert_eq!(err.code, MxcErrorCode::MalformedId, "phase {phase}");
         }
     }

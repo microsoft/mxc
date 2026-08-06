@@ -31,6 +31,10 @@ export type ErrorCode =
  * `operation`. `operation` marks that an underlying API call was in flight;
  * the other two refine it, and neither appears on its own. A failure MXC
  * raises before or outside any API call carries only `code` and `message`.
+ *
+ * The invariant is guaranteed by the executor, which cannot construct a
+ * violating envelope. This interface mirrors the flat wire shape rather than
+ * re-encoding the constraint in the type.
  */
 export interface MxcErrorFields {
   /** Machine-readable category. Branch on this first. */

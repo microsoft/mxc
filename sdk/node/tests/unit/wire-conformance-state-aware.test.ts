@@ -70,9 +70,9 @@ type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 // `Process`, both covered elsewhere) and backend-specific fields that map onto
 // that phase's wire object.
 //
-// The wire model now declares a SEPARATE type per phase, so the comparison is
+// The wire model declares a SEPARATE type per phase, so the comparison is
 // per-phase rather than a single pooled key set. That is strictly stronger: a
-// field legal only on provision can no longer satisfy the oracle by appearing
+// field legal only on provision cannot satisfy the oracle by appearing
 // on the start config, or vice versa.
 type LiftedPhaseKey = 'version' | 'process' | 'network';
 

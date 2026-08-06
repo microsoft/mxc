@@ -392,14 +392,6 @@ mod tests {
     // ====== decode failures ======
 
     #[test]
-    fn decode_rejects_a_legacy_plaintext_id() {
-        // Old ids were `iso:<agentUserName>`. They no longer decode; this is
-        // intended and accepted.
-        let err = decode("iso:_iso_abc_123").unwrap_err();
-        assert_eq!(err.code, MxcErrorCode::MalformedId);
-    }
-
-    #[test]
     fn decode_rejects_a_foreign_prefix() {
         let err = decode("wsb:deadbeef").unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);

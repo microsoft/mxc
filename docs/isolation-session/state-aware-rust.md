@@ -26,8 +26,9 @@ concurrency story, and error mapping.
   caller kills `wxc-exec.exe`, the OS-side service's per-process timer or
   the existing 3-tier shutdown (close stdin → `SendCtrlClose` → `Terminate`)
   reaps the agent. See [Cancellation](#cancellation) below.
-- **Concurrent state-aware sessions.** v1 supports a single state-aware
-  sandbox per consumer. See [Concurrency](#concurrency) for the constraint.
+- **Concurrent state-aware sessions.** v1 targets a single state-aware
+  sandbox per consumer. This is a scoping choice, not an OS limitation — see
+  [Concurrent state-aware sandboxes](#concurrent-state-aware-sandboxes).
 
 ## Per-phase config and metadata shapes
 
@@ -109,27 +110,16 @@ transparent.
 **Determinism.** The payload is serialised from a struct rather than a map, so
 key order is fixed and the same content always yields the same id string.
 
-**Legacy ids.** Ids minted before this format (`iso:<agentUserName>` in the
-clear) no longer decode and surface as `malformed_id` on every phase that takes
-an id. **Both** the running session and the agent user account survive a binary
-upgrade: nothing in MXC tears either down when the executable is replaced, and
-outliving the process is the premise of the whole state-aware lifecycle — `exec`
-runs in a different process from `start` and addresses the same live session. A
-session ends at an explicit `stop`, or when `deprovision` removes the agent user
-(which terminates any session still running under it). A sandbox provisioned by
-an older binary should therefore be stopped and deprovisioned **before**
-upgrading.
-
-The *legacy id string* becomes unusable, but the sandbox itself does not become
-unreachable: the payload binds nothing to the binary that minted it, so
-re-encoding the old agent user name as a current payload
-(`{"version":1,"agentUserName":"<old-name>"}`, base64url) produces a valid id
-that addresses the same sandbox. For a legacy id this needs nothing recorded in
-advance — the old format is `iso:<agentUserName>` **in the clear**, so the name
-is readable straight from the stranded id. (Provision also returns it as
-`agentUserName` metadata.) It is a recovery procedure rather than a supported
-migration path, but it means a sandbox stranded by an in-place upgrade can
-always be cleaned up through MXC.
+**Upgrading with live sandboxes.** **Both** the running session and the agent
+user account survive a binary upgrade: nothing in MXC tears either down when the
+executable is replaced, and outliving the process is the premise of the whole
+state-aware lifecycle — `exec` runs in a different process from `start` and
+addresses the same live session. A session ends at an explicit `stop`, or when
+`deprovision` removes the agent user (which terminates any session still running
+under it). An id the running build cannot decode is refused as `malformed_id` on
+every phase that takes one, and a sandbox left behind that way cannot be
+addressed through MXC afterwards — so stop and deprovision **before** replacing
+the executable.
 
 ### Start
 
@@ -307,6 +297,10 @@ is discarded (`ScriptResponse::error`) and the envelope carries
 typed policy code today. A structurally invalid `appId` likewise surfaces as
 `policy_validation`.
 
+One exception: a supplied `network.proxy` is refused during config parsing,
+before any backend validation runs, so it surfaces as `malformed_request` on
+both surfaces.
+
 ## Mode-specific fields
 
 ### Fields valid in both modes
@@ -349,11 +343,11 @@ whole section for every backend. See the matrix notes above.
 
 | Phase | Repeated call | Notes |
 |---|---|---|
-| provision | non-idempotent | Each provision mints a fresh `provisionId` / agent user. Two provision calls produce two distinct sandboxes. Acceptable: callers manage `sandboxId` state themselves. |
+| provision | non-idempotent | Each provision mints a fresh agent user. Two provision calls produce two distinct sandboxes. Acceptable: callers manage `sandboxId` state themselves. |
 | start | OS-side dependent | Starting an already-started session surfaces an HRESULT from `StartSessionAsync`; mapped to `backend_error` (no specific MXC code). Callers should not call start twice; if they do, the second call's failure does not corrupt the first session. |
 | exec | per-call | Each exec creates a fresh agent process via `RunProcessWithOptionsAsync`. No deduplication — repeated `commandLine` runs the command repeatedly. |
 | stop | OS-side dependent | Stopping an already-stopped session surfaces an HRESULT from `StopSessionAsync`; mapped to `backend_error`. The agent user remains — only the running session is gone. |
-| deprovision | becomes `stale_id` | After a successful deprovision, the agent user is gone. A second deprovision on the same `sandboxId` triggers the OS-side `FindActiveAgentUserByProvisionId` lookup failure (`HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`), which the runner maps to `MxcError::StaleId`. |
+| deprovision | becomes `stale_id` | After a successful deprovision, the agent user is gone. A second deprovision on the same `sandboxId` fails the OS-side agent-user lookup (`HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`), which the runner maps to `MxcError::StaleId`. |
 
 ## Concurrency
 
@@ -426,7 +420,7 @@ treat `operation` as telemetry and log detail. See the
 
 `message` is the API's own text, passed through verbatim, and is never empty: when the
 API reports a failure without a message, a short stand-in is substituted, because the
-operation and status now live in their own fields and no longer backfill it.
+operation and status live in their own fields rather than being folded into the message.
 
 `error.details` is unused by this backend. It remains the escape hatch for
 backend-specific structured data that has no cross-backend meaning; the three named
@@ -470,10 +464,9 @@ waiter, with `terminator` invoking `IsoSessionProcess::Terminate()`.
 ### Concurrent state-aware sandboxes
 
 v1 targets a single state-aware sandbox per consumer (see the
-[Out of scope](#out-of-scope-for-v1) note). The earlier cross-sandbox
-deprovision hazard no longer applies — each sandbox is an independent OS
-agent user with no shared registration — so this is a v1 scoping choice,
-not an OS limitation.
+[Out of scope](#out-of-scope-for-v1) note). Each sandbox is an independent OS
+agent user with no shared registration, so this is a v1 scoping choice, not an
+OS limitation.
 
 ## References
 
