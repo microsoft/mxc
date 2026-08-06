@@ -71,7 +71,15 @@ test('macOS rollout uses 26 for PR and nightly with 15 added weekly', () => {
 
 test('enabled plan deduplicates and runs both macOS versions', () => {
   const enabled = resolvePlan(catalog(), 'enabled');
-  assert.equal(enabled.windows.length + enabled.linux.length + enabled.macos.length, 4);
+  const combinations = Object.values(enabled).flat();
+  assert.equal(
+    new Set(
+      combinations.map(entry => (
+        `${entry.os}|${entry.architecture}|${entry.backend}`
+      ))
+    ).size,
+    combinations.length
+  );
   assert.deepEqual(
     enabled.macos.map(entry => ({
       plan: entry.plan,

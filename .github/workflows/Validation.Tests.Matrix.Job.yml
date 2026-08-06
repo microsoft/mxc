@@ -109,12 +109,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          exec > >(tee -a "$RUNNER_TEMP/mxc-ci.log") 2>&1
           chmod +x artifacts/bin/lxc-exec
           case '${{ matrix.command }}' in
             bubblewrap)
               if ! command -v bwrap >/dev/null 2>&1; then
-                sudo apt-get update
-                sudo apt-get install -y --no-install-recommends bubblewrap
+                if command -v apt-get >/dev/null 2>&1; then
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends bubblewrap
+                elif command -v dnf >/dev/null 2>&1; then
+                  sudo dnf install -y bubblewrap
+                elif command -v yum >/dev/null 2>&1; then
+                  sudo yum install -y bubblewrap
+                elif command -v microdnf >/dev/null 2>&1; then
+                  sudo microdnf install -y bubblewrap
+                else
+                  echo "No supported package manager found to install bubblewrap." >&2
+                  exit 1
+                fi
               fi
               command -v bwrap
               if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
@@ -134,11 +146,11 @@ jobs:
           if [[ '${{ matrix.command }}' == 'lxc' ]]; then
             sudo --preserve-env=RUNNER_TEMP bash tests/scripts/run_ci_backend_tests.sh \
               '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
-              tee "$RUNNER_TEMP/mxc-ci.log"
+              tee -a "$RUNNER_TEMP/mxc-ci.log"
           else
             bash tests/scripts/run_ci_backend_tests.sh \
               '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
-              tee "$RUNNER_TEMP/mxc-ci.log"
+              tee -a "$RUNNER_TEMP/mxc-ci.log"
           fi
 
       - name: Upload failure logs
