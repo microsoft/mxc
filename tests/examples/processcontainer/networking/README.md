@@ -1,22 +1,18 @@
 # ProcessContainer networking examples
 
-These forward-looking examples use the schema 0.8 ProcessContainer networking
-model. They are intentionally exempt from the config-schema gate until the
-schema and runtime implementation land. The exemption becomes stale and fails
-CI once the checked-in schema accepts them, which is the signal to remove it.
-This is an additive versioned surface: schema 0.7.0 and earlier remain
-unchanged.
+> **Versioning:** Schema 0.7.0 and earlier remain unchanged. The examples in
+> this directory describe the additive schema 0.8 networking surface. They are
+> intentionally exempt from schema validation until that surface lands.
 
-- [`egress-allow-https.json`](egress-allow-https.json) allows one IPv4
-  destination on TCP/443 and denies all other egress.
-- [`egress-allow-with-exceptions.json`](egress-allow-with-exceptions.json)
-  demonstrates multiple protocols, CIDR exceptions, and an explicit deny that
-  narrows a broader allow.
-- [`proxy.json`](proxy.json) denies direct egress and permits HTTP/S traffic
-  only through one loopback AppContainer proxy.
+## Examples
 
-After the schema 0.8 networking implementation lands, run an egress example
-with:
+| File | Demonstrates |
+|---|---|
+| [`egress-allow-https.json`](egress-allow-https.json) | Deny-by-default egress with one IPv4 TCP/443 allow |
+| [`egress-allow-with-exceptions.json`](egress-allow-with-exceptions.json) | CIDR exceptions, multiple protocols, and a narrower explicit deny |
+| [`proxy.json`](proxy.json) | Deny direct egress and use one loopback proxy peer |
+
+After schema 0.8 support lands:
 
 ```powershell
 src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe `
@@ -24,103 +20,41 @@ src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe `
   --config tests\examples\processcontainer\networking\egress-allow-https.json
 ```
 
-## Proxy prerequisites
+## Proxy contract
 
-MXC configures the BaseContainer client, but it does not create or start the
-proxy. Start the proxy before `wxc-exec.exe` and keep it alive for the complete
-client lifetime.
+MXC configures the BaseContainer client. It does **not** create, authorize, or
+start the proxy.
 
-The BaseContainer client and proxy security environments must both have
-`privateNetworkClientServer`. MXC adds it to the BaseContainer client. The
-proxy also needs `internetClient` when it connects to external destinations.
-It must listen on the loopback address and port in
-`runtimeConfig.networkProxy`.
+| Requirement | Value |
+|---|---|
+| Client capability | `privateNetworkClientServer` (added by MXC) |
+| Proxy capabilities | `privateNetworkClientServer`; also `internetClient` for external destinations |
+| Proxy endpoint | Loopback URL matching `runtimeConfig.networkProxy` |
+| Peer identity | Exactly one `processContainer.network.allowedPeer` |
+| Firewall | Inbound authorization for the proxy executable |
+| Lifetime | Start proxy first; keep it alive until the BaseContainer exits |
+| Policy | Proxy mode cannot include direct egress allow/deny rules |
 
-Windows supports two proxy identity/setup models:
+The peer rule and `privateNetworkClientServer` capability are not sufficient by
+themselves. Without inbound firewall authorization, Windows Firewall blocks the
+BaseContainer-to-proxy loopback connection.
 
-1. **Unpackaged AppContainer proxy.** Create the proxy with an AppContainer
-   profile, give it `privateNetworkClientServer` (and `internetClient` when
-   needed), set `allowedPeer` to the profile name, and install an inbound
-   Windows Firewall application rule that permits the proxy executable to
-   receive the scoped loopback connection.
-2. **Packaged proxy.** Install or loosely register the proxy as a package, set
-   `allowedPeer` to its package family name, and declare the proxy executable's
-   inbound firewall/loopback authorization in the package manifest.
+## Supported proxy setups
 
-Without one of these identities plus its firewall authorization, the process
-inside the BaseContainer cannot connect to the proxy. The scoped peer rules
-created from `allowedPeer` do not by themselves bypass Windows Firewall's
-block-inbound-to-non-allowed-apps policy.
+| Setup | `allowedPeer` | Firewall authorization | Setup authority |
+|---|---|---|---|
+| Unpackaged AppContainer proxy | AppContainer profile name | Administrator-installed inbound application rule for the proxy executable | App owner / installer |
+| Packaged proxy | Package family name | Package manifest `windows.firewallRules` declaration | Package |
 
-Proxy mode and direct `network.egress.allow` or `network.egress.deny` rules are
-mutually exclusive.
+### Unpackaged AppContainer
 
-## Minimal packaged proxy
+1. Create the proxy with `CreateAppContainerProfile`.
+2. Give the proxy `privateNetworkClientServer`.
+3. Add `internetClient` if the proxy connects externally.
+4. Install an inbound firewall rule for the proxy executable.
+5. Set `allowedPeer` to the AppContainer profile name.
 
-An MSIX or loosely registered AppX package can own the proxy's inbound firewall
-authorization. The important manifest declarations are:
-
-```xml
-<Package
-  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
-  xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
-  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap10 desktop2 rescap">
-  <Capabilities>
-    <rescap:Capability Name="runFullTrust" />
-    <Capability Name="internetClient" />
-    <Capability Name="privateNetworkClientServer" />
-  </Capabilities>
-  <Applications>
-    <Application
-      Id="Proxy"
-      Executable="proxy.exe"
-      EntryPoint="Windows.PartialTrustApplication"
-      uap10:RuntimeBehavior="packagedClassicApp"
-      uap10:TrustLevel="appContainer" />
-  </Applications>
-  <Extensions>
-    <desktop2:Extension Category="windows.firewallRules">
-      <desktop2:FirewallRules Executable="proxy.exe">
-        <desktop2:Rule Direction="in" IPProtocol="TCP" Profile="all" />
-      </desktop2:FirewallRules>
-    </desktop2:Extension>
-  </Extensions>
-</Package>
-```
-
-The `runFullTrust` restricted capability is required by manifest validation for
-the firewall extension; the application still runs with
-`TrustLevel="appContainer"`. A loose package requires Developer Mode or trusted
-developer-package policy. A normally deployed MSIX must satisfy the usual
-signing and trust requirements.
-
-After installing or registering the package:
-
-1. Activate `<PackageFamilyName>!Proxy` and pass the proxy's listen/allowlist
-   arguments.
-2. Read the selected loopback port from the proxy or assign a fixed port.
-3. Get the identity with
-   `(Get-AppxPackage -Name <IdentityName>).PackageFamilyName`.
-4. Replace the port and placeholder `allowedPeer` in [`proxy.json`](proxy.json).
-5. Run the config with `wxc-exec.exe --experimental --config ...`.
-
-The repository's runnable test implementation is
-[`run_base_container_network_tests.ps1`](../../../scripts/run_base_container_network_tests.ps1).
-The script launches the Rust E2E test; its minimal package manifest is under
-[`AppContainerProxyPackage`](../../../scripts/AppContainerProxyPackage/).
-The test package also declares a temporary app-execution alias so the Rust
-harness can launch it with arguments without a C# or COM activation shim.
-
-## Unpackaged AppContainer proxy
-
-An unpackaged proxy created with `CreateAppContainerProfile` can also work.
-Give its profile and token `privateNetworkClientServer`, give it
-`internetClient` when external egress is needed, and set `allowedPeer` to the
-profile name. Because it has no package-owned firewall declaration, an
-administrator must install an inbound application rule for the proxy
-executable, for example:
+Example firewall rule:
 
 ```powershell
 New-NetFirewallRule `
@@ -131,4 +65,62 @@ New-NetFirewallRule `
   -Protocol TCP
 ```
 
-Remove that rule when the proxy is uninstalled.
+Remove the rule when the proxy is uninstalled.
+
+### Packaged proxy
+
+1. Package or loosely register the proxy.
+2. Declare `privateNetworkClientServer` and, when needed, `internetClient`.
+3. Declare an inbound TCP `windows.firewallRules` rule for the executable.
+4. Start the packaged proxy and obtain its loopback port.
+5. Set `allowedPeer` to the package family name.
+6. Set `runtimeConfig.networkProxy` to the proxy loopback URL.
+
+Get the package family name with:
+
+```powershell
+(Get-AppxPackage -Name <IdentityName>).PackageFamilyName
+```
+
+## Test package manifest
+
+The complete runnable manifest is
+[`AppContainerProxyPackage/AppxManifest.xml`](../../../scripts/AppContainerProxyPackage/AppxManifest.xml).
+It uses one shared PNG for all required logo fields.
+
+| Manifest declaration | Why it is present |
+|---|---|
+| `Identity`, `Properties`, `Resources`, `Dependencies` | Required package metadata |
+| `uap:VisualElements` | Required application registration metadata; `AppListEntry="none"` hides the test app |
+| `privateNetworkClientServer` | Allows the proxy side of the scoped loopback connection |
+| `internetClient` | Allows the proxy to reach permitted external destinations |
+| `runFullTrust` | Required by manifest validation when declaring the desktop firewall extension; the app still uses AppContainer trust |
+| `uap10:RuntimeBehavior="packagedClassicApp"` + `uap10:TrustLevel="appContainer"` | Runs the executable as a packaged AppContainer process |
+| `desktop2:windows.firewallRules` | Authorizes inbound TCP to the proxy executable |
+| `uap5:windows.appExecutionAlias` | Test-only launch path that passes arguments without a C# or COM shim |
+
+The firewall portion is:
+
+```xml
+<desktop2:Extension Category="windows.firewallRules">
+  <desktop2:FirewallRules Executable="proxy.exe">
+    <desktop2:Rule Direction="in" IPProtocol="TCP" Profile="all" />
+  </desktop2:FirewallRules>
+</desktop2:Extension>
+```
+
+A loose package requires Developer Mode or trusted developer-package policy.
+A normally deployed MSIX must satisfy the usual signing and trust requirements.
+
+## Run the repository test
+
+```powershell
+tests\scripts\run_base_container_network_tests.ps1
+```
+
+The script is a thin launcher for the Rust E2E test. The Rust test:
+
+- runs the legacy schema 0.7 cases;
+- registers and starts the packaged proxy;
+- removes the package during cleanup; and
+- runs the schema 0.8 direct and B1-B6 proxy matrix when schema support exists.

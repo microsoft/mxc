@@ -15,7 +15,7 @@
   <Properties>
     <DisplayName>MXC Test Proxy</DisplayName>
     <PublisherDisplayName>Microsoft Corporation</PublisherDisplayName>
-    <Logo>Assets\StoreLogo.png</Logo>
+    <Logo>Assets\Logo.png</Logo>
   </Properties>
   <Resources>
     <Resource Language="en-us" />
@@ -42,8 +42,8 @@
         DisplayName="MXC Test Proxy"
         Description="MXC test HTTP proxy"
         BackgroundColor="transparent"
-        Square150x150Logo="Assets\Square150x150Logo.png"
-        Square44x44Logo="Assets\Square44x44Logo.png"
+        Square150x150Logo="Assets\Logo.png"
+        Square44x44Logo="Assets\Logo.png"
         AppListEntry="none" />
       <Extensions>
         <uap5:Extension Category="windows.appExecutionAlias">

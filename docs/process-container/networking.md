@@ -45,12 +45,12 @@ implementation lands.
 
 ### Model 2: proxy-only egress (recommended)
 
-- **Capabilities:** both the BaseContainer client and proxy security
-  environments have `privateNetworkClientServer`. The proxy additionally has
-  `internetClient` so it can reach allowed external destinations. A loopback
-  exemption permits the client to communicate only with the single named proxy
-  peer.
-- **Enforcement:** The per-container WinHTTP proxy. With no internetClient, the only reachable egress is the loopback proxy; the system drops everything else. MXC resolves the proxy container's SID at launch to scope the loopback exemption.
+| Item | Requirement |
+|---|---|
+| BaseContainer capability | `privateNetworkClientServer` |
+| Proxy capabilities | `privateNetworkClientServer`; also `internetClient` for external destinations |
+| Peer | One packaged or unpackaged proxy identity |
+| Enforcement | Per-container WinHTTP proxy plus scoped loopback; all direct egress remains blocked |
 
 ```jsonc
 {
@@ -70,44 +70,29 @@ implementation lands.
 }
 ```
 
-The proxy endpoint (e.g., 127.0.0.1:8080) is runtime metadata for the process
-container backend and not part of the shared network policy. MXC resolves the
-single `allowedPeer` identity at launch to scope the loopback exemption and
-adds `privateNetworkClientServer` to the BaseContainer client. The proxy
-security environment must also have `privateNetworkClientServer`; it needs
-`internetClient` as well if it connects to external destinations.
+The proxy endpoint is runtime metadata, not shared network policy. MXC:
 
-For a packaged proxy, `allowedPeer` is its package family name (for example,
-the value returned by
-`(Get-AppxPackage -Name <IdentityName>).PackageFamilyName`). For an unpackaged
-AppContainer created with
-[CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile),
-use the profile name.
+- resolves `allowedPeer` and creates the scoped loopback relationship;
+- adds `privateNetworkClientServer` to the BaseContainer client; and
+- configures the per-container WinHTTP proxy.
 
-In proxy mode, egress must remain deny-default with no direct allow or deny
-rules. MXC does not create or start the proxy; the caller must start it before
-the BaseContainer client and keep it alive until the client exits.
+The caller must:
+
+- create and authorize the proxy;
+- start it before the BaseContainer;
+- keep it alive until the client exits; and
+- leave egress deny-default with no direct allow or deny rules.
 
 #### Proxy firewall authorization
 
-An AppContainer proxy listener also needs an inbound Windows Firewall
-application authorization. The scoped loopback rules created from
-`allowedPeer` are necessary, but they do not bypass the firewall's
-block-inbound-to-non-allowed-apps policy.
-
-Use one of these identity and firewall ownership models:
-
-- Run an unpackaged proxy in an AppContainer profile and install an inbound
-  application rule for its executable with administrator privileges. Use the
-  profile name as `allowedPeer`.
-- Package the proxy as MSIX/AppX, use its package family name as `allowedPeer`,
-  and declare a
-  `desktop2:Extension Category="windows.firewallRules"` inbound TCP rule for
-  the proxy executable. This keeps firewall authorization owned by the package
-  and removes it when the package is uninstalled.
+| Proxy setup | `allowedPeer` | Firewall authorization |
+|---|---|---|
+| Unpackaged AppContainer | [AppContainer profile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile) name | Administrator-installed inbound application rule |
+| Packaged proxy | Package family name | Package-owned `desktop2:Extension Category="windows.firewallRules"` inbound TCP rule |
 
 Without one of these setups, the BaseContainer process cannot connect to the
-proxy even when both sides have `privateNetworkClientServer`.
+proxy. The scoped peer rule and `privateNetworkClientServer` do not bypass
+Windows Firewall's block-inbound-to-non-allowed-apps policy.
 
 The
 [`ProcessContainer networking examples`](../../tests/examples/processcontainer/networking/README.md)
