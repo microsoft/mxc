@@ -6,14 +6,11 @@
     "commandLine": "pwsh.exe -nop -nol -c \"Set-PSReadLineOption -HistorySaveStyle SaveNothing; Set-Location c:\\temp\"; Get-Location"
   },
   "filesystem": {
-    "readwritePaths": [
-      "C:\\Program Files\\PowerShell\\7",
-      "C:\\temp",
-      "C:\\Users",
-      "C:\\Users\\stscha\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine"
-    ],
     "readonlyPaths": [
-      "C:\\"
+      "C:\\Program Files\\PowerShell\\7"
+    ],
+    "readwritePaths": [
+      "C:\\temp"
     ]
   }
 }
