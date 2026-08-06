@@ -73,7 +73,12 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let config = config.unwrap_or_default();
         let app_id = config.app_id;
-        let provisioned = IsolationSessionManager::add_user().map_err(map_lifecycle_error)?;
+        // The manager is discarded here — each post-provision phase builds its
+        // own from the `sandboxId`. Taking it anyway keeps a single provisioning
+        // path with `one_shot`, and proves the service instance that minted the
+        // user is live rather than re-activating to find out.
+        let (provisioned, _manager) =
+            IsolationSessionManager::add_user().map_err(map_lifecycle_error)?;
 
         // `appId` rides inside the id so later phases recover it without the
         // caller re-supplying it. Nothing consumes it yet; it is carried for a

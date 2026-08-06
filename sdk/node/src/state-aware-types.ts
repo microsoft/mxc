@@ -201,6 +201,44 @@ export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
 
 export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['provision'];
+
+/**
+ * True when every member of `T` is optional — i.e. `{}` is a valid value.
+ *
+ * Applied to a single config type. For a possibly-union backend see
+ * {@link EveryBackendConfigIsOptional}, which is what `provisionSandbox`
+ * actually uses.
+ */
+export type HasNoRequiredMembers<T> = Record<string, never> extends T ? true : false;
+
+/**
+ * True only when **every** backend in `C` has an all-optional provision config.
+ *
+ * `provisionSandbox` uses this to require its config argument exactly when the
+ * selected backend needs one. The rule is derived from the types rather than an
+ * enumerated list of backends, so a future backend gaining or losing a required
+ * member is handled automatically.
+ *
+ * The `[C] extends [never]` shape is deliberate and is the whole point of this
+ * type. `C` is not always a single literal — a caller holding a variable typed
+ * as the full `StateAwareContainmentBackend` union instantiates it with that
+ * union. Asking `HasNoRequiredMembers` about the *union* of configs answers
+ * "yes" as soon as any one member is all-optional, because `{}` is assignable
+ * to that member — which would make the config optional for every backend,
+ * including the ones that require it. Instead this distributes over `C`, keeps
+ * only the backends that DO require a config, and reports "all optional" only
+ * when that set is empty. A union backend therefore behaves like its strictest
+ * member, which is the safe direction.
+ *
+ * Without this, a required field could be bypassed by omitting the whole
+ * argument — the config type would advertise a guarantee the call signature did
+ * not enforce. IsolationSession depends on it: its unrestricted-network
+ * acknowledgment is mandatory, and the backend refuses a provision without it.
+ */
+export type EveryBackendConfigIsOptional<C extends StateAwareContainmentBackend> =
+  [C extends unknown ? (HasNoRequiredMembers<ProvisionConfigFor<C>> extends true ? never : C) : never] extends [never]
+    ? true
+    : false;
 export type StartConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['start'];
 export type ExecConfigFor<C extends StateAwareContainmentBackend> =

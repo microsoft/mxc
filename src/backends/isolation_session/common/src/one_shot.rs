@@ -79,22 +79,20 @@ impl ScriptRunner for IsolationSessionRunner {
         let _ = writeln!(logger, "Isolation Session: arguments={}", options.arguments);
         let _ = writeln!(logger, "Isolation Session: interactive={}", interactive);
 
-        // Provision returns the OS-assigned account name; the manager is then
-        // pegged to it for the rest of the lifecycle.
-        let agent_user_name = match IsolationSessionManager::add_user() {
-            Ok(provisioned) => {
+        // Provision returns the OS-assigned account name plus a manager
+        // already pegged to it. Taking the manager from `add_user` is what
+        // keeps a freshly-minted agent user from being stranded: a separate
+        // `new()` would activate the service a second time, and a failure
+        // there would leave an account that can no longer be removed.
+        let manager = match IsolationSessionManager::add_user() {
+            Ok((provisioned, manager)) => {
                 let _ = writeln!(
                     logger,
                     "Isolation Session: agent user = {}",
                     provisioned.agent_user_name
                 );
-                provisioned.agent_user_name
+                manager
             }
-            Err(e) => return e.into(),
-        };
-
-        let manager = match IsolationSessionManager::new(&agent_user_name) {
-            Ok(m) => m,
             Err(e) => return e.into(),
         };
 

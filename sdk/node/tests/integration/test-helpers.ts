@@ -14,7 +14,6 @@ import {
   MxcError,
   deprovisionSandbox,
   provisionSandbox,
-  type ProvisionConfigFor,
   type SandboxId,
   type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk';
@@ -226,17 +225,49 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
     // network cannot be filtered or denied); other backends take no required
     // provision config. Without this the probe would hit `policy_validation` on
     // an iso-capable host and rethrow it, breaking the suite at module load.
-    const probeConfig = (
-      containment === 'isolation_session'
-        ? { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }
-        : undefined
-    ) as ProvisionConfigFor<C> | undefined;
-    const provisionResult = await provisionSandbox(
-      containment,
-      probeConfig,
-      { experimental: true },
-    );
-    await safeDeprovision(provisionResult.sandboxId);
+    //
+    // The provision call is made per backend rather than once with a cast
+    // config. `provisionSandbox`'s trailing parameters are a conditional tuple
+    // keyed on the backend, and that conditional cannot be evaluated while `C`
+    // is still an unresolved type parameter — so a single generic call cannot
+    // be checked against it. Casting the config would silence that rather than
+    // resolve it, and would also hide the day a new backend arrives with a
+    // required provision config of its own. Switching on the backend resolves
+    // `C` to a literal at each call, so each one is checked properly, and the
+    // exhaustiveness guard below turns "a new backend was added" into a
+    // compile error here instead of a wrong config at runtime.
+    const sandboxId = await (async () => {
+      // Widen once into a local of the concrete union, then switch on that.
+      // Switching on `containment as StateAwareContainmentBackend` would not
+      // narrow inside the arms — an assertion expression is not a narrowable
+      // reference — which would in turn force the default arm to cast, and
+      // `x as never` compiles unconditionally, leaving the guard unable to
+      // ever fire. Binding the local first makes the narrowing real, so the
+      // default arm genuinely reduces to `never` and adding a backend to the
+      // union becomes a compile error here.
+      const backend: StateAwareContainmentBackend = containment;
+      switch (backend) {
+        case 'isolation_session': {
+          const result = await provisionSandbox(
+            'isolation_session',
+            { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+            { experimental: true },
+          );
+          return result.sandboxId;
+        }
+        case 'windows_sandbox': {
+          const result = await provisionSandbox('windows_sandbox', undefined, {
+            experimental: true,
+          });
+          return result.sandboxId;
+        }
+        default: {
+          const unhandled: never = backend;
+          throw new Error(`probeStateAwareRuntime: unhandled backend ${String(unhandled)}`);
+        }
+      }
+    })();
+    await safeDeprovision(sandboxId);
     return undefined;
   } catch (err) {
     if (err instanceof MxcError && err.code === 'backend_unavailable') {
@@ -247,6 +278,59 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
     }
     throw err;
   }
+}
+
+/**
+ * Probes whether `wxc-exec` was built WITH the IsolationSession feature,
+ * independently of whether this host can activate a real session. Returns a
+ * skip-reason string when the feature is absent, `undefined` when it is
+ * present. Other errors propagate so genuine failures aren't masked as
+ * "skipped."
+ *
+ * Deliberately narrower than `probeStateAwareRuntime`; the two are not
+ * interchangeable. Policy refusals are raised by the dispatcher's `validate_*`
+ * hooks, which run before any IsolationSession API call, so they ARE
+ * exercisable on a host with no IsolationSession runtime support — gating them
+ * on the runtime probe would silently drop that coverage on every such host,
+ * which is most of them. They are NOT exercisable against a binary built
+ * without the feature: dispatch fails with `unsupported_phase` before reaching
+ * those hooks, so the assertions would fail rather than skip.
+ *
+ * The probe provisions nothing. It sends the empty config the backend must
+ * refuse (IsolationSession requires the unrestricted-network acknowledgment at
+ * provision), so a feature-present binary answers `policy_validation` having
+ * created no session. That refusal is IsolationSession-specific, so this probe
+ * is too — there is no generic form to write here.
+ */
+export async function probeIsolationSessionFeature(): Promise<string | undefined> {
+  // The typed signature makes `network` required at provision, which is exactly
+  // the refusal being provoked, so the config must be passed untyped.
+  type UntypedProvision = (
+    containment: 'isolation_session',
+    config: unknown,
+    options: unknown,
+  ) => Promise<{ sandboxId: SandboxId<'isolation_session'> }>;
+  const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
+
+  let provisioned: SandboxId<'isolation_session'>;
+  try {
+    const result = await provisionUntyped('isolation_session', {}, { experimental: true });
+    provisioned = result.sandboxId;
+  } catch (err) {
+    if (err instanceof MxcError && err.code === 'unsupported_phase') {
+      return 'wxc-exec lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
+    }
+    if (err instanceof MxcError && err.code === 'policy_validation') {
+      return undefined;
+    }
+    throw err;
+  }
+
+  // Reaching here means the empty config was ACCEPTED — the "respect or refuse"
+  // guarantee itself breaking, which is precisely what the gated tests assert.
+  // Clean up the unexpected session and let them run so they report it.
+  await safeDeprovision(provisioned);
+  return undefined;
 }
 
 // Temp directory helpers

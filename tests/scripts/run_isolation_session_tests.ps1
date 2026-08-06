@@ -107,51 +107,103 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 
 # ---------------- Backend-availability probe ----------------
 #
-# Three-tier probe mirroring run_isolation_session_state_aware_tests.ps1:
-#   1. IsoSessionApp.dll present in System32
-#   2. WinRT activatable class IsoSessionOps registered
-#   3. wxc-exec responds to a state-aware request without backend_unavailable
-#      (catches feature-flag-off builds)
-# Any failure surfaces as SKIP rather than a forest of FAILed tests.
+# Availability is decided by a single call to `wxc-exec --probe`, which reports
+# `probes.isolationSessionAvailable`. That one signal covers both reasons this
+# suite can be unrunnable:
+#
+#   - the host cannot activate the isolation session API, or
+#   - wxc-exec was built without `--features isolation_session`, in which case
+#     the field stays false because the backend is not compiled in.
+#
+# This deliberately replaces the earlier checks for a specific DLL and a
+# hard-coded WinRT activatable-class registry key. Those named a runtime class
+# directly, so they silently stopped tracking what the code actually activates
+# when the backend moved to the Preview API — leaving a gate that could pass or
+# skip for reasons unrelated to whether the suite can run. Probing the binary
+# under test cannot drift, because it asks that binary what it can do.
+#
+# The former third tier — provisioning a sandbox as a smoke check — is also
+# gone. It sent a provision request with no `network` block, which this backend
+# now refuses outright, so it could no longer provision anything and its
+# success branch was unreachable. `--probe` is read-only and cannot leak.
+#
+# Returns one of three statuses, because collapsing them loses the distinction
+# that matters:
+#
+#   available   -> run the suite
+#   unavailable -> the probe answered, and the answer is "no": a clean skip
+#   error       -> the probe did not answer at all. That is an infrastructure
+#                  failure, NOT a statement about the backend, so it must not
+#                  be reported as a skip.
+#
+# stdout and stderr are captured SEPARATELY. Merging them would let any stderr
+# line corrupt the JSON, and stderr is not hypothetical here: wxc-exec runs a
+# best-effort DACL-recovery pass BEFORE the `--probe` arm and reports it on
+# stderr (`core/wxc/src/main.rs`), so a host carrying leftover state from a
+# crashed prior run would emit unparseable output and be judged "unavailable"
+# while being perfectly capable. That failure mode is inverted with respect to
+# risk — the dirtier the host, the likelier the false skip — which is exactly
+# the kind of silent green this gate exists to prevent.
+function Get-IsolationSessionProbe {
+    param([string]$Exe)
 
-if (-not (Test-Path 'C:\Windows\System32\IsoSessionApp.dll')) {
-    Write-Host "SKIPPED: IsoSessionApp.dll not present in System32" -ForegroundColor Yellow
-    exit 0
-}
-$IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
-if (-not (Test-Path $IsoSessionOpsKey)) {
-    Write-Host "SKIPPED: Windows.AI.IsolationSession.IsoSessionOps WinRT class not registered" -ForegroundColor Yellow
-    exit 0
-}
-
-# Helper: send an inline state-aware request via --config-base64 and return
-# { Stdout, ExitCode }.
-function Invoke-StateAwareProbe {
-    param([hashtable]$Request)
-    $json = $Request | ConvertTo-Json -Compress -Depth 8
-    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-    $out = & $WxcExec --experimental --config-base64 $b64 2>&1 | Out-String
-    @{ Stdout = $out; ExitCode = $LASTEXITCODE }
-}
-
-$probe = Invoke-StateAwareProbe -Request @{ phase = 'provision'; containment = 'isolation_session' }
-$probeEnv = $null
-try { $probeEnv = $probe.Stdout | ConvertFrom-Json } catch { }
-if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
-    Write-Host "SKIPPED: wxc-exec reports backend_unavailable (likely built without --features isolation_session)" -ForegroundColor Yellow
-    exit 0
-}
-# On a healthy build the probe successfully provisions an agent user --
-# deprovision it immediately so the probe doesn't leak.
-if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
-    $probeSandboxId = [string]$probeEnv.result.sandboxId
-    $probeAgent = if ($probeEnv.result.metadata) { [string]$probeEnv.result.metadata.agentUserName } else { '<absent>' }
-    Write-Host "Backend probe: provisioned $probeSandboxId (agentUserName=$probeAgent), deprovisioning ..." -ForegroundColor DarkGray
-    $deprov = Invoke-StateAwareProbe -Request @{ phase = 'deprovision'; sandboxId = $probeSandboxId }
-    if ($deprov.ExitCode -ne 0) {
-        Write-Host "WARN: probe deprovision returned exit $($deprov.ExitCode); local user $probeAgent may persist" -ForegroundColor Yellow
-        Write-Host "  Stdout: $($deprov.Stdout)" -ForegroundColor Gray
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prevPref = $ErrorActionPreference
+    try {
+        # This script runs under `$ErrorActionPreference = "Stop"`, which turns
+        # a native command's stderr output into a terminating error. The probe
+        # is expected to write to stderr on a host carrying leftover state, so
+        # relax it for the duration of the call — the same idiom used around
+        # the wxc-exec invocation in Run-IsolationSessionTest below.
+        $ErrorActionPreference = "Continue"
+        $stdout = (& $Exe --probe 2>$errFile) | Out-String
+        $exitCode = $LASTEXITCODE
+        $stderr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+    } catch {
+        return @{ Status = 'error'; Detail = "could not run '$Exe --probe': $($_.Exception.Message)" }
+    } finally {
+        $ErrorActionPreference = $prevPref
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
     }
+
+    $stderrNote = if ([string]::IsNullOrWhiteSpace($stderr)) { '' } else { " stderr: $($stderr.Trim())" }
+
+    if ($exitCode -ne 0) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe exited $exitCode.$stderrNote" }
+    }
+    $parsed = $null
+    try { $parsed = $stdout | ConvertFrom-Json } catch {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe did not emit valid JSON.$stderrNote" }
+    }
+    if ($null -eq $parsed -or $null -eq $parsed.probes) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes' object.$stderrNote" }
+    }
+    if ($parsed.probes.PSObject.Properties.Name -notcontains 'isolationSessionAvailable') {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes.isolationSessionAvailable' field.$stderrNote" }
+    }
+    # Only a literal boolean is meaningful. Treating anything else as `false`
+    # would recreate the conflation this function exists to remove: a value of
+    # `null`, a string, or a number is a malformed answer, not a statement that
+    # the backend is unavailable, and it gets the same infrastructure-failure
+    # treatment as a missing field.
+    $value = $parsed.probes.isolationSessionAvailable
+    if ($value -is [bool]) {
+        if ($value) { return @{ Status = 'available' } }
+        return @{ Status = 'unavailable' }
+    }
+    return @{ Status = 'error'; Detail = "wxc-exec --probe reported a non-boolean 'probes.isolationSessionAvailable' ($(if ($null -eq $value) { 'null' } else { "'$value'" })).$stderrNote" }
+}
+
+$probeResult = Get-IsolationSessionProbe -Exe $WxcExec
+if ($probeResult.Status -eq 'unavailable') {
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
+    exit 0
+}
+if ($probeResult.Status -ne 'available') {
+    Write-Host "FAILED: could not determine whether the isolation session backend is available." -ForegroundColor Red
+    Write-Host "  $($probeResult.Detail)" -ForegroundColor Red
+    Write-Host "  This is an infrastructure failure, not an unsupported host, so it is not a skip." -ForegroundColor Red
+    exit 1
 }
 
 # Helper: run one IsolationSession test config.
@@ -562,6 +614,20 @@ $total = $results.Count
 $executed = $passed + $failed
 
 Write-Host "`n==========================" -ForegroundColor Cyan
+# A suite that collected tests but executed none of them is not a pass:
+# without this, an aggregator reading only the exit code cannot tell
+# "everything passed" from "nothing ran".
+#
+# This deliberately cannot fire on an unsupported host. That case exits at the
+# availability probe near the top of the script, long before the summary, and
+# remains a clean skip — graceful degradation on an OS that cannot run these
+# tests is not a failure. Reaching this line means the backend *was* available,
+# so a zero execution count is anomalous rather than environmental.
+if ($executed -eq 0) {
+    Write-Host "FAILED: backend was available but no tests executed ($total collected, $skipped skipped)" -ForegroundColor Red
+    Write-Host "  A zero-execution run cannot substantiate anything; treating it as a failure." -ForegroundColor Red
+    exit 1
+}
 if ($failed -eq 0) {
     Write-Host "$passed/$total passed$(if ($skipped -gt 0) { ", $skipped skipped" })" -ForegroundColor Green
 } else {

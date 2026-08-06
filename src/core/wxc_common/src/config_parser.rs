@@ -1680,7 +1680,7 @@ mod tests {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
-            "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
+            "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),

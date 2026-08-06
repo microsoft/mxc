@@ -184,8 +184,8 @@ type StateAwareRequest = ProvisionStateAwareRequest | NonProvisionStateAwareRequ
 // builds this from per-(backend, phase) Configs (see TypeScript SDK section above).
 interface ExperimentalStateAwareConfigs {
   isolation_session?: {
-    start?: { configurationId?: 'small' | 'medium' | 'large' | 'composable' };
-    // provision, exec, stop, deprovision omitted — IsolationSession has no
+    provision?: { appId?: string };
+    // start, exec, stop, deprovision omitted — IsolationSession has no
     // backend-specific config for those phases.
   };
   // future state-aware-capable backends add typed entries here
@@ -298,7 +298,7 @@ const { sandboxId } = await provisionSandbox(
   config,
   { experimental: true },
 );
-// sandboxId = "iso:reg-abc:prov-123"
+// sandboxId = "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 ```
 
 ```json
@@ -312,21 +312,25 @@ const { sandboxId } = await provisionSandbox(
 
 ```rust
 // Parser deserializes the JSON above into an ExecutionRequest with
-//   request.policy.readwrite_paths = ["C:\\workspace"]
 //   request.policy.default_network_policy = NetworkPolicy::Allow
-//   request.policy.allowed_hosts = ["api.anthropic.com"]
-// (the same one-shot path the parser already uses). The dispatcher then calls:
+//   request.policy.allow_local_network = true
+//   request.policy.network_specified = true
+// (the same one-shot path the parser already uses). No filesystem policy
+// appears because this backend refuses it at every phase. The dispatcher
+// then calls:
 backend.provision(&request, /* config */ None)
 // returns Ok(ProvisionResult {
-//     sandbox_id: "iso:reg-abc:prov-123".into(),
+//     sandbox_id: "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
 //         agent_user_name: "_iso_abc_123".into(),
+//         agent_user_sid: "S-1-5-21-1001".into(),
+//         ephemeral_workspace_path: "C:\\ProgramData\\...\\_iso_abc_123".into(),
 //     }),
 // })
 ```
 
 ```json
-{ "result": { "sandboxId": "iso:reg-abc:prov-123", "metadata": { "agentUserName": "_iso_abc_123" } } }
+{ "result": { "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", "metadata": { "agentUserName": "_iso_abc_123", "agentUserSid": "S-1-5-21-1001", "ephemeralWorkspacePath": "C:\\ProgramData\\...\\_iso_abc_123" } } }
 ```
 
 #### Exec (buffered)
@@ -345,7 +349,7 @@ const r = await execInSandboxAsync(
 {
   "version": "0.6.0-alpha",
   "phase": "exec",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
   "process": { "commandLine": "echo hello" }
 }
 ```
@@ -353,7 +357,7 @@ const r = await execInSandboxAsync(
 ```rust
 // Parser populates request.script_code = "echo hello" from the wire-format `process`
 // block (same path as one-shot). The dispatcher then calls:
-backend.exec("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(ExecHandle { stdout, stderr, stdin, waiter, terminator })
 ```
 

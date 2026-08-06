@@ -236,6 +236,12 @@ describe('parseNonExecResponse', () => {
 describe('provisionSandbox', { skip: platformSkip }, () => {
   let activeFake: ReturnType<typeof fakeSpawn> | null = null;
 
+  // The unrestricted-network acknowledgment is a required member of
+  // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
+  // omitted config for this backend. Tests below that are not about the config
+  // itself use this minimal valid value.
+  const ACK = { network: { defaultPolicy: 'allow', allowLocalNetwork: true } } as const;
+
   beforeEach(() => { activeFake = null; });
   afterEach(() => { _resetSpawnImpl(); activeFake = null; });
 
@@ -275,7 +281,7 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     });
     activeFake = fake;
     _setSpawnImpl(fake.spawn);
-    const result = await provisionSandbox('isolation_session', undefined, testOptions());
+    const result = await provisionSandbox('isolation_session', ACK, testOptions());
     assert.strictEqual(result.correlationVector, 'BASEbaseBASEbaseBASEba.42');
     // Provision itself never sends a correlationVector on the wire.
     assert.strictEqual(fake.captured.envelope?.correlationVector, undefined);
@@ -283,13 +289,13 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
 
   it('throws an MxcError carrying backend_unavailable when the executor reports it', async () => {
     const fake = fakeSpawn({
-      stdout: '{"error":{"code":"backend_unavailable","message":"IsoSessionApp.dll not registered"}}',
+      stdout: '{"error":{"code":"backend_unavailable","message":"isolation session API not available on this host"}}',
       exitCode: 1,
     });
     activeFake = fake;
     _setSpawnImpl(fake.spawn);
     await assert.rejects(
-      () => provisionSandbox('isolation_session', undefined, testOptions()),
+      () => provisionSandbox('isolation_session', ACK, testOptions()),
       (err: unknown) => err instanceof MxcError && err.code === 'backend_unavailable',
     );
   });
@@ -301,7 +307,7 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     _setSpawnImpl(fake.spawn);
     const promise = provisionSandbox(
       'isolation_session',
-      undefined,
+      ACK,
       testOptions({ signal: ac.signal }),
     );
     ac.abort();

@@ -13,6 +13,7 @@ import {
   ProvisionResult,
   SandboxId,
   StartMetadataFor,
+  StateAwareContainmentBackend,
   StopConfigFor,
   WindowsSandboxProvisionConfig,
   WindowsSandboxStartConfig,
@@ -56,6 +57,38 @@ describe('IsolationSessionProvisionConfig', () => {
     // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
     const missing: IsolationSessionProvisionConfig = { version: '0.6.0-alpha' };
     assert.ok(missing);
+  });
+
+  it('cannot be skipped by omitting the config argument entirely', async () => {
+    // Declaring `network` required on the config type is only a real guarantee
+    // if the call signature also refuses an omitted config — otherwise the
+    // requirement is bypassable by passing nothing at all. `provisionSandbox`
+    // takes a conditional parameter tuple so the config is mandatory exactly
+    // for backends whose provision config has a required member.
+    const { provisionSandbox } = await import('../../src/state-aware.js');
+
+    // @ts-expect-error — isolation_session provision requires a config.
+    const skipped = () => provisionSandbox('isolation_session');
+    assert.ok(skipped);
+
+    // Backends whose provision config is entirely optional stay skippable.
+    const optional = () => provisionSandbox('windows_sandbox');
+    assert.ok(optional);
+  });
+
+  it('cannot be skipped by widening the backend to the union', async () => {
+    // A caller holding a variable typed as the whole backend union — rather
+    // than a literal — instantiates the conditional tuple with that union. If
+    // optionality were decided over the *union of configs*, the all-optional
+    // WindowsSandbox member would satisfy it and make the config optional for
+    // every backend, silently re-opening the hole the test above closes.
+    // A union backend must behave like its strictest member.
+    const { provisionSandbox } = await import('../../src/state-aware.js');
+    const wide = 'isolation_session' as StateAwareContainmentBackend;
+
+    // @ts-expect-error — the union includes a backend that requires a config.
+    const widened = () => provisionSandbox(wide);
+    assert.ok(widened);
   });
 
   it('rejects any network value other than the canonical acknowledgment', () => {

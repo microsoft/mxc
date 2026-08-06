@@ -70,8 +70,7 @@ Comparing the generated schema against the prior hand-written one on lens (2):
 
 - **Enums are identical** on every canonical path (`containment`,
   `network.defaultPolicy`, `network.enforcementMode`, `ui.clipboard`,
-  `processContainer.ui.isolation`, `seatbelt.launchMethod`,
-  `isolation_session.configurationId`, port `protocol`).
+  `processContainer.ui.isolation`, `seatbelt.launchMethod`, port `protocol`).
 - **The generated schema is stricter:** it closes the stable nested objects
   (`process`, `network`, `filesystem`, `lifecycle`, `ui`, `lxc`, `fallback`,
   `processContainer`/`.ui`, `seatbelt`) with
