@@ -61,8 +61,8 @@ export function validateCatalog(catalog) {
 
       if (platform.family === 'macos') {
         assertNonEmptyString(details.runner, `${platform.id}.${architecture}.runner`);
-      } else {
-        assertNonEmptyString(details.pool, `${platform.id}.${architecture}.pool`);
+      } else if (details.pool != null && typeof details.pool !== 'string') {
+        throw new Error(`${platform.id}.${architecture}.pool must be a string`);
       }
 
       const backends = new Set();
@@ -134,6 +134,9 @@ export function expandPlan(catalog, plan) {
     // A trigger is architecture-neutral. Expand it only where the platform's
     // capability declaration supports the requested backend.
     for (const [architecture, details] of Object.entries(platform.architectures)) {
+      if (platform.family !== 'macos' && !details.pool?.trim()) {
+        continue;
+      }
       for (const backend of request.backends) {
         if (!details.backends.includes(backend)) {
           continue;

@@ -35,17 +35,17 @@ test('trigger categories resolve independently', () => {
 
   assert.ok(
     pr.windows.some(entry => (
-      entry.os === 'windows-canary' && entry.backend === 'process-t1'
+      entry.os === 'windows-25h2' && entry.backend === 'process-t3'
     ))
   );
   assert.ok(
     nightly.linux.some(entry => (
-      entry.os === 'rhel-10.2' && entry.backend === 'bubblewrap'
+      entry.os === 'ubuntu-26.04' && entry.backend === 'bubblewrap'
     ))
   );
   assert.ok(
-    weekly.linux.some(entry => (
-      entry.os === 'debian-13' && entry.backend === 'lxc'
+    weekly.macos.some(entry => (
+      entry.os === 'macos-15' && entry.backend === 'seatbelt'
     ))
   );
 });
@@ -97,7 +97,24 @@ test('missing enabled trigger does not affect other plans', () => {
   });
   assert.ok(
     resolvePlan(modified, 'pr').windows
-      .some(entry => entry.os === 'windows-canary' && entry.backend === 'process-t1')
+      .some(entry => entry.os === 'windows-25h2' && entry.backend === 'process-t3')
+  );
+});
+
+test('empty pools skip OS and architecture combinations', () => {
+  const modified = clone(catalog());
+  const windows25h2 = modified.platforms
+    .find(platform => platform.id === 'windows-25h2');
+  windows25h2.architectures.x64.pool = '';
+
+  assert.doesNotThrow(() => validateCatalog(modified));
+  assert.ok(
+    !expandPlan(modified, 'pr')
+      .some(entry => entry.os === 'windows-25h2')
+  );
+  assert.ok(
+    !resolvePlan(modified, 'pr').windows
+      .some(entry => entry.os === 'windows-25h2')
   );
 });
 
@@ -107,6 +124,7 @@ test('resolved matrices never emit non-macOS arm64 tests', () => {
     .find(platform => platform.id === 'windows-canary');
   windowsCanary.architectures.x64.backends = windowsCanary.architectures.x64.backends
     .filter(backend => backend !== 'process-t1');
+  windowsCanary.architectures.arm64.pool = 'test-arm64-pool';
   modified.triggers.enabled.push({
     os: 'windows-canary',
     backends: ['process-t1']
@@ -143,13 +161,13 @@ test('weekly does not inherit nightly combinations', () => {
   }
 });
 
-test('full plan expands supported backends to both architectures', () => {
+test('full plan expands only architectures with available pools', () => {
   const expanded = expandPlan(catalog(), 'pr');
   const ubuntuBubblewrap = expanded
     .filter(entry => entry.os === 'ubuntu-26.04' && entry.backend === 'bubblewrap');
   assert.deepEqual(
     ubuntuBubblewrap.map(entry => entry.architecture).sort(),
-    ['arm64', 'x64']
+    ['x64']
   );
 });
 
@@ -179,6 +197,10 @@ test('all trigger categories omit placeholder handlers', () => {
 
 test('enabled trigger respects handler architecture restrictions', () => {
   const modified = clone(catalog());
+  const windows24h2 = modified.platforms
+    .find(platform => platform.id === 'windows-24h2');
+  windows24h2.architectures.x64.pool = 'test-x64-pool';
+  windows24h2.architectures.arm64.pool = 'test-arm64-pool';
   modified.triggers.enabled.push({
     os: 'windows-24h2',
     backends: ['wslc']
