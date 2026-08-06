@@ -52,6 +52,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Image verification: report WSL2 optional-feature state BEFORE the build,
+      # so we confirm whether the 1ES Managed Image baked WSL2 in even if later
+      # build/test steps fail for unrelated reasons (e.g. missing MSVC linker).
+      # Best-effort: never fails the job.
+      - name: Report WSL2 feature state (image verification)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "=== Windows optional features (baked into image?) ==="
+          foreach ($f in 'Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform') {
+            try {
+              $state = (Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction Stop).State
+            } catch {
+              $state = "query-failed: $($_.Exception.Message)"
+            }
+            Write-Host ("  {0} = {1}" -f $f, $state)
+          }
+          Write-Host "=== wsl.exe presence + status ==="
+          $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+          if ($wsl) {
+            Write-Host "wsl.exe: $($wsl.Source)"
+            wsl --status  2>&1 | Write-Host
+            wsl --version 2>&1 | Write-Host
+            Write-Host "wsl --status exit code: $LASTEXITCODE"
+          } else {
+            Write-Host "wsl.exe NOT found on PATH"
+          }
+
       # setup-rust-toolchain auto-reads rust-toolchain.toml from the repo root
       # only. Surface src/rust-toolchain.toml there so the pinned toolchain is
       # honored. Use PowerShell (bare client image may lack bash).
