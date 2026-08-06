@@ -7,7 +7,6 @@
  */
 
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { randomBytes } from 'crypto';
@@ -54,7 +53,7 @@ interface KnownEnvVar {
 
 /** Split a path list using the platform-appropriate separator. */
 function splitPathList(value: string): string[] {
-    const separator = os.platform() === 'win32' ? ';' : ':';
+    const separator = process.platform === 'win32' ? ';' : ':';
     return value.split(separator).filter(p => p.length > 0);
 }
 
@@ -120,19 +119,71 @@ function getWindowsDirectory(): string {
 }
 
 /**
- * Returns `true` if the path resides under system-critical locations.
- * On Windows: under %WINDIR%. On Linux: /bin, /sbin, /boot, /proc, /sys, /dev, etc.
+ * Strip a Windows verbatim / device-namespace prefix (`\\?\`, `\\?\UNC\`,
+ * `\\.\`), rewriting `\\?\UNC\server\share` back to `\\server\share`.
  */
-function isSystemCriticalPath(dirPath: string): boolean {
-    if (os.platform() === 'win32') {
+function stripVerbatimPrefix(dirPath: string): string {
+    const upper = dirPath.toUpperCase();
+    if (upper.startsWith('\\\\?\\UNC\\')) {
+        return '\\\\' + dirPath.slice('\\\\?\\UNC\\'.length);
+    }
+    if (upper.startsWith('\\\\?\\') || upper.startsWith('\\\\.\\')) {
+        return dirPath.slice('\\\\?\\'.length);
+    }
+    return dirPath;
+}
+
+/** Whether a resolved path is a filesystem root (`C:\`, `\\server\share\`, `/`). */
+function isRootPath(resolved: string, pathApi: path.PlatformPath): boolean {
+    return pathApi.parse(resolved).root === resolved;
+}
+
+/**
+ * Returns `true` if the path resides under system-critical locations.
+ * On Windows: a volume/share root or under %WINDIR%. On Linux: `/`, /bin,
+ * /sbin, /boot, /proc, /sys, /dev, etc.
+ *
+ * `pathApi` and `isWindows` are parameters rather than reads of the ambient
+ * `path` module and `process.platform` so that Windows semantics — drive and
+ * UNC roots, drive-relative paths, verbatim and device namespaces — can be
+ * exercised from a POSIX host. Mocking `process.platform` alone cannot reach
+ * those branches, because the imported `path` module stays POSIX.
+ *
+ * @internal Exported for tests; not part of the SDK's public surface.
+ */
+export function isSystemCriticalPathWith(
+    dirPath: string,
+    pathApi: path.PlatformPath,
+    isWindows: boolean,
+): boolean {
+    const resolved = pathApi.resolve(dirPath);
+    // A volume or share root (`C:\`, `\\server\share`, `/`) is never a
+    // legitimate tool directory, and granting one exposes every file on the
+    // volume. `path.parse().root` equals the path itself only for a root.
+    if (isRootPath(resolved, pathApi)) {
+        return true;
+    }
+    if (isWindows) {
+        // Strip a verbatim (`\\?\`, `\\?\UNC\`) or device-namespace (`\\.\`)
+        // prefix so a path supplied in that form still matches the plain
+        // comparisons below, as the Rust mirror does. The root test above runs
+        // on the un-stripped path first, so stripping can never turn an
+        // absolute root into a cwd-relative path that escapes it.
+        const unwrapped = stripVerbatimPrefix(resolved);
+        if (unwrapped !== resolved && isRootPath(pathApi.resolve(unwrapped), pathApi)) {
+            return true;
+        }
         const winDir = getWindowsDirectory().toLowerCase();
-        const normalized = path.resolve(dirPath).toLowerCase();
+        const normalized = unwrapped.toLowerCase();
         return normalized === winDir || normalized.startsWith(winDir + '\\');
     }
     // Linux: protect critical system paths
-    const normalized = path.resolve(dirPath);
     const criticalPaths = ['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/boot', '/proc', '/sys', '/dev'];
-    return criticalPaths.some(cp => normalized === cp || normalized.startsWith(cp + '/'));
+    return criticalPaths.some(cp => resolved === cp || resolved.startsWith(cp + '/'));
+}
+
+function isSystemCriticalPath(dirPath: string): boolean {
+    return isSystemCriticalPathWith(dirPath, path, process.platform === 'win32');
 }
 
 /**
@@ -141,7 +192,7 @@ function isSystemCriticalPath(dirPath: string): boolean {
  * Only applicable on Windows.
  */
 function hasAllApplicationPackagesAccess(dirPath: string): boolean {
-    if (os.platform() !== 'win32') {
+    if (process.platform !== 'win32') {
         return false; // Only applicable on Windows
     }
     try {
@@ -171,7 +222,7 @@ function directoryExists(dirPath: string): boolean {
  * case-sensitive on other platforms. Paths are resolved to absolute form.
  */
 function deduplicatePaths(paths: string[]): string[] {
-    const isWindows = os.platform() === 'win32';
+    const isWindows = process.platform === 'win32';
     const seen = new Set<string>();
     const result: string[] = [];
     for (const p of paths) {
@@ -194,9 +245,19 @@ function deduplicatePaths(paths: string[]): string[] {
  * the supplied PATH directories for a `pwsh.exe` binary.
  *
  * When PowerShell is found, return a policy fragment with:
- * - `C:\` in `readonlyPaths` — pwsh.exe enumerates the drive root on startup.
+ * - `$PSHOME` in `readonlyPaths` — the directory holding `pwsh.exe`, its
+ *   bundled modules and `powershell.config.json`. Additional module trees
+ *   reach the policy through `PSModulePath`, which
+ *   {@link getAvailableToolsPolicy} already discovers.
  * - The PSReadLine history directory in `readwritePaths` so the PSReadLine
  *   module can persist command history.
+ *
+ * It deliberately does **not** grant the system-drive root. `pwsh.exe` does
+ * stat `C:\` on startup, but that only needs metadata rights on the root
+ * directory itself — which `wxc-host-prep prepare-system-drive` grants
+ * host-wide with non-inheriting ACEs (see `docs/host-prep.md`). A `C:\` entry
+ * in `readonlyPaths` instead hands the sandbox read access to every file on
+ * the volume.
  *
  * On non-Windows platforms or when pwsh.exe is not found on PATH, returns an
  * empty policy.
@@ -208,11 +269,11 @@ function getPowerShellPolicy(
     pathDirs: string[],
     env: { [key: string]: string | undefined },
 ): FilesystemPolicyResult {
-    if (os.platform() !== 'win32') {
+    if (process.platform !== 'win32') {
         return { readonlyPaths: [], readwritePaths: [] };
     }
 
-    const pwshFound = pathDirs.some(dir => {
+    const psHome = pathDirs.find(dir => {
         try {
             return fs.existsSync(path.join(dir, 'pwsh.exe'));
         } catch {
@@ -220,15 +281,11 @@ function getPowerShellPolicy(
         }
     });
 
-    if (!pwshFound) {
+    if (!psHome) {
         return { readonlyPaths: [], readwritePaths: [] };
     }
 
-    const systemDrive = process.env["SystemDrive"] || 'C:';
-    const systemRoot = systemDrive + "\\";
-    const readonlyPaths: string[] = [systemRoot];
     const readwritePaths: string[] = [];
-
     const userProfile = env['USERPROFILE'];
     if (userProfile) {
         const psReadLineDir = path.join(
@@ -237,7 +294,7 @@ function getPowerShellPolicy(
         readwritePaths.push(psReadLineDir);
     }
 
-    return { readonlyPaths, readwritePaths };
+    return { readonlyPaths: [psHome], readwritePaths };
 }
 
 // ---------------------------------------------------------------------------
@@ -249,18 +306,19 @@ function getPowerShellPolicy(
  * policy paths.
  *
  * Reads the `PATH` variable and a set of well-known tool / SDK environment
- * variables, enumerates the directories they reference, then applies filters:
+ * variables, adds the PowerShell paths when `pwsh.exe` is found on `PATH`,
+ * then applies filters to every discovered directory:
  *
  * 1. Directories that do not exist on disk are removed.
- * 2. System-critical directories (under `%WINDIR%`) are removed.
+ * 2. System-critical directories (filesystem roots, and anything under
+ *    `%WINDIR%`) are removed.
  * 3. When `options.containerType` is `'processcontainer'`, directories whose ACLs
  *    already grant access to `ALL_APPLICATION_PACKAGES` are removed because
  *    AppContainer processes can see them without explicit brokering.
  *
- * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the drive root
- * (`C:\`) is added to `readonlyPaths` and the PSReadLine history directory
- * is added to `readwritePaths` so that interactive PowerShell sessions work
- * correctly inside the container.
+ * When PowerShell is found, `$PSHOME` is added to `readonlyPaths` and the
+ * PSReadLine history directory is added to `readwritePaths` so that
+ * interactive PowerShell sessions work correctly inside the container.
  *
  * @param env - Environment variable map. Defaults to `process.env`.
  * @param options - Filtering options.
@@ -286,6 +344,11 @@ export function getAvailableToolsPolicy(
         }
     }
 
+    // Merged before the filter below so the PowerShell grant is held to the
+    // same bar as every other discovered directory.
+    const pwshPolicy = getPowerShellPolicy(pathDirs, environment);
+    collected.push(...pwshPolicy.readonlyPaths);
+
     const unique = deduplicatePaths(collected);
 
     // Filter out non-existent paths, system-critical paths, and (optionally)
@@ -303,12 +366,15 @@ export function getAvailableToolsPolicy(
         return true;
     });
 
-    // Merge PowerShell-specific paths when pwsh.exe is available
-    const pwshPolicy = getPowerShellPolicy(pathDirs, environment);
-
     return {
-        readonlyPaths: deduplicatePaths([...filtered, ...pwshPolicy.readonlyPaths]),
-        readwritePaths: deduplicatePaths([...pwshPolicy.readwritePaths]),
+        readonlyPaths: filtered,
+        // Write grants get the system-critical check too — a `USERPROFILE`
+        // under `%WINDIR%` (the SYSTEM account's `config\systemprofile`, say)
+        // would otherwise yield a read-write grant inside a protected system
+        // directory. They are deliberately *not* existence-filtered:
+        // PowerShell creates the PSReadLine history directory on first use.
+        readwritePaths: deduplicatePaths(pwshPolicy.readwritePaths)
+            .filter(dirPath => !isSystemCriticalPath(dirPath)),
     };
 }
 
@@ -323,7 +389,7 @@ export function getAvailableToolsPolicy(
 export function getUserProfilePolicy(): FilesystemPolicyResult {
     const readonlyPaths: string[] = [];
 
-    if (os.platform() === 'win32') {
+    if (process.platform === 'win32') {
         /*  TODO: Need to think through the implications of granting access
             to folders within APPDATA versus LOCALAPPDATA.
         const appData = process.env['APPDATA'];
@@ -389,7 +455,7 @@ export function getTemporaryFilesPolicy(
     const environment = env ?? process.env;
 
     // On Linux, prefer TMPDIR; on Windows, prefer TEMP/TMP
-    const tempRoot = os.platform() === 'win32'
+    const tempRoot = process.platform === 'win32'
         ? (environment['TEMP'] || environment['TMP'])
         : (environment['TMPDIR'] || '/tmp');
 
