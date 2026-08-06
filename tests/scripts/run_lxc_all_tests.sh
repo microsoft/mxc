@@ -46,6 +46,7 @@ run_test "LXC Object Validation" "$SCRIPT_DIR/run_lxc_object_test.sh"
 run_test "LXC Most-Specific Path" "$SCRIPT_DIR/run_lxc_most_specific_test.sh"
 run_test "LXC Denied Masking" "$SCRIPT_DIR/run_lxc_denied_masking_test.sh"
 run_test "LXC Network" "$SCRIPT_DIR/run_lxc_network_test.sh"
+run_test "LXC Local Network (inbound)" "$SCRIPT_DIR/run_lxc_local_network_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 

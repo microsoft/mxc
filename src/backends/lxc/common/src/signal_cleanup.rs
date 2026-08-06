@@ -30,13 +30,13 @@ use crate::network_iptables::NetworkIptablesManager;
 use wxc_common::logger::{Logger, Mode};
 
 /// What the watchdog needs to roll back on a fatal signal: the container
-/// name (so we can `lxc-destroy` it) plus, when known, the host-side veth
-/// interface (so we can also remove the iptables FORWARD hook the runner
-/// installed against it).
+/// name (so we can `lxc-destroy` it) plus, when known, the container's init
+/// PID (so we can also remove the container-netns iptables INPUT rules the
+/// runner installed inside it, before the container is destroyed).
 #[derive(Default)]
 struct ActiveSandbox {
     name: Option<String>,
-    veth: Option<String>,
+    netns_pid: Option<u32>,
 }
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<ActiveSandbox>> = OnceLock::new();
@@ -52,21 +52,21 @@ fn lock_slot() -> std::sync::MutexGuard<'static, ActiveSandbox> {
 
 /// Records `name` as the currently active container so the cleanup watchdog
 /// can destroy it if a fatal signal arrives. Replaces any previous value
-/// (including any previously registered veth, since the new container has
-/// not had its veth discovered yet).
+/// (including any previously registered netns PID, since the new container
+/// has not had its init PID discovered yet).
 pub fn set_active(name: &str) {
     let mut slot = lock_slot();
     slot.name = Some(name.to_owned());
-    slot.veth = None;
+    slot.netns_pid = None;
 }
 
-/// Records the host-side veth interface for the active container so the
-/// watchdog can also remove the iptables FORWARD hook on a fatal signal.
+/// Records the container's init PID for the active container so the watchdog
+/// can remove the container-netns iptables INPUT rules on a fatal signal.
 /// No-op if no container is currently registered.
-pub fn set_active_veth(veth: &str) {
+pub fn set_active_pid(pid: u32) {
     let mut slot = lock_slot();
     if slot.name.is_some() {
-        slot.veth = Some(veth.to_owned());
+        slot.netns_pid = Some(pid);
     }
 }
 
@@ -128,14 +128,13 @@ fn run_watchdog(mask: SigSet) -> ! {
         let Ok(sig) = mask.wait() else { continue };
         let active = std::mem::take(&mut *lock_slot());
         if let Some(name) = active.name {
-            // Remove iptables rules first so the FORWARD hook and chain
-            // don't outlive the container. The veth disappears once the
-            // container is destroyed below; cleaning up first avoids a
-            // dangling reference. Best-effort with a buffered logger so
-            // signal-time output doesn't interleave with whatever else
-            // might still be writing to the host's stdio.
+            // Remove the container-netns iptables INPUT rules first, while
+            // the container's network namespace still exists (it vanishes
+            // once the container is destroyed below). Best-effort with a
+            // buffered logger so signal-time output doesn't interleave with
+            // whatever else might still be writing to the host's stdio.
             let mut buf_logger = Logger::new(Mode::Buffer);
-            NetworkIptablesManager::force_cleanup(&name, active.veth.as_deref(), &mut buf_logger);
+            NetworkIptablesManager::force_cleanup(&name, active.netns_pid, &mut buf_logger);
             let _ = LxcContainer::new(&name, None).destroy();
         }
         std::process::exit(128 + sig as i32);

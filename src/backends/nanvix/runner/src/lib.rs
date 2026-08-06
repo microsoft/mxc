@@ -542,8 +542,9 @@ impl NanVixScriptRunner {
     ///   nothing to the resolved list and are collected into the second return
     ///   value so callers can warn (allowlist) or reject (blocklist).
     ///
-    /// Mirrors `lxc::network_iptables::resolve_host` for the hostname-to-IPv4
-    /// mapping; unlike that helper this also preserves IPv4/CIDR literals.
+    /// Performs the same hostname-to-IPv4 mapping as the appcontainer
+    /// `resolve_hostname` helper; unlike that helper this also preserves
+    /// IPv4/CIDR literals.
     ///
     /// Returns `(resolved_ips, unresolved_entries)`. Empty/whitespace entries
     /// are ignored entirely and appear in neither list.

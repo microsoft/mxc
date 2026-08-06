@@ -204,18 +204,45 @@ impl LxcScriptRunner {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
         }
 
-        // Configure network rules
+        // Configure inbound network rules inside the container's own netns.
         let mut fw_manager = NetworkIptablesManager::new(&container_name);
 
-        // Try to discover the container's veth interface for scoped rules
-        if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
-            let _ = writeln!(logger, "Discovered veth interface: {}", veth);
-            fw_manager.set_veth_interface(&veth);
+        // A firewall enforcement mode means the caller asked for the inbound
+        // deny chain. LXC enforces it inside the container's own netns, so it
+        // is useless without the init PID that lets us enter that netns.
+        let use_firewall = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        );
+
+        // Discover the container's init PID so the INPUT rules are applied
+        // inside the container's network namespace (the inbound deny chain is
+        // enforced via the container's own iptables INPUT chain).
+        if let Some(pid) = container.init_pid() {
+            let _ = writeln!(logger, "Container init PID: {}", pid);
+            fw_manager.set_netns_pid(pid);
             if self.destroy_on_exit {
-                // Tell the watchdog about the veth so signal-time cleanup
-                // can also remove the FORWARD hook, not just the chain.
-                signal_cleanup::set_active_veth(&veth);
+                // Tell the watchdog about the netns PID so signal-time cleanup
+                // can remove the container's INPUT rules before it's destroyed.
+                signal_cleanup::set_active_pid(pid);
             }
+        } else if use_firewall {
+            // The run asked for a firewall but we could not find the container
+            // netns to enforce it in. Building the chain anyway would leave it
+            // unhooked and inert, so the container would run with none of the
+            // requested inbound enforcement. That is a silent fail-open, so
+            // abort the run instead. This is LXC-specific: Bubblewrap
+            // deliberately shares the host net namespace and reaches
+            // `apply_firewall_rules` with no netns PID by design, through its
+            // own runner, so it is unaffected by this guard.
+            if self.destroy_on_exit || container_created {
+                let _ = container.destroy();
+            }
+            return ScriptResponse::error(
+                "Failed to discover the container init PID; cannot enter the container \
+                 network namespace to enforce the requested firewall. Aborting rather than \
+                 running with inbound enforcement silently disabled.",
+            );
         }
 
         match fw_manager.apply_firewall_rules(&request.policy, logger) {

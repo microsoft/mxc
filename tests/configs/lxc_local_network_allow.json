@@ -1,0 +1,23 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "lxc-localnet-allow",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "/opt/mxc-netcheck/netcheck serve --port 5000 --hold 20"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "filesystem": {
+    "readonlyPaths": ["/opt/mxc-netcheck"]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowLocalNetwork": true
+  }
+}
