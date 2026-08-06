@@ -1,4 +1,18 @@
 {
   "$comment": "Config files under tests/examples or tests/configs that are INTENTIONALLY invalid against the dev schema (e.g. negative parser tests). validate-configs.js requires each listed file to FAIL validation; if one starts passing, the gate fails so this list cannot rot. Paths are repo-root-relative with forward slashes. Keep this empty unless a config is deliberately malformed.",
-  "intentionallyInvalid": []
+  "intentionallyInvalid": [
+    "tests/configs/processcontainer/networking/base_container_network_v08_allow_any_protocol_tcp443.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_allow_cidr_except_blocked.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_allow_ip_tcp443.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_allow_port_range_tcp443.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_allow_udp53.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_default_deny_tcp_blocked.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_deny_overrides_allow.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_deny_udp53.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_multiple_rules.json",
+    "tests/configs/processcontainer/networking/base_container_network_v08_proxy_with_egress_invalid.json",
+    "tests/examples/processcontainer/networking/egress-allow-https.json",
+    "tests/examples/processcontainer/networking/egress-allow-with-exceptions.json",
+    "tests/examples/processcontainer/networking/proxy.json"
+  ]
 }

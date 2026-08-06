@@ -49,30 +49,6 @@ available bounds what policy can be enforced.
 - **T3 (AppContainer + DACL)** is the universal fallback and enforces
   filesystem policy via host path ACEs on every release.
 
-## Learning Mode denial capture
-
-`processContainer.captureDenials` uses a separate V2 process
-security-environment path rather than the T1/T2/T3 fallback chain. The host
-must expose the complete official V2 export set:
-
-- `StartLearningModeTrace`
-- `StopLearningModeTrace`
-- `CloseLearningModeTrace`
-- `CreateProcessSecurityEnvironment`
-- `QueryProcessSecurityEnvironmentSupport`
-- `CloseProcessSecurityEnvironment`
-
-Unsupported or earlier-contract hosts fail as `backend_unavailable`; capture
-never falls back to AppContainer or host-DACL enforcement. Internal validation
-confirmed the earlier contract on build `26657.1002` is rejected and the full
-V2 contract on build `26663.1000` is accepted. These builds are validation
-points, not a public release-floor commitment; runtime export probing is the
-source of truth.
-
-Capture is incompatible with `processContainer.leastPrivilege` and
-`network.proxy`. `filesystem.deniedPaths` is accepted only when
-`QueryProcessSecurityEnvironmentSupport` advertises `PSE_SUPPORT_FS_DENY`.
-
 ## Filesystem policy
 
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |

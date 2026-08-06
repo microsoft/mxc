@@ -169,11 +169,6 @@ export interface ProcessContainerConfig {
   capabilities?: string[];
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
-  /** ProcessContainer-specific network settings (schema 0.8+). */
-  network?: {
-    /** Friendly name of the single AppContainer loopback peer. */
-    allowedPeer?: string;
-  };
 }
 
 /**
@@ -236,42 +231,6 @@ export interface NetworkConfig {
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
-}
-
-/** Schema 0.8 outbound destination. */
-export interface NetworkDestinationConfig {
-  cidr: string;
-  except?: string[];
-}
-
-/** Schema 0.8 outbound port/protocol selector. */
-export interface NetworkPortConfig {
-  protocol: 'tcp' | 'udp' | 'icmp' | 'any';
-  port?: number;
-  endPort?: number;
-}
-
-/** Schema 0.8 outbound allow/deny rule. */
-export interface NetworkRuleConfig {
-  to: NetworkDestinationConfig[];
-  ports?: NetworkPortConfig[];
-}
-
-/** Schema 0.8 GA network policy. */
-export interface NetworkV2Config {
-  egress?: {
-    default?: 'allow' | 'deny';
-    allow?: NetworkRuleConfig[];
-    deny?: NetworkRuleConfig[];
-  };
-  ingress?: {
-    hostLoopback?: 'allow' | 'deny';
-  };
-}
-
-/** Schema 0.8 runtime metadata. */
-export interface RuntimeConfig {
-  networkProxy?: string;
 }
 
 /**
@@ -364,8 +323,6 @@ export interface ContainerConfig {
   filesystem?: FilesystemConfig;
   /** Network access configuration */
   network?: NetworkConfig;
-  /** Runtime metadata available in schema 0.8 and later. */
-  runtimeConfig?: RuntimeConfig;
   /** Experimental features (only applied when --experimental flag is set) */
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */

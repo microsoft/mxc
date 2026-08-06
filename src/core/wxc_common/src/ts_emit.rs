@@ -163,25 +163,6 @@ fn ts_type(prop: &Value) -> (String, bool) {
         return (ref_name(r), false);
     }
 
-    if let Some(Value::Array(all_of)) = obj.get("allOf") {
-        let mut nullable = false;
-        let types: Vec<String> = all_of
-            .iter()
-            .map(ts_type)
-            .map(|(ty, is_nullable)| {
-                nullable |= is_nullable;
-                ty
-            })
-            .filter(|ty| ty != "unknown")
-            .collect();
-        let ty = match types.as_slice() {
-            [] => "unknown".to_string(),
-            [single] => single.clone(),
-            _ => types.join(" & "),
-        };
-        return (ty, nullable);
-    }
-
     if let Some(Value::Array(any_of)) = obj.get("anyOf") {
         let mut nullable = false;
         let mut ty = "unknown".to_string();
@@ -337,9 +318,6 @@ mod tests {
                         "tags": { "type": ["array", "null"], "items": { "type": "string" } },
                         "child": {
                             "anyOf": [ { "$ref": "#/definitions/Thing" }, { "type": "null" } ]
-                        },
-                        "wrapped": {
-                            "allOf": [ { "$ref": "#/definitions/Thing" } ]
                         }
                     }
                 }
@@ -354,8 +332,6 @@ mod tests {
         assert!(ts.contains("tags?: string[] | null;"), "{ts}");
         // Optional ref made nullable by the anyOf null branch.
         assert!(ts.contains("child?: Thing | null;"), "{ts}");
-        // Schemars wraps described references in allOf.
-        assert!(ts.contains("wrapped?: Thing;"), "{ts}");
     }
 
     #[test]

@@ -10,30 +10,30 @@
 //! resolves it to the target AppContainer SID server-side). Neither of MXC's existing
 //! launch paths yields that handle — classic AppContainer uses `CreateProcess` +
 //! `SECURITY_CAPABILITIES`, and BaseContainer uses the one-shot RPC-brokered
-//! `Experimental_CreateProcessInSandbox`. To capture denials, MXC uses the
-//! official process security-environment model exported by `processmodel.dll`:
+//! `Experimental_CreateProcessInSandbox`. To capture denials, MXC adopts the flat
+//! 2-phase model exported by the same `processmodel.dll`:
 //!
 //! ```c
-//! HRESULT CreateProcessSecurityEnvironment(
+//! BOOL CreateProcessSecurityEnvironment(
 //!     LPCVOID sandboxSpecification, DWORD sandboxSpecificationSize,
 //!     PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
 //!     HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment);
-//! void CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT processSecurityEnvironment);
+//! BOOL CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment);
 //! ```
 //!
-//! `sandboxSpecification`/`...Size` is a `"PSEC"` process-security-environment
-//! FlatBuffer;
+//! `sandboxSpecification`/`...Size` is a compiled FlatBuffer sandbox-spec blob (the
+//! same `"SBOX"` format the BaseContainer runner already builds via `sandbox_spec`);
 //! the spec must encode the learning-mode capability. The environment handle is
 //! attached to a normal `CreateProcessW` launch through
 //! `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`; KernelBase routes that launch
 //! through the security environment internally. `Close` tears the environment down.
 //!
-//! As with the trace exports, each function is resolved at runtime. The
-//! ABI-changing create/close exports require their official plain names.
+//! As with the trace exports, each function is resolved at runtime and tolerates the
+//! `Experimental_`-prefixed name as a fallback for OS builds that predate the
+//! graduation out of the `Experimental_` prefix.
 
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, HMODULE};
 use windows::Win32::System::LibraryLoader::{
@@ -43,7 +43,7 @@ use windows::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW, STARTUPINFOW,
 };
-use windows_core::{HRESULT, PCSTR, PCWSTR};
+use windows_core::{PCSTR, PCWSTR};
 use wxc_common::string_util;
 
 use crate::LearningModeError;
@@ -54,12 +54,13 @@ const PROCESSMODEL_DLL: &str = "processmodel.dll";
 /// No special behaviour when creating the security environment
 /// (`PROCESS_SECURITY_ENVIRONMENT_FLAGS` value `0`).
 ///
-/// A terminate-on-close bit exists, but its numeric value is intentionally not
-/// declared here: explicit [`ProcessSecurityEnvironment::close`] after the child
-/// has exited already provides deterministic teardown.
+/// A `KILL_ON_CLOSE` bit exists (tears the child down when the environment closes) but
+/// its numeric value is intentionally not declared here yet: explicit
+/// [`SecurityEnvironmentApi::close`] after the child has exited already provides
+/// deterministic teardown, so shipping code does not need to guess the flag value.
 pub const PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE: u32 = 0;
 
-/// `HRESULT CreateProcessSecurityEnvironment(LPCVOID sandboxSpecification,
+/// `BOOL CreateProcessSecurityEnvironment(LPCVOID sandboxSpecification,
 /// DWORD sandboxSpecificationSize, PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
 /// HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment)`.
 ///
@@ -69,23 +70,22 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
     sandbox_specification_size: u32,
     flags: u32,
     process_security_environment: *mut HANDLE,
-) -> HRESULT;
+) -> i32;
 
-/// `HRESULT QueryProcessSecurityEnvironmentSupport(UINT64* supportFlags)`.
-type PfnQueryProcessSecurityEnvironmentSupport =
-    unsafe extern "system" fn(support_flags: *mut u64) -> HRESULT;
-
-/// `void CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT processSecurityEnvironment)`.
+/// `BOOL CloseProcessSecurityEnvironment(HPROCESS_SECURITY_ENVIRONMENT* processSecurityEnvironment)`.
+///
+/// The export nulls `*processSecurityEnvironment` on success.
 type PfnCloseProcessSecurityEnvironment =
-    unsafe extern "system" fn(process_security_environment: HANDLE);
+    unsafe extern "system" fn(process_security_environment: *mut HANDLE) -> i32;
 
 /// Opaque handle to a process security environment (`HPROCESS_SECURITY_ENVIRONMENT`, a
 /// `HANDLE`).
 ///
 /// Produced by [`SecurityEnvironmentApi::create`], threaded into the trace start and
-/// the in-environment launch, and torn down by [`ProcessSecurityEnvironment::close`]. The
-/// wrapped [`HANDLE`] is passed by value to the launch, trace, and close exports.
-/// Drop guarantees the infallible close is called exactly once.
+/// the in-environment launch, and torn down by [`SecurityEnvironmentApi::close`]. The
+/// wrapped [`HANDLE`] is passed by value to the launch/trace exports and by pointer to
+/// the close export (which nulls it on success). If explicit close fails, the
+/// wrapper retains ownership and retries once when dropped.
 pub struct ProcessSecurityEnvironment {
     handle: HANDLE,
     close: PfnCloseProcessSecurityEnvironment,
@@ -107,26 +107,32 @@ impl ProcessSecurityEnvironment {
         self.handle
     }
 
-    /// Close the environment and release its server-side state.
-    pub fn close(mut self) {
-        self.close_inner();
-    }
-
-    fn close_inner(&mut self) {
+    fn close_with(
+        &mut self,
+        close: PfnCloseProcessSecurityEnvironment,
+    ) -> Result<(), LearningModeError> {
         if self.handle.0.is_null() {
-            return;
+            return Ok(());
         }
 
         // SAFETY: `close` was resolved from `processmodel.dll`; `self.handle`
         // came from a successful create call and remains owned by this wrapper.
-        unsafe { (self.close)(self.handle) };
+        let ok = unsafe { close(&mut self.handle) };
+        if ok == 0 {
+            return Err(LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                code: last_error(),
+            });
+        }
         self.handle = HANDLE(ptr::null_mut());
+        Ok(())
     }
 }
 
 impl Drop for ProcessSecurityEnvironment {
     fn drop(&mut self) {
-        self.close_inner();
+        let close = self.close;
+        let _ = self.close_with(close);
     }
 }
 
@@ -285,13 +291,13 @@ impl Drop for SecurityEnvironmentStartupInfo {
     }
 }
 
-/// Which official export resolved for each function on this machine.
+/// Which candidate export name resolved for each function on this machine — a
+/// diagnostic used by the capability probe to report the exact live surface (plain vs
+/// `Experimental_`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SecurityEnvironmentExportReport {
     /// Resolved name of the create export, if present.
     pub create: Option<&'static str>,
-    /// Resolved name of the support-query export, if present.
-    pub query_support: Option<&'static str>,
     /// Resolved name of the close export, if present.
     pub close: Option<&'static str>,
 }
@@ -300,36 +306,33 @@ impl SecurityEnvironmentExportReport {
     /// `true` only when every export required for the 2-phase launch resolved.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.create.is_some() && self.query_support.is_some() && self.close.is_some()
+        self.create.is_some() && self.close.is_some()
     }
 }
 
-const CREATE_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment"];
-const QUERY_SUPPORT_NAMES: &[&core::ffi::CStr] = &[c"QueryProcessSecurityEnvironmentSupport"];
-const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
+/// Candidate names for each export: the graduated (plain) name is preferred, with the
+/// `Experimental_`-prefixed name kept as a fallback for older feature builds.
+const CREATE_NAMES: &[&core::ffi::CStr] = &[
+    c"CreateProcessSecurityEnvironment",
+    c"Experimental_CreateProcessSecurityEnvironment",
+];
+const CLOSE_NAMES: &[&core::ffi::CStr] = &[
+    c"CloseProcessSecurityEnvironment",
+    c"Experimental_CloseProcessSecurityEnvironment",
+];
 
 /// Resolved process security-environment exports from `processmodel.dll`.
-///
-/// `cacheable` records whether this surface was produced by the memoizing
-/// [`SecurityEnvironmentApi::load`] (the real, process-wide singleton) as opposed
-/// to a test fake. Only cacheable surfaces are allowed to populate the process-wide
-/// [`supports_deny_paths`](Self::supports_deny_paths) cache, so injected fakes can
-/// never poison it for the real API or for each other.
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
-    query_support: PfnQueryProcessSecurityEnvironmentSupport,
     close: PfnCloseProcessSecurityEnvironment,
-    cacheable: bool,
 }
 
 impl std::fmt::Debug for SecurityEnvironmentApi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityEnvironmentApi")
             .field("create", &(self.create as *const ()))
-            .field("query_support", &(self.query_support as *const ()))
             .field("close", &(self.close as *const ()))
-            .field("cacheable", &self.cacheable)
             .finish()
     }
 }
@@ -337,24 +340,11 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
 impl SecurityEnvironmentApi {
     /// Load `processmodel.dll` and resolve the 2-phase security-environment exports.
     ///
-    /// The result — success or failure — is memoized for the lifetime of the
-    /// process: `processmodel.dll` is a resident system DLL whose export set does
-    /// not change while the process runs, so repeated probes would only repeat the
-    /// same work and return the same answer. The cached error is cloned (see
-    /// [`LearningModeError`]), preserving the original diagnostic on every call. The
-    /// cached surface is marked cacheable so its
-    /// [`supports_deny_paths`](Self::supports_deny_paths) result is memoized too.
-    ///
     /// # Errors
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
-    /// - [`LearningModeError::ExportMissing`] if any required export is absent.
+    /// - [`LearningModeError::ExportMissing`] if any required export is absent under
+    ///   either its plain or `Experimental_`-prefixed name.
     pub fn load() -> Result<Self, LearningModeError> {
-        static CACHE: OnceLock<Result<SecurityEnvironmentApi, LearningModeError>> = OnceLock::new();
-        CACHE.get_or_init(Self::load_uncached).clone()
-    }
-
-    /// Perform the actual DLL load and export resolution, bypassing the cache.
-    fn load_uncached() -> Result<Self, LearningModeError> {
         let dll = string_util::to_wide(PROCESSMODEL_DLL);
 
         // SAFETY: `dll` is a valid null-terminated wide string that outlives the call.
@@ -367,7 +357,6 @@ impl SecurityEnvironmentApi {
                 .map_err(|e| LearningModeError::DllLoad(e.to_string()))?;
 
             let create_proc = resolve_any(hmodule, CREATE_NAMES)?;
-            let query_support_proc = resolve_any(hmodule, QUERY_SUPPORT_NAMES)?;
             let close_proc = resolve_any(hmodule, CLOSE_NAMES)?;
 
             Ok(Self {
@@ -375,110 +364,38 @@ impl SecurityEnvironmentApi {
                     unsafe extern "system" fn() -> isize,
                     PfnCreateProcessSecurityEnvironment,
                 >(create_proc),
-                query_support: std::mem::transmute::<
-                    unsafe extern "system" fn() -> isize,
-                    PfnQueryProcessSecurityEnvironmentSupport,
-                >(query_support_proc),
                 close: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     PfnCloseProcessSecurityEnvironment,
                 >(close_proc),
-                cacheable: true,
             })
         }
     }
 
-    /// Construct an API surface directly from raw export pointers, bypassing the
-    /// DLL load. Test-only: lets sibling modules inject fakes. The surface is marked
-    /// non-cacheable so its [`supports_deny_paths`](Self::supports_deny_paths) result
-    /// never populates the process-wide cache.
-    #[cfg(test)]
-    pub(crate) fn from_raw_parts(
-        create: PfnCreateProcessSecurityEnvironment,
-        query_support: PfnQueryProcessSecurityEnvironmentSupport,
-        close: PfnCloseProcessSecurityEnvironment,
-    ) -> Self {
-        Self {
-            create,
-            query_support,
-            close,
-            cacheable: false,
-        }
-    }
-
-    /// Like [`from_raw_parts`](Self::from_raw_parts) but marked cacheable, so the
-    /// memoization of [`supports_deny_paths`](Self::supports_deny_paths) can be
-    /// exercised host-independently. Test-only.
-    #[cfg(test)]
-    pub(crate) fn from_raw_parts_cacheable(
-        create: PfnCreateProcessSecurityEnvironment,
-        query_support: PfnQueryProcessSecurityEnvironmentSupport,
-        close: PfnCloseProcessSecurityEnvironment,
-    ) -> Self {
-        Self {
-            create,
-            query_support,
-            close,
-            cacheable: true,
-        }
-    }
-
-    /// Whether the official V2 API supports native deny paths.
-    ///
-    /// The answer is a fixed host capability, so for the real (cacheable) API the
-    /// result — including a typed error — is memoized once per process. Non-cacheable
-    /// test fakes always query directly and never touch the process-wide cache.
-    pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
-        if self.cacheable {
-            static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
-            CACHE
-                .get_or_init(|| self.query_deny_paths_support())
-                .clone()
-        } else {
-            self.query_deny_paths_support()
-        }
-    }
-
-    /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
-    /// without consulting or populating the process-wide cache.
-    fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
-        const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
-        let mut support_flags = 0u64;
-        // SAFETY: `query_support` matches the official V2 declaration and
-        // `support_flags` is a valid out-pointer.
-        let result = unsafe { (self.query_support)(&mut support_flags) };
-        if result.is_err() {
-            return Err(LearningModeError::HResultCall {
-                function: "QueryProcessSecurityEnvironmentSupport",
-                code: result.0,
-            });
-        }
-        Ok(support_flags & PSE_SUPPORT_FS_DENY != 0)
-    }
-
-    /// Create a process security environment from a PSEC FlatBuffer
+    /// Create a process security environment from a compiled FlatBuffer sandbox-spec
     /// blob. `flags` is currently always [`PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE`].
     ///
     /// # Errors
-    /// [`LearningModeError::HResultCall`] if the export returns a failing HRESULT.
+    /// [`LearningModeError::ApiCall`] carrying `GetLastError` if the export returns
+    /// `FALSE` (including a spec larger than `u32::MAX`, reported as
+    /// `ERROR_INVALID_PARAMETER`).
     pub fn create(
         &self,
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
         let mut env = HANDLE(ptr::null_mut());
-        let spec_len = u32::try_from(sandbox_specification.len()).map_err(|_| {
-            LearningModeError::HResultCall {
+        let spec_len =
+            u32::try_from(sandbox_specification.len()).map_err(|_| LearningModeError::ApiCall {
                 function: "CreateProcessSecurityEnvironment",
-                code: windows::Win32::Foundation::E_INVALIDARG.0,
-            }
-        })?;
+                code: windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0,
+            })?;
 
         // SAFETY: `self.create` was resolved from `processmodel.dll` and matches the
         // declared C signature. `sandbox_specification`/`spec_len` describe a valid,
         // contiguous byte buffer that outlives the call, and `env` is a valid
         // out-pointer.
-        let result = unsafe {
+        let ok = unsafe {
             (self.create)(
                 sandbox_specification.as_ptr().cast(),
                 spec_len,
@@ -486,22 +403,28 @@ impl SecurityEnvironmentApi {
                 &mut env,
             )
         };
-        if result.is_err() {
-            return Err(LearningModeError::HResultCall {
+        if ok == 0 {
+            return Err(LearningModeError::ApiCall {
                 function: "CreateProcessSecurityEnvironment",
-                code: result.0,
-            });
-        }
-        if env.0.is_null() {
-            return Err(LearningModeError::HResultCall {
-                function: "CreateProcessSecurityEnvironment",
-                code: windows::Win32::Foundation::E_UNEXPECTED.0,
+                code: last_error(),
             });
         }
         Ok(ProcessSecurityEnvironment {
             handle: env,
             close: self.close,
         })
+    }
+
+    /// Close a process security environment, tearing down its server-side state and
+    /// (per the create flags) the child. The export nulls the handle on success.
+    /// On failure, `env` retains ownership so the caller can retry; its [`Drop`]
+    /// implementation also makes one best-effort retry.
+    ///
+    /// # Errors
+    /// [`LearningModeError::ApiCall`] carrying `GetLastError` if the export returns
+    /// `FALSE`.
+    pub fn close(&self, env: &mut ProcessSecurityEnvironment) -> Result<(), LearningModeError> {
+        env.close_with(self.close)
     }
 }
 
@@ -542,8 +465,9 @@ fn last_error() -> u32 {
     unsafe { GetLastError().0 }
 }
 
-/// Diagnostic probe reporting which official security-environment exports
-/// resolved. Returns an all-`None` report if the DLL itself cannot be loaded.
+/// Diagnostic probe reporting which security-environment export name resolved for each
+/// function (plain vs `Experimental_`). Returns an all-`None` report if the DLL itself
+/// cannot be loaded.
 #[must_use]
 pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
     let dll = string_util::to_wide(PROCESSMODEL_DLL);
@@ -559,7 +483,6 @@ pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
     unsafe {
         SecurityEnvironmentExportReport {
             create: first_present(hmodule, CREATE_NAMES),
-            query_support: first_present(hmodule, QUERY_SUPPORT_NAMES),
             close: first_present(hmodule, CLOSE_NAMES),
         }
     }
@@ -592,51 +515,20 @@ pub fn is_security_environment_api_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::Mutex;
-    use windows::Win32::Foundation::{E_FAIL, S_OK};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    /// Serializes the tests that share the query fakes' global counters.
-    static QUERY_LOCK: Mutex<()> = Mutex::new(());
-    static QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static QUERY_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
-    static QUERY_FLAGS: AtomicU64 = AtomicU64::new(0);
-
-    /// Native-deny-path support bit reported by `QueryProcessSecurityEnvironmentSupport`.
-    const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
-
-    unsafe extern "system" fn fake_close(_: HANDLE) {
-        CLOSE_CALLS.fetch_add(1, Ordering::SeqCst);
-    }
-
-    unsafe extern "system" fn fake_create(
-        _: *const c_void,
-        _: u32,
-        _: u32,
-        _: *mut HANDLE,
-    ) -> HRESULT {
-        S_OK
-    }
-
-    unsafe extern "system" fn fake_query(support_flags: *mut u64) -> HRESULT {
-        QUERY_CALLS.fetch_add(1, Ordering::SeqCst);
-        let result = HRESULT(QUERY_RESULT.load(Ordering::SeqCst));
-        if result.is_ok() {
-            unsafe { *support_flags = QUERY_FLAGS.load(Ordering::SeqCst) };
+    unsafe extern "system" fn close_fails_then_succeeds(handle: *mut HANDLE) -> i32 {
+        if CLOSE_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            0
+        } else {
+            // SAFETY: the test passes a valid pointer to its owned HANDLE.
+            unsafe {
+                *handle = HANDLE(ptr::null_mut());
+            }
+            1
         }
-        result
-    }
-
-    fn reset_query_fakes() {
-        QUERY_CALLS.store(0, Ordering::SeqCst);
-        QUERY_RESULT.store(S_OK.0, Ordering::SeqCst);
-        QUERY_FLAGS.store(0, Ordering::SeqCst);
-    }
-
-    fn fake_uncached_api() -> SecurityEnvironmentApi {
-        SecurityEnvironmentApi::from_raw_parts(fake_create, fake_query, fake_close)
     }
 
     #[test]
@@ -698,117 +590,26 @@ mod tests {
     }
 
     #[test]
-    fn explicit_close_is_exactly_once() {
+    fn failed_close_retains_ownership_and_drop_retries() {
         CLOSE_CALLS.store(0, Ordering::SeqCst);
-        let environment = ProcessSecurityEnvironment {
+        let mut environment = ProcessSecurityEnvironment {
             handle: HANDLE(std::ptr::dangling_mut::<c_void>()),
-            close: fake_close,
+            close: close_fails_then_succeeds,
         };
 
-        environment.close();
-        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn export_report_all_present_is_complete() {
-        let report = SecurityEnvironmentExportReport {
-            create: Some("CreateProcessSecurityEnvironment"),
-            query_support: Some("QueryProcessSecurityEnvironmentSupport"),
-            close: Some("CloseProcessSecurityEnvironment"),
-        };
-        assert!(report.is_complete());
-    }
-
-    #[test]
-    fn export_report_each_missing_export_is_incomplete() {
-        let complete = SecurityEnvironmentExportReport {
-            create: Some("CreateProcessSecurityEnvironment"),
-            query_support: Some("QueryProcessSecurityEnvironmentSupport"),
-            close: Some("CloseProcessSecurityEnvironment"),
-        };
-
-        assert!(!SecurityEnvironmentExportReport {
-            create: None,
-            ..complete
-        }
-        .is_complete());
-        assert!(!SecurityEnvironmentExportReport {
-            query_support: None,
-            ..complete
-        }
-        .is_complete());
-        assert!(!SecurityEnvironmentExportReport {
-            close: None,
-            ..complete
-        }
-        .is_complete());
-        assert!(!SecurityEnvironmentExportReport::default().is_complete());
-    }
-
-    #[test]
-    fn supports_deny_paths_reports_flag_state() {
-        let _guard = QUERY_LOCK.lock().unwrap();
-        let api = fake_uncached_api();
-
-        reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
-        assert!(api.supports_deny_paths().unwrap());
-        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
-
-        reset_query_fakes();
-        QUERY_FLAGS.store(0, Ordering::SeqCst);
-        assert!(!api.supports_deny_paths().unwrap());
-
-        reset_query_fakes();
-        // Unrelated support bits must not be mistaken for deny-path support.
-        QUERY_FLAGS.store(0xFFFF_FFFF_FFFF_FFFE, Ordering::SeqCst);
-        assert!(!api.supports_deny_paths().unwrap());
-    }
-
-    #[test]
-    fn supports_deny_paths_maps_failing_hresult() {
-        let _guard = QUERY_LOCK.lock().unwrap();
-        reset_query_fakes();
-        QUERY_RESULT.store(E_FAIL.0, Ordering::SeqCst);
-        let api = fake_uncached_api();
-
-        let error = api.supports_deny_paths().unwrap_err();
+        let error = environment
+            .close_with(close_fails_then_succeeds)
+            .expect_err("first close must fail");
         assert!(matches!(
             error,
-            LearningModeError::HResultCall {
-                function: "QueryProcessSecurityEnvironmentSupport",
-                code
-            } if code == E_FAIL.0
+            LearningModeError::ApiCall {
+                function: "CloseProcessSecurityEnvironment",
+                ..
+            }
         ));
-    }
+        assert!(!environment.raw().0.is_null());
 
-    #[test]
-    fn non_cacheable_api_queries_every_call() {
-        let _guard = QUERY_LOCK.lock().unwrap();
-        reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
-        let api = fake_uncached_api();
-
-        assert!(api.supports_deny_paths().unwrap());
-        assert!(api.supports_deny_paths().unwrap());
-        // A test fake must never be memoized: both calls hit the underlying query.
-        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn cacheable_api_memoizes_support_query() {
-        // The only test that drives the cacheable (process-wide) support cache, so
-        // the `OnceLock` initializer runs deterministically here.
-        let _guard = QUERY_LOCK.lock().unwrap();
-        reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
-        let api =
-            SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
-
-        let first = api.supports_deny_paths().unwrap();
-        let second = api.supports_deny_paths().unwrap();
-        assert_eq!(first, second);
-        // The result is memoized for the process: the query runs at most once.
-        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
+        drop(environment);
+        assert_eq!(CLOSE_CALLS.load(Ordering::SeqCst), 2);
     }
 }

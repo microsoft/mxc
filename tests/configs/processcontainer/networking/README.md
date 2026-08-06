@@ -3,6 +3,9 @@
 This directory contains the config-driven ProcessContainer networking matrix
 used by
 [`run_base_container_network_tests.ps1`](../../../scripts/run_base_container_network_tests.ps1).
+The runner executes the legacy cases now and automatically skips the
+forward-looking schema 0.8 cases until `egress`, `runtimeConfig`, and
+`allowedPeer` appear in the checked-in dev schema.
 
 The matrix covers:
 

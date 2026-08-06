@@ -4,11 +4,10 @@
 //! Decode a sealed learning-mode `.etl` into the captureDenials JSON
 //! output document, or dump its raw ETW events for schema discovery.
 //!
-//! This is a developer diagnostic for inspecting saved traces independently
-//! of the production pipeline. Normal `captureDenials` execution seals and
-//! decodes its internal ETL automatically, writes the JSON denials document,
-//! deletes the ETL, and returns structured output metadata. End users and SDK
-//! callers therefore do not invoke this example.
+//! This is a developer diagnostic for inspecting captured traces manually.
+//! End users and SDK agents do not invoke it: the BaseContainer runner seals
+//! the trace and reports its path, while this example performs the manual
+//! analysis until runner integration consumes the trace automatically.
 //!
 //! Usage:
 //!

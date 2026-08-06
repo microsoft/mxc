@@ -115,10 +115,6 @@ pub struct MxcConfig {
 
     /// Experimental features. Only honored when `--experimental` is passed.
     pub experimental: Option<Experimental>,
-
-    /// Runtime configuration applied to the launched container. Available in
-    /// schema 0.8 and later.
-    pub runtime_config: Option<RuntimeConfig>,
 }
 
 /// State-aware lifecycle phase.
@@ -212,32 +208,14 @@ pub struct ProcessContainer {
     pub capabilities: Option<Vec<String>>,
     /// Windows denial capture. When present, the runner records the sandboxed
     /// process's access attempts to a learning-mode ETL trace for later
-    /// inspection. Requires a host that exposes the complete official V2
-    /// Learning Mode and process security-environment API set. Cannot be
-    /// combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths`
-    /// additionally requires the V2 deny-support capability.
+    /// inspection. Requires a host that exposes the learning-mode OS API.
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
-    /// ProcessContainer-specific network settings.
-    pub network: Option<ProcessContainerNetwork>,
-}
-
-/// ProcessContainer-specific network settings (Windows).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProcessContainerNetwork {
-    /// Friendly name of the single AppContainer peer allowed to communicate
-    /// with this container over loopback.
-    pub allowed_peer: Option<String>,
 }
 
 /// Windows denial-capture settings. The presence of the `captureDenials`
-/// object enables capture; all fields are optional. Capture is incompatible
-/// with `processContainer.leastPrivilege` and `network.proxy`. Explicit
-/// `filesystem.deniedPaths` requires the host's V2 process security-environment
-/// support query to advertise native deny enforcement.
+/// object enables capture; all fields are optional.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -346,144 +324,23 @@ pub struct Fallback {
     pub allow_dacl_mutation: Option<bool>,
 }
 
-/// Versioned network access policy. Runtime deserialization accepts the legacy
-/// 0.7 fields and the GA 0.8 fields so diagnostics retain precise JSON paths;
-/// parser validation prevents mixing them and gates each set by schema version.
-/// Schema generation advertises only the 0.8 shape.
+/// Network access policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Network {
-    /// Outbound policy rules (schema 0.8+).
-    pub egress: Option<NetworkEgress>,
-    /// Inbound policy (schema 0.8+).
-    pub ingress: Option<NetworkIngress>,
-    /// Default outbound policy (legacy through schema 0.7).
+    /// Default outbound policy when no host rule matches.
     pub default_policy: Option<NetworkPolicy>,
-    /// Enforcement mechanism (legacy through schema 0.7).
+    /// How the policy is enforced.
     pub enforcement_mode: Option<NetworkEnforcement>,
-    /// Local network access (legacy through schema 0.7).
+    /// Allow binding/listening on local IPs and accepting inbound connections.
     pub allow_local_network: Option<bool>,
-    /// Allowed DNS hosts (legacy through schema 0.7).
+    /// Hosts explicitly allowed.
     pub allowed_hosts: Option<Vec<String>>,
-    /// Blocked DNS hosts (legacy through schema 0.7).
+    /// Hosts explicitly blocked.
     pub blocked_hosts: Option<Vec<String>>,
-    /// Proxy configuration (legacy through schema 0.7).
+    /// Proxy configuration (one of localhost / builtinTestServer / url).
     pub proxy: Option<Proxy>,
-}
-
-#[cfg(feature = "schema-gen")]
-impl schemars::JsonSchema for Network {
-    fn schema_name() -> String {
-        <NetworkV2 as schemars::JsonSchema>::schema_name()
-    }
-
-    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        <NetworkV2 as schemars::JsonSchema>::json_schema(generator)
-    }
-}
-
-/// GA network access policy used by schema 0.8 and later.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkV2 {
-    /// Outbound policy rules.
-    pub egress: Option<NetworkEgress>,
-    /// Inbound policy.
-    pub ingress: Option<NetworkIngress>,
-}
-
-/// Outbound policy rule set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkEgress {
-    /// Rules that allow matching outbound connections.
-    #[serde(default)]
-    pub allow: Vec<NetworkRules>,
-    /// Rules that deny matching outbound connections.
-    #[serde(default)]
-    pub deny: Vec<NetworkRules>,
-    /// Default action when no egress rule matches.
-    #[serde(rename = "default")]
-    pub default_action: Option<EgressDefault>,
-}
-
-/// Egress default action.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum EgressDefault {
-    Allow,
-    Deny,
-}
-
-/// Outbound policy rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkRules {
-    /// Destination CIDR ranges or bare IP addresses.
-    pub to: Vec<NetworkDestination>,
-    /// Destination ports and protocols. Empty matches all.
-    #[serde(default)]
-    pub ports: Vec<NetworkPort>,
-}
-
-/// Outbound destination.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkDestination {
-    /// IPv4/IPv6 CIDR range, or a bare IP address.
-    pub cidr: String,
-    /// CIDR exclusions carved out of `cidr`.
-    #[serde(default)]
-    pub except: Vec<String>,
-}
-
-/// Outbound port selector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkPort {
-    /// Transport protocol.
-    pub protocol: NetworkProtocol,
-    /// Destination port or start of an inclusive range.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
-    pub port: Option<u16>,
-    /// End of an inclusive destination port range.
-    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
-    pub end_port: Option<u16>,
-}
-
-/// Outbound transport protocol.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkProtocol {
-    Tcp,
-    Udp,
-    Icmp,
-    Any,
-}
-
-/// Inbound policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NetworkIngress {
-    /// Whether host loopback can connect inbound to the sandbox.
-    pub host_loopback: Option<HostLoopbackPolicy>,
-}
-
-/// Host loopback ingress policy.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum HostLoopbackPolicy {
-    Allow,
-    Deny,
 }
 
 /// Default network policy.
@@ -520,15 +377,6 @@ pub struct Proxy {
     pub builtin_test_server: Option<bool>,
     /// Proxy URL (parsed into host:port).
     pub url: Option<String>,
-}
-
-/// Runtime configuration applied to the launched container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeConfig {
-    /// Loopback HTTP/S proxy URL.
-    pub network_proxy: Option<String>,
 }
 
 /// Cross-platform UI isolation policy.

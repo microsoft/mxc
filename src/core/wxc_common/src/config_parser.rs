@@ -8,11 +8,10 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend, EgressRule,
+    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
-    NetworkDestination, NetworkEnforcementMode, NetworkPolicy, NetworkPort, PortMapping, Protocol,
-    ProxyAddress, ProxyConfig, RuleAction, SeatbeltConfig, TelemetryConfig, TestFeatureConfig,
-    UiPolicy, WindowsSandboxConfig, WslcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
+    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -517,178 +516,6 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     ))
 }
 
-fn schema_uses_network_v2(version: &str) -> bool {
-    semver::Version::parse(version)
-        .map(|version| version.major > 0 || version.minor >= 8)
-        .unwrap_or(false)
-}
-
-fn parse_network_cidr(value: &str, path: &str) -> Result<(std::net::IpAddr, u8), WxcError> {
-    let (address, prefix) = match value.split_once('/') {
-        Some((address, prefix)) => {
-            let address = address.parse::<std::net::IpAddr>().map_err(|_| {
-                WxcError::ConfigParse(format!("{path} must be an IPv4/IPv6 address or CIDR"))
-            })?;
-            let prefix = prefix.parse::<u8>().map_err(|_| {
-                WxcError::ConfigParse(format!("{path} has an invalid CIDR prefix length"))
-            })?;
-            (address, prefix)
-        }
-        None => {
-            let address = value.parse::<std::net::IpAddr>().map_err(|_| {
-                WxcError::ConfigParse(format!(
-                    "{path} must be an IPv4/IPv6 address or CIDR; DNS names are not supported"
-                ))
-            })?;
-            let prefix = if address.is_ipv4() { 32 } else { 128 };
-            (address, prefix)
-        }
-    };
-
-    let max_prefix = if address.is_ipv4() { 32 } else { 128 };
-    if prefix > max_prefix {
-        return Err(WxcError::ConfigParse(format!(
-            "{path} prefix length must be between 0 and {max_prefix}"
-        )));
-    }
-    Ok((address, prefix))
-}
-
-fn ip_bits(address: std::net::IpAddr) -> u128 {
-    match address {
-        std::net::IpAddr::V4(address) => u32::from(address) as u128,
-        std::net::IpAddr::V6(address) => u128::from(address),
-    }
-}
-
-fn cidr_contains(
-    parent_address: std::net::IpAddr,
-    parent_prefix: u8,
-    child_address: std::net::IpAddr,
-    child_prefix: u8,
-) -> bool {
-    if parent_address.is_ipv4() != child_address.is_ipv4() || child_prefix < parent_prefix {
-        return false;
-    }
-    let width = if parent_address.is_ipv4() { 32 } else { 128 };
-    if parent_prefix == 0 {
-        return true;
-    }
-    let mask = u128::MAX << (width - parent_prefix);
-    (ip_bits(parent_address) & mask) == (ip_bits(child_address) & mask)
-}
-
-fn convert_network_rules(
-    rules: Vec<wire::NetworkRules>,
-    action: RuleAction,
-    path: &str,
-) -> Result<Vec<EgressRule>, WxcError> {
-    rules
-        .into_iter()
-        .enumerate()
-        .map(|(rule_index, rule)| {
-            if rule.to.is_empty() {
-                return Err(WxcError::ConfigParse(format!(
-                    "{path}[{rule_index}].to must contain at least one destination"
-                )));
-            }
-            let destinations = rule
-                .to
-                .into_iter()
-                .enumerate()
-                .map(|(destination_index, destination)| {
-                    let destination_path =
-                        format!("{path}[{rule_index}].to[{destination_index}].cidr");
-                    let (address, prefix) =
-                        parse_network_cidr(&destination.cidr, &destination_path)?;
-                    for (except_index, except) in destination.except.iter().enumerate() {
-                        let except_path = format!(
-                            "{path}[{rule_index}].to[{destination_index}].except[{except_index}]"
-                        );
-                        let (except_address, except_prefix) =
-                            parse_network_cidr(except, &except_path)?;
-                        if !cidr_contains(address, prefix, except_address, except_prefix) {
-                            return Err(WxcError::ConfigParse(format!(
-                                "{except_path} must be contained within {}",
-                                destination.cidr
-                            )));
-                        }
-                    }
-                    Ok(NetworkDestination {
-                        cidr: destination.cidr,
-                        except: destination.except,
-                    })
-                })
-                .collect::<Result<Vec<_>, WxcError>>()?;
-
-            let ports = rule
-                .ports
-                .into_iter()
-                .enumerate()
-                .map(|(port_index, port)| {
-                    let port_path = format!("{path}[{rule_index}].ports[{port_index}]");
-                    if port.end_port.is_some() && port.port.is_none() {
-                        return Err(WxcError::ConfigParse(format!(
-                            "{port_path}.endPort requires port"
-                        )));
-                    }
-                    if port
-                        .end_port
-                        .zip(port.port)
-                        .is_some_and(|(end, start)| end < start)
-                    {
-                        return Err(WxcError::ConfigParse(format!(
-                            "{port_path}.endPort must be greater than or equal to port"
-                        )));
-                    }
-                    if matches!(port.protocol, wire::NetworkProtocol::Icmp)
-                        && (port.port.is_some() || port.end_port.is_some())
-                    {
-                        return Err(WxcError::ConfigParse(format!(
-                            "{port_path} must omit port/endPort for protocol 'icmp'"
-                        )));
-                    }
-                    let protocol = match port.protocol {
-                        wire::NetworkProtocol::Tcp => Protocol::Tcp,
-                        wire::NetworkProtocol::Udp => Protocol::Udp,
-                        wire::NetworkProtocol::Icmp => Protocol::Icmp,
-                        wire::NetworkProtocol::Any => Protocol::Any,
-                    };
-                    Ok(NetworkPort {
-                        protocol,
-                        port: port.port,
-                        end_port: port.end_port,
-                    })
-                })
-                .collect::<Result<Vec<_>, WxcError>>()?;
-
-            Ok(EgressRule {
-                destinations,
-                ports,
-                action,
-            })
-        })
-        .collect()
-}
-
-fn convert_runtime_proxy(url: String) -> Result<ProxyConfig, WxcError> {
-    let proxy = convert_wire_proxy(wire::Proxy {
-        localhost: None,
-        builtin_test_server: None,
-        url: Some(url),
-    })?;
-    let address = proxy
-        .address
-        .as_ref()
-        .expect("URL proxy always has an address");
-    if !matches!(address.host(), "localhost" | "127.0.0.1" | "::1") {
-        return Err(WxcError::ConfigParse(
-            "runtimeConfig.networkProxy must use localhost, 127.0.0.1, or [::1]".to_string(),
-        ));
-    }
-    Ok(proxy)
-}
-
 fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
     let mut sections: Vec<&'static str> = Vec::new();
     let mut push = |backend: ContainmentBackend| {
@@ -1032,16 +859,6 @@ fn convert_wire_config(
             policy.capabilities.extend(caps);
         }
 
-        if let Some(network) = ac.network {
-            if !schema_uses_network_v2(&schema_version) {
-                return Err(WxcError::ConfigParse(
-                    "processContainer.network is available only in schema 0.8 and later"
-                        .to_string(),
-                ));
-            }
-            policy.allowed_appcontainer_peer = network.allowed_peer;
-        }
-
         // captureDenials (Windows denial capture). Presence enables capture: the
         // runner records the process's ungranted access attempts to a
         // learning-mode ETL trace. `mode` decides whether each recorded access is
@@ -1133,149 +950,28 @@ fn convert_wire_config(
         }
     }
 
-    let uses_network_v2 = schema_uses_network_v2(&schema_version);
-    let has_network_section = cfg.network.is_some();
-
     // Network section
-    if let Some(network) = cfg.network {
-        let has_legacy_fields = network.default_policy.is_some()
-            || network.enforcement_mode.is_some()
-            || network.allow_local_network.is_some()
-            || network.allowed_hosts.is_some()
-            || network.blocked_hosts.is_some()
-            || network.proxy.is_some();
-        let has_v2_fields = network.egress.is_some() || network.ingress.is_some();
-
-        if uses_network_v2 && has_legacy_fields {
-            return Err(WxcError::ConfigParse(
-                "schema 0.8 network must use egress/ingress; legacy network fields are supported only through schema 0.7"
-                    .to_string(),
-            ));
-        }
-        if !uses_network_v2 && has_v2_fields {
-            return Err(WxcError::ConfigParse(
-                "network.egress/network.ingress require schema 0.8 or later".to_string(),
-            ));
-        }
-
-        if uses_network_v2 {
-            if let Some(egress) = network.egress {
-                policy.default_network_policy = match egress.default_action {
-                    Some(wire::EgressDefault::Allow) => NetworkPolicy::Allow,
-                    Some(wire::EgressDefault::Deny) | None => NetworkPolicy::Block,
-                };
-                policy.egress_rules.extend(convert_network_rules(
-                    egress.allow,
-                    RuleAction::Allow,
-                    "network.egress.allow",
-                )?);
-                policy.egress_rules.extend(convert_network_rules(
-                    egress.deny,
-                    RuleAction::Deny,
-                    "network.egress.deny",
-                )?);
+    if let Some(net) = cfg.network {
+        if let Some(proxy) = net.proxy {
+            let proxy_config = convert_wire_proxy(proxy)?;
+            if proxy_config.is_enabled()
+                && containment != ContainmentBackend::ProcessContainer
+                && containment != ContainmentBackend::Bubblewrap
+                && containment != ContainmentBackend::Seatbelt
+                && containment != ContainmentBackend::Wslc
+            {
+                let msg = "Network proxy is only supported with the 'processcontainer', \
+                           'bubblewrap', 'seatbelt', or 'wslc' containment backends";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
             }
-            if let Some(ingress) = network.ingress {
-                policy.allow_local_network =
-                    matches!(ingress.host_loopback, Some(wire::HostLoopbackPolicy::Allow));
-            }
-        } else {
-            if let Some(proxy) = network.proxy {
-                policy.network_proxy = convert_wire_proxy(proxy)?;
-            }
-            if let Some(policy_value) = network.default_policy {
-                policy.default_network_policy = policy_value.into();
-            }
-            if let Some(mode) = network.enforcement_mode {
-                policy.network_enforcement_mode = mode.into();
-            }
-            if let Some(allow_local_network) = network.allow_local_network {
-                policy.allow_local_network = allow_local_network;
-            }
-            if let Some(allowed_hosts) = network.allowed_hosts {
-                policy.allowed_hosts = allowed_hosts;
-            }
-            if let Some(blocked_hosts) = network.blocked_hosts {
-                policy.blocked_hosts = blocked_hosts;
-            }
-        }
-    }
 
-    if let Some(runtime_config) = cfg.runtime_config {
-        if !uses_network_v2 {
-            return Err(WxcError::ConfigParse(
-                "runtimeConfig is available only in schema 0.8 and later".to_string(),
-            ));
-        }
-        if let Some(proxy) = runtime_config.network_proxy {
-            policy.network_proxy = convert_runtime_proxy(proxy)?;
-        }
-    }
-
-    if uses_network_v2 {
-        let has_direct_egress_policy = policy.default_network_policy == NetworkPolicy::Allow
-            || !policy.egress_rules.is_empty();
-        if has_direct_egress_policy && containment != ContainmentBackend::ProcessContainer {
-            return Err(WxcError::ConfigParse(format!(
-                "{containment:?}: schema 0.8 direct egress rules are not supported by this backend"
-            )));
-        }
-
-        if policy.allow_local_network && containment != ContainmentBackend::Seatbelt {
-            return Err(WxcError::ConfigParse(format!(
-                "{containment:?}: schema 0.8 ingress.hostLoopback='allow' is not supported by this backend"
-            )));
-        }
-
-        if policy.network_proxy.is_enabled()
-            && containment != ContainmentBackend::ProcessContainer
-            && containment != ContainmentBackend::Seatbelt
-        {
-            return Err(WxcError::ConfigParse(format!(
-                "{containment:?}: schema 0.8 runtimeConfig.networkProxy is not supported by this backend"
-            )));
-        }
-    }
-
-    if policy.network_proxy.is_enabled() {
-        if uses_network_v2
-            && (policy.default_network_policy != NetworkPolicy::Block
-                || !policy.egress_rules.is_empty())
-        {
-            return Err(WxcError::ConfigParse(
-                "runtimeConfig.networkProxy requires deny-default egress with no direct allow/deny rules"
-                    .to_string(),
-            ));
-        }
-        if containment == ContainmentBackend::ProcessContainer
-            && uses_network_v2
-            && policy.allowed_appcontainer_peer.is_none()
-        {
-            return Err(WxcError::ConfigParse(
-                "processContainer.network.allowedPeer is required with runtimeConfig.networkProxy"
-                    .to_string(),
-            ));
-        }
-
-        if containment != ContainmentBackend::ProcessContainer
-            && containment != ContainmentBackend::Bubblewrap
-            && containment != ContainmentBackend::Seatbelt
-            && containment != ContainmentBackend::Wslc
-        {
-            let msg = "Network proxy is only supported with the 'processcontainer', \
-                       'bubblewrap', 'seatbelt', or 'wslc' containment backends";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        if !uses_network_v2 {
             // WSLc containers run in their own network namespace, so an
             // MXC-run host-loopback proxy is unreachable. Accept only the
             // caller-supplied `url` form (which carries `original_url`); reject
             // the `localhost` / `builtinTestServer` forms.
-            if containment == ContainmentBackend::Wslc {
-                let is_url_form = policy
-                    .network_proxy
+            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
+                let is_url_form = proxy_config
                     .address
                     .as_ref()
                     .is_some_and(|addr| addr.original_url.is_some());
@@ -1289,10 +985,29 @@ fn convert_wire_config(
                     return Err(WxcError::ConfigParse(msg.to_string()));
                 }
             }
-        }
-    }
 
-    if has_network_section || policy.network_proxy.is_enabled() {
+            policy.network_proxy = proxy_config;
+        }
+
+        if let Some(p) = net.default_policy {
+            policy.default_network_policy = p.into();
+        }
+
+        if let Some(m) = net.enforcement_mode {
+            policy.network_enforcement_mode = m.into();
+        }
+
+        if let Some(v) = net.allow_local_network {
+            policy.allow_local_network = v;
+        }
+
+        if let Some(v) = net.allowed_hosts {
+            policy.allowed_hosts = v;
+        }
+        if let Some(v) = net.blocked_hosts {
+            policy.blocked_hosts = v;
+        }
+
         // WSLc routes egress through the cooperative proxy but does not forward
         // host lists to it, and a 'block' default (the WSLc default) yields no
         // outbound networking / a drop-floor that can't even reach the proxy.
@@ -3446,101 +3161,6 @@ mod tests {
     }
 
     // ====== Network proxy configuration tests ======
-
-    #[test]
-    fn schema_07_accepts_legacy_network_shape() {
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "process": {"commandLine": "echo test"},
-            "network": {"defaultPolicy": "allow", "enforcementMode": "capabilities"}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let request = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(request.policy.default_network_policy, NetworkPolicy::Allow);
-    }
-
-    #[test]
-    fn schema_08_rejects_legacy_network_shape() {
-        let json = r#"{
-            "version": "0.8.0-dev",
-            "process": {"commandLine": "echo test"},
-            "network": {"defaultPolicy": "allow"}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("schema 0.8 network must use egress/ingress"));
-    }
-
-    #[test]
-    fn schema_08_accepts_ga_network_shape_for_process_container() {
-        let json = r#"{
-            "version": "0.8.0-dev",
-            "containment": "processcontainer",
-            "process": {"commandLine": "echo test"},
-            "network": {
-                "egress": {
-                    "default": "deny",
-                    "allow": [{
-                        "to": [{"cidr": "1.1.1.0/24", "except": ["1.1.1.1/32"]}],
-                        "ports": [{"protocol": "tcp", "port": 440, "endPort": 450}]
-                    }]
-                }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let request = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(request.policy.egress_rules.len(), 1);
-        assert_eq!(
-            request.policy.egress_rules[0].destinations[0].except,
-            vec!["1.1.1.1/32"]
-        );
-    }
-
-    #[test]
-    fn schema_07_rejects_ga_network_shape() {
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "process": {"commandLine": "echo test"},
-            "network": {"egress": {"default": "deny"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("network.egress/network.ingress require schema 0.8"));
-    }
-
-    #[test]
-    fn schema_08_rejects_rich_egress_for_unsupported_backend() {
-        let json = r#"{
-            "version": "0.8.0-dev",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo test"},
-            "network": {
-                "egress": {
-                    "default": "deny",
-                    "allow": [{"to": [{"cidr": "1.1.1.1/32"}]}]
-                }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("schema 0.8 direct egress rules are not supported"));
-    }
 
     #[test]
     fn no_proxy_leaves_default() {

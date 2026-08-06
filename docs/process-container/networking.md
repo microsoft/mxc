@@ -2,6 +2,12 @@
 
 Implementation companion to the parent [MXC Network Configuration, GA](../sandbox-policy/v2/networking.md) doc, which owns the shared policy schema, the three connectivity models, and the GA goal (model 2, deny-all-except-proxy). This doc covers only how the Windows processcontainer backend enforces those models.
 
+> **Schema version boundary:** Schema 0.7.0 and earlier keep their existing
+> networking shape and behavior unchanged. The `egress`/`ingress`,
+> `runtimeConfig.networkProxy`, and singular
+> `processContainer.network.allowedPeer` fields described here are additions
+> starting in schema 0.8.0.
+
 ## 1. What this backend delivers at GA
 
 Each sandbox gets two enforcement primitives, scoped to its container SID and applied with no UAC prompt per launch:
@@ -13,7 +19,8 @@ Each model is a specific combination of container network capabilities and
 enforcement. Complete schema 0.8 configs and proxy-host setup instructions are
 in the
 [`tests/examples/processcontainer/networking`](../../tests/examples/processcontainer/networking/README.md)
-README.
+README. Those examples are forward-looking until the schema 0.8 networking
+implementation lands.
 
 ### Model 1: direct egress, WFP-filtered (least restrictive)
 

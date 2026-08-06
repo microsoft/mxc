@@ -378,47 +378,6 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     }
 }
 
-/// Transport protocol for an egress rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    Tcp,
-    Udp,
-    Icmp,
-    Any,
-}
-
-/// Allow/deny action for an egress rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuleAction {
-    Allow,
-    Deny,
-}
-
-/// Validated outbound destination.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkDestination {
-    pub cidr: String,
-    pub except: Vec<String>,
-}
-
-/// Validated outbound port selector.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkPort {
-    pub protocol: Protocol,
-    pub port: Option<u16>,
-    pub end_port: Option<u16>,
-}
-
-/// Validated outbound rule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EgressRule {
-    pub destinations: Vec<NetworkDestination>,
-    pub ports: Vec<NetworkPort>,
-    pub action: RuleAction,
-}
-
 #[derive(Debug, Clone)]
 pub struct ProxyAddress {
     pub address: String,
@@ -591,10 +550,6 @@ pub struct ContainerPolicy {
     pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
-    /// GA schema 0.8 L3/L4 egress rules.
-    pub egress_rules: Vec<EgressRule>,
-    /// Friendly name of the single AppContainer loopback peer.
-    pub allowed_appcontainer_peer: Option<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
     /// Cross-platform UI policy.

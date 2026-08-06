@@ -49,29 +49,20 @@ production configs and the dev schema when working on experimental features:
         "allowDaclMutation": true          // Allow Tier 3 DACL fallback (default true)
     },
 
-    "network": {                           // 0.8.0+ GA network policy
-        "egress": {
-            "default": "deny",
-            "allow": [{
-                "to": [{ "cidr": "140.82.112.0/20" }],
-                "ports": [{ "protocol": "tcp", "port": 443 }]
-            }],
-            "deny": []
-        },
-        "ingress": { "hostLoopback": "deny" }
-    },
-
-    "runtimeConfig": {
-        "networkProxy": "http://127.0.0.1:8080" // Optional localhost HTTP/S proxy
+    "network": {
+        "defaultPolicy": "block",          // "allow" or "block"
+        "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
+        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
+                                           // (use { "builtinTestServer": true } for the bundled
+                                           //  testing-only proxy; requires --allow-testing-features)
+                                           // WSLC supports the cooperative proxy too, but only via
+                                           // { "url": "http://proxy.example:8080" } (own-netns:
+                                           //  localhost/builtinTestServer are unreachable, rejected)
     },
 
     "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
         "capabilities": ["internetClient"],
-        "network": {
-            "allowedPeer": "agent-proxy"   // Singular AppContainer profile allowed
-                                             // to communicate over loopback
-        },
         "captureDenials": {                // Windows-only: record the process's access
             "mode": "block",               // "block" (default): access stays denied and
                                            // is logged (deny-by-default preserved). "allow":
@@ -81,8 +72,6 @@ production configs and the dev schema when working on experimental features:
         }                                  // dir must already exist; a unique per-run id is stamped
                                            // into the stem (denials.<run-id>.json) and the actual
                                            // path printed on stderr. Omit outputPath for a managed temp file.
-                                           // captureDenials cannot be combined with leastPrivilege.
-                                           // captureDenials cannot currently be combined with network.proxy.
     },
 
     "lxc": {                               // LXC-specific
@@ -115,11 +104,6 @@ production configs and the dev schema when working on experimental features:
     }
 }
 ```
-
-Schema 0.7 and earlier continue to use the legacy `network.defaultPolicy`,
-`network.enforcementMode`, and `network.proxy` fields. Schema 0.8 and later use
-the GA `egress`/`ingress` policy shown above plus
-`runtimeConfig.networkProxy`; mixing the two shapes is rejected.
 
 > **State-aware fields.** The `phase` top-level field is the **state-aware
 > discriminator**: a request that includes it is parsed as a state-aware

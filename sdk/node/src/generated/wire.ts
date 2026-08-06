@@ -38,7 +38,7 @@ export interface BaseProcessUi {
 }
 
 /**
- * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Capture is incompatible with `processContainer.leastPrivilege` and `network.proxy`. Explicit `filesystem.deniedPaths` requires the host's V2 process security-environment support query to advertise native deny enforcement.
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.
  */
 export interface CaptureDenials {
   /**
@@ -65,11 +65,6 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
  * Containment backend (abstract intent or concrete backend).
  */
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
-
-/**
- * Egress default action.
- */
-export type EgressDefault = "allow" | "deny";
 
 /**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
@@ -129,11 +124,6 @@ export interface Filesystem {
    */
   readwritePaths?: string[] | null;
 }
-
-/**
- * Host loopback ingress policy.
- */
-export type HostLoopbackPolicy = "allow" | "deny";
 
 /**
  * IsolationSession sizing profile.
@@ -235,97 +225,44 @@ export interface Lxc {
 }
 
 /**
- * Outbound destination.
+ * Network access policy.
  */
-export interface NetworkDestination {
+export interface Network {
   /**
-   * IPv4/IPv6 CIDR range, or a bare IP address.
+   * Allow binding/listening on local IPs and accepting inbound connections.
    */
-  cidr: string;
+  allowLocalNetwork?: boolean | null;
   /**
-   * CIDR exclusions carved out of `cidr`.
+   * Hosts explicitly allowed.
    */
-  except?: string[];
+  allowedHosts?: string[] | null;
+  /**
+   * Hosts explicitly blocked.
+   */
+  blockedHosts?: string[] | null;
+  /**
+   * Default outbound policy when no host rule matches.
+   */
+  defaultPolicy?: NetworkPolicy | null;
+  /**
+   * How the policy is enforced.
+   */
+  enforcementMode?: NetworkEnforcement | null;
+  /**
+   * Proxy configuration (one of localhost / builtinTestServer / url).
+   */
+  proxy?: Proxy | null;
 }
 
 /**
- * Outbound policy rule set.
+ * Network enforcement mechanism.
  */
-export interface NetworkEgress {
-  /**
-   * Rules that allow matching outbound connections.
-   */
-  allow?: NetworkRules[];
-  /**
-   * Default action when no egress rule matches.
-   */
-  default?: EgressDefault | null;
-  /**
-   * Rules that deny matching outbound connections.
-   */
-  deny?: NetworkRules[];
-}
+export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
- * Inbound policy.
+ * Default network policy.
  */
-export interface NetworkIngress {
-  /**
-   * Whether host loopback can connect inbound to the sandbox.
-   */
-  hostLoopback?: HostLoopbackPolicy | null;
-}
-
-/**
- * Outbound port selector.
- */
-export interface NetworkPort {
-  /**
-   * End of an inclusive destination port range.
-   */
-  endPort?: number | null;
-  /**
-   * Destination port or start of an inclusive range.
-   */
-  port?: number | null;
-  /**
-   * Transport protocol.
-   */
-  protocol: NetworkProtocol;
-}
-
-/**
- * Outbound transport protocol.
- */
-export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
-
-/**
- * Outbound policy rule.
- */
-export interface NetworkRules {
-  /**
-   * Destination ports and protocols. Empty matches all.
-   */
-  ports?: NetworkPort[];
-  /**
-   * Destination CIDR ranges or bare IP addresses.
-   */
-  to: NetworkDestination[];
-}
-
-/**
- * GA network access policy used by schema 0.8 and later.
- */
-export interface NetworkV2 {
-  /**
-   * Outbound policy rules.
-   */
-  egress?: NetworkEgress | null;
-  /**
-   * Inbound policy.
-   */
-  ingress?: NetworkIngress | null;
-}
+export type NetworkPolicy = "allow" | "block";
 
 /**
  * State-aware lifecycle phase.
@@ -382,7 +319,7 @@ export interface ProcessContainer {
    */
   capabilities?: string[] | null;
   /**
-   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the learning-mode OS API.
    */
   captureDenials?: CaptureDenials | null;
   /**
@@ -394,33 +331,27 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
-   * ProcessContainer-specific network settings.
-   */
-  network?: ProcessContainerNetwork | null;
-  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
 }
 
 /**
- * ProcessContainer-specific network settings (Windows).
+ * Proxy configuration. Exactly one variant applies.
  */
-export interface ProcessContainerNetwork {
+export interface Proxy {
   /**
-   * Friendly name of the single AppContainer peer allowed to communicate with this container over loopback.
+   * Have wxc launch its own built-in test proxy.
    */
-  allowedPeer?: string | null;
-}
-
-/**
- * Runtime configuration applied to the launched container.
- */
-export interface RuntimeConfig {
+  builtinTestServer?: boolean | null;
   /**
-   * Loopback HTTP/S proxy URL.
+   * External localhost proxy port.
    */
-  networkProxy?: string | null;
+  localhost?: number | null;
+  /**
+   * Proxy URL (parsed into host:port).
+   */
+  url?: string | null;
 }
 
 /**
@@ -608,7 +539,7 @@ export interface MXCConfiguration {
   /**
    * Network access policy. Shared across all backends.
    */
-  network?: NetworkV2 | null;
+  network?: Network | null;
   /**
    * State-aware lifecycle phase. When present, the request is a state-aware request (`sandboxId` is required for non-provision phases); when absent, the request is one-shot.
    */
@@ -621,10 +552,6 @@ export interface MXCConfiguration {
    * ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.
    */
   processContainer?: ProcessContainer | null;
-  /**
-   * Runtime configuration applied to the launched container. Available in schema 0.8 and later.
-   */
-  runtimeConfig?: RuntimeConfig | null;
   /**
    * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
    */

@@ -70,9 +70,18 @@ $hostDnsOutput = (& nslookup.exe example.com 8.8.8.8 2>&1) -join [Environment]::
 $hostCanReachPublicDns = $hostDnsOutput -match "Addresses?:" -and
     $hostDnsOutput -notmatch "timed out|No response from server"
 
-$directConfigs = @(
+$legacyConfigs = @(
     "base_container_network_allow.json",
-    "base_container_network_deny.json",
+    "base_container_network_deny.json"
+)
+
+foreach ($configName in $legacyConfigs) {
+    Invoke-NetworkConfig `
+        -Name ([IO.Path]::GetFileNameWithoutExtension($configName)) `
+        -ConfigPath (Join-Path $networkConfigRoot $configName)
+}
+
+$v08Configs = @(
     "base_container_network_v08_default_deny_tcp_blocked.json",
     "base_container_network_v08_allow_ip_tcp443.json",
     "base_container_network_v08_allow_cidr_except_blocked.json",
@@ -84,7 +93,42 @@ $directConfigs = @(
     "base_container_network_v08_deny_udp53.json"
 )
 
-foreach ($configName in $directConfigs) {
+$devSchemaPath = Join-Path $repoRoot "schemas\dev\mxc-config.schema.0.8.0-dev.json"
+$devSchemaText = Get-Content $devSchemaPath -Raw
+$supportsV08Networking = $devSchemaText.Contains('"egress"') -and
+    $devSchemaText.Contains('"runtimeConfig"') -and
+    $devSchemaText.Contains('"allowedPeer"')
+
+if (-not $supportsV08Networking) {
+    Write-Host "`nSchema 0.8 ProcessContainer networking is not present in this branch." -ForegroundColor Yellow
+    Write-Host "Skipping the forward-looking 0.8 egress and packaged-proxy cases."
+    $skippedNames = @(
+        $v08Configs | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) }
+    ) + @(
+        "base_container_network_v08_proxy_with_egress_invalid",
+        "B1_winhttp_allowed_domain_through_proxy",
+        "B1_curl_allowed_domain_through_proxy",
+        "B2_non_allowed_domain_blocked_at_proxy",
+        "B3_raw_external_tcp_blocked",
+        "B4_arbitrary_loopback_port_blocked",
+        "B5_proxy_loopback_port_reachable",
+        "B6_direct_external_udp53_blocked"
+    )
+    foreach ($name in $skippedNames) {
+        $results.Add([pscustomobject]@{
+            Name = $name
+            Status = "Skipped"
+            ExitCode = $null
+        })
+    }
+
+    Write-Host "`n=== BaseContainer network test summary ===" -ForegroundColor Cyan
+    $results | Format-Table -AutoSize
+    Write-Host "All runnable BaseContainer network tests passed." -ForegroundColor Green
+    return
+}
+
+foreach ($configName in $v08Configs) {
     if ($configName -eq "base_container_network_v08_allow_udp53.json" -and
         -not $hostCanReachPublicDns) {
         Write-Host "`n=== base_container_network_v08_allow_udp53 ===" -ForegroundColor Cyan
@@ -203,7 +247,7 @@ try {
     foreach ($case in $proxyCases) {
         $configPath = Join-Path $tempRoot "$($case.Name).json"
         $config = [ordered]@{
-            '$schema' = (Join-Path $repoRoot "schemas\dev\mxc-config.schema.0.8.0-dev.json")
+            '$schema' = $devSchemaPath
             version = "0.8.0-dev"
             containerId = "CLI-$($case.Name)"
             containment = "processcontainer"

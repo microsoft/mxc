@@ -1,6 +1,11 @@
 # ProcessContainer networking examples
 
-These examples use the schema 0.8 ProcessContainer networking model:
+These forward-looking examples use the schema 0.8 ProcessContainer networking
+model. They are intentionally exempt from the config-schema gate until the
+schema and runtime implementation land. The exemption becomes stale and fails
+CI once the checked-in schema accepts them, which is the signal to remove it.
+This is an additive versioned surface: schema 0.7.0 and earlier remain
+unchanged.
 
 - [`egress-allow-https.json`](egress-allow-https.json) allows one IPv4
   destination on TCP/443 and denies all other egress.
@@ -10,7 +15,8 @@ These examples use the schema 0.8 ProcessContainer networking model:
 - [`proxy.json`](proxy.json) denies direct egress and permits HTTP/S traffic
   only through one loopback AppContainer proxy.
 
-Run an egress example after building `wxc-exec.exe`:
+After the schema 0.8 networking implementation lands, run an egress example
+with:
 
 ```powershell
 src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe `
