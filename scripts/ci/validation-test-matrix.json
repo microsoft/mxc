@@ -10,7 +10,7 @@
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t1",
             "isolation-session",
@@ -23,7 +23,7 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t1",
             "isolation-session",
@@ -42,7 +42,7 @@
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t1",
             "isolation-session",
@@ -55,7 +55,7 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t1",
             "isolation-session",
@@ -73,7 +73,7 @@
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t1",
             "isolation-session"
@@ -82,7 +82,7 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t1",
             "isolation-session"
@@ -110,7 +110,7 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t3",
             "wslc",
@@ -127,7 +127,7 @@
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "1es-mxc-e2e-windows-24h2-pro-x64",
           "backends": [
             "process-t3",
             "wslc",
@@ -139,7 +139,7 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t3",
             "wslc",
@@ -156,7 +156,7 @@
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "1es-mxc-e2e-windows-23h2-enterprise-x64",
           "backends": [
             "process-t3",
             "wslc",
@@ -168,7 +168,7 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "process-t3",
             "wslc",
@@ -195,7 +195,7 @@
         "arm64": {
           "target": "aarch64-unknown-linux-gnu",
           "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "bubblewrap",
             "lxc"
@@ -211,7 +211,7 @@
         "x64": {
           "target": "x86_64-unknown-linux-gnu",
           "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "1es-mxc-e2e-ubuntu-24.04-x64",
           "backends": [
             "bubblewrap",
             "microvm",
@@ -222,7 +222,7 @@
         "arm64": {
           "target": "aarch64-unknown-linux-gnu",
           "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "bubblewrap",
             "lxc"
@@ -238,7 +238,7 @@
         "x64": {
           "target": "x86_64-unknown-linux-gnu",
           "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "1es-mxc-e2e-rhel-10-x64",
           "backends": [
             "bubblewrap",
             "hyperlight",
@@ -248,7 +248,7 @@
         "arm64": {
           "target": "aarch64-unknown-linux-gnu",
           "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "bubblewrap",
             "lxc"
@@ -264,7 +264,7 @@
         "x64": {
           "target": "x86_64-unknown-linux-gnu",
           "artifact": "lxc-binaries-x86_64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "1es-mxc-e2e-debian-13-x64",
           "backends": [
             "bubblewrap",
             "hyperlight",
@@ -274,7 +274,7 @@
         "arm64": {
           "target": "aarch64-unknown-linux-gnu",
           "artifact": "lxc-binaries-aarch64-unknown-linux-gnu",
-          "pool": "placeholder",
+          "pool": "",
           "backends": [
             "bubblewrap",
             "lxc"
