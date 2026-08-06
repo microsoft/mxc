@@ -182,18 +182,33 @@ Apple's Seatbelt evaluates rules with last-match-wins semantics within an
 operation, so denies emitted after allows correctly override them. This
 matches MXC's `denied_paths` contract on every other backend.
 
-A `readwritePaths` entry that targets a per-user Darwin temp/cache leaf —
-`/var/folders/<a>/<b>/T` (`$TMPDIR` / `_CS_DARWIN_USER_TEMP_DIR`), `.../C`
-(`_CS_DARWIN_USER_CACHE_DIR`), or `.../0` (misc), optionally under `/private`
-— is expanded to read-write grants for all three siblings (`.../T`, `.../C`,
-`.../0`). Without this, a grant of only the temp leaf leaves the sibling cache
-directory unwritable and tools that stage there are denied. The expansion is
-strict (only a direct `T`/`C`/`0` child of a genuine two-segment per-user
-container qualifies) and covers *only* those three siblings — the enclosing
-container itself is never granted, so no other directory under it becomes
-writable and an expansion can never reach `/var/folders` or `/`. `deniedPaths`
-still override the expanded grants, so a caller can carve any one sibling back
-out.
+#### `/private` path normalization
+
+On macOS `/etc`, `/tmp`, and `/var` are symlinks into `/private`, and Seatbelt
+evaluates `subpath` filters against the **resolved** path the kernel sees. A
+rule spelled `(subpath "/var/folders/…")` therefore matches nothing — the
+access is checked as `/private/var/folders/…`.
+
+Every caller-supplied path in `readonlyPaths`, `readwritePaths`, and
+`deniedPaths` is consequently rewritten to its `/private` form before being
+emitted. This matters most for `$TMPDIR`: its ordinary spelling is
+`/var/folders/<a>/<b>/T/` (`_CS_DARWIN_USER_TEMP_DIR`), so without the rewrite
+a caller passing `$TMPDIR` straight through would get a grant that silently
+never matches — the profile loads and the access is still denied.
+
+The rewrite is purely lexical and never widens a grant: it replaces only a
+leading whole `/etc`, `/tmp`, or `/var` component, and leaves everything else
+(including paths already spelled under `/private`) untouched. Because it is
+applied to all three lists, the last-match-wins ordering between them stays
+meaningful regardless of which spelling each entry used — a `deniedPaths` entry
+written as `/private/var/...` still overrides a `readwritePaths` entry written
+as `/var/...`, and vice versa.
+
+No path is expanded beyond what the caller named. In particular, granting the
+`$TMPDIR` leaf grants *only* that leaf; the sibling per-user cache
+(`.../C`, `_CS_DARWIN_USER_CACHE_DIR`) and `.../0` (`_CS_DARWIN_USER_DIR`) are
+not implied. A workload that stages under the per-user cache must list that
+directory explicitly.
 
 A baseline of read-only system paths (`/usr/lib`, `/usr/libexec`,
 `/usr/share`, `/System`, `/Library`, `/private/var/db/timezone`,
