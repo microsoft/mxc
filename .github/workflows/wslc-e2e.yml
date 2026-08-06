@@ -80,10 +80,49 @@ jobs:
             Write-Host "wsl.exe NOT found on PATH"
           }
 
+      # Stateful-pool WSL2 preparation. This pool is agentProfile.kind=Stateful, so
+      # the same VM persists across jobs (maxAgentLifetime 7d). WSL2's optional
+      # features are NOT in the base image, so the FIRST job on a fresh VM enables
+      # them via DISM and reboots — a normal running-VM reboot finalizes the
+      # pending features (no sysprep involved, unlike image capture). That reboot
+      # ends this job (expected). A SUBSEQUENT job on the same persisted VM sees
+      # the features Enabled and proceeds. This sidesteps the ephemeral-image
+      # sysprep-reset problem entirely.
+      - name: Prepare WSL2 on stateful VM (enable + reboot if needed)
+        id: prep
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $features = 'Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform'
+          $states = @{}
+          foreach ($f in $features) { $states[$f] = (Get-WindowsOptionalFeature -Online -FeatureName $f).State }
+          $allEnabled = -not (($features | ForEach-Object { $states[$_] -ne 'Enabled' }) -contains $true)
+          if ($allEnabled) {
+            Write-Host "WSL2 features already Enabled on this persisted VM — proceeding."
+            "ready=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          Write-Host "WSL2 features not all enabled: $(($states.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')"
+          $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host "Running elevated: $isAdmin"
+          foreach ($f in $features) {
+            if ($states[$f] -ne 'Enabled') {
+              Write-Host "Enabling $f ..."
+              $p = Start-Process dism.exe -ArgumentList '/online','/enable-feature',"/featurename:$f",'/all','/norestart' -Wait -PassThru -NoNewWindow
+              Write-Host "  dism exit $($p.ExitCode)"
+              if ($p.ExitCode -notin @(0,3010)) { throw "dism enable $f failed ($($p.ExitCode))" }
+            }
+          }
+          "ready=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "::warning::WSL2 features enabled on this stateful VM; rebooting to finalize. This job will end — re-run the workflow and the next job on this persisted VM will have WSL2 ready."
+          shutdown /r /t 15 /c "WSL2 feature finalize reboot (1ES stateful pool)"
+          Start-Sleep -Seconds 180
+
       # setup-rust-toolchain auto-reads rust-toolchain.toml from the repo root
       # only. Surface src/rust-toolchain.toml there so the pinned toolchain is
       # honored. Use PowerShell (bare client image may lack bash).
       - name: Surface toolchain file at repo root
+        if: steps.prep.outputs.ready == 'true'
         shell: powershell
         run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml -Force
 
@@ -93,6 +132,7 @@ jobs:
       # PowerShell; rust-toolchain.toml (surfaced at repo root above) pins
       # channel 1.93, which rustup installs and selects automatically.
       - name: Install Rust toolchain
+        if: steps.prep.outputs.ready == 'true'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -119,20 +159,24 @@ jobs:
           cargo "+$chan" --version
 
       - name: Point cargo at the MxcDependencies feed
+        if: steps.prep.outputs.ready == 'true'
         uses: ./.github/actions/setup-cargo-feed
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.prep.outputs.ready == 'true'
         with:
           workspaces: src -> target
           key: wslc-e2e-v1
 
       - name: Build with WSLC support
+        if: steps.prep.outputs.ready == 'true'
         working-directory: src
         run: cargo build --release --target x86_64-pc-windows-msvc
              --no-default-features --features wslc
 
       - name: Ensure WSL2 runtime
         id: wsl
+        if: steps.prep.outputs.ready == 'true'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
