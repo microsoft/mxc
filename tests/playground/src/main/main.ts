@@ -519,21 +519,21 @@ ipcMain.handle('run-sandbox-raw', (_event, configJson: string, debug: boolean, e
 
   try {
     const config = JSON.parse(configJson);
-    const execPath = resolveExecutablePath();
+    let execPath = resolveExecutablePath();
 
     // MicroVM (nanvixd) requires CWD to be the binary directory
     let workingDir: string | undefined;
     if (config.containment === 'microvm') {
       const fs = require('fs');
-      // Match the SDK's binary discovery layout (sdk/src/platform.ts):
-      // npm-packaged binaries live under sdk/bin/<arch>, local dev builds
-      // under src/target/<triple>/{release,debug}.
+      // Match the SDK's NanVix discovery layout: the explicit companion package
+      // contains a compatible wxc-exec beside the runtime payload; local dev
+      // builds remain under src/target/<triple>/{release,debug}.
       const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
       const triple = process.arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
-      const repoRoot = path.join(__dirname, '..', '..', '..');
+      const repoRoot = path.join(__dirname, '..', '..', '..', '..');
       const candidates = [
         execPath,
-        path.join(repoRoot, 'sdk', 'bin', arch),
+        path.join(repoRoot, 'sdk', 'node', 'companion-packages', 'nanvix-win32-x64'),
         path.join(repoRoot, 'src', 'target', triple, 'release'),
         path.join(repoRoot, 'src', 'target', triple, 'debug'),
         path.join(repoRoot, 'src', 'target', 'release'),
@@ -541,7 +541,12 @@ ipcMain.handle('run-sandbox-raw', (_event, configJson: string, debug: boolean, e
       ].filter(Boolean);
       for (const c of candidates) {
         const dir = c!.endsWith('.exe') ? path.dirname(c!) : c!;
-        if (fs.existsSync(path.join(dir, 'nanvixd.exe'))) {
+        const companionExec = path.join(dir, 'wxc-exec.exe');
+        if (
+          fs.existsSync(companionExec) &&
+          fs.existsSync(path.join(dir, 'nanvixd.exe'))
+        ) {
+          execPath = companionExec;
           workingDir = dir;
           break;
         }
@@ -549,8 +554,8 @@ ipcMain.handle('run-sandbox-raw', (_event, configJson: string, debug: boolean, e
       if (!workingDir) {
         return {
           success: false,
-          error: `nanvixd.exe not found for arch '${arch}'. Looked in: ${candidates.join('; ')}. ` +
-                 `MicroVM requires nanvixd.exe to be co-located with wxc-exec (and CWD must point at it).`,
+          error: `NanVix runtime not found for arch '${arch}'. Looked in: ${candidates.join('; ')}. ` +
+                 `Install @microsoft/mxc-sdk-nanvix-win32-x64 or build with --with-microvm.`,
         };
       }
     }

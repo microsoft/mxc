@@ -83,7 +83,12 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 
 All build scripts:
 1. Build the platform-appropriate Rust binary
-2. Copy the binary into `sdk/node/bin/<arch>/` (for example, `x64` or `arm64`) for SDK bundling
+2. Stage the core binary into the host's per-platform package directory,
+   `sdk/node/platform-packages/<os>-<arch>/` (e.g. `win32-x64`, `linux-arm64`,
+   `darwin-arm64`), which the SDK ships as an `optionalDependency` of the meta
+   `@microsoft/mxc-sdk` package. `build.bat --with-microvm` stages NanVix
+   separately into `sdk/node/companion-packages/nanvix-win32-x64/`; consumers
+   opt in with `npm install @microsoft/mxc-sdk-nanvix-win32-x64`.
 
 3. Build the TypeScript SDK
 

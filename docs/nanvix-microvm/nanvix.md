@@ -16,7 +16,8 @@ via the Windows Hypervisor Platform (WHP) on Windows or KVM on Linux.
 
 - Windows with WHP enabled (`bcdedit /set hypervisorlaunchtype auto`)
 - Nanvix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python3.initrd`, `nanvix_rootfs.img`) placed next to `wxc-exec.exe`
-- Build with `--with-microvm` (`build.bat --with-microvm` or `cargo build -p wxc --features microvm`)
+- SDK consumers: explicitly install `@microsoft/mxc-sdk-nanvix-win32-x64`
+- Source builds: use `--with-microvm` (`build.bat --with-microvm` or `cargo build -p wxc --features microvm`)
 - `--experimental` flag (Nanvix MicroVM is an experimental feature)
 
 ### Linux
@@ -76,6 +77,12 @@ wxc-exec.exe --experimental config.json
 ```
 
 ## SDK Usage
+
+Install the opt-in Windows x64 runtime alongside the SDK:
+
+```bash
+npm install @microsoft/mxc-sdk @microsoft/mxc-sdk-nanvix-win32-x64
+```
 
 Use `spawnSandboxFromConfig` with `usePty: false` for reliable exit codes and
 separate stdout/stderr streams:
