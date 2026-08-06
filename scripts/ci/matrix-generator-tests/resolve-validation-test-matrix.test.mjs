@@ -8,12 +8,12 @@ import {
   readCatalog,
   resolvePlan,
   validateCatalog
-} from '../resolve-test-matrix.mjs';
+} from '../resolve-validation-test-matrix.mjs';
 
 // Tests load a fresh catalog for each case so negative mutations cannot leak
 // into later assertions.
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
-const catalogPath = path.resolve(testDirectory, '..', 'test-matrix.json');
+const catalogPath = path.resolve(testDirectory, '..', 'validation-test-matrix.json');
 
 function catalog() {
   return readCatalog(catalogPath);
@@ -28,14 +28,26 @@ test('catalog validates and contains all five build targets', () => {
   assert.doesNotThrow(() => validateCatalog(catalog()));
 });
 
-test('current rollout enables three PR jobs and scheduled macOS coverage', () => {
+test('trigger categories resolve independently', () => {
   const pr = resolvePlan(catalog(), 'pr');
   const nightly = resolvePlan(catalog(), 'nightly');
   const weekly = resolvePlan(catalog(), 'weekly');
 
-  assert.equal(pr.windows.length + pr.linux.length + pr.macos.length, 3);
-  assert.equal(nightly.windows.length + nightly.linux.length + nightly.macos.length, 1);
-  assert.equal(weekly.windows.length + weekly.linux.length + weekly.macos.length, 2);
+  assert.ok(
+    pr.windows.some(entry => (
+      entry.os === 'windows-canary' && entry.backend === 'process-t1'
+    ))
+  );
+  assert.ok(
+    nightly.linux.some(entry => (
+      entry.os === 'rhel-10.2' && entry.backend === 'bubblewrap'
+    ))
+  );
+  assert.ok(
+    weekly.linux.some(entry => (
+      entry.os === 'debian-13' && entry.backend === 'lxc'
+    ))
+  );
 });
 
 test('macOS rollout uses 26 for PR and nightly with 15 added weekly', () => {
@@ -53,8 +65,7 @@ test('macOS rollout uses 26 for PR and nightly with 15 added weekly', () => {
     { plan: 'nightly', os: 'macos-26', runner: 'macos-26', backend: 'seatbelt' }
   ]);
   assert.deepEqual(resolvePlan(catalog(), 'weekly').macos.map(project), [
-    { plan: 'weekly', os: 'macos-15', runner: 'macos-15', backend: 'seatbelt' },
-    { plan: 'nightly', os: 'macos-26', runner: 'macos-26', backend: 'seatbelt' }
+    { plan: 'weekly', os: 'macos-15', runner: 'macos-15', backend: 'seatbelt' }
   ]);
 });
 
@@ -75,21 +86,60 @@ test('enabled plan deduplicates and runs both macOS versions', () => {
   );
 });
 
-test('weekly includes all enabled nightly combinations', () => {
+test('missing enabled trigger does not affect other plans', () => {
+  const modified = clone(catalog());
+  delete modified.triggers.enabled;
+
+  assert.deepEqual(resolvePlan(modified, 'enabled'), {
+    windows: [],
+    linux: [],
+    macos: []
+  });
+  assert.ok(
+    resolvePlan(modified, 'pr').windows
+      .some(entry => entry.os === 'windows-canary' && entry.backend === 'process-t1')
+  );
+});
+
+test('resolved matrices never emit non-macOS arm64 tests', () => {
+  const modified = clone(catalog());
+  const windowsCanary = modified.platforms
+    .find(platform => platform.id === 'windows-canary');
+  windowsCanary.architectures.x64.backends = windowsCanary.architectures.x64.backends
+    .filter(backend => backend !== 'process-t1');
+  modified.triggers.enabled.push({
+    os: 'windows-canary',
+    backends: ['process-t1']
+  });
+
+  for (const plan of ['pr', 'nightly', 'weekly', 'enabled']) {
+    const resolved = resolvePlan(modified, plan);
+    assert.ok(resolved.windows.every(entry => entry.architecture === 'x64'));
+    assert.ok(resolved.linux.every(entry => entry.architecture === 'x64'));
+    assert.ok(resolved.macos.every(entry => entry.architecture === 'arm64'));
+  }
+});
+
+test('weekly does not inherit nightly combinations', () => {
   const nightly = resolvePlan(catalog(), 'nightly');
   const weekly = resolvePlan(catalog(), 'weekly');
 
   for (const family of ['windows', 'linux', 'macos']) {
-    // The weekly matrix must be a superset, not a separate replacement plan.
-    const weeklyKeys = new Set(
-      weekly[family].map(entry => `${entry.os}|${entry.architecture}|${entry.backend}`)
+    const nightlyKeys = new Set(
+      nightly[family].map(entry => `${entry.os}|${entry.architecture}|${entry.backend}`)
     );
-    for (const entry of nightly[family]) {
-      assert.ok(
-        weeklyKeys.has(`${entry.os}|${entry.architecture}|${entry.backend}`),
-        `weekly is missing ${family} nightly entry ${entry.os}/${entry.backend}`
-      );
-    }
+    const inherited = weekly[family].filter(entry => (
+      nightlyKeys.has(`${entry.os}|${entry.architecture}|${entry.backend}`)
+    ));
+    assert.deepEqual(
+      inherited,
+      [],
+      `${family} weekly entries unexpectedly overlap nightly`
+    );
+    assert.ok(
+      weekly[family].map(entry => `${entry.os}|${entry.architecture}|${entry.backend}`)
+        .every(key => !nightlyKeys.has(key))
+    );
   }
 });
 
@@ -114,42 +164,39 @@ test('arm64 never expands Hyperlight or MicroVM', () => {
   }
 });
 
-test('enabled placeholder handlers are rejected', () => {
+test('all trigger categories omit placeholder handlers', () => {
   const modified = clone(catalog());
-  modified.enabled.push({
-    plan: 'weekly',
+  modified.triggers.enabled.push({
     os: 'ubuntu-24.04',
-    architecture: 'x64',
-    backend: 'hyperlight'
+    backends: ['hyperlight']
   });
-  assert.throws(
-    () => validateCatalog(modified),
-    /enabled entry has no wired handler/
+  assert.doesNotThrow(() => validateCatalog(modified));
+  assert.ok(
+    !resolvePlan(modified, 'enabled').linux
+      .some(entry => entry.backend === 'hyperlight')
   );
 });
 
-test('enabled handlers must support the selected architecture', () => {
-  // WSLC remains in the arm64 capability catalog while its current test
-  // dispatcher is explicitly restricted to x64.
+test('enabled trigger respects handler architecture restrictions', () => {
   const modified = clone(catalog());
-  modified.enabled.push({
-    plan: 'weekly',
+  modified.triggers.enabled.push({
     os: 'windows-24h2',
-    architecture: 'arm64',
-    backend: 'wslc'
+    backends: ['wslc']
   });
-  assert.throws(
-    () => validateCatalog(modified),
-    /enabled entry handler does not support arm64/
+  assert.deepEqual(
+    resolvePlan(modified, 'enabled').windows
+      .filter(entry => entry.os === 'windows-24h2' && entry.backend === 'wslc')
+      .map(entry => entry.architecture),
+    ['x64']
   );
 });
 
-test('duplicate enabled combinations are rejected', () => {
+test('duplicate enabled requests are rejected', () => {
   const modified = clone(catalog());
-  modified.enabled.push(clone(modified.enabled[0]));
+  modified.triggers.enabled.push(clone(modified.triggers.enabled[0]));
   assert.throws(
     () => validateCatalog(modified),
-    /duplicate enabled entry/
+    /duplicate enabled request/
   );
 });
 

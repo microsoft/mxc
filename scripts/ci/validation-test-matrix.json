@@ -523,38 +523,32 @@
           "lxc"
         ]
       }
+    ],
+    "enabled": [
+      {
+        "os": "windows-25h2",
+        "backends": [
+          "process-t3"
+        ]
+      },
+      {
+        "os": "ubuntu-26.04",
+        "backends": [
+          "bubblewrap"
+        ]
+      },
+      {
+        "os": "macos-26",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "macos-15",
+        "backends": [
+          "seatbelt"
+        ]
+      }
     ]
-  },
-  "enabled": [
-    {
-      "plan": "pr",
-      "os": "windows-25h2",
-      "architecture": "x64",
-      "backend": "process-t3"
-    },
-    {
-      "plan": "pr",
-      "os": "ubuntu-26.04",
-      "architecture": "x64",
-      "backend": "bubblewrap"
-    },
-    {
-      "plan": "pr",
-      "os": "macos-26",
-      "architecture": "arm64",
-      "backend": "seatbelt"
-    },
-    {
-      "plan": "nightly",
-      "os": "macos-26",
-      "architecture": "arm64",
-      "backend": "seatbelt"
-    },
-    {
-      "plan": "weekly",
-      "os": "macos-15",
-      "architecture": "arm64",
-      "backend": "seatbelt"
-    }
-  ]
+  }
 }

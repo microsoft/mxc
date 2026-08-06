@@ -46,7 +46,7 @@ delegate to the existing backend test scripts.
 
 The capability map and PR, nightly, and weekly triggers are defined in
 [`../../scripts/ci/test-matrix.json`](../../scripts/ci/test-matrix.json).
-[`../../scripts/ci/resolve-test-matrix.mjs`](../../scripts/ci/resolve-test-matrix.mjs)
+[`../../scripts/ci/resolve-validation-test-matrix.mjs`](../../scripts/ci/resolve-validation-test-matrix.mjs)
 validates that catalog and emits one matrix per OS family. Weekly resolution
 includes both nightly coverage and weekly additions.
 

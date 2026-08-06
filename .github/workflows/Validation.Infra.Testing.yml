@@ -31,7 +31,7 @@ jobs:
 
   test:
     needs: [windows, linux, macos]
-    uses: ./.github/workflows/Test.Matrix.Job.yml
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
       # Exercise every combination currently rolled out, independent of its
       # normal PR/nightly/weekly schedule.

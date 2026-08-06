@@ -10,13 +10,8 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const FAMILIES = ['windows', 'linux', 'macos'];
-const PLANS = ['pr', 'nightly', 'weekly'];
-const RESOLUTION_PLANS = [...PLANS, 'enabled'];
+const PLANS = ['pr', 'nightly', 'weekly', 'enabled'];
 const ARM64_UNSUPPORTED_BACKENDS = new Set(['hyperlight', 'microvm']);
-
-function combinationKey(plan, os, architecture, backend) {
-  return `${plan}|${os}|${architecture}|${backend}`;
-}
 
 function assertNonEmptyString(value, label) {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -124,47 +119,7 @@ export function validateCatalog(catalog) {
     }
   }
 
-  const enabled = new Set();
-  for (const entry of catalog.enabled ?? []) {
-    if (!PLANS.includes(entry.plan)) {
-      throw new Error(`enabled entry has unsupported plan ${entry.plan}`);
-    }
-    const platform = platforms.get(entry.os);
-    const architecture = platform?.architectures?.[entry.architecture];
-    if (!architecture?.backends?.includes(entry.backend)) {
-      throw new Error(
-        `enabled entry is unsupported: ${entry.os}/${entry.architecture}/${entry.backend}`
-      );
-    }
-    const requested = (catalog.triggers?.[entry.plan] ?? [])
-      .some(request => request.os === entry.os && request.backends.includes(entry.backend));
-    if (!requested) {
-      throw new Error(
-        `enabled entry is not present in ${entry.plan}: ${entry.os}/${entry.backend}`
-      );
-    }
-    const handler = catalog.handlers[platform.family][entry.backend];
-    // Capability entries may describe future coverage, but enabled entries
-    // must have an executable dispatcher command for their architecture.
-    if (handler.status !== 'wired' || !handler.command) {
-      throw new Error(
-        `enabled entry has no wired handler: ${entry.os}/${entry.architecture}/${entry.backend}`
-      );
-    }
-    if (handler.architectures && !handler.architectures.includes(entry.architecture)) {
-      throw new Error(
-        `enabled entry handler does not support ${entry.architecture}: `
-        + `${entry.os}/${entry.backend}`
-      );
-    }
-    const key = combinationKey(entry.plan, entry.os, entry.architecture, entry.backend);
-    if (enabled.has(key)) {
-      throw new Error(`duplicate enabled entry: ${key}`);
-    }
-    enabled.add(key);
-  }
-
-  return { platforms, enabled };
+  return { platforms };
 }
 
 export function expandPlan(catalog, plan) {
@@ -172,35 +127,35 @@ export function expandPlan(catalog, plan) {
     throw new Error(`unsupported plan: ${plan}`);
   }
   const { platforms } = validateCatalog(catalog);
-  // Sunday is one run containing the normal nightly set plus weekly additions.
-  const planNames = plan === 'weekly' ? ['nightly', 'weekly'] : [plan];
   const combinations = [];
 
-  for (const planName of planNames) {
-    for (const request of catalog.triggers[planName]) {
-      const platform = platforms.get(request.os);
-      // A trigger is architecture-neutral. Expand it only where the platform's
-      // capability declaration supports the requested backend.
-      for (const [architecture, details] of Object.entries(platform.architectures)) {
-        for (const backend of request.backends) {
-          if (!details.backends.includes(backend)) {
-            continue;
-          }
-          combinations.push({
-            plan: planName,
-            os: platform.id,
-            os_name: platform.displayName,
-            family: platform.family,
-            architecture,
-            target: details.target,
-            artifact: details.artifact,
-            pool: details.pool,
-            runner: details.runner,
-            backend,
-            command: catalog.handlers[platform.family][backend].command,
-            handler_status: catalog.handlers[platform.family][backend].status
-          });
+  for (const request of catalog.triggers?.[plan] ?? []) {
+    const platform = platforms.get(request.os);
+    // A trigger is architecture-neutral. Expand it only where the platform's
+    // capability declaration supports the requested backend.
+    for (const [architecture, details] of Object.entries(platform.architectures)) {
+      for (const backend of request.backends) {
+        if (!details.backends.includes(backend)) {
+          continue;
         }
+        const handler = catalog.handlers[platform.family][backend];
+        if (handler.architectures && !handler.architectures.includes(architecture)) {
+          continue;
+        }
+        combinations.push({
+          plan,
+          os: platform.id,
+          os_name: platform.displayName,
+          family: platform.family,
+          architecture,
+          target: details.target,
+          artifact: details.artifact,
+          pool: details.pool,
+          runner: details.runner,
+          backend,
+          command: handler.command,
+          handler_status: handler.status
+        });
       }
     }
   }
@@ -209,54 +164,15 @@ export function expandPlan(catalog, plan) {
 }
 
 export function resolvePlan(catalog, plan) {
-  if (!RESOLUTION_PLANS.includes(plan)) {
+  if (!PLANS.includes(plan)) {
     throw new Error(`unsupported plan: ${plan}`);
   }
 
-  if (plan === 'enabled') {
-    const { platforms } = validateCatalog(catalog);
-    const matrices = Object.fromEntries(FAMILIES.map(family => [family, []]));
-    const seen = new Set();
-
-    for (const entry of catalog.enabled ?? []) {
-      const key = `${entry.os}|${entry.architecture}|${entry.backend}`;
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-
-      const platform = platforms.get(entry.os);
-      const details = platform.architectures[entry.architecture];
-      const handler = catalog.handlers[platform.family][entry.backend];
-      matrices[platform.family].push({
-        plan,
-        os: platform.id,
-        os_name: platform.displayName,
-        architecture: entry.architecture,
-        target: details.target,
-        artifact: details.artifact,
-        pool: details.pool,
-        runner: details.runner,
-        backend: entry.backend,
-        command: handler.command
-      });
-    }
-
-    sortMatrices(matrices);
-    return matrices;
-  }
-
-  const { enabled } = validateCatalog(catalog);
+  validateCatalog(catalog);
   const matrices = Object.fromEntries(FAMILIES.map(family => [family, []]));
 
   for (const combination of expandPlan(catalog, plan)) {
-    const key = combinationKey(
-      combination.plan,
-      combination.os,
-      combination.architecture,
-      combination.backend
-    );
-    if (enabled.has(key)) {
+    if (combination.handler_status === 'wired' && combination.command) {
       // family selects the workflow job and handler_status is validation-only;
       // neither belongs in the matrix consumed by the runner.
       const { family, handler_status: _, ...matrixEntry } = combination;
@@ -264,8 +180,19 @@ export function resolvePlan(catalog, plan) {
     }
   }
 
+  suppressNonMacArm64(matrices);
   sortMatrices(matrices);
   return matrices;
+}
+
+// Windows and Linux ARM64 hosted VMs currently lack nested virtualization.
+// Keep their catalog entries intact for future enablement, but never emit them
+// until suitable test hosts are available. macOS remains ARM64-only.
+function suppressNonMacArm64(matrices) {
+  for (const family of ['windows', 'linux']) {
+    matrices[family] = matrices[family]
+      .filter(entry => entry.architecture !== 'arm64');
+  }
 }
 
 function sortMatrices(matrices) {
@@ -316,11 +243,11 @@ const currentFile = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === currentFile) {
   try {
     const args = parseArguments(process.argv.slice(2));
-    const defaultCatalog = path.join(path.dirname(currentFile), 'test-matrix.json');
+    const defaultCatalog = path.join(path.dirname(currentFile), 'validation-test-matrix.json');
     const catalog = readCatalog(path.resolve(args.catalog ?? defaultCatalog));
     writeOutputs(resolvePlan(catalog, args.plan));
   } catch (error) {
-    process.stderr.write(`resolve-test-matrix: ${error.message}\n`);
+    process.stderr.write(`resolve-validation-test-matrix: ${error.message}\n`);
     process.exitCode = 1;
   }
 }

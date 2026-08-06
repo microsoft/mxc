@@ -1,4 +1,4 @@
-name: E2E Validation Test Matrix
+name: Create Validation Test Matrix
 
 on:
   workflow_call:
@@ -28,7 +28,7 @@ jobs:
 
       - name: Resolve test combinations
         id: matrix
-        run: node scripts/ci/resolve-test-matrix.mjs --plan "${{ inputs.plan }}"
+        run: node scripts/ci/resolve-validation-test-matrix.mjs --plan "${{ inputs.plan }}"
 
   windows:
     name: ${{ matrix.os }}, ${{ matrix.architecture }}, ${{ matrix.backend }}

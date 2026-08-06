@@ -53,7 +53,7 @@ jobs:
   pr-validation-test-matrix:
     needs: [windows, linux, macos]
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    uses: ./.github/workflows/Test.Matrix.Job.yml
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
       plan: pr
 

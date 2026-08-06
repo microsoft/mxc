@@ -1,4 +1,4 @@
-name: Scheduled E2E Validation Tests
+name: Scheduled Validation Tests
 
 on:
   schedule:
@@ -40,8 +40,16 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
-  test:
-    needs: build-artifacts
-    uses: ./.github/workflows/Test.Matrix.Job.yml
+  test-nightly:
+    needs: [windows, linux, macos]
+    if: github.event_name == 'schedule' || inputs.plan == 'nightly'
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
-      plan: ${{ github.event_name == 'schedule' && github.event.schedule == '0 8 * * 0' && 'weekly' || github.event_name == 'schedule' && 'nightly' || inputs.plan }}
+      plan: nightly
+
+  test-weekly:
+    needs: [windows, linux, macos]
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 0') || inputs.plan == 'weekly'
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
+    with:
+      plan: weekly
