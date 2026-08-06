@@ -7,9 +7,13 @@
 //!   [`ExecutionRequest`](wxc_common::models::ExecutionRequest). It is
 //!   platform-agnostic (pure argument generation) so it compiles and is
 //!   fully unit-tested on every host.
+//! - [`bwrap_version`] probes the host `bwrap` and checks it is new enough to
+//!   understand every flag [`bwrap_command`] emits. Shared by the runner's
+//!   `validate` and the engine's platform-support probe.
 //! - [`bwrap_runner`] is gated to `target_os = "linux"` since it actually
 //!   spawns the `bwrap` binary.
 
 pub mod bwrap_command;
 #[cfg(target_os = "linux")]
 pub mod bwrap_runner;
+pub mod bwrap_version;

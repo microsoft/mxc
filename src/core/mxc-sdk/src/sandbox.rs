@@ -7,6 +7,7 @@
 
 use std::io::{Read, Write};
 
+pub use wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
 
 /// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).
@@ -36,6 +37,8 @@ pub struct Output {
     pub stdout: Vec<u8>,
     /// Everything the child wrote to stderr.
     pub stderr: Vec<u8>,
+    /// Structured outputs produced by optional sandbox features.
+    pub output_metadata: Option<SandboxOutputMetadata>,
 }
 
 /// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox).
@@ -56,6 +59,11 @@ impl Sandbox {
     /// Security warnings emitted while applying the sandbox policy.
     pub fn warnings(&self) -> &[String] {
         self.inner.warnings()
+    }
+
+    /// Structured outputs available after a terminal wait completes.
+    pub fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.inner.output_metadata()
     }
 
     /// Take the child's stdin pipe. Returns `None` after the first call.
@@ -141,11 +149,13 @@ impl Sandbox {
         let stdout = capture(self.inner.take_stdout());
         let stderr = capture(self.inner.take_stderr());
         let outcome = self.wait()?;
+        let output_metadata = self.inner.output_metadata().cloned();
         Ok(Output {
             outcome,
             warnings,
             stdout: stdout.join().unwrap_or_default(),
             stderr: stderr.join().unwrap_or_default(),
+            output_metadata,
         })
     }
 }
@@ -174,11 +184,16 @@ mod tests {
 
     struct FakeProcess {
         warnings: Vec<String>,
+        output_metadata: Option<SandboxOutputMetadata>,
     }
 
     impl SandboxProcess for FakeProcess {
         fn warnings(&self) -> &[String] {
             &self.warnings
+        }
+
+        fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+            self.output_metadata.as_ref()
         }
 
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -215,11 +230,29 @@ mod tests {
         let warning = "permissive mode weakens containment".to_string();
         let sandbox = Sandbox::new(Box::new(FakeProcess {
             warnings: vec![warning.clone()],
+            output_metadata: Some(SandboxOutputMetadata {
+                capture_denials: Some(CaptureDenialsOutput {
+                    kind: CaptureDenialsOutput::KIND.to_string(),
+                    output_path: "denials.json".to_string(),
+                    exit_code: 0,
+                    total_denials: 2,
+                    denied_resources_truncated: false,
+                }),
+            }),
         }));
 
         assert_eq!(sandbox.warnings(), [warning.as_str()]);
 
         let output = sandbox.wait_with_output().expect("wait succeeds");
         assert_eq!(output.warnings, [warning]);
+        assert_eq!(
+            output
+                .output_metadata
+                .unwrap()
+                .capture_denials
+                .unwrap()
+                .total_denials,
+            2
+        );
     }
 }

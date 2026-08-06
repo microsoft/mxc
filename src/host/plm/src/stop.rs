@@ -140,7 +140,10 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         .ok()
         .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
 
-    let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
+    // Discover capability SIDs here, at the CLI boundary, so the parse
+    // itself is deterministic and can be driven with an injected index.
+    let capability_index = crate::extract_caps::discover_capabilities(opts.verbose);
+    let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose, capability_index)?;
 
     write_detection_summary(&parse.valid_access_events, &parse.requested_capabilities);
     write_requested_capabilities_summary(&parse.requested_capabilities, opts.verbose);

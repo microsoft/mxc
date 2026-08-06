@@ -36,6 +36,21 @@ mod lifecycle;
 mod secenv;
 
 #[cfg(target_os = "windows")]
+mod capability_names;
+#[cfg(target_os = "windows")]
+mod etl_decode;
+#[cfg(target_os = "windows")]
+mod extractors;
+#[cfg(target_os = "windows")]
+mod path_norm;
+#[cfg(target_os = "windows")]
+mod tdh_decode;
+
+#[cfg(target_os = "windows")]
+pub use etl_decode::{visit_raw_events, EtlDenialAnalyzer};
+#[cfg(target_os = "windows")]
+pub use extractors::DecodedEventParts;
+#[cfg(target_os = "windows")]
 pub use ffi::{is_learning_mode_api_available, LearningModeApi, LearningModeTraceHandle};
 #[cfg(target_os = "windows")]
 pub use lifecycle::CaptureSession;
@@ -43,7 +58,7 @@ pub use lifecycle::CaptureSession;
 pub use secenv::{
     is_security_environment_api_available, probe_security_environment_exports,
     ProcessSecurityEnvironment, SecurityEnvironmentApi, SecurityEnvironmentExportReport,
-    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 
 /// Errors surfaced while loading or invoking the Learning Mode trace API.

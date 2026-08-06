@@ -87,6 +87,8 @@ stays enforced:
 1. **Developer inner-loop (`--audit`).** A developer runs `wxc-exec --audit`
    with ProcessContainer containment to discover the capabilities and paths
    their process needs. `--audit` is rejected for every other Windows backend.
+   It is also mutually exclusive with `captureDenials`; use
+   `captureDenials.mode: "allow"` for permissive application-driven capture.
    It triggers UAC, injects `permissiveLearningMode`, and drives a WPR/ETW
    permissive-learning-mode trace for the run. This is typically a static
    config the developer iterates on locally.
@@ -115,10 +117,84 @@ Windows-only `captureDenials` config switch drives collecting those events and
 surfacing the resulting denials to the caller. Its `mode` selects how each
 ungranted access is handled while it is recorded:
 
+> **Host requirement.** `captureDenials` requires a feature-enabled Windows
+> build exposing the BaseContainer security-environment and Learning Mode APIs.
+> It is not supported by the AppContainer fallback tiers; unsupported hosts
+> return `backend_unavailable`.
+
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.
 - `mode: "allow"` maps onto `permissiveLearningMode` (allow-and-record)
   — the fleet-auditing flow.
 
-The capture pipeline is delivered incrementally and is documented separately as
-it lands.
+### Output file the caller consumes
+
+After the sandboxed workload exits, MXC decodes the captured denials and writes
+them to a **single JSON file** — the deliverable a host application reads to
+regenerate its sandbox policy:
+
+```json
+{
+  "denials": [
+    {
+      "resource": "C:\\Users\\test\\secret.txt",
+      "resourceType": "file",
+      "accessType": "read",
+      "pid": 1234,
+      "filetime": "132847890123456789"
+    },
+    {
+      "resource": "internetClient",
+      "resourceType": "capability",
+      "accessType": "unknown",
+      "pid": 1234,
+      "filetime": "132847890123512345"
+    }
+  ],
+  "summary": {
+    "exitCode": 0,
+    "totalDenials": 2,
+    "deniedResourcesTruncated": false
+  }
+}
+```
+
+- `denials` is already de-duplicated per `(resource, accessType)`, so
+  `summary.totalDenials` equals `denials.length`.
+- Analysis retains at most 10,000 unique denials and processes at most
+  1,000,000 ETW events. Reaching either bound stops further analysis and sets
+  `summary.deniedResourcesTruncated` to `true`.
+- `resource` is the user-visible identifier for the denied resource,
+  interpreted by `resourceType`: a canonical `C:\…` path for `file`, the
+  AppContainer **capability name** (e.g. `internetClient`) for `capability`,
+  and the raw resource identifier otherwise. Well-known capability SIDs are
+  resolved to their policy name; custom (hashed) capability SIDs that can't be
+  reversed fall back to the `S-1-15-3-…` SID string.
+- `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
+  `accessType` is one of `read`, `write`, `execute`, `unknown`. Capability
+  denials are recorded under `block`; current `allow` traces expose capability
+  checks as empty-`ObjectType` access events that are omitted because they do
+  not carry a stable capability identifier.
+- `filetime` is a decimal string containing the Windows `FILETIME` value, so
+  JavaScript consumers retain all 64 bits without numeric precision loss.
+
+**Locating the file.** Set `captureDenials.outputPath` to name the file
+explicitly (its parent directory must already exist). MXC inserts a unique
+per-run identifier (process id plus random suffix) into the file stem
+(`denials.json` → `denials.<run-id>.json`) so concurrent and sequential
+captures using the same configured path do not collide. If `outputPath` is
+omitted, MXC writes a managed per-run temp file. `wxc-exec` prints **one
+structured pointer line** to its own **stderr** — carrying the *actual* path —
+so CLI callers can locate the deliverable without scanning the filesystem:
+
+```json
+{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
+```
+
+The pointer echoes the file's `summary`; the authoritative record is the file
+itself. In-process Rust callers receive the same information through
+`Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
+C# SDK exposes it through `RunResult.OutputMetadata` and
+`MxcSandboxProcess.OutputMetadata`. The intermediate ETW `.etl` trace is an
+internal, runner-managed temp file that MXC decodes and then deletes — callers
+never see it.
