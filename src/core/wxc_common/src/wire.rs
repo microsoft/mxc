@@ -208,14 +208,20 @@ pub struct ProcessContainer {
     pub capabilities: Option<Vec<String>>,
     /// Windows denial capture. When present, the runner records the sandboxed
     /// process's access attempts to a learning-mode ETL trace for later
-    /// inspection. Requires a host that exposes the learning-mode OS API.
+    /// inspection. Requires a host that exposes the complete official V2
+    /// Learning Mode and process security-environment API set. Cannot be
+    /// combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths`
+    /// additionally requires the V2 deny-support capability.
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
 }
 
 /// Windows denial-capture settings. The presence of the `captureDenials`
-/// object enables capture; all fields are optional.
+/// object enables capture; all fields are optional. Capture is incompatible
+/// with `processContainer.leastPrivilege` and `network.proxy`. Explicit
+/// `filesystem.deniedPaths` requires the host's V2 process security-environment
+/// support query to advertise native deny enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

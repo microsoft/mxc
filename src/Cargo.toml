@@ -11,6 +11,7 @@ members = [
     "core/mxc_build_common",
     "host/plm",
     "core/generated/base_container_specification",
+    "core/generated/process_security_environment_specification",
     "backends/appcontainer/common",
     "backends/windows_sandbox/daemon",
     "backends/windows_sandbox/guest",
@@ -91,7 +92,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Time",
     "Win32_System_SystemServices",
-    "Win32_System_SystemInformation",
+    "Win32_System_WindowsProgramming",
     "Win32_System_JobObjects",
 ] }
 windows-core = "0.62"
@@ -129,6 +130,7 @@ isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 mxc_pty = { path = "core/mxc_pty" }
 flatbuffers = "25"
 sandbox_spec = { path = "core/generated/base_container_specification" }
+process_security_environment_spec = { path = "core/generated/process_security_environment_specification" }
 mxc_telemetry = { path = "mxc_telemetry" }
 widestring = "1"
 url = "2"

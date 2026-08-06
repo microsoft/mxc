@@ -1,0 +1,93 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+//
+// FlatBuffers schema for the BaseContainer sandbox specification used in the
+// CreateProcessSecurityEnvironment Windows API.
+//
+// This is the CPSE wire format. The legacy CPIS path continues to use
+// SandboxSpec.fbs and its "SBOX" file identifier.
+//
+// ---- FlatBuffers Schema Evolution Rules ----
+//
+// Compatible (non-breaking) changes:
+//   - Add new fields to the END of a table (they get the next vtable slot).
+//   - Add new tables, structs, enums, or union members.
+//   - Deprecate a field with (deprecated) - the slot is preserved, readers skip it.
+//   - Rename a field or table (wire format uses slot indices, not names).
+//
+// BREAKING changes (will corrupt existing buffers):
+//   - Remove or reorder fields in a table or struct.
+//   - Change a field's type (e.g. uint32 -> int32, or scalar -> string).
+//   - Change a field's default value.
+//   - Add/remove/reorder values in an enum that is already serialized.
+//   - Change the file_identifier or root_type.
+//   - Change a field from scalar to non-scalar (or vice versa).
+//
+// To machine-check for breaking changes, keep a copy of the last shipped schema
+// (e.g. ProcessSecurityEnvironment.previous.fbs) and run:
+//
+//   flatc --conform ProcessSecurityEnvironment.previous.fbs ProcessSecurityEnvironment.fbs
+//
+// --conform verifies that every field/enum/table in the old schema still exists
+// at the same vtable slot, type, and default in the new schema.
+
+namespace ProcessSecurityEnvironmentLayout;
+
+struct SchemaVersion {
+    major:uint16;
+    minor:uint16;
+}
+
+table ProcessSecurityEnvironment {
+    version:SchemaVersion (required);
+    capabilities:string;
+    disallow_win32k_system_calls:bool = false;
+    ui_restrictions:uint64 = 0;
+    fs_read_write:[string];
+    fs_read_only:[string];
+    fs_deny:[string];
+    network_policy:NetworkPolicy;
+}
+
+table ProxyInfo {
+    url:string;
+}
+
+enum FilterAction : byte { deny, allow }
+enum IpProtocol : byte { any, tcp, udp, icmpv4, icmpv6 }
+
+table IpSubnet {
+    address:string;
+    prefix_length:ubyte = 0;
+}
+
+table DestinationRule {
+    subnet:IpSubnet;
+    except:[IpSubnet];
+}
+
+table PortRule {
+    protocol:IpProtocol = any;
+    port:uint16 = 0;
+    end_port:uint16 = 0;
+}
+
+table EndpointRule {
+    destinations:[DestinationRule];
+    ports:[PortRule];
+}
+
+table EndpointPolicy {
+    default_action:FilterAction = deny;
+    allow:[EndpointRule];
+    deny:[EndpointRule];
+}
+
+table NetworkPolicy {
+    proxy:ProxyInfo;
+    egress:EndpointPolicy;
+    allowed_appcontainer_peer:string;
+}
+
+root_type ProcessSecurityEnvironment;
+file_identifier "PSEC";
