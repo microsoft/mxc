@@ -57,6 +57,7 @@ jobs:
       # build/test steps fail for unrelated reasons (e.g. missing MSVC linker).
       # Best-effort: never fails the job.
       - name: Report WSL2 feature state (image verification)
+        continue-on-error: true
         shell: powershell
         run: |
           $ErrorActionPreference = 'Continue'
@@ -79,6 +80,9 @@ jobs:
           } else {
             Write-Host "wsl.exe NOT found on PATH"
           }
+          # Never fail the job on this diagnostic step (wsl --status exits non-zero
+          # when WSL isn't installed, which would otherwise fail the PowerShell step).
+          exit 0
 
       # Stateful-pool WSL2 preparation. This pool is agentProfile.kind=Stateful, so
       # the same VM persists across jobs (maxAgentLifetime 7d). WSL2's optional
