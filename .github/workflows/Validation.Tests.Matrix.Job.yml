@@ -115,7 +115,9 @@ jobs:
             bubblewrap)
               if ! command -v bwrap >/dev/null 2>&1; then
                 if command -v apt-get >/dev/null 2>&1; then
-                  sudo apt-get update
+                  if ! sudo apt-get update; then
+                    echo "WARNING: apt-get update reported repository errors; continuing with available package indexes." >&2
+                  fi
                   sudo apt-get install -y --no-install-recommends bubblewrap
                 elif command -v dnf >/dev/null 2>&1; then
                   sudo dnf install -y bubblewrap
