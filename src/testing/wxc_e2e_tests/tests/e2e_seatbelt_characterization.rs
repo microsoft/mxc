@@ -268,21 +268,27 @@ fn seatbelt_timeout_kills_before_completion() {
     );
 }
 
-/// Regression test for `/private` normalization of caller-supplied policy
-/// paths.
+/// End-to-end guard for the macOS root-symlink resolution in
+/// `seatbelt_common::profile_builder` (`resolve_macos_root_symlinks`).
 ///
-/// On macOS `/var` is a symlink to `/private/var` and Seatbelt matches
+/// On macOS `/var` is a symlink to `/private/var`, and Seatbelt matches
 /// `subpath` filters against the **resolved** path, so a grant emitted as
 /// `(subpath "/var/folders/…")` matches nothing at all. The ordinary spelling
 /// of `$TMPDIR` (`_CS_DARWIN_USER_TEMP_DIR`) *is* `/var/folders/<a>/<b>/T/`,
-/// so before the profile builder normalized these roots a caller who passed
-/// `$TMPDIR` straight through got a grant that silently never matched.
+/// so without that resolution a caller passing `$TMPDIR` straight through
+/// gets a grant that silently never matches — the profile loads fine and the
+/// access is still denied.
 ///
-/// This test deliberately does **not** canonicalize the path — every other
-/// filesystem test here calls `fs::canonicalize` first, which resolves the
-/// symlink itself and therefore masks the bug. It also covers profile
-/// loadability: if the emitted rules were malformed the sandbox would fail to
-/// launch rather than fail to write.
+/// The resolution itself is unit-tested in the builder; this test exists
+/// because those unit tests assert on the *generated profile text* and so
+/// cannot show that the kernel actually honors it. It covers the two things
+/// only a real sandbox launch can: that the profile still **loads** with the
+/// rewritten rules, and that a write under the un-resolved path genuinely
+/// **succeeds**.
+///
+/// It deliberately does **not** canonicalize the path. Every other filesystem
+/// test in this file calls `fs::canonicalize` first, which resolves the
+/// symlink itself — so none of them would notice this class of bug.
 #[test]
 fn seatbelt_honors_uncanonicalized_var_readwrite_path() {
     if !has_platform_exec() {
