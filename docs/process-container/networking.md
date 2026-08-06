@@ -2,11 +2,15 @@
 
 Implementation companion to the parent [MXC Network Configuration, GA](../sandbox-policy/v2/networking.md) doc, which owns the shared policy schema, the three connectivity models, and the GA goal (model 2, deny-all-except-proxy). This doc covers only how the Windows processcontainer backend enforces those models.
 
-> **Schema version boundary:** Schema 0.7.0 and earlier keep their existing
-> networking shape and behavior unchanged. The `egress`/`ingress`,
-> `runtimeConfig.networkProxy`, and singular
-> `processContainer.network.allowedPeer` fields described here are additions
-> starting in schema 0.8.0.
+| Schema version | Config shape | Proxy setup behavior |
+|---|---|---|
+| 0.7.0 and earlier | Existing `network.proxy` shape remains unchanged | Proxy host must use one of the packaged or unpackaged Windows setups described below |
+| 0.8.0 and later | Adds `egress`/`ingress`, `runtimeConfig.networkProxy`, and singular `processContainer.network.allowedPeer` | Uses the same proxy-host setup and names the single peer in config |
+
+The 0.7.0 compatibility promise applies to the JSON shape. Proxy bring-up has a
+behavioral change so legacy and 0.8 clients use one consistent Windows
+proxy-host security model. Only 0.8 expresses the single peer through
+`processContainer.network.allowedPeer`.
 
 ## 1. What this backend delivers at GA
 
@@ -85,7 +89,7 @@ The caller must:
 
 #### Proxy firewall authorization
 
-| Proxy setup | `allowedPeer` | Firewall authorization |
+| Proxy setup | Schema 0.8 `allowedPeer` | Firewall authorization |
 |---|---|---|
 | Unpackaged AppContainer | [AppContainer profile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile) name | Administrator-installed inbound application rule |
 | Packaged proxy | Package family name | Package-owned `desktop2:Extension Category="windows.firewallRules"` inbound TCP rule |

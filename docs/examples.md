@@ -35,7 +35,9 @@ For a more comprehensive list of examples, look in the examples\ directory.
 
 Starting in schema 0.8, ProcessContainer networking adds IP/CIDR, protocol, and
 port rules. Schema 0.7.0 and earlier retain their existing network config
-unchanged. This example permits only TCP/443 to one destination:
+shape, while legacy proxy bring-up adopts the same packaged or unpackaged
+proxy-host requirements as 0.8. Only 0.8 names the peer with `allowedPeer`.
+This example permits only TCP/443 to one destination:
 
 ```json
 {

@@ -1,8 +1,11 @@
 # ProcessContainer networking examples
 
-> **Versioning:** Schema 0.7.0 and earlier remain unchanged. The examples in
-> this directory describe the additive schema 0.8 networking surface. They are
-> intentionally exempt from schema validation until that surface lands.
+> **Versioning:** Schema 0.7.0 and earlier retain their existing JSON shape,
+> but proxy bring-up now follows the same packaged or unpackaged proxy-host
+> requirements as 0.8. Only 0.8 names the single peer through
+> `processContainer.network.allowedPeer`. The examples in this directory
+> describe the additive schema 0.8 networking surface and remain exempt from
+> schema validation until that surface lands.
 
 ## Examples
 
@@ -30,7 +33,7 @@ start the proxy.
 | Client capability | `privateNetworkClientServer` (added by MXC) |
 | Proxy capabilities | `privateNetworkClientServer`; also `internetClient` for external destinations |
 | Proxy endpoint | Loopback URL matching `runtimeConfig.networkProxy` |
-| Peer identity | Exactly one `processContainer.network.allowedPeer` |
+| Peer identity | Schema 0.8 names exactly one `processContainer.network.allowedPeer`; 0.7 keeps its legacy config shape |
 | Firewall | Inbound authorization for the proxy executable |
 | Lifetime | Start proxy first; keep it alive until the BaseContainer exits |
 | Policy | Proxy mode cannot include direct egress allow/deny rules |
@@ -41,7 +44,7 @@ BaseContainer-to-proxy loopback connection.
 
 ## Supported proxy setups
 
-| Setup | `allowedPeer` | Firewall authorization | Setup authority |
+| Setup | Schema 0.8 `allowedPeer` | Firewall authorization | Setup authority |
 |---|---|---|---|
 | Unpackaged AppContainer proxy | AppContainer profile name | Administrator-installed inbound application rule for the proxy executable | App owner / installer |
 | Packaged proxy | Package family name | Package manifest `windows.firewallRules` declaration | Package |
@@ -52,7 +55,7 @@ BaseContainer-to-proxy loopback connection.
 2. Give the proxy `privateNetworkClientServer`.
 3. Add `internetClient` if the proxy connects externally.
 4. Install an inbound firewall rule for the proxy executable.
-5. Set `allowedPeer` to the AppContainer profile name.
+5. For schema 0.8, set `allowedPeer` to the AppContainer profile name.
 
 Example firewall rule:
 
@@ -73,7 +76,7 @@ Remove the rule when the proxy is uninstalled.
 2. Declare `privateNetworkClientServer` and, when needed, `internetClient`.
 3. Declare an inbound TCP `windows.firewallRules` rule for the executable.
 4. Start the packaged proxy and obtain its loopback port.
-5. Set `allowedPeer` to the package family name.
+5. For schema 0.8, set `allowedPeer` to the package family name.
 6. Set `runtimeConfig.networkProxy` to the proxy loopback URL.
 
 Get the package family name with:
