@@ -31,61 +31,42 @@ For a more comprehensive list of examples, look in the examples\ directory.
 }
 ```
 
-### Network Restricted Execution
+### ProcessContainer Network Egress
+
+Schema 0.8 uses IP/CIDR, protocol, and port rules. This example permits only
+TCP/443 to one destination:
+
 ```json
 {
-  "script": "import urllib.request\nurllib.request.urlopen('https://api.github.com')",
+  "version": "0.8.0-dev",
+  "containment": "processcontainer",
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["api.github.com"]
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{"cidr": "1.1.1.1/32"}],
+          "ports": [{"protocol": "tcp", "port": 443}]
+        }
+      ]
+    }
   }
 }
 ```
 
-### Network Proxy
+See the complete
+[`egress examples`](../tests/examples/processcontainer/networking/README.md)
+for CIDR exceptions, multiple protocols, and explicit deny rules.
 
-Route process-container traffic through a localhost proxy. Supported with the
-`processcontainer` containment backend only. Two mutually exclusive modes are available:
+### ProcessContainer Network Proxy
 
-**External proxy** — connect to an already-running localhost proxy:
+Proxy mode denies direct egress and permits the BaseContainer to communicate
+only with one loopback AppContainer proxy. The proxy must already be running,
+both AppContainers need `privateNetworkClientServer`, and the proxy executable
+needs inbound firewall authorization. A packaged proxy can own that
+authorization through an MSIX/AppX `windows.firewallRules` declaration.
 
-```json
-{
-  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
-  "timeout": 30000,
-  "processContainer": {
-    "name": "CLI-Proxy",
-    "capabilities": ["internetClient"]
-  },
-  "network": {
-    "proxy": { "localhost": 8080 }
-  }
-}
-```
-
-**Builtin test server** — `wxc-exec` launches its own minimal HTTP CONNECT proxy on
-an OS-assigned port (for integration testing only, not production):
-
-```json
-{
-  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
-  "timeout": 30000,
-  "processContainer": {
-    "name": "CLI-BuiltinProxy",
-    "capabilities": ["internetClient"]
-  },
-  "network": {
-    "proxy": { "builtinTestServer": true }
-  }
-}
-```
-
-When `builtinTestServer` is `true`, it must be the only key in the `proxy`
-object. Because it activates a deliberately-permissive, testing-only proxy
-(no auth, no body limits), it is **not** enabled by default: pass the
-`--allow-testing-features` flag to `wxc-exec`/`lxc-exec`/`mxc-exec-mac`. This
-is a separate axis from `--experimental` (which selects experimental backends
-and features). The MXC SDK exposes the same gate as the `allowTestingFeatures`
-spawn option, which must be set to `true` for a policy that uses
-`builtinTestServer`.
+See the
+[`proxy example and setup guide`](../tests/examples/processcontainer/networking/README.md)
+for the complete config, minimal package manifest, launch order, capabilities,
+firewall requirements, and unpackaged alternative.

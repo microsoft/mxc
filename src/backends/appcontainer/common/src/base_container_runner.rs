@@ -20,8 +20,8 @@ use learning_mode_core::{
     write_document, DenialAnalyzer, DenialSummary, DenialsDocument, DenialsOutputPointer,
 };
 use learning_mode_windows::{
-    CaptureSession, EtlDenialAnalyzer, LearningModeApi, SecurityEnvironmentApi,
-    SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    CaptureSession, EtlDenialAnalyzer, LearningModeApi, ProcessSecurityEnvironment,
+    SecurityEnvironmentApi, SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 
 use windows::Win32::Foundation::{
@@ -49,9 +49,15 @@ use crate::launch_diagnostics::{
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use process_security_environment_spec::process_security_environment_layout::{
-    finish_process_security_environment_buffer, EndpointPolicy, EndpointPolicyArgs, FilterAction,
-    NetworkPolicy as PsecNetworkPolicy, NetworkPolicyArgs as PsecNetworkPolicyArgs,
-    ProcessSecurityEnvironment, ProcessSecurityEnvironmentArgs, SchemaVersion,
+    finish_process_security_environment_buffer, DestinationRule as PsecDestinationRule,
+    DestinationRuleArgs as PsecDestinationRuleArgs, EndpointPolicy, EndpointPolicyArgs,
+    EndpointRule as PsecEndpointRule, EndpointRuleArgs as PsecEndpointRuleArgs,
+    FilterAction as PsecFilterAction, IpProtocol as PsecIpProtocol, IpSubnet as PsecIpSubnet,
+    IpSubnetArgs as PsecIpSubnetArgs, NetworkPolicy as PsecNetworkPolicy,
+    NetworkPolicyArgs as PsecNetworkPolicyArgs, PortRule as PsecPortRule,
+    PortRuleArgs as PsecPortRuleArgs, ProcessSecurityEnvironment as PsecSpecification,
+    ProcessSecurityEnvironmentArgs as PsecSpecificationArgs, ProxyInfo as PsecProxyInfo,
+    ProxyInfoArgs as PsecProxyInfoArgs, SchemaVersion,
 };
 use sandbox_spec::base_container_layout::{
     endpoint_policy, endpoint_policyArgs, finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs,
@@ -64,7 +70,7 @@ use wxc_common::log_symbols::{
 use wxc_common::logger::Logger;
 use wxc_common::models::{
     CaptureDenialsOutput, ContainerPolicy, ExecutionRequest, FailurePhase, NetworkEnforcementMode,
-    NetworkPolicy, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+    NetworkPolicy, Protocol, ProxyAddress, RuleAction, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -374,6 +380,22 @@ fn run_sandbox_cleanup(
 }
 
 impl BaseContainerRunner {
+    fn uses_process_security_environment(request: &ExecutionRequest) -> bool {
+        let mut components = request
+            .schema_version
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.');
+        let major = components
+            .next()
+            .and_then(|value| value.parse::<u64>().ok());
+        let minor = components
+            .next()
+            .and_then(|value| value.parse::<u64>().ok());
+        matches!((major, minor), (Some(major), Some(minor)) if major > 0 || minor >= 8)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -560,6 +582,10 @@ impl BaseContainerRunner {
         builder: &mut flatbuffers::FlatBufferBuilder<'a>,
         policy: &ContainerPolicy,
     ) -> flatbuffers::WIPOffset<FbsNetworkPolicy<'a>> {
+        let allowed_appcontainer_peer = policy
+            .allowed_appcontainer_peer
+            .as_ref()
+            .map(|peer| builder.create_string(peer));
         if policy.network_proxy.is_enabled() {
             let proxy = policy.network_proxy.address.as_ref().map(|address| {
                 let url = builder.create_string(&address.to_url());
@@ -570,6 +596,7 @@ impl BaseContainerRunner {
                 builder,
                 &NetworkPolicyArgs {
                     proxy,
+                    allowed_appcontainer_peer,
                     ..Default::default()
                 },
             );
@@ -591,9 +618,117 @@ impl BaseContainerRunner {
             builder,
             &NetworkPolicyArgs {
                 egress: Some(egress),
+                allowed_appcontainer_peer,
                 ..Default::default()
             },
         )
+    }
+
+    fn cidr_parts(cidr: &str) -> (&str, u8) {
+        match cidr.split_once('/') {
+            Some((address, prefix)) => (
+                address,
+                prefix
+                    .parse()
+                    .expect("network CIDRs are validated by the config parser"),
+            ),
+            None if cidr.contains(':') => (cidr, 128),
+            None => (cidr, 32),
+        }
+    }
+
+    fn build_psec_subnet<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        cidr: &str,
+    ) -> flatbuffers::WIPOffset<PsecIpSubnet<'a>> {
+        let (address, prefix_length) = Self::cidr_parts(cidr);
+        let address = builder.create_string(address);
+        PsecIpSubnet::create(
+            builder,
+            &PsecIpSubnetArgs {
+                address: Some(address),
+                prefix_length,
+            },
+        )
+    }
+
+    fn build_psec_endpoint_rules<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        policy: &ContainerPolicy,
+        action: RuleAction,
+    ) -> Option<
+        flatbuffers::WIPOffset<
+            flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<PsecEndpointRule<'a>>>,
+        >,
+    > {
+        let mut endpoint_rules = Vec::new();
+        for rule in policy
+            .egress_rules
+            .iter()
+            .filter(|rule| rule.action == action)
+        {
+            for destination in &rule.destinations {
+                let subnet = Self::build_psec_subnet(builder, &destination.cidr);
+                let except = if destination.except.is_empty() {
+                    None
+                } else {
+                    let except_subnets = destination
+                        .except
+                        .iter()
+                        .map(|cidr| Self::build_psec_subnet(builder, cidr))
+                        .collect::<Vec<_>>();
+                    Some(builder.create_vector(&except_subnets))
+                };
+                let destination = PsecDestinationRule::create(
+                    builder,
+                    &PsecDestinationRuleArgs {
+                        subnet: Some(subnet),
+                        except,
+                    },
+                );
+                let destinations = builder.create_vector(&[destination]);
+
+                let ports = if rule.ports.is_empty() {
+                    None
+                } else {
+                    let destination_is_v6 = rule
+                        .destinations
+                        .first()
+                        .is_some_and(|destination| destination.cidr.contains(':'));
+                    let ports = rule
+                        .ports
+                        .iter()
+                        .map(|port| {
+                            let protocol = match port.protocol {
+                                Protocol::Tcp => PsecIpProtocol::tcp,
+                                Protocol::Udp => PsecIpProtocol::udp,
+                                Protocol::Icmp if destination_is_v6 => PsecIpProtocol::icmpv6,
+                                Protocol::Icmp => PsecIpProtocol::icmpv4,
+                                Protocol::Any => PsecIpProtocol::any,
+                            };
+                            PsecPortRule::create(
+                                builder,
+                                &PsecPortRuleArgs {
+                                    protocol,
+                                    port: port.port.unwrap_or(0),
+                                    end_port: port.end_port.unwrap_or(0),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    Some(builder.create_vector(&ports))
+                };
+                endpoint_rules.push(PsecEndpointRule::create(
+                    builder,
+                    &PsecEndpointRuleArgs {
+                        destinations: Some(destinations),
+                        ports,
+                    },
+                ));
+            }
+        }
+
+        (!endpoint_rules.is_empty()).then(|| builder.create_vector(&endpoint_rules))
     }
 
     /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
@@ -689,6 +824,22 @@ impl BaseContainerRunner {
     }
 
     fn needs_internet_client(request: &ExecutionRequest) -> bool {
+        if Self::uses_process_security_environment(request)
+            && !request.policy.network_proxy.is_enabled()
+            && (request.policy.default_network_policy == NetworkPolicy::Allow
+                || request
+                    .policy
+                    .egress_rules
+                    .iter()
+                    .any(|rule| rule.action == RuleAction::Allow))
+        {
+            return !request
+                .policy
+                .capabilities
+                .iter()
+                .any(|capability| capability == "internetClient");
+        }
+
         let use_caps_for_network = matches!(
             request.policy.network_enforcement_mode,
             NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
@@ -710,6 +861,13 @@ impl BaseContainerRunner {
         if Self::needs_internet_client(request) {
             caps.push("internetClient".to_string());
         }
+        if request.policy.allowed_appcontainer_peer.is_some()
+            && !caps
+                .iter()
+                .any(|capability| capability == "privateNetworkClientServer")
+        {
+            caps.push("privateNetworkClientServer".to_string());
+        }
         caps
     }
 
@@ -719,18 +877,11 @@ impl BaseContainerRunner {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
         let version = SchemaVersion::new(1, 0);
 
-        let needs_internet_client = Self::needs_internet_client(request);
-        let capabilities = if request.policy.capabilities.is_empty() && !needs_internet_client {
+        let caps = Self::effective_capabilities(request);
+        let capabilities = if caps.is_empty() {
             None
         } else {
-            let mut capabilities = request.policy.capabilities.join(",");
-            if needs_internet_client {
-                if !capabilities.is_empty() {
-                    capabilities.push(',');
-                }
-                capabilities.push_str("internetClient");
-            }
-            Some(builder.create_string(&capabilities))
+            Some(builder.create_string(&caps.join(",")))
         };
 
         let fs_read_write = create_string_vector(&mut builder, &request.policy.readwrite_paths);
@@ -738,21 +889,40 @@ impl BaseContainerRunner {
         let fs_deny = create_string_vector(&mut builder, &request.policy.denied_paths);
 
         let default_action = match request.policy.default_network_policy {
-            NetworkPolicy::Allow => FilterAction::allow,
-            NetworkPolicy::Block => FilterAction::deny,
+            NetworkPolicy::Allow => PsecFilterAction::allow,
+            NetworkPolicy::Block => PsecFilterAction::deny,
         };
+        let allow =
+            Self::build_psec_endpoint_rules(&mut builder, &request.policy, RuleAction::Allow);
+        let deny = Self::build_psec_endpoint_rules(&mut builder, &request.policy, RuleAction::Deny);
         let egress = EndpointPolicy::create(
             &mut builder,
             &EndpointPolicyArgs {
                 default_action,
-                ..Default::default()
+                allow,
+                deny,
             },
         );
+        let proxy = request
+            .policy
+            .network_proxy
+            .address
+            .as_ref()
+            .map(|address| {
+                let url = builder.create_string(&address.to_url());
+                PsecProxyInfo::create(&mut builder, &PsecProxyInfoArgs { url: Some(url) })
+            });
+        let allowed_appcontainer_peer = request
+            .policy
+            .allowed_appcontainer_peer
+            .as_ref()
+            .map(|peer| builder.create_string(peer));
         let network_policy = Some(PsecNetworkPolicy::create(
             &mut builder,
             &PsecNetworkPolicyArgs {
-                egress: Some(egress),
-                ..Default::default()
+                proxy,
+                egress: (!request.policy.network_proxy.is_enabled()).then_some(egress),
+                allowed_appcontainer_peer,
             },
         ));
 
@@ -763,9 +933,9 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
-        let spec = ProcessSecurityEnvironment::create(
+        let spec = PsecSpecification::create(
             &mut builder,
-            &ProcessSecurityEnvironmentArgs {
+            &PsecSpecificationArgs {
                 version: Some(&version),
                 capabilities,
                 disallow_win32k_system_calls: request.policy.ui.disable,
@@ -1011,7 +1181,8 @@ impl BaseContainerRunner {
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
 
         let capture_denials = request.policy.capture_denials.clone();
-        let spec_bytes = if capture_denials.is_none() {
+        let use_process_security_environment = Self::uses_process_security_environment(&request);
+        let spec_bytes = if !use_process_security_environment {
             let bytes = Self::build_sandbox_spec(&request);
             Self::log_sandbox_spec(&bytes, logger);
             Some(bytes)
@@ -1022,14 +1193,13 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let capture_spec_bytes = capture_denials
-            .as_ref()
-            .map(|_| Self::build_process_security_environment_spec(&request));
-        if let Some(capture_spec) = capture_spec_bytes.as_ref() {
+        let process_security_environment_spec = use_process_security_environment
+            .then(|| Self::build_process_security_environment_spec(&request));
+        if let Some(psec_spec) = process_security_environment_spec.as_ref() {
             let _ = writeln!(
                 logger,
                 "process security environment spec built (PSEC 1.0, {} bytes)",
-                capture_spec.len()
+                psec_spec.len()
             );
         }
 
@@ -1299,18 +1469,32 @@ impl BaseContainerRunner {
         // The one-shot API supplies its own default when this is NULL, but the
         // attribute-based CreateProcessW capture path must receive an explicit
         // clean block or it would inherit all wxc-exec process variables.
-        let env_block: Option<Vec<u16>> = if request.env.is_empty() {
-            if capture_denials.is_some() {
-                let entries =
-                    crate::appcontainer_runner::create_default_env_entries().map_err(|error| {
+        let env_block: Option<Vec<u16>> = if use_process_security_environment {
+            let base_env = if request.env.is_empty() {
+                crate::appcontainer_runner::create_default_env_entries()
+                    .map_err(|error| {
                         ScriptResponse::error(&format!(
-                            "captureDenials failed to create a clean child environment: {error}"
+                            "failed to create a clean child environment: {error}"
                         ))
-                    })?;
-                Some(crate::appcontainer_runner::encode_env_block(&entries))
+                    })?
+                    .into_iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>()
             } else {
-                None
-            }
+                request.env.clone()
+            };
+            let effective_env = request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|address| {
+                    wxc_common::proxy_env::apply_cooperative_proxy_env(&base_env, &address.to_url())
+                })
+                .unwrap_or(base_env);
+            Some(encode_env_block(&effective_env))
+        } else if request.env.is_empty() {
+            None
         } else {
             Some(encode_env_block(&request.env))
         };
@@ -1380,8 +1564,9 @@ impl BaseContainerRunner {
         // On any early return below, `capture_session` drops and its Drop
         // discards the trace and closes the environment (no broker leak).
         let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
+        let mut process_security_environment: Option<ProcessSecurityEnvironment> = None;
         if capture_denials.is_some() {
-            let capture_spec = capture_spec_bytes
+            let capture_spec = process_security_environment_spec
                 .as_deref()
                 .expect("capture spec is initialized with captureDenials");
             match self
@@ -1413,10 +1598,37 @@ impl BaseContainerRunner {
                     });
                 }
             }
+        } else if use_process_security_environment {
+            let psec_spec = process_security_environment_spec
+                .as_deref()
+                .expect("PSEC specification is initialized for schema 0.8");
+            let api = SecurityEnvironmentApi::load().map_err(|error| ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&format!(
+                    "process security-environment API unavailable: {error}"
+                ))
+            })?;
+            process_security_environment = Some(
+                api.create(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+                    .map_err(|error| {
+                        ScriptResponse::error(&format!(
+                            "CreateProcessSecurityEnvironment failed: {error}"
+                        ))
+                    })?,
+            );
         }
 
         // The launch yields (api_return_code, last_win32_error_on_failure).
-        let (success, last_error, launch_api_name) = if let Some(session) = capture_session.as_ref()
+        let process_security_environment_handle = capture_session
+            .as_ref()
+            .map(|session| session.environment())
+            .or_else(|| {
+                process_security_environment
+                    .as_ref()
+                    .map(|environment| environment.raw())
+            });
+        let (success, last_error, launch_api_name) = if let Some(environment) =
+            process_security_environment_handle
         {
             // Single-attempt in-environment launch. The learning-mode security
             // environment is attached as a process-thread attribute; the
@@ -1429,7 +1641,7 @@ impl BaseContainerRunner {
             };
             let extended_startup = match SecurityEnvironmentStartupInfo::new(
                 si,
-                session.environment(),
+                environment,
                 &inherited_handles,
             ) {
                 Ok(startup) => startup,
@@ -1721,6 +1933,7 @@ impl BaseContainerRunner {
             sid_string,
             proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
             capture_session,
+            process_security_environment,
             capture_etl_path,
             capture_output_path,
         })
@@ -1753,6 +1966,9 @@ struct BaseChild {
     /// is configured and the OS API is available). Sealed in `run_teardown`
     /// after the child exits.
     capture_session: Option<Box<dyn CaptureSessionOps>>,
+    /// Non-capture PSEC environment used by schema 0.8 requests. Kept alive
+    /// until the child exits, then closed by RAII.
+    process_security_environment: Option<ProcessSecurityEnvironment>,
     /// Internal runner-managed temp `.etl` the broker seals into. Decoded
     /// then deleted in `run_teardown`. `Some` iff `capture_session` is `Some`.
     capture_etl_path: Option<PathBuf>,
@@ -1764,18 +1980,11 @@ struct BaseChild {
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         let capture_denials = request.policy.capture_denials.is_some();
-        if capture_denials && request.policy.least_privilege_mode {
+        if Self::uses_process_security_environment(request) && request.policy.least_privilege_mode {
             return Err(ScriptResponse::error(
-                "processContainer.captureDenials cannot be combined with \
+                "schema 0.8 process containers cannot be combined with \
                  processContainer.leastPrivilege because the Windows process \
                  security-environment contract does not support LPAC tokens",
-            ));
-        }
-        if capture_denials && request.policy.network_proxy.is_enabled() {
-            return Err(ScriptResponse::error(
-                "processContainer.captureDenials cannot be combined with network.proxy \
-                 until the V2 process-security-environment path can supply the required \
-                 proxy AppContainer peer identity",
             ));
         }
         if capture_denials {
@@ -1894,6 +2103,8 @@ struct BaseContainerSandboxProcess {
     /// Live learning-mode capture session, moved from the `BaseChild`. Sealed
     /// in `run_teardown` once the child has exited and been reaped.
     capture_session: Option<Box<dyn CaptureSessionOps>>,
+    /// Live schema 0.8 process security environment for non-capture launches.
+    process_security_environment: Option<ProcessSecurityEnvironment>,
     /// Internal runner-managed temp `.etl` the broker seals into.
     capture_etl_path: Option<PathBuf>,
     /// Resolved JSON denials deliverable path.
@@ -1938,6 +2149,7 @@ impl BaseContainerSandboxProcess {
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
             teardown_result: None,
             capture_session: child.capture_session.take(),
+            process_security_environment: child.process_security_environment.take(),
             capture_etl_path: child.capture_etl_path.take(),
             capture_output_path: child.capture_output_path.take(),
             last_exit_code: None,
@@ -1996,6 +2208,7 @@ impl BaseContainerSandboxProcess {
         } else {
             Ok(None)
         };
+        drop(self.process_security_environment.take());
 
         if self.destroy_on_exit {
             run_sandbox_cleanup(
@@ -2865,7 +3078,7 @@ mod tests {
             .network_policy()
             .and_then(|policy| policy.egress())
             .expect("PSEC must carry an explicit egress default");
-        assert_eq!(egress.default_action(), FilterAction::deny);
+        assert_eq!(egress.default_action(), PsecFilterAction::deny);
         assert!(egress.allow().is_none());
         assert!(egress.deny().is_none());
     }
@@ -2882,7 +3095,7 @@ mod tests {
             .and_then(|policy| policy.egress())
             .expect("PSEC must carry an explicit egress default");
 
-        assert_eq!(egress.default_action(), FilterAction::allow);
+        assert_eq!(egress.default_action(), PsecFilterAction::allow);
         assert_eq!(spec.capabilities(), Some("internetClient"));
     }
 
@@ -3053,6 +3266,29 @@ mod tests {
         let proxy = net.proxy().expect("proxy should be set");
         assert_eq!(proxy.url(), Some("http://127.0.0.1:8080"));
         assert!(net.egress().is_none());
+    }
+
+    #[test]
+    fn build_psec_proxy_adds_private_network_capability_for_peer() {
+        use wxc_common::models::ProxyAddress;
+
+        let mut request = ExecutionRequest::default();
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        request.policy.allowed_appcontainer_peer = Some("mxc-test-proxy".to_string());
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let network = spec.network_policy().expect("network policy should be set");
+
+        assert_eq!(spec.capabilities(), Some("privateNetworkClientServer"));
+        assert_eq!(network.allowed_appcontainer_peer(), Some("mxc-test-proxy"));
+        assert_eq!(
+            network.proxy().and_then(|proxy| proxy.url()),
+            Some("http://127.0.0.1:8080")
+        );
     }
 
     #[test]
@@ -3230,6 +3466,7 @@ mod tests {
     fn validate_runner_rejects_capture_denials_with_least_privilege() {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest::default();
+        request.schema_version = "0.8.0-alpha".to_string();
         request.policy.capture_denials = Some(Default::default());
         request.policy.least_privilege_mode = true;
 
@@ -3241,19 +3478,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_rejects_capture_denials_with_proxy() {
+    fn validate_runner_accepts_v2_proxy_with_peer() {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest::default();
-        request.policy.capture_denials = Some(Default::default());
+        request.schema_version = "0.8.0-alpha".to_string();
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
+        request.policy.allowed_appcontainer_peer = Some("mxc-test-proxy".to_string());
 
-        let error = runner
+        runner
             .validate(&request)
-            .expect_err("V2 capture proxy requires peer identity plumbing");
-
-        assert!(error.error_message.contains("network.proxy"));
+            .expect("schema 0.8 PSEC supports proxy plus allowed peer");
     }
 }

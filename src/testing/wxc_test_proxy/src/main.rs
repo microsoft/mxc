@@ -31,6 +31,14 @@ struct Cli {
     /// PID of the parent process — proxy exits if the parent dies.
     #[arg(long = "parent-pid")]
     parent_pid: u32,
+
+    /// Destination hostname to allow. May be repeated; omitted means allow all.
+    #[arg(long = "allow-host")]
+    allow_hosts: Vec<String>,
+
+    /// Exit when this file appears. Intended for AppContainer integration tests.
+    #[arg(long = "shutdown-file")]
+    shutdown_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -42,7 +50,7 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let port = proxy::start().await;
+    let port = proxy::start(cli.allow_hosts).await;
     eprintln!("[wxc-test-proxy] Listening on 127.0.0.1:{}", port);
 
     if let Err(err) = fs::write(&cli.ready_file, port.to_string()) {
@@ -54,12 +62,27 @@ async fn main() {
         std::process::exit(1);
     }
 
-    wait_for_shutdown(&cli.cleanup_event, cli.parent_pid);
+    wait_for_shutdown(
+        &cli.cleanup_event,
+        cli.parent_pid,
+        cli.shutdown_file.as_deref(),
+    );
     eprintln!("[wxc-test-proxy] Shutting down.");
 }
 
 /// Block until the cleanup event is signaled or the parent process exits.
-fn wait_for_shutdown(event_name: &str, parent_pid: u32) {
+fn wait_for_shutdown(event_name: &str, parent_pid: u32, shutdown_file: Option<&std::path::Path>) {
+    if let Some(shutdown_file) = shutdown_file {
+        while !shutdown_file.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        eprintln!(
+            "[wxc-test-proxy] Shutdown file detected: {}",
+            shutdown_file.display()
+        );
+        return;
+    }
+
     use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
         OpenEventW, OpenProcess, WaitForMultipleObjects, PROCESS_SYNCHRONIZE,

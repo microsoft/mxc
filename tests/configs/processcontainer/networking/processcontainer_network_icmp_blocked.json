@@ -1,9 +1,9 @@
 {
   "version": "0.8.0-alpha",
-  "containerId": "CLI-ProcessContainer-Network-DnsBlocked",
+  "containerId": "CLI-ProcessContainer-Network-IcmpBlocked",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"nslookup -timeout=2 example.com 1.1.1.1 >nul 2>&1 && (echo LEAK:dns&exit 1) || (echo OK:dns_blocked&exit 0)\"",
+    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"ping -n 1 -w 3000 1.1.1.1 >nul 2>&1 && (echo LEAK:icmp&exit 1) || (echo OK:icmp_blocked&exit 0)\"",
     "timeout": 30000
   },
   "filesystem": {
@@ -15,8 +15,9 @@
     ]
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "capabilities"
+    "egress": {
+      "default": "deny"
+    }
   },
   "ui": {
     "disable": false

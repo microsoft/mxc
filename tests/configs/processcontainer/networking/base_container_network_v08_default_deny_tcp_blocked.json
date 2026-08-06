@@ -1,0 +1,21 @@
+{
+  "$schema": "../../../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "version": "0.8.0-dev",
+  "containerId": "CLI-BaseContainer-v08-Default-Deny",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -NonInteractive -Command \"$client = [Net.Sockets.TcpClient]::new(); try { $connected = $client.ConnectAsync('1.1.1.1', 443).Wait(5000) } catch { $connected = $false } finally { $client.Dispose() }; if (-not $connected) { Write-Output 'OK:default_deny_tcp_blocked'; exit 0 }; Write-Output 'FAIL:default_deny_tcp_connected'; exit 1\"",
+    "timeout": 15000
+  },
+  "filesystem": {
+    "readonlyPaths": ["C:\\Windows"]
+  },
+  "ui": {
+    "disable": false
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  }
+}

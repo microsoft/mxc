@@ -3,6 +3,9 @@
 
 //! Minimal HTTP proxy for testing — supports CONNECT tunnels and HTTP forwarding.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -12,6 +15,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type AllowedHosts = Arc<HashSet<String>>;
 
 fn empty_response(status: StatusCode) -> Response<Full<Bytes>> {
     Response::builder()
@@ -21,7 +25,13 @@ fn empty_response(status: StatusCode) -> Response<Full<Bytes>> {
 }
 
 /// Start the test proxy. Binds to port 0 (OS-assigned) and returns the actual port.
-pub async fn start() -> u16 {
+pub async fn start(allow_hosts: Vec<String>) -> u16 {
+    let allowed_hosts: AllowedHosts = Arc::new(
+        allow_hosts
+            .into_iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect(),
+    );
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap_or_else(|err| {
@@ -34,12 +44,16 @@ pub async fn start() -> u16 {
     tokio::spawn(async move {
         loop {
             if let Ok((stream, _)) = listener.accept().await {
+                let allowed_hosts = Arc::clone(&allowed_hosts);
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
                     let _ = http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
-                        .serve_connection(io, service_fn(handle_request))
+                        .serve_connection(
+                            io,
+                            service_fn(move |req| handle_request(req, Arc::clone(&allowed_hosts))),
+                        )
                         .with_upgrades()
                         .await;
                 });
@@ -50,21 +64,33 @@ pub async fn start() -> u16 {
     port
 }
 
-async fn handle_request(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, BoxError> {
+async fn handle_request(
+    req: Request<Incoming>,
+    allowed_hosts: AllowedHosts,
+) -> Result<Response<Full<Bytes>>, BoxError> {
     if req.method() == Method::CONNECT {
-        return handle_connect(req).await;
+        return handle_connect(req, &allowed_hosts).await;
     }
 
     // HTTP forwarding — forward GET/POST/etc to the target
-    handle_forward(req).await
+    handle_forward(req, &allowed_hosts).await
 }
 
-async fn handle_connect(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, BoxError> {
-    let authority = req
-        .uri()
-        .authority()
-        .ok_or("CONNECT missing authority")?
-        .to_string();
+fn host_is_allowed(host: &str, allowed_hosts: &HashSet<String>) -> bool {
+    allowed_hosts.is_empty() || allowed_hosts.contains(&host.to_ascii_lowercase())
+}
+
+async fn handle_connect(
+    req: Request<Incoming>,
+    allowed_hosts: &HashSet<String>,
+) -> Result<Response<Full<Bytes>>, BoxError> {
+    let authority = req.uri().authority().ok_or("CONNECT missing authority")?;
+    let host = authority.host();
+    if !host_is_allowed(host, allowed_hosts) {
+        eprintln!("[wxc-test-proxy] blocked CONNECT {}", authority);
+        return Ok(empty_response(StatusCode::FORBIDDEN));
+    }
+    let authority = authority.to_string();
 
     eprintln!("[wxc-test-proxy] CONNECT {}", authority);
 
@@ -98,7 +124,10 @@ async fn handle_connect(req: Request<Incoming>) -> Result<Response<Full<Bytes>>,
     Ok(empty_response(StatusCode::OK))
 }
 
-async fn handle_forward(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, BoxError> {
+async fn handle_forward(
+    req: Request<Incoming>,
+    allowed_hosts: &HashSet<String>,
+) -> Result<Response<Full<Bytes>>, BoxError> {
     let uri = req.uri().clone();
     let method = req.method().clone();
 
@@ -106,6 +135,10 @@ async fn handle_forward(req: Request<Incoming>) -> Result<Response<Full<Bytes>>,
 
     // Extract host from the absolute URI
     let host = uri.host().ok_or("missing host in URI")?;
+    if !host_is_allowed(host, allowed_hosts) {
+        eprintln!("[wxc-test-proxy] blocked {} {}", method, uri);
+        return Ok(empty_response(StatusCode::FORBIDDEN));
+    }
     let port = uri.port_u16().unwrap_or(80);
     let addr = format!("{}:{}", host, port);
 
@@ -165,4 +198,23 @@ async fn handle_forward(req: Request<Incoming>) -> Result<Response<Full<Bytes>>,
     );
 
     Ok(response.body(Full::new(resp_body))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_is_allowed;
+    use std::collections::HashSet;
+
+    #[test]
+    fn empty_allowlist_allows_every_host() {
+        assert!(host_is_allowed("example.com", &HashSet::new()));
+    }
+
+    #[test]
+    fn allowlist_is_case_insensitive_and_exact() {
+        let allowed_hosts = HashSet::from(["example.com".to_string()]);
+
+        assert!(host_is_allowed("EXAMPLE.COM", &allowed_hosts));
+        assert!(!host_is_allowed("www.example.com", &allowed_hosts));
+    }
 }

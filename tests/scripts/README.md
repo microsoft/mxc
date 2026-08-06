@@ -30,6 +30,7 @@ All scripts accept a `-Release` switch to use the release build (default: debug)
 | `run_microvm_tests.ps1` | Full MicroVM E2E suite | WHP enabled, NanVix binaries |
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
+| `run_base_container_network_tests.ps1` | BaseContainer 0.7/0.8 direct-policy and packaged-AppContainer proxy network matrix using `tests\configs\processcontainer\networking` | `wxc-exec.exe`, `wxc-test-proxy.exe`, BaseContainer PSEC APIs, and loose package registration (Developer Mode or trusted developer package policy) |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
@@ -116,7 +117,7 @@ Run them explicitly on capable machines with
 | `test_pwsh_setlocation` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_tests\configs` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_examples` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_processcontainer_proxy` | Requires velocity key 61714527 (BFS deadlock fix) and elevation |
+| `test_processcontainer_proxy` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_on_repeat` | Stress test (loops BFS tests) |
 
 ## MicroVM E2E

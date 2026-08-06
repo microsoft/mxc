@@ -15,8 +15,9 @@
     ]
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "capabilities"
+    "egress": {
+      "default": "deny"
+    }
   },
   "ui": {
     "disable": false

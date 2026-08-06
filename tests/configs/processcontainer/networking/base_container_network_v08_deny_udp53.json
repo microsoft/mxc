@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "version": "0.8.0-dev",
+  "containerId": "CLI-BaseContainer-v08-Deny-UDP53",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -NonInteractive -Command \"$output = (& nslookup.exe example.com 8.8.8.8 2>&1) -join [Environment]::NewLine; if ($output -match 'timed out|No response from server|UnKnown') { Write-Output 'OK:deny_udp53'; exit 0 }; Write-Output 'FAIL:deny_udp53_unexpected_response'; Write-Output $output; exit 1\"",
+    "timeout": 20000
+  },
+  "filesystem": {
+    "readonlyPaths": ["C:\\Windows"]
+  },
+  "ui": {
+    "disable": false
+  },
+  "network": {
+    "egress": {
+      "default": "allow",
+      "deny": [
+        {
+          "to": [{"cidr": "8.8.8.8/32"}],
+          "ports": [{"protocol": "udp", "port": 53}]
+        }
+      ]
+    }
+  }
+}

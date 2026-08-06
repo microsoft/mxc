@@ -1,0 +1,44 @@
+{
+  "$schema": "../../../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "version": "0.8.0-dev",
+  "containerId": "CLI-ProcessContainer-Egress-Exceptions",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -NonInteractive -Command \"$client = [Net.Sockets.TcpClient]::new(); try { $client.Connect('1.1.1.1', 443); Write-Output 'Allowed endpoint reachable' } finally { $client.Dispose() }\"",
+    "timeout": 15000
+  },
+  "filesystem": {
+    "readonlyPaths": ["C:\\Windows"]
+  },
+  "ui": {
+    "disable": false
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "1.1.1.0/24",
+              "except": ["1.1.1.2/32", "1.1.1.3/32"]
+            }
+          ],
+          "ports": [
+            {"protocol": "tcp", "port": 443},
+            {"protocol": "udp", "port": 53}
+          ]
+        }
+      ],
+      "deny": [
+        {
+          "to": [{"cidr": "1.1.1.128/25"}],
+          "ports": [{"protocol": "tcp", "port": 443}]
+        }
+      ]
+    },
+    "ingress": {
+      "hostLoopback": "deny"
+    }
+  }
+}

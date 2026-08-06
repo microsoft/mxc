@@ -1,0 +1,29 @@
+{
+  "$schema": "../../../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "version": "0.8.0-dev",
+  "containerId": "CLI-BaseContainer-v08-Proxy-Egress-Invalid",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "cmd.exe /d /c echo this command must not run",
+    "timeout": 5000
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{"cidr": "1.1.1.1/32"}],
+          "ports": [{"protocol": "tcp", "port": 443}]
+        }
+      ]
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  },
+  "processContainer": {
+    "network": {
+      "allowedPeer": "mxc-test-proxy"
+    }
+  }
+}

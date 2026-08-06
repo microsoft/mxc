@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "version": "0.8.0-dev",
+  "containerId": "CLI-BaseContainer-v08-Allow-Any",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -NonInteractive -Command \"$client = [Net.Sockets.TcpClient]::new(); try { $connected = $client.ConnectAsync('1.1.1.1', 443).Wait(5000) } catch { $connected = $false } finally { $client.Dispose() }; if ($connected) { Write-Output 'OK:allow_any_protocol_tcp443'; exit 0 }; Write-Output 'FAIL:allow_any_protocol_tcp443_blocked'; exit 1\"",
+    "timeout": 15000
+  },
+  "filesystem": {
+    "readonlyPaths": ["C:\\Windows"]
+  },
+  "ui": {
+    "disable": false
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{"cidr": "1.1.1.1/32"}],
+          "ports": [{"protocol": "any", "port": 443}]
+        }
+      ]
+    }
+  }
+}

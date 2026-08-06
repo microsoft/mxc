@@ -1,0 +1,32 @@
+{
+  "$schema": "../../../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "version": "0.8.0-dev",
+  "containerId": "CLI-ProcessContainer-Proxy",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; $request = New-Object -ComObject WinHttp.WinHttpRequest.5.1; $request.Open('GET', 'https://example.com/', $false); $request.Send(); Write-Output $request.Status\"",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readonlyPaths": ["C:\\Windows"]
+  },
+  "ui": {
+    "disable": false
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "hostLoopback": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  },
+  "processContainer": {
+    "network": {
+      "allowedPeer": "Contoso.MxcProxy_1234567890abc"
+    }
+  }
+}

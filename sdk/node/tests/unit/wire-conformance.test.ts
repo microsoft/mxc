@@ -48,7 +48,7 @@ import type {
   ProcessConfig,
   LifecycleConfig,
   FilesystemConfig,
-  NetworkConfig,
+  NetworkV2Config,
   UiConfig,
   ProcessContainerConfig,
   BaseProcessUiConfig,
@@ -66,7 +66,7 @@ import type {
   Process as WireProcess,
   Lifecycle as WireLifecycle,
   Filesystem as WireFilesystem,
-  Network as WireNetwork,
+  NetworkV2 as WireNetwork,
   Ui as WireUi,
   ProcessContainer as WireProcessContainer,
   BaseProcessUi as WireBaseProcessUi,
@@ -77,8 +77,6 @@ import type {
   MXCConfiguration as WireMxcConfig,
   ClipboardPolicy as WireClipboardPolicy,
   Containment as WireContainment,
-  NetworkPolicy as WireNetworkPolicy,
-  NetworkEnforcement as WireNetworkEnforcement,
   UiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
 } from '../../src/generated/wire.js';
@@ -108,12 +106,6 @@ type _Containment = AssertTrue<
 // field the SDK exposes inline is checked for exact equivalence with its wire
 // enum. `NonNullable` strips the generated `| null` so only the value set is
 // compared. A new wire enum value now fails the build until the SDK adds it.
-type _NetDefaultPolicy = AssertTrue<
-  Equivalent<NonNullable<NetworkConfig['defaultPolicy']>, WireNetworkPolicy>
->;
-type _NetEnforcement = AssertTrue<
-  Equivalent<NonNullable<NetworkConfig['enforcementMode']>, WireNetworkEnforcement>
->;
 type _BaseProcessUiIsolation = AssertTrue<
   Equivalent<NonNullable<BaseProcessUiConfig['isolation']>, WireUiIsolation>
 >;
@@ -128,7 +120,7 @@ type _PortProtocol = AssertTrue<
 type _ProcessVals = AssertTrue<Assignable<ProcessConfig, WireProcess>>;
 type _LifecycleVals = AssertTrue<Assignable<LifecycleConfig, WireLifecycle>>;
 type _FilesystemVals = AssertTrue<Assignable<FilesystemConfig, WireFilesystem>>;
-type _NetworkVals = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
+type _NetworkVals = AssertTrue<Assignable<NetworkV2Config, WireNetwork>>;
 type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
 type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
 type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
@@ -160,9 +152,8 @@ type _SeatbeltKeys = AssertTrue<Equivalent<OnlyInPublic<SeatbeltConfig, WireSeat
 // into `lifecycle.preservePolicy`; it is not a wire `filesystem` field.
 type _FilesystemKeys = AssertTrue<Equivalent<OnlyInPublic<FilesystemConfig, WireFilesystem>, 'clearPolicyOnExit'>>;
 
-// `NetworkConfig.removeRulesOnExit` is deprecated (use `lifecycle.preservePolicy`)
-// and not a wire `network` field.
-type _NetworkKeys = AssertTrue<Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>>;
+// The schema 0.8 public network type mirrors the generated GA wire shape.
+type _NetworkKeys = AssertTrue<Equivalent<OnlyInPublic<NetworkV2Config, WireNetwork>, never>>;
 
 // `ProcessContainerConfig.name` is the deprecated AppContainer profile name
 // (superseded by top-level `containerId`); not a wire `processContainer` field.
@@ -180,7 +171,10 @@ type _LxcKeys = AssertTrue<Equivalent<OnlyInPublic<LxcConfig, WireLxc>, 'contain
 //  * key-drift: the only public-but-not-wire root key is `appContainer`, the
 //    deprecated serde alias the schema folds away (so it is absent from the
 //    generated root). A NEW root divergence fails the build.
-type _RootVals = AssertTrue<Assignable<ContainerConfig, WireMxcConfig>>;
+type V2ContainerConfig = Omit<ContainerConfig, 'network'> & {
+  network?: NetworkV2Config;
+};
+type _RootVals = AssertTrue<Assignable<V2ContainerConfig, WireMxcConfig>>;
 type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConfig>, 'appContainer'>>;
 
 // --- reverse key conformance: wire-only fields (review finding F1, gpt-5.5) --
@@ -192,7 +186,7 @@ type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConf
 type _ProcessWireKeys = AssertTrue<Equivalent<OnlyInWire<ProcessConfig, WireProcess>, never>>;
 type _LifecycleWireKeys = AssertTrue<Equivalent<OnlyInWire<LifecycleConfig, WireLifecycle>, never>>;
 type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, WireFilesystem>, never>>;
-type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
+type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkV2Config, WireNetwork>, never>>;
 type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
 type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, never>>;
@@ -224,7 +218,7 @@ type _RootWireKeys = AssertTrue<
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
   _Clipboard, _Containment,
-  _NetDefaultPolicy, _NetEnforcement, _BaseProcessUiIsolation, _PortProtocol,
+  _BaseProcessUiIsolation, _PortProtocol,
   _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
   _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _PortMappingVals,
   _SeatbeltVals, _LxcVals,

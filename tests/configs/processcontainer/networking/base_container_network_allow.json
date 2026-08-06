@@ -1,5 +1,5 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+  "$schema": "../../../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
   "version": "0.7.0-alpha",
   "containerId": "CLI-BaseContainer-Network-Allow",
   "containment": "processcontainer",

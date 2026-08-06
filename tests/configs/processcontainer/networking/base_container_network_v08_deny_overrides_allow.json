@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "version": "0.8.0-dev",
+  "containerId": "CLI-BaseContainer-v08-Deny-Override",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoProfile -NonInteractive -Command \"$client = [Net.Sockets.TcpClient]::new(); try { $connected = $client.ConnectAsync('1.1.1.1', 443).Wait(5000) } catch { $connected = $false } finally { $client.Dispose() }; if (-not $connected) { Write-Output 'OK:deny_overrides_allow'; exit 0 }; Write-Output 'FAIL:deny_override_connected'; exit 1\"",
+    "timeout": 15000
+  },
+  "filesystem": {
+    "readonlyPaths": ["C:\\Windows"]
+  },
+  "ui": {
+    "disable": false
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{"cidr": "1.1.1.0/24"}],
+          "ports": [{"protocol": "tcp", "port": 443}]
+        }
+      ],
+      "deny": [
+        {
+          "to": [{"cidr": "1.1.1.1/32"}],
+          "ports": [{"protocol": "tcp", "port": 443}]
+        }
+      ]
+    }
+  }
+}
