@@ -4,22 +4,22 @@
 # and skip when WHP is absent), WSLC needs WSL2 — which requires nested
 # virtualization — so it can only EXECUTE on a nested-virt-capable 1ES pool.
 #
-# Pool: 1es-mxc-test-2 (REPOSITORY-level, runner group Default; confirmed
-# working). `shell: powershell` because the raw windows-25h2-pro-x64 CLIENT
-# image ships Windows PowerShell 5.1, not pwsh (PS7). Cold-start pickup on the
-# idle Stateless pool is ~10-11 min — the long timeout accounts for that plus
-# an in-image toolchain/WSL setup on first run.
+# Pool: 1es-mxc-e2e-windows-25h2-wsl2 (REPOSITORY-level, microsoft/mxc). Its VMs
+# boot from the windows-25h2-wsl2 1ES Managed Image, which bakes WSL2 in (see
+# below). `shell: powershell` for parity with the sibling client images. Cold-
+# start pickup on the idle Stateless pool is ~10-11 min — the long timeout
+# accounts for that plus an in-image toolchain/WSL setup on first run.
 #
 # IMAGE PREREQUISITES (see docs/wsl/wsl-container-getting-started.md):
-#   The raw client image is a bare desktop. For this workflow to build + run it
-#   needs: git, the Rust/MSVC toolchain, WSL2 with VirtualMachinePlatform
-#   enabled, and the WSLC SDK produced by a `--features wslc` build. Enabling
-#   VirtualMachinePlatform normally needs a reboot, which a Stateless ephemeral
-#   runner cannot do mid-job — so the robust long-term path is a 1ES Managed
-#   Image with WSL2 + VirtualMachinePlatform (and ideally the toolchain) baked
-#   in (the same DISM-at-image-build approach microsoft/ebpf-for-windows uses
-#   for Hyper-V). Every runtime-dependent step below is guarded so the job
-#   degrades to a clean SKIP rather than a hard failure when a prerequisite is
+#   The pool's windows-25h2-wsl2 Managed Image is win11-25h2-pro with a 1ES
+#   provisioning script (.azure-pipelines/1es-images/wsl2/Setup.ps1) that enables
+#   Microsoft-Windows-Subsystem-Linux + VirtualMachinePlatform at image-build
+#   time; 1ES's mandatory post-provisioning reboot activates them, so runner VMs
+#   boot WSL2-ready (the DISM-at-image-build approach microsoft/ebpf-for-windows
+#   uses for Hyper-V). The job still installs git + the Rust/MSVC toolchain and
+#   finishes WSL2 runtime setup (`wsl --update`), and builds the WSLC SDK via a
+#   `--features wslc` build. Every runtime-dependent step below is guarded so the
+#   job degrades to a clean SKIP rather than a hard failure if a prerequisite is
 #   missing.
 # ============================================================================
 name: WSLC E2E Tests
@@ -38,7 +38,7 @@ jobs:
     name: WXC-Exec WSLC
     runs-on:
       - self-hosted
-      - "1ES.Pool=1es-mxc-test-2"
+      - "1ES.Pool=1es-mxc-e2e-windows-25h2-wsl2"
       - "JobId=wslc-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     timeout-minutes: 45
 
