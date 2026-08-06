@@ -678,15 +678,16 @@ impl BaseContainerRunner {
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
-        // Empty falls back to a granted path (see `resolved_working_directory`).
-        let working_directory = request.resolved_working_directory().unwrap_or_default();
-        let cwd_wide;
-        let cwd_ptr = if working_directory.is_empty() {
-            ptr::null()
-        } else {
-            cwd_wide = string_util::to_wide(working_directory);
-            cwd_wide.as_ptr()
-        };
+        // Resolved via the shared helper so both Windows launch paths agree and
+        // neither can pass a NULL cwd (see `working_directory`).
+        let working_directory = crate::working_directory::launch_working_directory(&request);
+        let _ = writeln!(
+            logger,
+            "working directory: {}",
+            working_directory.describe()
+        );
+        let cwd_wide = string_util::to_wide(&working_directory.path);
+        let cwd_ptr = cwd_wide.as_ptr();
 
         // Identity: when destroy_on_exit is true we generate a random ephemeral
         // identity so each sandbox gets a unique, cleanable AppContainer profile.
@@ -1060,7 +1061,10 @@ impl BaseContainerRunner {
                 &request.policy.readonly_paths,
             );
 
-            let extended_error = format!("Experimental_CreateProcessInSandbox failed: {err:?}");
+            let extended_error = format!(
+                "Experimental_CreateProcessInSandbox failed: {err:?} (working directory: {})",
+                working_directory.describe()
+            );
             let _ = writeln!(logger, "Error: {extended_error}");
 
             let _ = writeln!(

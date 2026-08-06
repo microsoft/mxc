@@ -941,14 +941,15 @@ impl AppContainerScriptRunner {
         // --- Build command line ---
         let mut cmd_line_wide = string_util::to_wide(&request.script_code);
 
-        // Empty falls back to a granted path (see `resolved_working_directory`).
-        let working_directory = request.resolved_working_directory().unwrap_or_default();
-        let working_dir_wide = string_util::to_wide(working_directory);
-        let working_dir_pcwstr = if working_directory.is_empty() {
-            PCWSTR::null()
-        } else {
-            PCWSTR(working_dir_wide.as_ptr())
-        };
+        // Resolved via the shared helper so both Windows launch paths agree and
+        // neither can pass a NULL cwd (see `working_directory`).
+        let working_directory = crate::working_directory::launch_working_directory(request);
+        logger.log_line(&format!(
+            "working directory: {}",
+            working_directory.describe()
+        ));
+        let working_dir_wide = string_util::to_wide(&working_directory.path);
+        let working_dir_pcwstr = PCWSTR(working_dir_wide.as_ptr());
 
         // Environment block for the sandboxed child.
         // SECURITY: Never pass NULL (which would inherit the parent process's
@@ -1023,7 +1024,13 @@ impl AppContainerScriptRunner {
                 &mut pi,
             )
         }
-        .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
+        .map_err(|err| {
+            WxcError::Process(format!(
+                "CreateProcessW failed: {} (working directory: {})",
+                err,
+                working_directory.describe()
+            ))
+        })?;
 
         logger.log_line(&format!(
             "Process created successfully (PID: {})",
