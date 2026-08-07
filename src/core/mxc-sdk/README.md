@@ -54,7 +54,10 @@ available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
 
 [`platform_support`] is the Rust port of `getPlatformSupport` — reports host
-support and the available containment backends.
+support and the available containment backends. Each platform probes the
+dependency that actually fails at spawn time: `/usr/bin/sandbox-exec` on macOS,
+a real namespace-creating `bwrap` run on Linux, and the host OS build against
+the 26100 (24H2) floor on Windows.
 
 ## Denial capture (Windows)
 

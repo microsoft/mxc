@@ -68,16 +68,19 @@ type WindowsBuild = { major: number; minor: number } | null;
 function defaultWindowsBuildQuery(): WindowsBuild {
   const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
   const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
-  const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
-  if (!currentBuild || !ubrValue) {
+  if (!currentBuild) {
     return null;
   }
   const major = parseInt(currentBuild, 10);
-  const minor = Number(ubrValue);
-  if (isNaN(major) || isNaN(minor)) {
+  if (isNaN(major)) {
     return null;
   }
-  return { major, minor };
+  // `UBR` is only needed for the IsolationSession minor-build gate, so an
+  // unreadable revision degrades to 0 rather than discarding `CurrentBuild` —
+  // otherwise a missing value would silently bypass the processcontainer
+  // build floor.
+  const minor = Number(queryWindowsRegistry(registryPath, 'UBR'));
+  return { major, minor: isNaN(minor) ? 0 : minor };
 }
 
 let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
@@ -86,6 +89,16 @@ let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
 export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
   windowsBuildQuery = fn ?? defaultWindowsBuildQuery;
 }
+
+/**
+ * Minimum Windows build the `processcontainer` backend supports — 26100
+ * (Windows 11 24H2). This is the product floor documented in the README and in
+ * `docs/process-container/os-version-support.md`.
+ *
+ * Mirrors `MIN_WINDOWS_BUILD` in `src/core/mxc_engine/src/platform.rs` — keep
+ * both in sync.
+ */
+const MIN_PROCESSCONTAINER_BUILD = 26100;
 
 /**
  * Check whether the host supports the IsolationSession backend.
@@ -299,14 +312,38 @@ function computeSupport(): PlatformSupport {
     return support;
   }
 
-  support.isSupported = true;
-  support.availableMethods = ['processcontainer'];
+  // The host build is the real gate on Windows: below the product floor
+  // `processcontainer` fails at spawn rather than at detection. An unreadable
+  // registry leaves the build unknown, which is treated as modern so a
+  // detection failure never declares a supported host unsupported.
+  const build = windowsBuildQuery();
+  const methods: ContainmentBackend[] = [];
+  if (!build || build.major >= MIN_PROCESSCONTAINER_BUILD) {
+    methods.push('processcontainer');
+  }
+  // Windows Sandbox has its own, lower floor, so a host below the
+  // processcontainer floor may still have it. Both it and IsolationSession are
+  // reported when present, but they are experimental-only backends reached by
+  // explicit opt-in, so they cannot carry `isSupported` — that flag is what
+  // guards the default `processcontainer` spawn.
   if (isWindowsSandboxAvailable()) {
-    support.availableMethods.push('windows_sandbox');
+    methods.push('windows_sandbox');
   }
   if (isIsoSessionSupported()) {
-    support.availableMethods.push('isolation_session');
+    methods.push('isolation_session');
   }
+  support.availableMethods = methods;
+
+  if (!methods.includes('processcontainer')) {
+    const alternatives =
+      methods.length > 0 ? ` (experimental backends available: ${methods.join(', ')})` : '';
+    support.reason =
+      `Windows build ${build?.major} is below ${MIN_PROCESSCONTAINER_BUILD}, ` +
+      `the minimum supported build (Windows 11 24H2)${alternatives}`;
+    return support;
+  }
+
+  support.isSupported = true;
   populateIsolationFromProbe(support);
   return support;
 }
@@ -542,7 +579,114 @@ export function _probeBubblewrap(): BubblewrapProbe {
       reason: `Bubblewrap (bwrap) ${version.join('.')} is too old; version ${minVersion} or newer is required`,
     };
   }
+  // A new enough `bwrap` still cannot sandbox if the host forbids it, and
+  // `--version` never creates a namespace, so ask it to build a real one.
+  const sandbox = bwrapSandboxRunner();
+  if (!sandbox.ok) {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) ${version.join('.')} is installed but cannot create a sandbox on this host: ${sandbox.detail}`,
+    };
+  }
   return { available: true };
+}
+
+/**
+ * Arguments for a minimal end-to-end containment probe.
+ *
+ * `bwrap --version` only prints a banner — it never creates a namespace — so
+ * it passes on hosts where unprivileged user namespaces are disabled
+ * (`kernel.unprivileged_userns_clone=0`) or where AppArmor denies `bwrap`
+ * (Ubuntu 23.10+), both of which then fail at every spawn.
+ *
+ * The shape mirrors a real run: the same namespaces the Bubblewrap backend
+ * unshares, plus `--proc` / `--dev`, and `--clearenv` so the payload is
+ * resolved through `execvp`'s built-in `/bin:/usr/bin` default rather than the
+ * caller's `PATH`. Binds use `--ro-bind-try` on the few directories a shell
+ * needs — binding `/` instead would make the probe fail on any host with an
+ * awkward submount, since `bwrap` treats a failed submount remount as fatal.
+ *
+ * Kept in step with the engine's `BWRAP_PROBE_ARGS`
+ * (`src/core/mxc_engine/src/platform.rs`), which is pinned against the
+ * production argument builder by a unit test.
+ */
+const BWRAP_PROBE_ARGS = [
+  '--unshare-user',
+  '--unshare-pid',
+  '--unshare-ipc',
+  '--unshare-uts',
+  '--unshare-net',
+  '--ro-bind-try',
+  '/bin',
+  '/bin',
+  '--ro-bind-try',
+  '/usr/bin',
+  '/usr/bin',
+  '--ro-bind-try',
+  '/lib',
+  '/lib',
+  '--ro-bind-try',
+  '/lib64',
+  '/lib64',
+  '--ro-bind-try',
+  '/usr/lib',
+  '/usr/lib',
+  '--ro-bind-try',
+  '/usr/lib64',
+  '/usr/lib64',
+  '--proc',
+  '/proc',
+  '--dev',
+  '/dev',
+  '--clearenv',
+  '--',
+  'sh',
+  '-c',
+  'exit 0',
+];
+
+/** Outcome of the sandbox probe; `detail` is empty when `ok`. */
+export type BubblewrapSandboxProbe = { ok: boolean; detail: string };
+
+/**
+ * Run {@link BWRAP_PROBE_ARGS}, reporting bwrap's own diagnostic on failure.
+ *
+ * Replaceable in unit tests via {@link _setBwrapSandboxRunner}, so the
+ * version-gate tests can drive `_probeBubblewrap` on a host without `bwrap`.
+ */
+function defaultBwrapSandboxRunner(): BubblewrapSandboxProbe {
+  try {
+    execFileSync('bwrap', BWRAP_PROBE_ARGS, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: BWRAP_VERSION_TIMEOUT_MS,
+    });
+    return { ok: true, detail: '' };
+  } catch (error) {
+    return { ok: false, detail: bwrapFailureDetail(error) };
+  }
+}
+
+let bwrapSandboxRunner: () => BubblewrapSandboxProbe = defaultBwrapSandboxRunner;
+
+/** @internal Test-only: override the Bubblewrap sandbox probe. */
+export function _setBwrapSandboxRunner(fn: (() => BubblewrapSandboxProbe) | null): void {
+  bwrapSandboxRunner = fn ?? defaultBwrapSandboxRunner;
+}
+
+/** Reduce a failed bwrap run to a single length-capped line for a `reason`. */
+function bwrapFailureDetail(error: unknown): string {
+  const MAX_LEN = 200;
+  const { stderr } = (error ?? {}) as { stderr?: Buffer | string };
+  const line = (stderr?.toString() ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) {
+    return 'it failed with no diagnostic output';
+  }
+  // Spread so the cap counts code points and never splits a surrogate pair.
+  const chars = [...line];
+  return chars.length > MAX_LEN ? `${chars.slice(0, MAX_LEN).join('')}…` : line;
 }
 
 /**

@@ -13,7 +13,18 @@
 //! [`probe_bwrap`] shells out.
 
 use std::fmt;
-use std::process::{Command, Stdio};
+use std::fs::File;
+use std::io::{self, Read, Seek};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long a `bwrap` probe may run before it is treated as a failure.
+///
+/// Platform detection is synchronous, so without a bound a `bwrap` that hangs
+/// — a wrapper script on PATH, a binary on a stalled network mount — blocks
+/// the caller indefinitely. Mirrors `BWRAP_VERSION_TIMEOUT_MS` in the
+/// TypeScript SDK (`sdk/node/src/platform.ts`).
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The minimum `bwrap` version the Bubblewrap backend supports.
 ///
@@ -135,20 +146,31 @@ impl std::error::Error for BwrapUnavailable {}
 /// Runs `bwrap --version` and validates the reported version against
 /// [`MIN_BWRAP_VERSION`]. Returns the detected version on success.
 pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
-    let output = Command::new("bwrap")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|err| match err.kind() {
-            // `ENOENT` covers both an absent binary and a present-but-unusable
-            // one (missing ELF interpreter / shebang target), so confirm the
-            // binary is really absent before blaming the package manager.
-            std::io::ErrorKind::NotFound if !bwrap_exists_on_path() => BwrapUnavailable::NotFound,
-            _ => BwrapUnavailable::ProbeFailed {
+    let spawn_failure = |err: io::Error| match err.kind() {
+        // `ENOENT` covers both an absent binary and a present-but-unusable
+        // one (missing ELF interpreter / shebang target), so confirm the
+        // binary is really absent before blaming the package manager.
+        io::ErrorKind::NotFound if !bwrap_exists_on_path() => BwrapUnavailable::NotFound,
+        _ => BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: err.to_string(),
+        },
+    };
+
+    let mut command = Command::new("bwrap");
+    command.arg("--version");
+    let output = match run_with_deadline(&mut command, PROBE_TIMEOUT).map_err(spawn_failure)? {
+        Some(output) => output,
+        None => {
+            return Err(BwrapUnavailable::ProbeFailed {
                 status: None,
-                detail: err.to_string(),
-            },
-        })?;
+                detail: format!(
+                    "did not respond within {}s and was killed",
+                    PROBE_TIMEOUT.as_secs()
+                ),
+            })
+        }
+    };
 
     if !output.status.success() {
         return Err(BwrapUnavailable::ProbeFailed {
@@ -160,6 +182,75 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
     // The version banner goes to stdout; `parse_version` owns its format.
     let stdout = String::from_utf8_lossy(&output.stdout);
     check_version_output(&stdout)
+}
+
+/// Run `command` to completion, or kill it and return `None` if it outlives
+/// `timeout`.
+///
+/// Output is collected through temporary files rather than pipes on purpose.
+/// A pipe only reaches EOF once *every* write end is closed, so a `bwrap`
+/// wrapper that backgrounds a process inheriting stdout would keep a
+/// `read_to_end` blocked long after the direct child exited — reintroducing
+/// the exact hang this deadline exists to prevent. Reading a file always
+/// terminates, and a descendant that keeps writing to it after we return is
+/// harmless because the file is already unlinked.
+///
+/// The timeout path never blocks: the child is signalled and reaped
+/// asynchronously, so the deadline holds even against a process the kernel
+/// will not interrupt.
+pub fn run_with_deadline(command: &mut Command, timeout: Duration) -> io::Result<Option<Output>> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+    let stdout = tempfile::tempfile()?;
+    let stderr = tempfile::tempfile()?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .spawn()?;
+
+    let deadline = Instant::now() + timeout;
+    let outcome = loop {
+        match child.try_wait()? {
+            Some(status) => break Some(status),
+            None if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
+            None => {
+                let _ = child.kill();
+                // Reap on a detached thread rather than blocking here. A
+                // process wedged in uninterruptible I/O — the stalled-mount
+                // case this deadline exists for — leaves the signal pending,
+                // and a `wait()` on it would never return. The thread still
+                // collects the zombie once the kernel lets go, but the caller
+                // gets its deadline back either way.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                break None;
+            }
+        }
+    };
+
+    let Some(status) = outcome else {
+        return Ok(None);
+    };
+    Ok(Some(Output {
+        status,
+        stdout: read_capped(stdout)?,
+        stderr: read_capped(stderr)?,
+    }))
+}
+
+/// Cap on retained probe output. `bwrap --version` prints one line and a
+/// failure prints a short diagnostic, so anything past this is a runaway
+/// writer rather than something worth parsing — read a bounded snapshot
+/// instead of letting the allocation follow the file.
+const MAX_PROBE_OUTPUT: u64 = 64 * 1024;
+
+fn read_capped(mut file: File) -> io::Result<Vec<u8>> {
+    file.rewind()?;
+    let mut buf = Vec::new();
+    file.take(MAX_PROBE_OUTPUT).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// Validate a raw `bwrap --version` output string against
@@ -456,6 +547,69 @@ mod tests {
         assert!(
             message.contains("os error 13"),
             "OS error should survive: {message}"
+        );
+    }
+
+    /// A `bwrap` wrapper that backgrounds a process keeps the inherited output
+    /// handle open after the direct child exits. Draining a *pipe* in that
+    /// situation blocks until the descendant exits, which is how a probe with a
+    /// wait deadline can still hang; collecting into a file cannot.
+    #[test]
+    #[cfg(unix)]
+    fn deadline_holds_when_a_descendant_inherits_the_output_handles() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10 & echo 'bubblewrap 0.11.0'"]);
+
+        let started = Instant::now();
+        let output = run_with_deadline(&mut command, Duration::from_secs(5))
+            .expect("probe should not error")
+            .expect("the direct child exits immediately");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "returned only after {:?}; the descendant blocked the drain",
+            started.elapsed()
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "bubblewrap 0.11.0"
+        );
+    }
+
+    /// A verbose command must not translate into an allocation that follows
+    /// the output. Deliberately bounded so the test cannot fill the disk.
+    #[test]
+    #[cfg(unix)]
+    fn output_beyond_the_cap_is_truncated() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes diagnostic | head -c 200000"]);
+
+        let output = run_with_deadline(&mut command, Duration::from_secs(5))
+            .expect("probe should not error")
+            .expect("the command exits on its own");
+
+        assert_eq!(
+            output.stdout.len() as u64,
+            MAX_PROBE_OUTPUT,
+            "expected the read to stop at the cap"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deadline_kills_a_command_that_outlives_it() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+
+        let started = Instant::now();
+        let outcome = run_with_deadline(&mut command, Duration::from_millis(200))
+            .expect("probe should not error");
+
+        assert!(outcome.is_none(), "expected the deadline to fire");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?} to give up",
+            started.elapsed()
         );
     }
 }
