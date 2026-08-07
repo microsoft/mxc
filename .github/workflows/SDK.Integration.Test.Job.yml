@@ -58,6 +58,11 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      - name: Refresh Linux package indexes
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: sudo apt-get -o Acquire::Retries=3 update
+
       - name: Install bubblewrap + LXC stack (Linux only, cached)
         if: matrix.os_label == 'linux'
         uses: awalsh128/cache-apt-pkgs-action@v1
@@ -80,19 +85,74 @@ jobs:
           # env var for the same reason (compounded by 1ES Hosted Pool
           # egress filtering).
           packages: bubblewrap lxc lxc-utils dnsmasq-base iptables bridge-utils
-          version: 1.3
+          version: 1.4
+
+      - name: Verify or repair Linux containment dependencies
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          packages=(
+            bubblewrap
+            lxc
+            lxc-utils
+            dnsmasq-base
+            iptables
+            bridge-utils
+          )
+
+          missing=()
+          for package in "${packages[@]}"; do
+            if [ "$(dpkg-query --show --showformat='${db:Status-Abbrev}' "$package" 2>/dev/null || true)" != "ii " ]; then
+              missing+=("$package")
+            fi
+          done
+
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::warning::Cached dependency installation was incomplete; repairing: ${missing[*]}"
+
+            # Runner images can have package indexes that reference versions
+            # already removed from the Ubuntu mirrors. Refresh and retry the
+            # complete install so a transient 404 cannot leave a green setup
+            # step with no containment packages installed.
+            for attempt in 1 2 3; do
+              sudo apt-get -o Acquire::Retries=3 update
+              if sudo env DEBIAN_FRONTEND=noninteractive \
+                apt-get -o Acquire::Retries=3 install -y "${packages[@]}"; then
+                break
+              fi
+
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::Failed to install Linux containment dependencies after $attempt attempts"
+                exit 1
+              fi
+
+              echo "::warning::Dependency installation failed; refreshing package indexes and retrying"
+              sleep $((attempt * 5))
+            done
+          else
+            echo "Linux containment dependencies restored successfully from cache"
+          fi
+
+          command -v bwrap
+          command -v lxc-start
+          dpkg-query --show --showformat='${binary:Package}=${Version}\n' "${packages[@]}"
 
       - name: Start LXC services (cache restore skips postinst hooks)
         if: matrix.os_label == 'linux'
         shell: bash
         run: |
+          set -euo pipefail
+
           # cache-apt-pkgs-action restores package files but does not
           # re-run postinst hooks on cache hit, so AppArmor profiles
           # (lxc-container-default) and the lxc-net bridge service may
           # not be active. Load/start them explicitly so lxc-start
           # doesn't abort with an AppArmor denial.
-          sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
-          sudo systemctl start lxc-net 2>/dev/null || true
+          sudo apparmor_parser -rT /etc/apparmor.d/lxc*
+          sudo systemctl start lxc-net
+          sudo systemctl is-active --quiet lxc-net
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
