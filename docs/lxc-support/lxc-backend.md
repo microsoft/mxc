@@ -109,18 +109,53 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 ## Network Policy
 
-Network policies are enforced via iptables/nftables rules applied to the container's virtual ethernet (veth) interface:
+Network policies are enforced via iptables/ip6tables rules in a per-container
+chain (`MXC-<container>`), hooked on the container's host-side virtual ethernet
+(veth) interface:
 
 | Policy | Implementation |
 |--------|---------------|
-| `defaultPolicy: "block"` | Default DROP rule on container veth |
-| `defaultPolicy: "allow"` | Default ACCEPT rule on container veth |
+| `defaultPolicy: "block"` | Chain closes with DROP |
+| `defaultPolicy: "allow"` | Chain closes with ACCEPT |
 | `allowedHosts` | ACCEPT rules for specific IPs/CIDRs |
 | `blockedHosts` | DROP rules for specific IPs/CIDRs |
+| `proxy` | ACCEPT for the proxy endpoint only, then DROP |
 
 Rules are automatically cleaned up when the container exits (if `removeRulesOnExit` is `true`).
 
-**IPv4 only.** Firewall mode resolves `allowedHosts` / `blockedHosts` to IPv4 addresses only; AAAA (IPv6) records and IPv6 literals are silently dropped. A host that has only AAAA records is effectively unreachable from the sandbox under firewall mode.
+**Hooked on `-i <veth>`, in both FORWARD and INPUT.** Container-originated
+packets arrive at the host on the host-side veth, so egress matches by *input*
+interface. FORWARD alone is not enough: netfilter routes packets addressed to the
+host itself through INPUT and never through FORWARD, so a FORWARD-only hook would
+leave the bridge gateway and every host service reachable from inside the
+container. Both hooks share the chain, so a host-local proxy is still permitted by
+its own ACCEPT rule. DHCP (`udp/67`, and `udp/547` for DHCPv6) is accepted ahead of
+the INPUT jump so lease renewal against the bridge's dnsmasq keeps working.
+
+**Deny wins.** Rules are emitted deny-list first, then the DNS carve-out, then the
+allow-list, then the default. Under iptables' first-match-wins a destination named
+in both lists is dropped.
+
+**No conntrack exemption.** The chain has no `ESTABLISHED,RELATED` accept. Reply
+traffic arrives on `-o <veth>` and never traverses the chain, so such a rule would
+not help replies — it would only let flows opened *before* the chain was installed
+keep running through a deny-all policy.
+
+**DNS.** Outside proxy mode, `udp/tcp` port 53 is accepted so the container can
+resolve the names in `allowedHosts` / `blockedHosts`. In proxy mode the proxy host
+is resolved once on the host and the container is handed the literal address, so
+it never needs a resolver and port 53 stays shut.
+
+**IPv4 only for host lists.** Firewall mode resolves `allowedHosts` /
+`blockedHosts` to IPv4 addresses only; AAAA (IPv6) records and IPv6 literals are
+silently dropped. A host that has only AAAA records is effectively unreachable from
+the sandbox under firewall mode. The parallel ip6tables chain still carries the
+default stance, so IPv6 egress is dropped whenever IPv4 egress is.
+
+**ip6tables is required when the policy denies by default.** If `ip6tables` cannot
+be run but the host has a live IPv6 stack (`/proc/net/if_inet6` lists addresses),
+startup fails rather than silently leaving IPv6 unfiltered. On a host with no IPv6
+stack the v6 chain is skipped and the IPv4 policy is enforced alone.
 
 ## Usage
 

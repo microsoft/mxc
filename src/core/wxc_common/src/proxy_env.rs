@@ -29,12 +29,15 @@
 //! Functions here operate on `"KEY=VALUE"` strings, so they are
 //! platform-agnostic and unit-testable on every host.
 
+use crate::models::ProxyConfig;
+
 /// Proxy-related env var keys that are *scrubbed* from caller-supplied env so
 /// a sandboxed process cannot override or disable the cooperative proxy.
 pub const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
+    "FTP_PROXY",
     "http_proxy",
     "https_proxy",
     "all_proxy",
@@ -124,9 +127,38 @@ pub fn apply_cooperative_proxy_env(caller_env: &[String], proxy_url: &str) -> Ve
     effective
 }
 
+/// Scrub proxy env vars from `env` in place, then point them at `proxy` when it
+/// carries an address.
+///
+/// This is the LXC entry point; it delegates to [`apply_cooperative_proxy_env`]
+/// so LXC scrubs and sets exactly the same key set as Bubblewrap and WSLc
+/// rather than maintaining a parallel list that can drift.
+///
+/// `env` uses the `ExecutionRequest::env` representation: `KEY=VALUE` strings.
+/// Entries without `=` are treated as a bare key, so a valueless `HTTP_PROXY`
+/// is still scrubbed.
+///
+/// Returns `true` when the caller should force a clean environment even if the
+/// resulting vector is empty (for example, because every entry was scrubbed).
+pub fn apply_proxy_env(env: &mut Vec<String>, proxy: &ProxyConfig) -> bool {
+    if let Some(address) = &proxy.address {
+        *env = apply_cooperative_proxy_env(env, &address.to_url());
+        return true;
+    }
+
+    // Proxy disabled: still strip inherited proxy vars so a caller cannot point
+    // the sandbox at an egress path the policy never authorized.
+    // Always return true so the caller emits --clear-env even when the input
+    // was empty — an empty env must still prevent lxc-attach from inheriting
+    // the full MXC host process environment (including proxy vars and tokens).
+    env.retain(|entry| !is_managed_proxy_key(env_key(entry)));
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ProxyAddress;
 
     #[test]
     fn sets_all_http_https_proxy_keys_to_url() {
@@ -263,5 +295,100 @@ mod tests {
             redact_proxy_url("http://proxy.example:8080/a@b"),
             "http://proxy.example:8080/a@b"
         );
+    }
+
+    #[test]
+    fn apply_proxy_env_removes_all_managed_proxy_vars() {
+        let mut env = vec![
+            "HTTP_PROXY=old".to_string(),
+            "HTTPS_PROXY=old".to_string(),
+            "ALL_PROXY=old".to_string(),
+            "FTP_PROXY=old".to_string(),
+            "NO_PROXY=old".to_string(),
+            "http_proxy=old".to_string(),
+            "https_proxy=old".to_string(),
+            "all_proxy=old".to_string(),
+            "ftp_proxy=old".to_string(),
+            "no_proxy=old".to_string(),
+            "PATH=/usr/bin".to_string(),
+            "MALFORMED".to_string(),
+        ];
+
+        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
+
+        assert!(force_clear);
+        assert_eq!(env, vec!["PATH=/usr/bin", "MALFORMED"]);
+    }
+
+    #[test]
+    fn apply_proxy_env_sets_configured_proxy_when_enabled() {
+        let mut env = vec![
+            "HTTP_PROXY=http://old.example:1".to_string(),
+            "FOO=bar".to_string(),
+        ];
+        let proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        let force_clear = apply_proxy_env(&mut env, &proxy);
+
+        assert!(force_clear);
+        assert_eq!(env[0], "FOO=bar");
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            assert!(
+                env.iter()
+                    .any(|entry| entry == &format!("{key}=http://127.0.0.1:8080")),
+                "missing {key} in {env:?}"
+            );
+        }
+        assert!(!env.iter().any(|entry| entry.contains("old.example")));
+    }
+
+    #[test]
+    fn apply_proxy_env_neutralizes_inherited_no_proxy() {
+        // Shares `apply_cooperative_proxy_env`, so an inherited `NO_PROXY=*`
+        // cannot survive as an exemption that steers traffic around the proxy.
+        let mut env = vec!["NO_PROXY=*".to_string()];
+        let proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
+            builtin_test_server: false,
+        };
+
+        apply_proxy_env(&mut env, &proxy);
+
+        assert!(env.contains(&"NO_PROXY=".to_string()));
+        assert!(!env.iter().any(|entry| entry == "NO_PROXY=*"));
+    }
+
+    #[test]
+    fn apply_proxy_env_disabled_clears_proxy_vars_without_setting_any() {
+        let mut env = vec![
+            "HTTP_PROXY=http://old.example:1".to_string(),
+            "https_proxy=http://old.example:2".to_string(),
+        ];
+
+        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
+
+        assert!(force_clear);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn apply_proxy_env_disabled_always_forces_clear_even_without_proxy_vars() {
+        // Previously asserted !force_clear, which was wrong and masked the leak.
+        // The fix makes apply_proxy_env return true unconditionally in the
+        // proxy-disabled branch so --clear-env is always emitted.  Non-proxy
+        // vars (PATH) must survive the scrub unchanged.
+        // Safe to assert true here: with a non-empty env the !env.is_empty()
+        // arm of build_attach_args already triggered --clear-env before the fix,
+        // so the produced argv is byte-identical for this input.  The bool only
+        // changed observable attach-args behavior for the empty-env case.
+        let mut env = vec!["PATH=/usr/bin".to_string()];
+
+        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
+
+        assert!(force_clear);
+        assert_eq!(env, vec!["PATH=/usr/bin"]);
     }
 }

@@ -24,19 +24,26 @@ use nix::sys::signal::{SigSet, Signal};
 
 #[cfg(target_os = "linux")]
 use crate::lxc_bindings::LxcContainer;
+use crate::network_iptables::CreatedFirewallState;
 #[cfg(target_os = "linux")]
 use crate::network_iptables::NetworkIptablesManager;
 #[cfg(target_os = "linux")]
 use wxc_common::logger::{Logger, Mode};
 
 /// What the watchdog needs to roll back on a fatal signal: the container
-/// name (so we can `lxc-destroy` it) plus, when known, the host-side veth
-/// interface (so we can also remove the iptables FORWARD hook the runner
-/// installed against it).
+/// name (so we can `lxc-destroy` it), the host-side veth interface when
+/// known (so we can also remove the iptables hooks the runner installed
+/// against it), and the set of chains and hooks the runner has actually
+/// created so far (so we remove only those).
+///
+/// All three live behind one mutex on purpose. The watchdog takes a single
+/// snapshot of the whole struct, so it can never pair one container's
+/// identity with another's ownership record.
 #[derive(Default)]
 struct ActiveSandbox {
     name: Option<String>,
     veth: Option<String>,
+    created: CreatedFirewallState,
 }
 
 static ACTIVE_CONTAINER: OnceLock<Mutex<ActiveSandbox>> = OnceLock::new();
@@ -52,12 +59,14 @@ fn lock_slot() -> std::sync::MutexGuard<'static, ActiveSandbox> {
 
 /// Records `name` as the currently active container so the cleanup watchdog
 /// can destroy it if a fatal signal arrives. Replaces any previous value
-/// (including any previously registered veth, since the new container has
-/// not had its veth discovered yet).
+/// (including any previously registered veth and created-resource record,
+/// since the new container has not had its veth discovered and has not
+/// created anything yet).
 pub fn set_active(name: &str) {
     let mut slot = lock_slot();
     slot.name = Some(name.to_owned());
     slot.veth = None;
+    slot.created = CreatedFirewallState::default();
 }
 
 /// Records the host-side veth interface for the active container so the
@@ -68,6 +77,31 @@ pub fn set_active_veth(veth: &str) {
     if slot.name.is_some() {
         slot.veth = Some(veth.to_owned());
     }
+}
+
+/// Records which iptables chains and hooks the runner has created so far, so
+/// signal-time cleanup removes exactly those and nothing else.
+///
+/// No-op when no container is registered. Backends that never call
+/// [`set_active`] — Bubblewrap builds the same firewall manager but installs
+/// no watchdog — therefore publish nothing, which keeps the watchdog from
+/// acting on a lifecycle it does not manage.
+pub(crate) fn set_active_created(created: CreatedFirewallState) {
+    let mut slot = lock_slot();
+    if slot.name.is_some() {
+        slot.created = created;
+    }
+}
+
+/// The ownership record currently published for the active container.
+///
+/// Test-only. The watchdog reads this slot on a signal, and a signal cannot be
+/// delivered on this host, so this is the only way to assert that a teardown
+/// republished what it left behind instead of leaving a stale superset in
+/// place.
+#[cfg(test)]
+pub(crate) fn active_created_for_test() -> CreatedFirewallState {
+    lock_slot().created
 }
 
 /// Block SIGHUP/SIGTERM/SIGINT in the calling thread and spawn a watchdog
@@ -135,7 +169,12 @@ fn run_watchdog(mask: SigSet) -> ! {
             // signal-time output doesn't interleave with whatever else
             // might still be writing to the host's stdio.
             let mut buf_logger = Logger::new(Mode::Buffer);
-            NetworkIptablesManager::force_cleanup(&name, active.veth.as_deref(), &mut buf_logger);
+            NetworkIptablesManager::force_cleanup(
+                &name,
+                active.veth.as_deref(),
+                active.created,
+                &mut buf_logger,
+            );
             let _ = LxcContainer::new(&name, None).destroy();
         }
         std::process::exit(128 + sig as i32);

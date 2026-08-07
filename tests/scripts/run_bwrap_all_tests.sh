@@ -5,7 +5,14 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASSED=0
 FAILED=0
+SKIPPED=0
 FAILURES=""
+SKIPS=""
+
+# Exit status a child test uses to report an honest skip (a prerequisite such
+# as root, bwrap, or iptables is missing), following the Automake convention.
+# A skip must never be counted as a pass.
+SKIP_EXIT=77
 
 # Check for Windows line endings in test scripts
 check_line_endings() {
@@ -21,10 +28,17 @@ check_line_endings
 run_test() {
     local name="$1"
     local script="$2"
+    local status
     echo "=== $name ==="
-    if bash "$script"; then
+    bash "$script"
+    status=$?
+    if [ "$status" -eq 0 ]; then
         echo "PASS: $name"
         PASSED=$((PASSED + 1))
+    elif [ "$status" -eq "$SKIP_EXIT" ]; then
+        echo "SKIP: $name"
+        SKIPPED=$((SKIPPED + 1))
+        SKIPS="$SKIPS\n  - $name"
     else
         echo "FAIL: $name"
         FAILED=$((FAILED + 1))
@@ -39,11 +53,18 @@ run_test "Bubblewrap Object Validation" "$SCRIPT_DIR/run_bwrap_filesystem_object
 run_test "Bubblewrap Most-Specific Path" "$SCRIPT_DIR/run_bwrap_most_specific_test.sh"
 run_test "Bubblewrap Denied Masking" "$SCRIPT_DIR/run_bwrap_denied_masking_test.sh"
 run_test "Bubblewrap Network Block" "$SCRIPT_DIR/run_bwrap_network_test.sh"
+run_test "Bubblewrap Network Firewall" "$SCRIPT_DIR/run_bwrap_network_firewall_test.sh"
 run_test "Bubblewrap Network Proxy" "$SCRIPT_DIR/run_bwrap_network_proxy_test.sh"
 run_test "Linux Process Default" "$SCRIPT_DIR/run_linux_process_default_test.sh"
 
 echo "================================"
-echo "Results: $PASSED passed, $FAILED failed"
+echo "Results: $PASSED passed, $FAILED failed, $SKIPPED skipped"
+if [ "$SKIPPED" -gt 0 ]; then
+    echo -e "Skipped (prerequisite missing, not run):$SKIPS"
+fi
+if [ "$PASSED" -eq 0 ] && [ "$SKIPPED" -gt 0 ] && [ "$FAILED" -eq 0 ]; then
+    echo "WARNING: every test skipped — nothing was actually verified."
+fi
 if [ $FAILED -gt 0 ]; then
     echo -e "Failures:$FAILURES"
     exit 1

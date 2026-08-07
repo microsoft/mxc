@@ -420,6 +420,68 @@ impl ProxyAddress {
         }
         format!("http://127.0.0.1:{}", self.port)
     }
+
+    /// Return a copy of this address with the host replaced by `ip`, keeping
+    /// the port and — where the address came from a URL — the original scheme,
+    /// credentials and path.
+    ///
+    /// Used to pin a hostname-based proxy to the address the host actually
+    /// resolved, so the firewall rule and the `HTTP(S)_PROXY` handed to the
+    /// sandbox agree on one endpoint. Without this the sandbox re-resolves the
+    /// hostname itself and, under round-robin or split-horizon DNS, can pick an
+    /// address the firewall never allowed.
+    pub fn pinned_to_ip(&self, ip: &str) -> Self {
+        let ip_host = Self::bracket_if_ipv6(ip);
+        let fallback = || format!("http://{}:{}", ip_host, self.port);
+        let rewritten = match &self.original_url {
+            Some(raw) => Self::rewrite_url_host(raw, ip).unwrap_or_else(fallback),
+            None => fallback(),
+        };
+
+        Self {
+            address: ip.to_string(),
+            port: self.port,
+            original_url: Some(rewritten),
+        }
+    }
+
+    /// Return `ip` unchanged unless it is a bare (unbracketed) IPv6 literal, in
+    /// which case wrap it in `[` `]` so it is valid as a URL host component and
+    /// as the argument to `Url::set_host`.
+    fn bracket_if_ipv6(ip: &str) -> std::borrow::Cow<'_, str> {
+        if ip.starts_with('[') {
+            return std::borrow::Cow::Borrowed(ip);
+        }
+        match ip.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V6(_)) => std::borrow::Cow::Owned(format!("[{ip}]")),
+            _ => std::borrow::Cow::Borrowed(ip),
+        }
+    }
+
+    /// Replace the host of `raw` with `ip`, preserving scheme, credentials,
+    /// port and path. Returns `None` when `raw` is not a parseable URL or the
+    /// host cannot be replaced, letting the caller fall back.
+    fn rewrite_url_host(raw: &str, ip: &str) -> Option<String> {
+        let ip_host = Self::bracket_if_ipv6(ip);
+        let mut parsed = url::Url::parse(raw).ok()?;
+        parsed.set_host(Some(&ip_host)).ok()?;
+        let mut pinned = parsed.to_string();
+        // `Url::to_string` normalises an empty path to "/"; drop it again when
+        // the configured URL had none, so the injected value keeps the shape
+        // the caller supplied. Only do this when the "/" is actually the last
+        // character — when a query or fragment follows (e.g. ".../?q=1"), the
+        // slash sits mid-string and popping would instead eat the final query
+        // or fragment character.
+        if parsed.path() == "/"
+            && parsed.query().is_none()
+            && parsed.fragment().is_none()
+            && pinned.ends_with('/')
+            && !raw.ends_with('/')
+        {
+            pinned.pop();
+        }
+        Some(pinned)
+    }
 }
 
 /// Proxy configuration parsed from the `network.proxy` JSON field.
@@ -856,9 +918,74 @@ impl ScriptResponse {
 }
 
 #[cfg(test)]
+#[path = "models_proxy_url_spec_tests.rs"]
+mod proxy_url_spec_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pinned_to_ip_swaps_host_and_keeps_shape() {
+        let addr = ProxyAddress::from_url(
+            "http://proxy.example.com:8080",
+            "proxy.example.com".to_string(),
+            8080,
+        );
+
+        let pinned = addr.pinned_to_ip("93.184.216.34");
+
+        assert_eq!(pinned.host(), "93.184.216.34");
+        assert_eq!(pinned.port(), 8080);
+        // No trailing slash added: the injected HTTP_PROXY keeps the shape the
+        // caller configured.
+        assert_eq!(pinned.to_url(), "http://93.184.216.34:8080");
+    }
+
+    #[test]
+    fn pinned_to_ip_preserves_scheme_credentials_and_path() {
+        let addr = ProxyAddress::from_url(
+            "https://user:pass@proxy.example.com:8443/pac",
+            "proxy.example.com".to_string(),
+            8443,
+        );
+
+        let pinned = addr.pinned_to_ip("10.0.0.7");
+
+        assert_eq!(
+            pinned.to_url(),
+            "https://user:pass@10.0.0.7:8443/pac",
+            "credentials, scheme and path must survive pinning"
+        );
+    }
+
+    #[test]
+    fn pinned_to_ip_keeps_explicit_trailing_slash() {
+        let addr = ProxyAddress::from_url(
+            "http://proxy.example.com:8080/",
+            "proxy.example.com".to_string(),
+            8080,
+        );
+
+        assert_eq!(
+            addr.pinned_to_ip("10.0.0.7").to_url(),
+            "http://10.0.0.7:8080/"
+        );
+    }
+
+    #[test]
+    fn pinned_to_ip_without_original_url_builds_one() {
+        // `{ "localhost": 8080 }` produces an address with no original URL;
+        // pinning must still yield a usable proxy URL rather than falling back
+        // to the hardcoded 127.0.0.1 in `to_url`.
+        let addr = ProxyAddress::new("localhost".to_string(), 8080);
+
+        assert_eq!(
+            addr.pinned_to_ip("10.0.0.7").to_url(),
+            "http://10.0.0.7:8080"
+        );
+    }
 
     #[test]
     fn script_response_backend_unavailable_round_trips() {

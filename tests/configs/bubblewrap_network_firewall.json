@@ -3,7 +3,7 @@
   "containerId": "CLI-Bubblewrap-Network-Firewall",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "wget -qO- https://api.github.com/zen"
+    "commandLine": "echo BWRAP_FW_STARTED; wget -qO- --timeout=5 https://api.github.com/zen 2>&1 || echo BWRAP_FW_WGET_DONE"
   },
   "network": {
     "defaultPolicy": "block",
