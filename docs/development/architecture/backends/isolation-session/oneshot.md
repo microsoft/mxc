@@ -18,9 +18,9 @@ session. Use cases that need this — per the broader claw-on-MXC scenario — c
 
 ## Proposed Solution
 
-Add an **IsolationSession runner** to `wxc-exec.exe`.
+Add an **IsolationSession runner** to `wxc-exec.exe`, behind `--experimental`.
 When the JSON config specifies `"containment": "isolation_session"` and the
-the backend is selected, the binary routes to a new `IsolationSessionRunner`
+experimental flag is set, the binary routes to a new `IsolationSessionRunner`
 (implementing the existing `ScriptRunner` trait). The runner orchestrates the
 full lifecycle against the OS-side Isolation Session API: provision an
 agent user, start a session, run the script (capturing stdout / stderr /
@@ -38,13 +38,13 @@ reuse the manager's methods individually.
 ## How It Works
 
 ```
-User: wxc-exec.exe config.json
+User: wxc-exec.exe --experimental config.json
        (config.json sets containment = "isolation_session")
    │
    ▼
 wxc-exec.exe (Rust — single binary, multiple backends)
    ├── Parses JSON config → sees containment = "isolation_session"
-   ├── Instantiates IsolationSessionRunner
+   ├── Checks --experimental flag → instantiates IsolationSessionRunner
    ├── Calls IsolationSessionManager methods 1:1 with the OS-side service:
    │     add_user(...)               → Step 1 — creates agent user
    │     start_session(...)          → Step 2 — boots session
@@ -69,9 +69,14 @@ Dispatch in `wxc/src/main.rs`:
 ```rust
 let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-    // ... other containment backends ...
-    ContainmentBackend::IsolationSession =>
-        Box::new(IsolationSessionRunner::new(/* ... */)),
+    // ... existing stable + experimental backends ...
+    ContainmentBackend::IsolationSession => {
+        if !request.experimental_enabled {
+            eprintln!("Error: IsolationSession is experimental. Use --experimental.");
+            process::exit(1);
+        }
+        Box::new(IsolationSessionRunner::new(/* ... */))
+    }
 };
 ```
 
@@ -117,34 +122,34 @@ invocations, without changing the manager's interface. See
 
 ```json
 {
-    "version": "0.9.0-alpha",
+    "version": "0.6.0-alpha",
     "containerId": "MyIsolationSessionRun",
     "containment": "isolation_session",
     "process": {
         "commandLine": "echo hello & whoami",
         "cwd": "C:\\Windows",
         "env": ["MYVAR=hello"],
-        "inheritDefaultEnv": true,
         "timeout": 30000
     },
     "network": {
-        "egress": { "default": "allow" },
-        "ingress": { "default": "allow", "hostLoopback": "allow" }
+        "defaultPolicy": "allow",
+        "allowLocalNetwork": true
+    },
+    "experimental": {
+        "isolation_session": {}
     }
 }
 ```
 
-The directional shape explicitly describes the backend's actual unrestricted
-posture across egress, ingress, and host loopback. All three values are
-required; rules, proxies, mixed postures, and omission are rejected.
+The one-shot surface takes **no backend configuration at all** — there is no
+`experimental.isolation_session` field the one-shot path reads. The Entra
+`user` bundle is state-aware-only, so supplying it here is just an
+unrecognised key in the deliberately permissive `experimental` block and is
+ignored (the run proceeds as a local, non-Entra agent). Process options
+(`cwd`, `env`, `timeout`) read from the existing top-level `process` section,
+matching the contract every other backend honors.
 
-Legacy network fields are rejected.
-
-`appId` and the nested `provision` section are state-aware-only and are
-rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
-in the top-level `process` section.
-
-Run with: `wxc-exec.exe config.json`.
+Run with: `wxc-exec.exe --experimental config.json`.
 
 ## OS API Dependency
 
@@ -153,8 +158,62 @@ The runner calls into the WinRT API namespaced
 Session service (running as SYSTEM via `svchost.exe`). The API is gated
 on an internal Windows feature flag.
 
-Activation goes through the WinRT activation factory for the
-`Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class.
+### Two activation paths and the selection rule
+
+The runtime class `IsoSessionOps` (and `IsoSessionProcessOptions`) can be
+activated two ways, both funneled through
+`src/backends/isolation_session/common/src/regfree.rs`:
+
+1. **Coresident explicit load (preferred when present).** MXC
+   `LoadLibraryExW`s the MSI-installed `IsoSessionApp.dll` **by full path**
+   and calls its `DllGetActivationFactory` export directly, bypassing the
+   WinRT activation catalog. This binds the MSI-installed runtime — the App
+   DLL's coresidency logic then sibling-loads the MSI `IsoSessionClient.dll`
+   and the matching side-by-side service instance. No machine-wide registry
+   mutation is involved. This is what lets a packaged product (openclaw)
+   ship and run a specific runtime version without touching the inbox
+   binaries.
+
+2. **Default system activation (fallback).** When no coresident
+   `IsoSessionApp.dll` is present at the runtime folder, activation falls
+   back to `IsoSessionOps::new()`, which resolves through the OS WinRT
+   activation catalog to the inbox `System32` binaries.
+
+**Selection rule.** `regfree::activate_from_runtime_dir` resolves the runtime
+folder (see *Runtime folder resolution* below), then:
+
+- **absent** at the default folder → fall back to system activation (a host
+  without the paired MSI keeps working);
+- **loaded** → use the coresident factory;
+- **present or explicitly configured but unloadable** (wrong architecture,
+  missing dependency, corrupt image, or an explicit override whose folder
+  does not resolve) → the error is **surfaced**, never silently redirected to
+  the inbox binaries — otherwise MXC would bind a *different* binary set under
+  the guise of success.
+
+### Runtime folder resolution
+
+The coresident folder is `DEFAULT_RUNTIME_DIR`
+(`C:\Program Files\Microsoft\Agentic Runtime\2026.08` — the fixed MSI install
+location) unless overridden by the `MXC_ISOSESSION_RUNTIME_DIR` environment
+variable:
+
+| Variable | Effect |
+|---|---|
+| `MXC_ISOSESSION_RUNTIME_DIR` | Absolute path to the folder holding the coresident runtime binaries (`IsoSessionApp.dll`, `IsoSessionClient.dll`, `IsoSession.manifest`, …). Intended for tests and side-by-side validation machines. **Must be absolute** — a relative value is rejected (with a warning) and the default is used, because the value is also the DLL dependency search root and a relative value would make it CWD-relative (a DLL-planting surface). When set to an absolute path it is *authoritative*: if its folder does not resolve, the run fails rather than silently binding the inbox runtime. |
+| `DEFAULT_RUNTIME_DIR` (compile-time constant, not an env var) | The hardcoded MSI install location used when the override is unset/empty/rejected. |
+
+### Apartment initialization
+
+The coresident path obtains the factory via `DllGetActivationFactory` and
+calls `IActivationFactory::ActivateInstance` directly — which, unlike the
+inbox `RoActivateInstance` path, does **not** implicitly initialize the
+WinRT/COM apartment. `src/core/wxc/src/main.rs` calls
+`CoInitializeEx(COINIT_MULTITHREADED)` at startup, and `regfree.rs`
+additionally calls `CoInitializeEx` (best-effort; `S_FALSE` /
+`RPC_E_CHANGED_MODE` ignored) before activation so the factory's internal COM
+activation (coresident client → service) has an initialized apartment even on
+the `--probe` path, which returns before `main`'s initialization.
 
 The API surface includes the lifecycle methods plus
 `IsoSessionProcess` (the running-process handle). The runner uses the
@@ -207,12 +266,11 @@ versions and stating that the bindings must be regenerated.
 **Implemented:**
 
 - Single-shot `provision → start → run → stop → deprovision` lifecycle,
-  selected directly by the exact v0.9 contract.
+  gated by `--experimental`.
 - `process.commandLine` (the script command, wrapped via `cmd.exe /c "..."`
   — the same pattern the LXC runner uses with `/bin/sh -c`).
 - `process.cwd` (working directory inside the session).
-- `process.env` with `process.inheritDefaultEnv: true` (the entries are layered
-  over the agent user's default environment through the OS-side
+- `process.env` (environment variables forwarded via the OS-side
   `IsoSessionProcessOptions`).
 - `process.timeout` (forwarded to the OS-side per-process timeout
   enforcement).
@@ -223,15 +281,12 @@ versions and stating that the bindings must be regenerated.
 - `lifecycle.destroyOnExit: false` and `lifecycle.preservePolicy: true`. The
   in-proc API exposes no session-lifetime knob, so the backend cannot vary
   teardown: the one-shot path always stops the session and removes the agent
-  user. `destroyOnExit: true` (the default) is therefore
+  user before returning. `destroyOnExit: true` (the default) is therefore
   accepted because it matches actual behavior; `false` is refused. There is no
   filesystem or network policy to preserve (both are rejected outright), so
   `preservePolicy: true` is refused as meaningless here.
 - `ui` (any value). The backend has no UI-restriction primitive — see the
   cross-cutting policy honor matrix below.
-- `process.env` without `process.inheritDefaultEnv: true`, including `[]`.
-  Every process starts from the agent user's default environment, which the
-  backend cannot replace or empty.
 
 ## Cross-cutting policy honor matrix (one-shot)
 
@@ -242,24 +297,23 @@ the rationale for each disposition, and the error mapping live in
 | Field | one-shot disposition |
 |---|---|
 | `process.commandLine` | **honored** (required) |
-| `process.cwd` / `process.timeout` | **honored** |
-| `process.env` | **honored** with `process.inheritDefaultEnv: true`; rejected without it, including `[]` |
+| `process.cwd` / `process.env` / `process.timeout` | **honored** |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
-| `network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required** |
-| `network` — legacy fields, absent, empty, restrictive, mixed, rule-bearing, or proxy-bearing | rejected |
+| `network` — canonical unrestricted acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** |
+| `network` — anything else, including absent (defaults to the unenforceable `block`) | rejected |
 | `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `isolationSession` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
+| `experimental.isolation_session.user` | accepted, ignored — Entra is state-aware-only, and one-shot reads no backend config |
+| `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
 typed policy error code: the envelope carries `error.code = "backend_error"` with
-the reason in the message. On the state-aware surface, structurally
-representable backend policy failures emit `policy_validation`; fields excluded
-by an exact phase root fail earlier as `malformed_request`.
+the reason in the message, unlike the state-aware surface which emits
+`policy_validation`.
 
 **Why every supplied `ui` is refused.** The `ui` section states intent about the
 contained code's relationship to the *user's* environment, and was modelled on a
@@ -279,11 +333,12 @@ The full field-by-field table is in
 
 **Deferred to follow-up work:**
 
-- **C# one-shot SDK support.** The Rust SDK already supports one-shot `run` and
-  `spawn_sandbox` behind the `isolation_session` feature. The Node JSON/config
-  path (`spawnSandboxFromConfig`) and
-  `wxc-exec` support the required network posture. The C# SDK still reaches
-  IsolationSession only through the state-aware lifecycle APIs.
+- **TypeScript SDK exposure.** Adding a one-shot isolation-session config
+  surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
+  workloads programmatically **on the one-shot path**. Today the one-shot
+  backend is reachable only via JSON config (`spawnSandboxFromConfig` or
+  `wxc-exec` directly), and it takes no backend configuration; the
+  state-aware lifecycle *is* SDK-exposed.
 
 ## Test Plan
 
@@ -291,8 +346,8 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | Directional network shape, closure, legacy-field removal, and phase-specific field rejection |
-| Policy validation | `policy.rs` | Filesystem/UI rejection; directional unrestricted form; empty/restrictive/mixed policy rejection; unchanged post-provision rules; `process.env` without `inheritDefaultEnv` rejection |
+| Config parsing | `config_parser.rs` | The `"isolation_session"` containment value; a stray `experimental.isolation_session` payload is accepted and ignored |
+| Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
@@ -313,7 +368,7 @@ Two end-to-end configs live under `tests/configs/`:
   exit code 42 propagates to `ScriptResponse.exit_code`.
 
 A test runner at `tests/scripts/run_isolation_session_tests.ps1` invokes
-both configs via `wxc-exec.exe`, validates exit codes and
+both configs via `wxc-exec.exe --experimental`, validates exit codes and
 expected output substrings, and reports a pass/fail summary. Pattern
 follows the existing per-backend integration scripts (e.g.
 `run_microvm_tests.ps1`, `run_wslc_all_tests.ps1`).
@@ -354,18 +409,26 @@ The following were observed during VM testing and are accepted for v0.1.
 | OS API not present on older Windows builds | the IsolationSession feature is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
-| One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
-| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user |
+| One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path; the experimental flag indicates rough edges. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
+| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user before returning |
 
 ## Prerequisites
 
 **For end users:**
 
 - A Windows build with the IsolationSession feature enabled.
-- The OS-side isolation-session host binary present in
-  `%SystemRoot%\System32\` (ships with Windows as part of the OS-side
-  service).
-- WinRT initialized as MTA (handled by `wxc-exec`).
+- The isolation-session runtime binaries available via **one** of:
+  - the paired **MSI** installed at `DEFAULT_RUNTIME_DIR`
+    (`C:\Program Files\Microsoft\Agentic Runtime\2026.08`), which MXC binds
+    coresidently by path (preferred — this is how a packaged product ships a
+    specific runtime version); or
+  - the OS-side inbox host binaries in `%SystemRoot%\System32\` (ships with
+    Windows), used as the fallback when no MSI runtime is present.
+- WinRT/COM initialized as MTA (handled by `wxc-exec` and `regfree.rs`).
+
+Set `MXC_ISOSESSION_RUNTIME_DIR` (absolute path) to point at a specific
+runtime folder for tests or side-by-side validation; see *OS API Dependency →
+Runtime folder resolution*.
 
 **For developers:**
 
@@ -379,14 +442,14 @@ The following were observed during VM testing and are accepted for v0.1.
 
 ```powershell
 # Minimal config: print the agent identity inside the session
-wxc-exec.exe hello.json
+wxc-exec.exe --experimental hello.json
 ```
 
 `hello.json`:
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.6.0-alpha",
   "containerId": "Hello",
   "containment": "isolation_session",
   "process": {
@@ -394,8 +457,11 @@ wxc-exec.exe hello.json
     "timeout": 30000
   },
   "network": {
-    "egress": { "default": "allow" },
-    "ingress": { "default": "allow", "hostLoopback": "allow" }
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
+  "experimental": {
+    "isolation_session": {}
   }
 }
 ```
