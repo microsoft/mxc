@@ -268,6 +268,12 @@ pub(crate) fn extract_denials(
 }
 
 fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> HashSet<&'a str> {
+    let unidentified_capability =
+        property_is_empty(parts, "ObjectType") && property_is_empty(parts, "ObjectName");
+    if !unidentified_capability {
+        return HashSet::new();
+    }
+
     let mut names = extract_flattened_dacl_names(parts, index);
     let mut explicit: Vec<&str> = parts
         .props
@@ -285,9 +291,7 @@ fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> H
         explicit.push(value);
     }
 
-    let unidentified_capability =
-        property_is_empty(parts, "ObjectType") && property_is_empty(parts, "ObjectName");
-    let candidates: Vec<&str> = if explicit.is_empty() && unidentified_capability {
+    let candidates: Vec<&str> = if explicit.is_empty() {
         parts
             .props
             .iter()
@@ -302,9 +306,7 @@ fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> H
         let Ok(decoded) = decode_hex(candidate) else {
             continue;
         };
-        let Ok(found) = walk_aces(&decoded, index) else {
-            continue;
-        };
+        let (found, _) = walk_aces(&decoded, index);
         names.extend(found);
     }
     names
@@ -456,72 +458,92 @@ fn parse_sid(value: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+struct ParsedAce<'a> {
+    ace_type: u8,
+    mask: u32,
+    sid: &'a [u8],
+    next: usize,
+}
+
+fn parse_ace(bytes: &[u8], cursor: usize) -> Result<ParsedAce<'_>, DaclDecodeError> {
+    if bytes.len() - cursor < STANDARD_ACE_HEADER_SIZE + SID_FIXED_HEADER_SIZE {
+        return Err(DaclDecodeError::TruncatedAce(cursor));
+    }
+    let ace_type = bytes[cursor + ACE_TYPE_OFFSET];
+    if ace_type == ACE_TYPE_ACCESS_ALLOWED_CALLBACK {
+        return Err(DaclDecodeError::CallbackAce(cursor));
+    }
+
+    // EvtRender historically exposed this provider's ComplexData in a
+    // DWORD-padded shape. TDH may expose the native ACCESS_ALLOWED_ACE
+    // shape, so accept both and prefer the self-framing native form.
+    let declared_ace_size =
+        u16::from_le_bytes([bytes[cursor + STANDARD_ACE_SIZE_OFFSET], bytes[cursor + 3]]) as usize;
+    let (mask_offset, sid_offset, declared_end) = if declared_ace_size == 0 {
+        (
+            cursor + LEGACY_ACE_ACCESS_MASK_OFFSET,
+            cursor + LEGACY_ACE_HEADER_SIZE,
+            None,
+        )
+    } else {
+        let end = cursor
+            .checked_add(declared_ace_size)
+            .filter(|end| {
+                *end <= bytes.len()
+                    && declared_ace_size >= STANDARD_ACE_HEADER_SIZE + SID_FIXED_HEADER_SIZE
+            })
+            .ok_or(DaclDecodeError::TruncatedAce(cursor))?;
+        (
+            cursor + STANDARD_ACE_ACCESS_MASK_OFFSET,
+            cursor + STANDARD_ACE_HEADER_SIZE,
+            Some(end),
+        )
+    };
+    let mask = u32::from_le_bytes(
+        bytes[mask_offset..mask_offset + 4]
+            .try_into()
+            .map_err(|_| DaclDecodeError::TruncatedAce(cursor))?,
+    );
+    let sub_authorities = bytes[sid_offset + 1] as usize;
+    let sid_size = SID_FIXED_HEADER_SIZE + SID_SUB_AUTHORITY_SIZE * sub_authorities;
+    let sid_end = sid_offset
+        .checked_add(sid_size)
+        .filter(|next| *next <= bytes.len())
+        .ok_or(DaclDecodeError::TruncatedAce(cursor))?;
+    let next = match declared_end {
+        Some(end) if sid_end <= end => end,
+        Some(_) => return Err(DaclDecodeError::TruncatedAce(cursor)),
+        None => sid_end,
+    };
+
+    Ok(ParsedAce {
+        ace_type,
+        mask,
+        sid: &bytes[sid_offset..sid_end],
+        next,
+    })
+}
+
 fn walk_aces<'a>(
     bytes: &[u8],
     index: &'a CapabilityIndex,
-) -> Result<HashSet<&'a str>, DaclDecodeError> {
+) -> (HashSet<&'a str>, Option<DaclDecodeError>) {
     let mut names = HashSet::new();
     let mut cursor = 0;
     while cursor < bytes.len() {
-        if bytes.len() - cursor < STANDARD_ACE_HEADER_SIZE + SID_FIXED_HEADER_SIZE {
-            return Err(DaclDecodeError::TruncatedAce(cursor));
-        }
-        let ace_type = bytes[cursor + ACE_TYPE_OFFSET];
-        if ace_type == ACE_TYPE_ACCESS_ALLOWED_CALLBACK {
-            return Err(DaclDecodeError::CallbackAce(cursor));
-        }
-
-        // EvtRender historically exposed this provider's ComplexData in a
-        // DWORD-padded shape. TDH may expose the native ACCESS_ALLOWED_ACE
-        // shape, so accept both and prefer the self-framing native form.
-        let declared_ace_size =
-            u16::from_le_bytes([bytes[cursor + STANDARD_ACE_SIZE_OFFSET], bytes[cursor + 3]])
-                as usize;
-        let (mask_offset, sid_offset, declared_end) = if declared_ace_size == 0 {
-            (
-                cursor + LEGACY_ACE_ACCESS_MASK_OFFSET,
-                cursor + LEGACY_ACE_HEADER_SIZE,
-                None,
-            )
-        } else {
-            let end = cursor
-                .checked_add(declared_ace_size)
-                .filter(|end| {
-                    *end <= bytes.len()
-                        && declared_ace_size >= STANDARD_ACE_HEADER_SIZE + SID_FIXED_HEADER_SIZE
-                })
-                .ok_or(DaclDecodeError::TruncatedAce(cursor))?;
-            (
-                cursor + STANDARD_ACE_ACCESS_MASK_OFFSET,
-                cursor + STANDARD_ACE_HEADER_SIZE,
-                Some(end),
-            )
-        };
-        let mask = u32::from_le_bytes(
-            bytes[mask_offset..mask_offset + 4]
-                .try_into()
-                .map_err(|_| DaclDecodeError::TruncatedAce(cursor))?,
-        );
-        let sub_authorities = bytes[sid_offset + 1] as usize;
-        let sid_size = SID_FIXED_HEADER_SIZE + SID_SUB_AUTHORITY_SIZE * sub_authorities;
-        let sid_end = sid_offset
-            .checked_add(sid_size)
-            .filter(|next| *next <= bytes.len())
-            .ok_or(DaclDecodeError::TruncatedAce(cursor))?;
-        let next = match declared_end {
-            Some(end) if sid_end <= end => end,
-            Some(_) => return Err(DaclDecodeError::TruncatedAce(cursor)),
-            None => sid_end,
+        let ace = match parse_ace(bytes, cursor) {
+            Ok(ace) => ace,
+            Err(error) => return (names, Some(error)),
         };
 
-        if ace_type == ACE_TYPE_ACCESS_ALLOWED && mask != 0 {
-            if let Some(name) = index.resolve(&bytes[sid_offset..sid_end]) {
+        if ace.ace_type == ACE_TYPE_ACCESS_ALLOWED && ace.mask != 0 {
+            if let Some(name) = index.resolve(ace.sid) {
                 names.insert(name);
             }
         }
-        cursor = next;
+        cursor = ace.next;
     }
-    Ok(names)
+    (names, None)
 }
 
 fn build_capability_index() -> CapabilityIndex {
@@ -714,7 +736,32 @@ mod tests {
     }
 
     #[test]
-    fn file_event_reads_fifth_complex_data_property_like_legacy_parser() {
+    fn named_file_event_does_not_scan_explicit_dacl_property() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let mut event = parts("Dacl", hex(&legacy_ace(1, &sid)));
+        event.props[0].1 = "\"File\"".to_string();
+        event.props[1].1 = "\"C:\\data\\file.txt\"".to_string();
+        assert!(extract_names(&event, &index).is_empty());
+    }
+
+    #[test]
+    fn named_file_event_does_not_scan_flattened_dacl() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let mut event = parts("DaclAce", "<struct>".to_string());
+        event.props[0].1 = "\"File\"".to_string();
+        event.props[1].1 = "\"C:\\data\\file.txt\"".to_string();
+        event.props.extend([
+            ("AceType".to_string(), "0".to_string()),
+            ("AccessMask".to_string(), "0x1".to_string()),
+            ("Sid".to_string(), "S-1-1-0".to_string()),
+        ]);
+        assert!(extract_names(&event, &index).is_empty());
+    }
+
+    #[test]
+    fn named_file_event_does_not_scan_fifth_complex_data_property() {
         let sid = sid();
         let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
         let mut event = parts("ComplexData", "00".to_string());
@@ -729,8 +776,7 @@ mod tests {
             "ComplexData".to_string(),
             format!("hex:{}", hex(&legacy_ace(1, &sid))),
         ));
-        let names = extract_names(&event, &index);
-        assert_eq!(names, HashSet::from(["internetClient"]));
+        assert!(extract_names(&event, &index).is_empty());
     }
 
     #[test]
@@ -748,6 +794,17 @@ mod tests {
             decode_hex(&value),
             Err(DaclDecodeError::InputTooLarge)
         ));
+    }
+
+    #[test]
+    fn truncated_tail_preserves_capabilities_from_complete_aces() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let mut bytes = standard_ace(1, &sid);
+        bytes.push(0);
+        let (names, error) = walk_aces(&bytes, &index);
+        assert_eq!(names, HashSet::from(["internetClient"]));
+        assert!(matches!(error, Some(DaclDecodeError::TruncatedAce(_))));
     }
 
     #[test]
