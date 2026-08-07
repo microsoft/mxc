@@ -5,3 +5,11 @@
 windows_bindgen_version = "0.62.1"
 target_windows_crate = "0.62"
 generated_date = "2026-08-14"
+
+[source]
+# The pinned SDK package these bindings were generated from (checked in beside
+# this file). Bindings come from the Preview WinMD inside it.
+nupkg = "Microsoft.Windows.AI.IsolationSession.SDK.0.2606.0.nupkg"
+winmd = "metadata/windows.ai.isolationsession.preview.winmd"
+winmd_sha256 = "1A9DBDC2CBFDEDC7FF366939DB4BA1564179D55B6EA3E70B99BD82C532428147"
+namespace = "Windows.AI.IsolationSession.Preview"
