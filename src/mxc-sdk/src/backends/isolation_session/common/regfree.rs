@@ -188,13 +188,20 @@ fn load_app_dll() -> RuntimeLoad {
         if explicit {
             // An explicit override that does not resolve is authoritative: the
             // operator asked for a specific runtime and it is not there. Surface
-            // it instead of silently binding the inbox binaries.
+            // it instead of silently binding the inbox binaries. Emit an
+            // (ungated) diagnostic -- this is a misconfiguration, not
+            // success-path spam, matching the ungated `LoadLibraryExW failed`
+            // path below; a silent fail-closed gives the operator nothing to
+            // act on.
+            let detail = format!(
+                "{}='{}' but {} does not exist at '{}'",
+                RUNTIME_DIR_ENV, dir, APP_DLL_NAME, path
+            );
+            eprintln!("[mxc isosession] {}; refusing inbox fallback.", detail);
+
             return RuntimeLoad::Unloadable {
                 code: HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0),
-                detail: format!(
-                    "{}='{}' but {} does not exist at '{}'",
-                    RUNTIME_DIR_ENV, dir, APP_DLL_NAME, path
-                ),
+                detail,
             };
         }
         if success_diag_enabled() {
