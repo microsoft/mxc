@@ -534,6 +534,21 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
+fn audit_stop_args(
+    config_path: Option<&std::path::Path>,
+    exit_code: i32,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![std::ffi::OsString::from("stop")];
+    if let Some(config_path) = config_path {
+        args.push(std::ffi::OsString::from("--config-path"));
+        args.push(config_path.as_os_str().to_owned());
+    }
+    args.push(std::ffi::OsString::from("--exit-code"));
+    args.push(std::ffi::OsString::from(exit_code.to_string()));
+    args
+}
+
+#[cfg(target_os = "windows")]
 use audit::{
     cancel_active_audit_trace, mark_audit_active, release_audit_singleton, run_plm_command,
     try_acquire_audit_singleton, AuditSingletonGuard, AuditTraceGuard, AUDIT_ACTIVE,
@@ -1313,11 +1328,7 @@ fn main() {
     // `Drop` runs `wpr -cancel` for us.
     #[cfg(target_os = "windows")]
     if cli.audit {
-        let mut stop_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from("stop")];
-        if let Some(cfg) = audit_config_file.as_ref() {
-            stop_args.push(std::ffi::OsString::from("--config-path"));
-            stop_args.push(cfg.clone().into_os_string());
-        }
+        let stop_args = audit_stop_args(audit_config_file.as_deref(), response.exit_code);
         let borrowed: Vec<&std::ffi::OsStr> = stop_args
             .iter()
             .map(std::ffi::OsString::as_os_str)
@@ -1488,6 +1499,23 @@ mod tests {
             assert_eq!(error, AUDIT_CAPTURE_DENIALS_CONFLICT_MSG);
             assert!(error.contains(r#"mode: "allow""#));
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn audit_stop_args_include_workload_exit_code() {
+        let args = audit_stop_args(Some(std::path::Path::new(r"C:\config.json")), 23);
+        assert_eq!(
+            args,
+            [
+                "stop",
+                "--config-path",
+                r"C:\config.json",
+                "--exit-code",
+                "23"
+            ]
+            .map(std::ffi::OsString::from)
+        );
     }
 
     #[test]

@@ -56,6 +56,7 @@ pub fn write_denials(output_path: &Path, analysis: &AnalysisResult, exit_code: i
 /// without retaining a second ETL parser.
 pub fn legacy_config_inputs(
     denials: &[DeniedResource],
+    current_directory: Option<&str>,
 ) -> (Vec<LearningModeAccessEvent>, HashSet<String>) {
     let mut events: Vec<LearningModeAccessEvent> = Vec::new();
     let mut file_event_indices: HashMap<String, usize> = HashMap::new();
@@ -64,7 +65,9 @@ pub fn legacy_config_inputs(
     for denial in denials {
         match denial.resource_type {
             ResourceType::File => {
-                if !is_local_drive_path(&denial.resource) {
+                if !is_local_drive_path(&denial.resource)
+                    || is_current_directory_path(&denial.resource, current_directory)
+                {
                     continue;
                 }
                 let access_mask = match denial.access_type {
@@ -94,6 +97,28 @@ pub fn legacy_config_inputs(
             }
             ResourceType::Ui | ResourceType::Network | ResourceType::Other => {}
         }
+    }
+
+    fn is_current_directory_path(path: &str, current_directory: Option<&str>) -> bool {
+        let Some(current_directory) = current_directory else {
+            return false;
+        };
+        let current_directory = current_directory.trim_end_matches('\\');
+        let path = path.trim_end_matches('\\');
+        if path.eq_ignore_ascii_case(current_directory) {
+            return true;
+        }
+
+        let bytes = current_directory.as_bytes();
+        let is_drive_root = bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        let path_bytes = path.as_bytes();
+        !is_drive_root
+            && path_bytes.len() > bytes.len()
+            && path_bytes[..bytes.len()]
+                .iter()
+                .zip(bytes)
+                .all(|(path_byte, cwd_byte)| path_byte.eq_ignore_ascii_case(cwd_byte))
+            && path_bytes[bytes.len()] == b'\\'
     }
 
     (events, capabilities)
@@ -170,12 +195,33 @@ mod tests {
             ),
         ];
 
-        let (events, capabilities) = legacy_config_inputs(&denials);
+        let (events, capabilities) = legacy_config_inputs(&denials, None);
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].access_mask, 0x1);
         assert_eq!(events[1].access_mask, 0x2);
         assert_eq!(events[2].access_mask, 0x3);
         assert_eq!(capabilities, HashSet::from(["internetClient".to_string()]));
+    }
+
+    #[test]
+    fn legacy_inputs_exclude_current_directory_but_not_siblings() {
+        let denials = vec![
+            denial(
+                r"C:\work\repo\tool.log",
+                ResourceType::File,
+                AccessType::Write,
+            ),
+            denial(
+                r"C:\work\repo2\data.txt",
+                ResourceType::File,
+                AccessType::Read,
+            ),
+        ];
+
+        let (events, _) = legacy_config_inputs(&denials, Some(r"C:\work\repo"));
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].file_path, r"C:\work\repo2\data.txt");
     }
 
     #[test]

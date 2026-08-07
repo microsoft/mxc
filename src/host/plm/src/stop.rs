@@ -287,7 +287,11 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
         });
     }
 
-    let (valid_access_events, requested_capabilities) = legacy_config_inputs(&analysis.denials);
+    let current_directory = std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    let (valid_access_events, requested_capabilities) =
+        legacy_config_inputs(&analysis.denials, current_directory.as_deref());
     write_requested_capabilities_summary(&requested_capabilities, opts.verbose);
 
     if valid_access_events.is_empty() && requested_capabilities.is_empty() {
