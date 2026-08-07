@@ -361,6 +361,8 @@ fn same_config_target(a: &Path, b: &Path) -> bool {
 }
 
 fn target_comparison_key(path: &Path) -> String {
+    let original = path.to_string_lossy().replace('/', "\\");
+    let is_verbatim = original.starts_with(r"\\?\");
     let resolved = std::fs::canonicalize(path)
         .or_else(|_| {
             let parent = path
@@ -375,14 +377,42 @@ fn target_comparison_key(path: &Path) -> String {
         })
         .or_else(|_| std::path::absolute(path))
         .unwrap_or_else(|_| path.to_path_buf());
-
     let key = resolved.to_string_lossy().replace('/', "\\");
     let key = key
         .strip_prefix(r"\\?\UNC\")
         .map(|rest| format!(r"\\{rest}"))
         .or_else(|| key.strip_prefix(r"\\?\").map(str::to_string))
         .unwrap_or(key);
+    let key = if is_verbatim {
+        key
+    } else {
+        normalize_nonverbatim_win32_components(&key)
+    };
     key.to_ascii_lowercase()
+}
+
+fn normalize_nonverbatim_win32_components(path: &str) -> String {
+    path.split('\\')
+        .map(|component| {
+            if component.is_empty() || component.ends_with(':') {
+                component
+            } else {
+                let default_stream_suffix = "::$DATA";
+                let component = component
+                    .get(..component.len().saturating_sub(default_stream_suffix.len()))
+                    .filter(|_| {
+                        component
+                            .get(component.len().saturating_sub(default_stream_suffix.len())..)
+                            .is_some_and(|suffix| {
+                                suffix.eq_ignore_ascii_case(default_stream_suffix)
+                            })
+                    })
+                    .unwrap_or(component);
+                component.trim_end_matches([' ', '.'])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\\")
 }
 
 #[cfg(test)]
@@ -517,6 +547,36 @@ mod tests {
     }
 
     #[test]
+    fn trailing_dot_trace_alias_cannot_collide_with_denials_output() {
+        let dir = std::env::temp_dir().join(format!("plm_alias_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = prepare_config_output_paths(
+            None,
+            &dir,
+            &dir.join("denials.json."),
+            &dir.join("denials.json"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("would be overwritten"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_stream_trace_alias_cannot_collide_with_denials_output() {
+        let dir = std::env::temp_dir().join(format!("plm_stream_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = prepare_config_output_paths(
+            None,
+            &dir,
+            &dir.join("denials.json::$DATA"),
+            &dir.join("denials.json"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("would be overwritten"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn source_config_collision_is_rejected_before_capture() {
         let trace = Path::new(r"C:\captures\trace.etl");
         let error = prepare_config_output_paths(
@@ -557,6 +617,39 @@ mod tests {
         let lower = dir.join("denials.json");
         let upper = dir.join("DENIALS.JSON");
         assert!(same_config_target(&lower, &upper));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_trailing_dot_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_dot_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(
+            &dir.join("denials.json."),
+            &dir.join("denials.json")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_trailing_space_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_space_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(
+            &dir.join("denials.json "),
+            &dir.join("denials.json")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_default_stream_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_stream_key_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(
+            &dir.join("denials.json::$data"),
+            &dir.join("denials.json")
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

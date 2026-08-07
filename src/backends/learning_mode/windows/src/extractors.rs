@@ -323,7 +323,6 @@ fn parse_u32(raw: &str) -> Option<u32> {
 fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
     // Standard rights (object-type independent).
     const DELETE: u32 = 0x0001_0000;
-    const READ_CONTROL: u32 = 0x0002_0000;
     const WRITE_DAC: u32 = 0x0004_0000;
     const WRITE_OWNER: u32 = 0x0008_0000;
     // Generic rights (object-type independent).
@@ -343,12 +342,7 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
         const KEY_NOTIFY: u32 = 0x0010;
         const KEY_CREATE_LINK: u32 = 0x0020;
         (
-            KEY_QUERY_VALUE
-                | KEY_ENUMERATE_SUB_KEYS
-                | KEY_NOTIFY
-                | READ_CONTROL
-                | GENERIC_READ
-                | GENERIC_EXECUTE,
+            KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY | GENERIC_READ | GENERIC_EXECUTE,
             KEY_SET_VALUE
                 | KEY_CREATE_SUB_KEY
                 | KEY_CREATE_LINK
@@ -370,7 +364,7 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
         const FILE_READ_ATTRIBUTES: u32 = 0x0080;
         const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
         (
-            FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | READ_CONTROL | GENERIC_READ,
+            FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | GENERIC_READ,
             FILE_WRITE_DATA
                 | FILE_APPEND_DATA
                 | FILE_WRITE_EA
@@ -790,7 +784,12 @@ mod tests {
 
     #[test]
     fn file_mask_no_recognised_right_is_unknown() {
-        // SYNCHRONIZE (0x100000) alone and MAXIMUM_ALLOWED (0x02000000) alone.
+        // READ_CONTROL, SYNCHRONIZE, and MAXIMUM_ALLOWED alone grant no
+        // file-content access and must not become readonly recommendations.
+        assert_eq!(
+            access_type_from_mask(0x0002_0000, false),
+            AccessType::Unknown
+        );
         assert_eq!(
             access_type_from_mask(0x0010_0000, false),
             AccessType::Unknown
@@ -815,5 +814,9 @@ mod tests {
         assert_eq!(access_type_from_mask(0x0020, true), AccessType::Write); // KEY_CREATE_LINK (execute for files!)
                                                                             // Registry has no execute concept: 0x20 is a write here, not execute.
         assert_ne!(access_type_from_mask(0x0020, true), AccessType::Execute);
+        assert_eq!(
+            access_type_from_mask(0x0002_0000, true),
+            AccessType::Unknown
+        );
     }
 }
