@@ -49,6 +49,49 @@ available bounds what policy can be enforced.
 - **T3 (AppContainer + DACL)** is the universal fallback and enforces
   filesystem policy via host path ACEs on every release.
 
+## Schema 0.8 process security environment preference
+
+BaseContainer requests using schema versions through 0.7 use the SBOX contract
+and the T1/T2/T3 fallback chain above. Schema 0.8 and later prefer the PSEC
+process-security-environment contract when its complete export set resolves and
+`QueryProcessSecurityEnvironmentSupport` succeeds. During the transition from
+the experimental SBOX API to PSEC, an ordinary schema 0.8 request falls back to
+SBOX when PSEC is unavailable, then continues through the existing AppContainer
+fallback tiers when neither BaseContainer contract is usable.
+
+The PSEC probe requires:
+
+- `CreateProcessSecurityEnvironment`
+- `QueryProcessSecurityEnvironmentSupport`
+- `CloseProcessSecurityEnvironment`
+
+When `processContainer.captureDenials` is present, fallback is not possible:
+capture requires a PSEC handle to key the trace. The host must additionally
+expose the complete official V2 Learning Mode export set:
+
+- `StartLearningModeTrace`
+- `StopLearningModeTrace`
+- `CloseLearningModeTrace`
+
+For capture, unsupported or earlier-contract hosts fail as
+`backend_unavailable`. Ordinary ProcessContainer execution still follows the
+fallback chain. Internal validation confirmed the earlier contract on build
+`26657.1002` is rejected for capture while schema 0.7 SBOX execution remains
+functional, and the full V2 contract on build `26663.1000` is accepted. These
+builds are validation points, not a public release-floor commitment; runtime
+probing is the source of truth.
+
+The PSEC contract cannot represent `processContainer.leastPrivilege`, so
+ordinary schema 0.8 requests using that option use the transitional SBOX
+contract instead of failing. MXC also does not yet supply the AppContainer peer
+identity required by the current model-2 SBOX proxy contract. On hosts with
+`Experimental_QuerySandboxSupport`, proxy requests therefore skip
+BaseContainer and continue to the AppContainer fallback; older query-less hosts
+retain the legacy SBOX proxy path. Similarly, `filesystem.deniedPaths` uses
+PSEC only when `QueryProcessSecurityEnvironmentSupport` advertises
+`PSE_SUPPORT_FS_DENY`; otherwise MXC continues through the SBOX/AppContainer
+fallback chain.
+
 ## Filesystem policy
 
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
@@ -74,17 +117,19 @@ Notes:
 |--------|:--:|:--:|:--:|:--:|
 | Capabilities (`internetClient`) | ✅ | ✅ | ✅ | ✅ |
 | Firewall rules (`netsh advfirewall`, needs admin) | ✅ | ✅ | ✅ | ✅ |
-| Proxy via OS / BaseContainer (`appinfosvc`, FlatBuffer `network_policy.proxy`) | ❌ | ❌ | ❌ | ✅ (T1 only) |
+| Proxy | ✅ (AppContainer compatibility) | ✅ (AppContainer compatibility) | ✅ (AppContainer compatibility) | ✅ (legacy T1 or AppContainer compatibility) |
 
 Notes:
 - Capability- and firewall-based network enforcement is an AppContainer
   primitive and works on every release.
 - OS-configured WinHTTP proxy (passed in the FlatBuffer spec to
-  `CreateProcessInSandbox`) is a T1-only path and therefore 25H2+ only.
-- The earlier AppContainer WinHTTP proxy shim (`winhttp-proxy-shim.exe`) is
-  being retired and is intentionally omitted here: the new WinHTTP cleanup APIs
-  it depended on are not moving down-level, so it is not a forward-looking
-  option.
+  `CreateProcessInSandbox`) is used only on legacy query-less T1 hosts. The
+  capability-aware model-2 contract requires an AppContainer proxy peer
+  identity that MXC does not yet author, so those hosts use the AppContainer
+  compatibility fallback.
+- The AppContainer compatibility path uses `winhttp-proxy-shim.exe`. It is not
+  the forward-looking proxy architecture; support for the model-2 BaseContainer
+  contract should replace this fallback in a separate change.
 
 ## UI restrictions
 

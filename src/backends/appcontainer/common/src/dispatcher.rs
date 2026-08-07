@@ -435,13 +435,23 @@ struct BackendPlan {
 /// selected [`IsolationTier`] and any tier-selection warnings are returned for
 /// telemetry.
 fn select_backend_with_fallback(request: &ExecutionRequest) -> Result<BackendPlan, DispatchError> {
-    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
+    // Keep the established tier fallback behavior for every schema version.
+    // For schema 0.8+, BaseContainerRunner prefers PSEC when available and
+    // otherwise uses the transitional SBOX contract. If neither BaseContainer
+    // contract is usable, detection continues to the AppContainer tiers.
+    let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
+    let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
+    let decision = fallback_detector::detect_with_base_container_capabilities(
+        &request.policy,
+        prefer_base_container,
+        prefer_base_container,
+        supports_deny_paths,
+    )?;
     if request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer {
         return Err(DispatchError::CaptureDenialsUnsupported {
             tier: decision.tier,
         });
     }
-
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
             // Tier 1 delegates filesystem-policy enforcement to
@@ -721,7 +731,7 @@ impl SandboxProcess for DaclGuardedProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, ExecutionRequest};
+    use wxc_common::models::{ContainerPolicy, ExecutionRequest, ProxyAddress, ProxyConfig};
     // `ForceTierGuard` lives in `crate::test_env` so the lock is
     // shared with the `fallback_detector::tests` module — otherwise
     // a dispatcher test and a fallback-detector test running on
@@ -734,6 +744,13 @@ mod tests {
             container_id: "MxcDispatcherTest".to_string(),
             policy,
             ..ExecutionRequest::default()
+        }
+    }
+
+    fn schema_0_8_request(policy: ContainerPolicy) -> ExecutionRequest {
+        ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..test_request(policy)
         }
     }
 
@@ -847,23 +864,67 @@ mod tests {
     }
 
     #[test]
-    fn capture_denials_rejects_fallback_before_backend_or_dacl_setup() {
+    fn capture_denials_rejects_appcontainer_fallback() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
-        let req = test_request(policy);
+        let req = schema_0_8_request(policy);
 
-        let error = match dispatch_with_fallback(&req) {
-            Ok(_) => panic!("capture fallback must be rejected"),
-            Err(error) => error,
-        };
+        let result = dispatch_with_fallback(&req);
         assert!(matches!(
-            error,
-            DispatchError::CaptureDenialsUnsupported {
+            result,
+            Err(DispatchError::CaptureDenialsUnsupported {
                 tier: IsolationTier::AppContainerDacl
-            }
+            })
         ));
     }
+
+    #[test]
+    fn schema_0_8_without_capture_keeps_legacy_fallback() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (policy, _tmp) = policy_with_rw_temp();
+        let req = schema_0_8_request(policy);
+
+        let dispatched = dispatch_with_fallback(&req).expect("fallback should be selected");
+        assert!(matches!(dispatched.tier, IsolationTier::AppContainerDacl));
+        assert!(
+            dispatched.has_dacl_guard(),
+            "schema 0.8 ordinary requests retain AppContainer + DACL fallback"
+        );
+    }
+
+    #[test]
+    fn schema_0_8_proxy_keeps_base_container_on_legacy_sbox_hosts() {
+        let _g = BcUsableGuard::set(true);
+        let mut policy = empty_policy();
+        policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        let req = schema_0_8_request(policy);
+
+        let plan = select_backend_with_fallback(&req).expect("SBOX should remain eligible");
+        assert!(matches!(plan.tier, IsolationTier::BaseContainer));
+        assert!(matches!(plan.backend, SelectedBackend::BaseContainer(_)));
+        assert!(plan.dacl_manager.is_none());
+    }
+
+    #[test]
+    fn schema_0_8_proxy_uses_appcontainer_when_base_container_is_incompatible() {
+        let _g = BcUsableGuard::set(false);
+        let mut policy = empty_policy();
+        policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        let req = schema_0_8_request(policy);
+
+        let plan =
+            select_backend_with_fallback(&req).expect("AppContainer fallback should be selected");
+        assert_ne!(plan.tier, IsolationTier::BaseContainer);
+        assert!(matches!(plan.backend, SelectedBackend::AppContainer(_)));
+    }
+
     #[test]
     fn dispatch_fallback_disabled_errors() {
         let _g = ForceTierGuard::set("appcontainer-dacl");

@@ -33,6 +33,9 @@ jobs:
       - name: Check schema is in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-schema-codegen.js
 
+      - name: Check PSEC generated contract (provenance + drift)
+        run: node scripts/versioning/check-psec-codegen.js
+
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js
 

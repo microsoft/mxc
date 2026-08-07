@@ -21,6 +21,7 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: Some(10_000),
+    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("echo hello");
@@ -44,12 +45,48 @@ through the shared parser. The returned [`SandboxRequest`] has an empty
 command line — set the command with [`SandboxRequest::set_script`] (and any
 working directory / env) before spawning.
 
+To target a specific backend instead of the host default, use
+[`build_request_with_containment`] with a [`Containment`] — the same choice the
+TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
+
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
 
 [`platform_support`] is the Rust port of `getPlatformSupport` — reports host
 support and the available containment backends.
+
+## Denial capture (Windows)
+
+`SandboxPolicy::capture_denials` enables the Windows ProcessContainer's
+learning-mode capture: the runner records every access the policy does not
+grant and writes them to a JSON denials document.
+
+```rust
+use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
+use mxc_sdk::SandboxPolicy;
+
+let policy = SandboxPolicy {
+    version: "0.7.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+    capture_denials: Some(CaptureDenialsSection {
+        // `Block` (the default) keeps deny-by-default and records the denial;
+        // `Allow` runs permissively and records what *would* have been denied.
+        mode: CaptureDenialsMode::Block,
+        // Absolute path; a per-run id is stamped into the stem
+        // (`denials.json` -> `denials.<run-id>.json`). `None` uses a managed temp.
+        output_path: None,
+    }),
+};
+```
+
+`Allow` relaxes containment for the run — it is reported through `warnings()`.
+Read the resulting file path and denial summary from `output_metadata()` after
+the process terminates. The section is ignored on Linux and macOS, whose
+backends have no learning-mode API.
 
 ## Live stdio + kill (streaming)
 
@@ -67,6 +104,7 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: None,
+    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("cat"); // echoes stdin until EOF
@@ -169,15 +207,46 @@ return an `Error` with `ErrorCode::UnsupportedPhase`.
 The backend is chosen by the `containment` field in the request (or the host
 default):
 
-| Host    | Backend(s)                                             |
-|---------|--------------------------------------------------------|
-| Linux   | Bubblewrap                                             |
-| macOS   | Seatbelt                                               |
-| Windows | ProcessContainer (AppContainer + BaseContainer)        |
+| Host    | Backend(s)                                      | Selected by             |
+|---------|-------------------------------------------------|-------------------------|
+| Linux   | Bubblewrap                                      | `Containment::Process`  |
+| macOS   | Seatbelt                                        | `Containment::Process`  |
+| Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`  |
+| Windows | WSLC (WSL Container)                            | `Containment::Wslc`     |
 
-Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
-WSLC, LXC) returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the standalone
-executor binaries for those.
+Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight, LXC)
+returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the
+standalone executor binaries for those.
+
+### WSLC (experimental)
+
+WSLC runs a Linux container on a Windows host through the WSLC SDK. It is
+opt-in on two axes: build this crate with its **`wslc` feature**, and call
+[`SandboxRequest::set_experimental(true)`] on the request (the library-side
+equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
+memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
+inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
+go through the same parser the executor uses — so a rejected value (e.g. a port
+mapping with a zero or duplicated host port) fails at build time, not at spawn.
+
+```rust,no_run
+use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+
+# let policy = SandboxPolicy {
+#     version: "0.7.0-alpha".to_string(),
+#     filesystem: None, network: None, ui: None, timeout_ms: None,
+# };
+let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
+let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
+request.set_script("python3 -c 'print(42)'").set_experimental(true);
+let output = run(request)?;
+# Ok::<(), mxc_sdk::Error>(())
+```
+
+Two WSLC-specific limits follow from the SDK's surface: the container has no
+stdin (`Sandbox::take_stdin()` returns `None`), and its process has no host
+process id (`Sandbox::id()` is `0`) — `kill()` stops the whole container.
+[`platform_support`] reports `"wslc"` only on a host that can actually run it.
 
 ## No pty
 

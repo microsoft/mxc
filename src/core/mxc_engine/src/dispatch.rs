@@ -13,9 +13,10 @@
 //! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
 //! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
 //! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
-//! (Linux), and Seatbelt (macOS). Every other backend — including the
-//! experimental ones (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
-//! WSLC) and LXC (no streaming path suitable for the library) — returns
+//! (Linux), Seatbelt (macOS), and WSLC (Windows, experimental, behind the
+//! `wslc` feature). Every other backend — including the remaining experimental
+//! ones (Windows Sandbox, IsolationSession, MicroVM, Hyperlight) and LXC (no
+//! streaming path suitable for the library) — returns
 //! [`MxcError::unsupported_containment`]; callers that need those must drive the
 //! standalone executor binaries (whose run-to-completion path will, in a later
 //! increment, also route through this engine).
@@ -72,6 +73,7 @@ pub fn spawn_runner(
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
+        ContainmentBackend::Wslc => spawn_wslc(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
@@ -214,6 +216,48 @@ fn spawn_process_container(
     ))
 }
 
+/// Spawn the WSL Container backend. Experimental, so it refuses to run unless
+/// the request opted in (`SandboxRequest::set_experimental(true)`) — the
+/// library-side equivalent of the executor's `--experimental` flag.
+#[cfg(all(target_os = "windows", feature = "wslc"))]
+fn spawn_wslc(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            "WSLC is an experimental backend; enable experimental features on the \
+             request (SandboxRequest::set_experimental(true)) to use it",
+        ));
+    }
+    let config = request.experimental.wslc.clone().unwrap_or_default();
+    let mut runner = wslc_common::WSLContainerRunner::new(&config);
+    runner
+        .spawn(request, logger, StdioMode::Pipes)
+        .map_err(map_spawn_error)
+}
+
+#[cfg(not(all(target_os = "windows", feature = "wslc")))]
+fn spawn_wslc(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    #[cfg(target_os = "windows")]
+    {
+        Err(MxcError::unsupported_containment(
+            "WSLC backend not compiled. Rebuild with --features wslc.",
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(MxcError::unsupported_containment(
+            "WSLC (WSL Container) is only available on Windows",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ensure_host_supported, spawn_runner};
@@ -229,6 +273,7 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
+            capture_denials: None,
         }
     }
 
@@ -289,6 +334,7 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
+            capture_denials: None,
         };
         let mut request = build_request(&policy, None).expect("build_request");
         request.set_script("echo hi");
@@ -304,5 +350,38 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.message.contains("guiAccess"), "got: {}", err.message);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn streaming_rejects_wslc_off_windows() {
+        // WSLC is a Windows-host backend; selecting it anywhere else must be a
+        // clear `UnsupportedContainment` rather than a confusing spawn failure.
+        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        request.inner.containment = ContainmentBackend::Wslc;
+        request.set_experimental(true);
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("WSLC must be rejected off Windows"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert!(err.message.contains("Windows"), "got: {}", err.message);
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn streaming_rejects_wslc_without_experimental() {
+        // The experimental gate is fail-closed: selecting WSLC without opting
+        // in must be rejected before any container is created.
+        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        request.inner.containment = ContainmentBackend::Wslc;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("WSLC must be rejected without experimental features"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(err.message.contains("experimental"), "got: {}", err.message);
     }
 }

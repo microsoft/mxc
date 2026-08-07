@@ -5,10 +5,24 @@ pub mod base_container_layout {
     use super::*;
     mod integrity_level_generated;
     pub use self::integrity_level_generated::*;
+    mod filter_action_generated;
+    pub use self::filter_action_generated::*;
+    mod ip_protocol_generated;
+    pub use self::ip_protocol_generated::*;
     mod sandbox_spec_generated;
     pub use self::sandbox_spec_generated::*;
     mod proxy_info_generated;
     pub use self::proxy_info_generated::*;
+    mod ip_subnet_generated;
+    pub use self::ip_subnet_generated::*;
+    mod destination_rule_generated;
+    pub use self::destination_rule_generated::*;
+    mod port_rule_generated;
+    pub use self::port_rule_generated::*;
+    mod endpoint_rule_generated;
+    pub use self::endpoint_rule_generated::*;
+    mod endpoint_policy_generated;
+    pub use self::endpoint_policy_generated::*;
     mod network_policy_generated;
     pub use self::network_policy_generated::*;
 } // sandbox_tech_spec_layout
