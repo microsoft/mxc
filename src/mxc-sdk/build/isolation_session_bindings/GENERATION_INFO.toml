@@ -13,7 +13,7 @@ target_windows_crate = "0.62"
 generated_date = "2026-08-14"
 
 [source]
-nupkg = "Microsoft.Windows.AI.IsolationSession.SDK.0.2606.0.nupkg"
+nupkg = "Microsoft.Windows.AI.IsolationSession.SDK.0.2608.0.nupkg"
 winmd = "metadata/windows.ai.isolationsession.preview.winmd"
 winmd_sha256 = "1A9DBDC2CBFDEDC7FF366939DB4BA1564179D55B6EA3E70B99BD82C532428147"
 namespace = "Windows.AI.IsolationSession.Preview"
