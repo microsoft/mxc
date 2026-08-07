@@ -61,10 +61,26 @@ jobs:
       - name: Refresh Linux package indexes
         if: matrix.os_label == 'linux'
         shell: bash
-        run: sudo apt-get -o Acquire::Retries=3 update
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::Retries=3 update; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to refresh Linux package indexes after $attempt attempts"
+              exit 1
+            fi
+
+            echo "::warning::Package index refresh failed; retrying"
+            sleep $((attempt * 5))
+          done
 
       - name: Install bubblewrap + LXC stack (Linux only, cached)
         if: matrix.os_label == 'linux'
+        continue-on-error: true
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
           # Installs the LXC + Bubblewrap substrate the SDK integration
@@ -126,9 +142,9 @@ jobs:
             # complete install so a transient 404 cannot leave a green setup
             # step with no containment packages installed.
             for attempt in 1 2 3; do
-              sudo apt-get -o Acquire::Retries=3 update
-              if sudo env DEBIAN_FRONTEND=noninteractive \
-                apt-get -o Acquire::Retries=3 install -y "${packages[@]}"; then
+              if sudo apt-get -o Acquire::Retries=3 update &&
+                sudo env DEBIAN_FRONTEND=noninteractive \
+                  apt-get -o Acquire::Retries=3 install -y "${packages[@]}"; then
                 break
               fi
 
@@ -159,7 +175,8 @@ jobs:
           # (lxc-container-default) and the lxc-net bridge service may
           # not be active. Load/start them explicitly so lxc-start
           # doesn't abort with an AppArmor denial.
-          sudo apparmor_parser -rT /etc/apparmor.d/lxc*
+          sudo apparmor_parser -rT /etc/apparmor.d/lxc-containers
+          sudo systemctl daemon-reload
           sudo systemctl start lxc-net
           sudo systemctl is-active --quiet lxc-net
 
