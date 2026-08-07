@@ -102,15 +102,24 @@ jobs:
             bridge-utils
           )
 
-          missing=()
-          for package in "${packages[@]}"; do
-            if [ "$(dpkg-query --show --showformat='${db:Status-Abbrev}' "$package" 2>/dev/null || true)" != "ii " ]; then
-              missing+=("$package")
+          required_commands=(
+            bwrap
+            lxc-start
+            lxc-create
+            dnsmasq
+            iptables
+            brctl
+          )
+
+          missing_commands=()
+          for command in "${required_commands[@]}"; do
+            if ! command -v "$command" >/dev/null 2>&1; then
+              missing_commands+=("$command")
             fi
           done
 
-          if [ "${#missing[@]}" -ne 0 ]; then
-            echo "::warning::Cached dependency installation was incomplete; repairing: ${missing[*]}"
+          if [ "${#missing_commands[@]}" -ne 0 ]; then
+            echo "::warning::Cached dependency installation was incomplete; missing commands: ${missing_commands[*]}"
 
             # Runner images can have package indexes that reference versions
             # already removed from the Ubuntu mirrors. Refresh and retry the
@@ -135,9 +144,9 @@ jobs:
             echo "Linux containment dependencies restored successfully from cache"
           fi
 
-          command -v bwrap
-          command -v lxc-start
-          dpkg-query --show --showformat='${binary:Package}=${Version}\n' "${packages[@]}"
+          for command in "${required_commands[@]}"; do
+            command -v "$command"
+          done
 
       - name: Start LXC services (cache restore skips postinst hooks)
         if: matrix.os_label == 'linux'
