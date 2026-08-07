@@ -199,14 +199,17 @@ fn build_request_then_run_seatbelt() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn platform_support_linux_methods_are_lxc_or_bubblewrap() {
+fn platform_support_linux_reports_only_bubblewrap() {
     let support = platform_support();
-    for method in &support.available_methods {
-        assert!(
-            method == "lxc" || method == "bubblewrap",
-            "unexpected Linux method: {method}"
-        );
-    }
+    // Bubblewrap is the only SDK-launchable Linux backend; `lxc` is a
+    // host-capability backend reported by `available_backends()`, not here.
+    // Assert the exact set so re-advertising a non-launchable backend fails
+    // (an inclusive `for` check would pass vacuously and permit `lxc`).
+    assert_eq!(
+        support.available_methods,
+        vec!["bubblewrap".to_string()],
+        "Linux platform_support must report exactly bubblewrap (lxc excluded)"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -219,15 +222,15 @@ fn platform_support_windows_includes_processcontainer() {
         support.available_methods.first().map(String::as_str),
         Some("processcontainer")
     );
-    // `windows_sandbox`, `isolation_session` (with the feature), and `wslc` may
-    // also appear, so the exact vector is host-dependent.
+    // Beyond processcontainer, only `wslc` may appear (SDK-launchable, opt-in).
+    // `windows_sandbox` and `isolation_session` are host-capability backends
+    // reported by `available_backends()`, not here — so assert they never leak
+    // into this launchable set, or a regression would slip through.
     for method in &support.available_methods {
         assert!(
-            matches!(
-                method.as_str(),
-                "processcontainer" | "windows_sandbox" | "isolation_session" | "wslc"
-            ),
-            "unexpected Windows method: {method}"
+            matches!(method.as_str(), "processcontainer" | "wslc"),
+            "unexpected Windows method (only processcontainer + optional wslc \
+             are SDK-launchable): {method}"
         );
     }
 }
