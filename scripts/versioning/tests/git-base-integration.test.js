@@ -14,6 +14,7 @@ const { join } = require("path");
 const {
   listFilesAtCommit,
   readFileAtCommit,
+  repoRelativeGitPath,
   resolveBaseCommit,
   toGitPath,
 } = require("../lib/git-base");
@@ -41,6 +42,12 @@ test("toGitPath normalises Windows separators", () => {
   assert.equal(toGitPath("schemas\\dev\\a.json"), "schemas/dev/a.json");
   assert.equal(toGitPath("schemas/dev/a.json"), "schemas/dev/a.json");
   assert.equal(toGitPath("./a.json"), "a.json");
+});
+
+test("toGitPath rejects non-string paths", () => {
+  for (const path of [null, undefined, 42, ["schemas", "a.json"], {}]) {
+    assert.throws(() => toGitPath(path), TypeError);
+  }
 });
 
 test("readFileAtCommit reads a file using either separator", () => {
@@ -81,6 +88,19 @@ test("readFileAtCommit returns null for a genuinely absent file", () => {
   });
   try {
     assert.equal(readFileAtCommit(dir, "HEAD", "missing.json"), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readFileAtCommit handles output larger than Node's default buffer", () => {
+  const content = "x".repeat(2 * 1024 * 1024);
+  const dir = scratchRepo((d) => {
+    writeFileSync(join(d, "large.txt"), content);
+    commitAll(d, "add");
+  });
+  try {
+    assert.equal(readFileAtCommit(dir, "HEAD", "large.txt"), content);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -249,3 +269,23 @@ test("readFileAtCommit accepts the natural absolute call shape", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test(
+  "repoRelativeGitPath compares Windows absolute paths case-insensitively",
+  { skip: process.platform !== "win32" },
+  () => {
+    const dir = scratchRepo((d) => {
+      mkdirSync(join(d, "schemas"), { recursive: true });
+      writeFileSync(join(d, "schemas", "a.json"), "{}\n");
+      commitAll(d, "add");
+    });
+    try {
+      assert.equal(
+        repoRelativeGitPath(dir.toUpperCase(), join(dir, "schemas", "a.json")),
+        "schemas/a.json"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+);

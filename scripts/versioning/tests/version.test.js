@@ -137,6 +137,11 @@ test("compareMajorMinor ignores patch and prerelease", () => {
 
 test("majorMinor renders the line of a version", () => {
   assert.equal(majorMinor(parseVersion("0.8.0-alpha")), "0.8");
+  assert.equal(majorMinor("0.8.0-alpha"), "0.8");
+  assert.equal(majorMinor("invalid"), null);
+  assert.equal(majorMinor(null), null);
+  assert.throws(() => majorMinor({}), TypeError);
+  assert.throws(() => majorMinor({ major: 1, minor: undefined }), TypeError);
 });
 
 // -- Round-1 review regressions -----------------------------------------------

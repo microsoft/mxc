@@ -167,8 +167,13 @@ function compareVersions(a, b) {
 }
 
 function majorMinor(value) {
-  const parsed = typeof value === "string" ? parseVersion(value) : value;
-  return parsed ? `${parsed.major}.${parsed.minor}` : null;
+  if (typeof value === "string") {
+    const parsed = parseVersion(value);
+    return parsed ? `${parsed.major}.${parsed.minor}` : null;
+  }
+  if (value === null || value === undefined) return null;
+  assertParsed(value, "value");
+  return `${value.major}.${value.minor}`;
 }
 
 function parseMajorMinor(value) {

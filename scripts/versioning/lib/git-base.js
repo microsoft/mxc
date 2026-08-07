@@ -27,6 +27,7 @@ function git(repoRoot, args, { trim = true } = {}) {
   const output = execFileSync("git", args, {
     cwd: repoRoot,
     encoding: "utf8",
+    maxBuffer: Infinity,
     stdio: ["ignore", "pipe", "pipe"],
   });
   return trim ? output.trimEnd() : output;
@@ -81,7 +82,10 @@ function resolveBaseCommit(
 // slashes are all meaningful to the filesystem but never appear in git's own
 // output, so they are collapsed here rather than compared literally.
 function toGitPath(path) {
-  const text = String(path).split("\\").join("/");
+  if (typeof path !== "string") {
+    throw new TypeError(`path must be a string, got ${typeof path}`);
+  }
+  const text = path.split("\\").join("/");
   const segments = [];
   for (const segment of text.split("/")) {
     if (segment === "" || segment === ".") continue;
@@ -111,17 +115,20 @@ function toGitPath(path) {
 function repoRelativeGitPath(repoRoot, path) {
   const normalized = toGitPath(path);
   const root = toGitPath(resolve(repoRoot));
-  if (!isAbsolute(String(path).split("\\").join("/")) && !hasDriveLetter(normalized)) {
+  if (!isAbsolute(path.split("\\").join("/")) && !hasDriveLetter(normalized)) {
     return normalized;
   }
-  if (normalized === root) return "";
-  const prefix = `${root}/`;
-  if (!normalized.startsWith(prefix)) {
+  const caseInsensitive = process.platform === "win32" || hasDriveLetter(root);
+  const comparablePath = caseInsensitive ? normalized.toLowerCase() : normalized;
+  const comparableRoot = caseInsensitive ? root.toLowerCase() : root;
+  if (comparablePath === comparableRoot) return "";
+  const prefix = `${comparableRoot}/`;
+  if (!comparablePath.startsWith(prefix)) {
     throw new Error(
       `path "${path}" is outside the repository root "${repoRoot}"`
     );
   }
-  return normalized.slice(prefix.length);
+  return normalized.slice(root.length + 1);
 }
 
 function hasDriveLetter(path) {
