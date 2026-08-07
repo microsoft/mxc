@@ -25,9 +25,10 @@ const BUFFER_SIZE: u32 = 4096;
 /// Parameters for a pipe relay thread. The thread reads from `h_read` and
 /// writes every chunk to `h_write`, flushing after each write.
 ///
-/// # Safety
-/// The caller **must** keep this struct alive until the relay thread exits
-/// (i.e. wait for the thread handle before dropping the params).
+/// # Ownership
+/// Ownership of this struct transfers to the relay thread, which frees it on
+/// exit. The caller must **not** keep or free it. The HANDLEs it carries are
+/// borrowed, not owned — see the safety contract on [`create_relay_thread`].
 #[repr(C)]
 pub(super) struct PipeRelayParams {
     pub h_read: HANDLE,
@@ -37,9 +38,13 @@ pub(super) struct PipeRelayParams {
 /// Thread procedure for relaying data between two handles.
 ///
 /// # Safety
-/// `param` must point to a valid `PipeRelayParams` that outlives the thread.
+/// `param` must be the `Box::into_raw` pointer produced by
+/// [`create_relay_thread`], passed exactly once.
 unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) -> u32 {
-    let params = &*(param as *const PipeRelayParams);
+    // Reclaim ownership at entry so every exit path below frees exactly once,
+    // and so the params outlive the thread's use of them regardless of what
+    // the spawning frame does. This is what makes an unjoined thread sound.
+    let params = unsafe { Box::from_raw(param as *mut PipeRelayParams) };
     let mut buffer = [0u8; BUFFER_SIZE as usize];
 
     loop {
@@ -78,23 +83,39 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
 /// Create a relay thread via `CreateThread`. Returns the thread HANDLE
 /// wrapped in `OwnedHandle`.
 ///
+/// Takes `params` **by value** and moves it to the heap for the thread to own
+/// and free. Joining the thread is therefore *not* required for memory
+/// safety — an abandoned relay thread reads memory it owns rather than a
+/// caller frame that may already be gone.
+///
 /// # Safety
-/// `params` must remain valid until the thread exits. The caller is
-/// responsible for joining (waiting on) the thread before `params` is dropped.
-pub(super) unsafe fn create_relay_thread(
-    params: *mut PipeRelayParams,
-) -> Result<OwnedHandle, WxcError> {
-    let handle = CreateThread(
-        None,
-        0,
-        Some(pipe_relay_thread_proc),
-        Some(params as *const core::ffi::c_void),
-        THREAD_CREATION_FLAGS(0),
-        None,
-    )
-    .map_err(|e| WxcError::Process(format!("CreateThread for pipe relay failed: {}", e)))?;
-
-    Ok(OwnedHandle::new(handle))
+/// The HANDLEs inside `params` are borrowed and must remain valid until the
+/// thread exits. In practice they are released by `IsoSessionProcess::Close`
+/// (which makes the next relay read/write fail, ending the thread) and by the
+/// OS on process exit.
+pub(super) unsafe fn create_relay_thread(params: PipeRelayParams) -> Result<OwnedHandle, WxcError> {
+    let raw = Box::into_raw(Box::new(params));
+    match unsafe {
+        CreateThread(
+            None,
+            0,
+            Some(pipe_relay_thread_proc),
+            Some(raw as *const core::ffi::c_void),
+            THREAD_CREATION_FLAGS(0),
+            None,
+        )
+    } {
+        Ok(handle) => Ok(OwnedHandle::new(handle)),
+        Err(e) => {
+            // The thread never started, so nothing will run the proc that
+            // frees the box. Reclaim it here or it leaks.
+            drop(unsafe { Box::from_raw(raw) });
+            Err(WxcError::Process(format!(
+                "CreateThread for pipe relay failed: {}",
+                e
+            )))
+        }
+    }
 }
 
 // ── Stop-event-aware pipe relay ────────────────────────────────────────────
@@ -127,10 +148,10 @@ pub(super) unsafe fn create_relay_thread(
 /// `h_read` must be a waitable handle (console input, event). Anonymous
 /// pipes are not supported — see module-level comment above.
 ///
-/// # Safety
-/// All three handles must remain valid until the relay thread exits. The
-/// struct must outlive the thread (caller waits on the thread before dropping
-/// `params`).
+/// # Ownership
+/// Ownership of this struct transfers to the relay thread, which frees it on
+/// exit. The caller must **not** keep or free it. The HANDLEs it carries are
+/// borrowed — see the safety contract on [`create_relay_thread_with_stop`].
 #[repr(C)]
 pub(super) struct PipeRelayWithStopParams {
     pub h_read: HANDLE,
@@ -141,10 +162,11 @@ pub(super) struct PipeRelayWithStopParams {
 /// Thread procedure for a stop-event-aware relay.
 ///
 /// # Safety
-/// `param` must point to a valid `PipeRelayWithStopParams` that outlives the
-/// thread.
+/// `param` must be the `Box::into_raw` pointer produced by
+/// [`create_relay_thread_with_stop`], passed exactly once.
 unsafe extern "system" fn pipe_relay_with_stop_thread_proc(param: *mut core::ffi::c_void) -> u32 {
-    let params = &*(param as *const PipeRelayWithStopParams);
+    // Reclaim ownership at entry — see `pipe_relay_thread_proc`.
+    let params = unsafe { Box::from_raw(param as *mut PipeRelayWithStopParams) };
     let mut buffer = [0u8; BUFFER_SIZE as usize];
     let wait_handles = [params.h_stop_event, params.h_read];
 
@@ -191,28 +213,35 @@ unsafe extern "system" fn pipe_relay_with_stop_thread_proc(param: *mut core::ffi
 /// Create a stop-event-aware relay thread via `CreateThread`. Returns the
 /// thread HANDLE wrapped in `OwnedHandle`.
 ///
+/// Takes `params` by value and moves it to the heap for the thread to own and
+/// free — see [`create_relay_thread`].
+///
 /// # Safety
-/// `params` must remain valid until the thread exits. The caller is
-/// responsible for joining (waiting on) the thread before `params` is dropped.
+/// The HANDLEs inside `params` are borrowed and must remain valid until the
+/// thread exits.
 pub(super) unsafe fn create_relay_thread_with_stop(
-    params: *mut PipeRelayWithStopParams,
+    params: PipeRelayWithStopParams,
 ) -> Result<OwnedHandle, WxcError> {
-    let handle = CreateThread(
-        None,
-        0,
-        Some(pipe_relay_with_stop_thread_proc),
-        Some(params as *const core::ffi::c_void),
-        THREAD_CREATION_FLAGS(0),
-        None,
-    )
-    .map_err(|e| {
-        WxcError::Process(format!(
-            "CreateThread for stop-aware pipe relay failed: {}",
-            e
-        ))
-    })?;
-
-    Ok(OwnedHandle::new(handle))
+    let raw = Box::into_raw(Box::new(params));
+    match unsafe {
+        CreateThread(
+            None,
+            0,
+            Some(pipe_relay_with_stop_thread_proc),
+            Some(raw as *const core::ffi::c_void),
+            THREAD_CREATION_FLAGS(0),
+            None,
+        )
+    } {
+        Ok(handle) => Ok(OwnedHandle::new(handle)),
+        Err(e) => {
+            drop(unsafe { Box::from_raw(raw) });
+            Err(WxcError::Process(format!(
+                "CreateThread for stop-aware pipe relay failed: {}",
+                e
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -294,12 +323,12 @@ mod tests {
         let (source_read, source_write) = create_test_pipes();
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let mut params = PipeRelayParams {
+        let params = PipeRelayParams {
             h_read: source_read.get(),
             h_write: dest_write.get(),
         };
 
-        let relay_thread = unsafe { create_relay_thread(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread(params).unwrap() };
 
         // Read from dest concurrently — the relay calls FlushFileBuffers after
         // each write, which blocks until the reader drains the pipe buffer.
@@ -341,12 +370,12 @@ mod tests {
         let (source_read, mut source_write) = create_test_pipes();
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let mut params = PipeRelayParams {
+        let params = PipeRelayParams {
             h_read: source_read.get(),
             h_write: dest_write.get(),
         };
 
-        let relay_thread = unsafe { create_relay_thread(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread(params).unwrap() };
 
         // Write data larger than the pipe buffer (4096 bytes default).
         // Use ASCII to avoid from_utf8_lossy expansion of invalid bytes.
@@ -397,11 +426,11 @@ mod tests {
         // dest: non-inheritable (only the test reads here)
         let (mut dest_read, dest_write) = create_test_pipes();
 
-        let mut params = PipeRelayParams {
+        let params = PipeRelayParams {
             h_read: child_stdout_read.get(),
             h_write: dest_write.get(),
         };
-        let relay_thread = unsafe { create_relay_thread(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread(params).unwrap() };
 
         // Concurrent reader to avoid FlushFileBuffers deadlock
         let dest_send = SendOwnedHandle::take(&mut dest_read);
@@ -447,11 +476,11 @@ mod tests {
         let (mut child_stdout_read, child_stdout_write) = create_std_pipes(true).unwrap();
 
         // Relay: test input → child stdin
-        let mut params = PipeRelayParams {
+        let params = PipeRelayParams {
             h_read: source_read.get(),
             h_write: child_stdin_write.get(),
         };
-        let relay_thread = unsafe { create_relay_thread(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread(params).unwrap() };
 
         // findstr /R "." echoes all non-empty lines from stdin to stdout
         let (child, _child_thread) = spawn_child(
@@ -517,12 +546,12 @@ mod tests {
         let (mut dest_read, dest_write) = create_test_pipes();
         let stop_event = create_test_stop_event();
 
-        let mut params = PipeRelayWithStopParams {
+        let params = PipeRelayWithStopParams {
             h_read: source_read.get(),
             h_write: dest_write.get(),
             h_stop_event: stop_event.get(),
         };
-        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
 
         // Source has no data and is not closed → relay sits in
         // WaitForMultipleObjects. Without the stop event it would hang.
@@ -549,12 +578,12 @@ mod tests {
         let (mut dest_read, dest_write) = create_test_pipes();
         let stop_event = create_test_stop_event();
 
-        let mut params = PipeRelayWithStopParams {
+        let params = PipeRelayWithStopParams {
             h_read: source_read.get(),
             h_write: dest_write.get(),
             h_stop_event: stop_event.get(),
         };
-        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
 
         // Concurrent reader (no-op here, but defensive in case data flows on
         // any FlushFileBuffers iteration; avoids any pipe-buffer deadlock).
@@ -578,12 +607,12 @@ mod tests {
         let (mut dest_read, dest_write) = create_test_pipes();
         let stop_event = create_test_stop_event();
 
-        let mut params = PipeRelayWithStopParams {
+        let params = PipeRelayWithStopParams {
             h_read: source_read.get(),
             h_write: dest_write.get(),
             h_stop_event: stop_event.get(),
         };
-        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
 
         // Concurrent reader to avoid FlushFileBuffers deadlock.
         let dest_send = SendOwnedHandle::take(&mut dest_read);
@@ -628,12 +657,12 @@ mod tests {
         let (_, dest_write) = create_test_pipes();
         let stop_event = create_test_stop_event();
 
-        let mut params = PipeRelayWithStopParams {
+        let params = PipeRelayWithStopParams {
             h_read: HANDLE::default(), // invalid — not a kernel handle
             h_write: dest_write.get(),
             h_stop_event: stop_event.get(),
         };
-        let relay_thread = unsafe { create_relay_thread_with_stop(&mut params).unwrap() };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
 
         let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
         assert_eq!(

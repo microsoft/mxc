@@ -7,39 +7,35 @@
 // `sdk/src/types.ts` conforms to the generated wire types. This companion does
 // the same for the STATE-AWARE lifecycle public types in
 // `sdk/src/state-aware-types.ts`, against the generated wire state-aware defs
-// (`Phase`, `IsolationConfigurationId`, `IsolationUser`, `IsolationSessionPhase`).
-// Without it, a wire-model change to the state-aware surface — a new sizing
-// profile, a field added to the Entra user bundle, a `Phase` change — would
+// (`Phase`, `IsolationSessionProvisionPhase`).
+// Without it, a wire-model change to the state-aware surface — a field added to
+// a phase object, a `Phase` change — would
 // regenerate `wire.ts`, pass the codegen gate, and still leave the SDK silently
 // lagging with no CI signal.
 //
 // Mapping note (why this is a separate file, not part of the one-shot oracle):
 // the public per-phase call configs do NOT map 1:1 to a single wire type. Each
-// mixes SDK-level / top-level wire fields with `IsolationSessionPhase` fields:
+// mixes SDK-level / top-level wire fields with per-phase wire fields:
 //
 //   public field                          wire location
 //   ------------------------------------  --------------------------------------
 //   *Config.version                       top-level `version` (SDK fills default)
-//   ProvisionConfig.filesystem            top-level `Filesystem`
 //   ExecConfig.process                    top-level `Process`
-//   StartConfig.configurationId           IsolationSessionPhase.configurationId
-//   {Provision,Start}Config.user          IsolationSessionPhase.user / IsolationUser
+//   ProvisionConfig.appId                 IsolationSessionProvisionPhase.appId
 //
 // The top-level fields are already covered by the one-shot oracle; here we (a)
 // assert the per-phase configs REUSE those same public leaf types (so the
 // delegation is real, not a re-derived shape that could escape the one-shot
 // oracle), and (b) directly check the genuinely state-aware shapes (the phase
-// enum, the sizing-profile enum, the user bundle, and the `IsolationSessionPhase`
-// field set). The runtime body is a no-op; the guarantee is enforced at `tsc`
-// time.
+// enum and the per-phase field sets). The runtime
+// body is a no-op; the guarantee is enforced at `tsc` time.
 
 import { test } from 'node:test';
 
-import type { ProcessConfig, FilesystemConfig } from '../../src/types.js';
+import type { ProcessConfig } from '../../src/types.js';
 
 import type {
   Phase,
-  IsolationSessionUserConfig,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
   IsolationSessionExecConfig,
@@ -49,9 +45,7 @@ import type {
 
 import type {
   Phase as WirePhase,
-  IsolationUser as WireIsolationUser,
-  IsolationConfigurationId as WireIsolationConfigurationId,
-  IsolationSessionPhase as WireIsolationSessionPhase,
+  IsolationSessionProvisionPhase as WireProvisionPhase,
 } from '../../src/generated/wire.js';
 
 import type {
@@ -67,74 +61,67 @@ import type {
 // The lifecycle phase enum must be value-for-value identical to the wire `Phase`.
 type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 
-// --- user bundle conformance ----------------------------------------------
-
-// `IsolationSessionUserConfig` is a class; compare its DATA shape (the symbol
-// inspect method is not part of the wire contract) to wire `IsolationUser`.
-// Value equivalence alone misses a NEW OPTIONAL wire field (an optional addition
-// does not break mutual assignability), so the key sets are also pinned in both
-// directions: a new wire credential field (optional or required) fails
-// `_UserBundleWireKeys`, and a public-only field fails `_UserBundlePublicKeys`.
-type PublicUserData = Pick<IsolationSessionUserConfig, 'upn' | 'wamToken'>;
-type _UserBundleVals = AssertTrue<Equivalent<PublicUserData, WireIsolationUser>>;
-type _UserBundleWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicUserData, WireIsolationUser>, never>>;
-type _UserBundlePublicKeys = AssertTrue<Equivalent<OnlyInPublic<PublicUserData, WireIsolationUser>, never>>;
-
-// --- IsolationSessionPhase field-set conformance ---------------------------
+// --- per-phase wire field-set conformance ----------------------------------
 
 // The per-phase wire surface is DERIVED from the real public phase configs, not
 // hand-restated, so a newly exposed public phase field cannot bypass the oracle
 // (review finding F2). Each phase config splits into "lifted" fields that map to
-// top-level wire locations (`version` is SDK metadata; `filesystem` → top-level
-// `Filesystem`; `process` → top-level `Process`, all covered elsewhere) and
-// backend-specific fields that map onto the wire `IsolationSessionPhase` object.
-// `PublicPhaseKeys` is the union of those backend-specific keys across all five
-// phase configs.
-type PhaseConfigUnion =
-  | IsolationSessionProvisionConfig
-  | IsolationSessionStartConfig
-  | IsolationSessionExecConfig
-  | IsolationSessionStopConfig
-  | IsolationSessionDeprovisionConfig;
-type LiftedPhaseKey = 'version' | 'filesystem' | 'process';
-type PublicPhaseKeys = Exclude<
-  | keyof IsolationSessionProvisionConfig
-  | keyof IsolationSessionStartConfig
-  | keyof IsolationSessionExecConfig
-  | keyof IsolationSessionStopConfig
-  | keyof IsolationSessionDeprovisionConfig,
-  LiftedPhaseKey
->;
-type WirePhaseKeys = keyof StripIndex<WireIsolationSessionPhase>;
-type PublicPhaseFieldValue<K extends PropertyKey, Config = PhaseConfigUnion> = Config extends object
-  ? K extends keyof Config
-    ? NonNullable<Config[K]>
-    : never
-  : never;
-// `user` is normalised because the public SDK type is a class with an inspect
-// method, while the wire contract is just its data shape.
-type ComparablePublicPhaseFieldValue<K extends PublicPhaseKeys> =
-  K extends 'user' ? PublicUserData : PublicPhaseFieldValue<K>;
-type PublicPhaseFieldValues = {
-  [K in PublicPhaseKeys]: ComparablePublicPhaseFieldValue<K>;
+// top-level wire locations (`version` is SDK metadata; `process` → top-level
+// `Process`, both covered elsewhere) and backend-specific fields that map onto
+// that phase's wire object.
+//
+// The wire model now declares a SEPARATE type per phase, so the comparison is
+// per-phase rather than a single pooled key set. That is strictly stronger: a
+// field legal only on provision can no longer satisfy the oracle by appearing
+// on the start config, or vice versa.
+type LiftedPhaseKey = 'version' | 'process' | 'network';
+
+type BackendKeys<C> = Exclude<keyof C, LiftedPhaseKey>;
+type WireKeys<W> = keyof StripIndex<W>;
+
+type PublicFieldValues<C, K extends PropertyKey = BackendKeys<C>> = {
+  [P in K]: P extends keyof C ? NonNullable<C[P]> : never;
 };
-type WirePhaseFieldValues = {
-  [K in WirePhaseKeys]: NonNullable<StripIndex<WireIsolationSessionPhase>[K]>;
+type WireFieldValues<W, K extends PropertyKey = WireKeys<W>> = {
+  [P in K]: P extends keyof StripIndex<W> ? NonNullable<StripIndex<W>[P]> : never;
 };
 
-// A public phase field with no wire `IsolationSessionPhase` counterpart fails
-// (the SDK exposes a field the wire model does not define).
-type _PhasePublicKeys = AssertTrue<Equivalent<Exclude<PublicPhaseKeys, WirePhaseKeys>, never>>;
-// A wire `IsolationSessionPhase` field no phase config exposes fails (the wire
-// model gained a per-phase field the SDK forgot to surface).
-type _PhaseWireKeys = AssertTrue<Equivalent<Exclude<WirePhaseKeys, PublicPhaseKeys>, never>>;
-// Matching public/wire phase field names must also carry matching value types.
-type _PhaseFieldValueTypes = AssertTrue<Equivalent<PublicPhaseFieldValues, WirePhaseFieldValues>>;
-// Sizing profile remains named explicitly because it is an important SDK-facing
-// enum, but the broad value-type guard above is the primary drift check.
-type _ConfigurationId = AssertTrue<Equivalent<PublicPhaseFieldValue<'configurationId'>, WireIsolationConfigurationId>>;
-// Phases that accept a user bundle must reuse the same public type.
-type _PhaseUserBundleReuse = AssertTrue<Equivalent<PublicPhaseFieldValue<'user'>, IsolationSessionUserConfig>>;
+// provision: a public field with no wire counterpart, or a wire field the SDK
+// forgot to surface, fails. Matching names must carry matching value types.
+type _ProvisionPublicKeys = AssertTrue<
+  Equivalent<Exclude<BackendKeys<IsolationSessionProvisionConfig>, WireKeys<WireProvisionPhase>>, never>
+>;
+type _ProvisionWireKeys = AssertTrue<
+  Equivalent<Exclude<WireKeys<WireProvisionPhase>, BackendKeys<IsolationSessionProvisionConfig>>, never>
+>;
+type _ProvisionFieldValueTypes = AssertTrue<
+  Equivalent<
+    PublicFieldValues<IsolationSessionProvisionConfig>,
+    WireFieldValues<WireProvisionPhase>
+  >
+>;
+
+// start / exec / stop / deprovision take no per-phase wire object at all (their
+// Rust associated types are `()`), so they must expose no backend-specific field.
+type _StartNoBackendKeys = AssertTrue<Equivalent<BackendKeys<IsolationSessionStartConfig>, never>>;
+type _ExecNoBackendKeys = AssertTrue<Equivalent<BackendKeys<IsolationSessionExecConfig>, never>>;
+type _StopNoBackendKeys = AssertTrue<Equivalent<BackendKeys<IsolationSessionStopConfig>, never>>;
+type _DeprovisionNoBackendKeys = AssertTrue<
+  Equivalent<BackendKeys<IsolationSessionDeprovisionConfig>, never>
+>;
+
+// Non-vacuity guard. Every assertion above is of the form
+// `Exclude<A, B> extends never`, which passes trivially if `A` resolves to
+// `never` — so a mistake in the derivation would silently disable the oracle
+// rather than fail it. Pin the derived key sets to their expected contents:
+// adding a backend-specific field to the provision config must be a deliberate
+// edit here, not a silent widening.
+type _ProvisionKeysNonVacuous = AssertTrue<
+  Equivalent<BackendKeys<IsolationSessionProvisionConfig>, 'appId'>
+>;
+type _ProvisionWireKeysNonVacuous = AssertTrue<
+  Equivalent<WireKeys<WireProvisionPhase>, 'appId'>
+>;
 
 // --- delegation to the one-shot oracle (documented, asserted) --------------
 
@@ -143,23 +130,20 @@ type _PhaseUserBundleReuse = AssertTrue<Equivalent<PublicPhaseFieldValue<'user'>
 // re-declared an inline shape instead, it would escape that coverage — these
 // assertions fail if that ever happens.
 type _ExecProcessReuse = AssertTrue<Equivalent<IsolationSessionExecConfig['process'], ProcessConfig>>;
-type _ProvisionFilesystemReuse = AssertTrue<
-  Equivalent<NonNullable<IsolationSessionProvisionConfig['filesystem']>, FilesystemConfig>
->;
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type StateAwareWireConformanceAssertions = [
   _Phase,
-  _UserBundleVals,
-  _UserBundleWireKeys,
-  _UserBundlePublicKeys,
-  _PhaseWireKeys,
-  _PhasePublicKeys,
-  _PhaseFieldValueTypes,
-  _ConfigurationId,
-  _PhaseUserBundleReuse,
+  _ProvisionPublicKeys,
+  _ProvisionWireKeys,
+  _ProvisionFieldValueTypes,
+  _StartNoBackendKeys,
+  _ExecNoBackendKeys,
+  _StopNoBackendKeys,
+  _DeprovisionNoBackendKeys,
+  _ProvisionKeysNonVacuous,
+  _ProvisionWireKeysNonVacuous,
   _ExecProcessReuse,
-  _ProvisionFilesystemReuse,
 ];
 
 test('public state-aware SDK types conform to the generated wire schema (compile-time)', () => {

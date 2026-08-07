@@ -87,15 +87,75 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
 }
 
 # ---------------- Backend-availability probe ----------------
+#
+# Decided by `wxc-exec --probe` → `probes.isolationSessionAvailable`, which
+# covers both an unsupported host and a binary built without
+# `--features isolation_session`.
+#
+# This replaces the earlier DLL-presence and WinRT activatable-class registry
+# checks. Those named a runtime class directly, so they stopped tracking what
+# the code actually activates once the backend moved to the Preview API.
+# Asking the binary under test what it supports cannot drift.
+function Get-IsolationSessionProbe {
+    param([string]$Exe)
 
-if (-not (Test-Path 'C:\Windows\System32\IsoSessionApp.dll')) {
-    Write-Host "SKIPPED: IsoSessionApp.dll not present in System32" -ForegroundColor Yellow
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prevPref = $ErrorActionPreference
+    try {
+        # This script runs under `$ErrorActionPreference = "Stop"`, which turns
+        # a native command's stderr output into a terminating error. The probe
+        # is expected to write to stderr on a host carrying leftover state, so
+        # relax it for the duration of the call — the same idiom used around
+        # the wxc-exec invocation in Run-IsolationSessionTest below.
+        $ErrorActionPreference = "Continue"
+        $stdout = (& $Exe --probe 2>$errFile) | Out-String
+        $exitCode = $LASTEXITCODE
+        $stderr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+    } catch {
+        return @{ Status = 'error'; Detail = "could not run '$Exe --probe': $($_.Exception.Message)" }
+    } finally {
+        $ErrorActionPreference = $prevPref
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $stderrNote = if ([string]::IsNullOrWhiteSpace($stderr)) { '' } else { " stderr: $($stderr.Trim())" }
+
+    if ($exitCode -ne 0) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe exited $exitCode.$stderrNote" }
+    }
+    $parsed = $null
+    try { $parsed = $stdout | ConvertFrom-Json } catch {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe did not emit valid JSON.$stderrNote" }
+    }
+    if ($null -eq $parsed -or $null -eq $parsed.probes) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes' object.$stderrNote" }
+    }
+    if ($parsed.probes.PSObject.Properties.Name -notcontains 'isolationSessionAvailable') {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes.isolationSessionAvailable' field.$stderrNote" }
+    }
+    # Only a literal boolean is meaningful. Treating anything else as `false`
+    # would recreate the conflation this function exists to remove: a value of
+    # `null`, a string, or a number is a malformed answer, not a statement that
+    # the backend is unavailable, and it gets the same infrastructure-failure
+    # treatment as a missing field.
+    $value = $parsed.probes.isolationSessionAvailable
+    if ($value -is [bool]) {
+        if ($value) { return @{ Status = 'available' } }
+        return @{ Status = 'unavailable' }
+    }
+    return @{ Status = 'error'; Detail = "wxc-exec --probe reported a non-boolean 'probes.isolationSessionAvailable' ($(if ($null -eq $value) { 'null' } else { "'$value'" })).$stderrNote" }
+}
+
+$probeResult = Get-IsolationSessionProbe -Exe $WxcExec
+if ($probeResult.Status -eq 'unavailable') {
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
     exit 0
 }
-$IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
-if (-not (Test-Path $IsoSessionOpsKey)) {
-    Write-Host "SKIPPED: Windows.AI.IsolationSession.IsoSessionOps WinRT class not registered" -ForegroundColor Yellow
-    exit 0
+if ($probeResult.Status -ne 'available') {
+    Write-Host "FAILED: could not determine whether the isolation session backend is available." -ForegroundColor Red
+    Write-Host "  $($probeResult.Detail)" -ForegroundColor Red
+    Write-Host "  This is an infrastructure failure, not an unsupported host, so it is not a skip." -ForegroundColor Red
+    exit 1
 }
 
 # ---------------- Build the encoded inner loop ----------------
@@ -144,13 +204,19 @@ $encodedLoop = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loop
 # ---------------- Build the wxc-exec config envelope ----------------
 #
 # Shape matches tests/configs/isolation_session_powershell_interactive.json:
-# top-level version + containerId + containment + process. timeout=0 lets
-# the loop run until Ctrl-C.
+# top-level version + containerId + containment + network + process. The
+# network block is the canonical unrestricted-network acknowledgment the
+# IsolationSession backend requires (it has no primitive to filter or deny
+# the container's network). timeout=0 lets the loop run until Ctrl-C.
 
 $config = [ordered]@{
     version     = '0.6.0-alpha'
     containerId = 'isolation-session-resize-smoke'
     containment = 'isolation_session'
+    network     = [ordered]@{
+        defaultPolicy     = 'allow'
+        allowLocalNetwork = $true
+    }
     process     = [ordered]@{
         commandLine = "powershell.exe -NoProfile -EncodedCommand $encodedLoop"
         timeout     = 0

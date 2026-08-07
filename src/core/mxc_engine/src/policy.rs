@@ -873,12 +873,25 @@ fn build_wire_config(
             "readonlyPaths": fs.readonly_paths,
             "deniedPaths": fs.denied_paths,
         },
-        "ui": {
-            "disable": !policy.ui.as_ref().map(|u| u.allow_windows).unwrap_or(false),
-            "clipboard": policy.ui.as_ref().map(|u| u.clipboard).unwrap_or_default().wire(),
-            "injection": policy.ui.as_ref().map(|u| u.allow_input_injection).unwrap_or(false),
-        },
     });
+
+    // `ui` is emitted only when the caller actually supplied one.
+    //
+    // The parser records presence as `ContainerPolicy::ui_specified`, and
+    // backends that cannot honor a UI posture refuse the section on presence
+    // rather than by value — a `UiPolicy` whose fields all sit at their
+    // defaults is full lockdown, so an explicit lockdown and an absent block
+    // are indistinguishable once the values are read. Emitting a synthesized
+    // `ui` unconditionally would therefore make every request built through
+    // this path look like it asked for a UI posture, and those backends would
+    // refuse requests whose caller never mentioned `ui` at all.
+    if let Some(ui) = policy.ui.as_ref() {
+        config["ui"] = json!({
+            "disable": !ui.allow_windows,
+            "clipboard": ui.clipboard.wire(),
+            "injection": ui.allow_input_injection,
+        });
+    }
 
     // Mirror the SDK's host-rule validation: Unix backends accept host lists
     // without `allowOutbound`; only Windows ProcessContainer requires it. WSLC
@@ -1048,6 +1061,52 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::ProxySpec;
+
+    // `ui` must be emitted only when the caller supplied one.
+    //
+    // These pin the fix for a defect that was invisible by value: the builder
+    // used to synthesize a `ui` object unconditionally, and because
+    // `UiSection::default()` is full lockdown the synthesized block was
+    // value-identical to an explicit lockdown. The resulting request therefore
+    // carried `ui_specified = true` even when the caller never mentioned `ui`,
+    // and a backend that refuses a UI posture on *presence* would reject it.
+    //
+    // The assertion is deliberately about key presence rather than content —
+    // that is the only thing that distinguishes the two states downstream.
+    // Policies are built from JSON rather than a literal so the "caller said
+    // nothing about ui" case is expressed the way a real caller expresses it.
+    #[test]
+    fn wire_config_omits_ui_when_the_caller_supplied_none() {
+        let policy: super::SandboxPolicy =
+            serde_json::from_str(r#"{ "version": "0.7.0-alpha" }"#).expect("minimal policy parses");
+        assert!(policy.ui.is_none(), "precondition: no ui supplied");
+
+        let config = super::build_wire_config(&policy, &super::Containment::Process, None)
+            .expect("minimal policy builds a wire config");
+
+        assert!(
+            config.get("ui").is_none(),
+            "wire config synthesized a `ui` block for a caller that supplied none: {config}"
+        );
+    }
+
+    #[test]
+    fn wire_config_emits_ui_when_the_caller_supplied_one() {
+        // An explicitly-supplied lockdown `ui` — value-identical to the old
+        // synthesized block, which is exactly why presence is what matters.
+        let policy: super::SandboxPolicy =
+            serde_json::from_str(r#"{ "version": "0.7.0-alpha", "ui": {} }"#)
+                .expect("policy with ui parses");
+        assert!(policy.ui.is_some(), "precondition: ui supplied");
+
+        let config = super::build_wire_config(&policy, &super::Containment::Process, None)
+            .expect("policy with ui builds a wire config");
+
+        assert!(
+            config.get("ui").is_some(),
+            "wire config dropped a `ui` block the caller supplied: {config}"
+        );
+    }
 
     #[test]
     fn proxy_builtin_test_server_true_is_accepted() {

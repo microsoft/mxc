@@ -1,0 +1,23 @@
+{
+  "version": "0.6.0-alpha",
+  "containerId": "isolation-session-one-shot-stray-config-ignored",
+  "containment": "isolation_session",
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
+  "process": {
+    "commandLine": "echo ONE_SHOT_STRAY_CONFIG_IGNORED",
+    "cwd": "C:\\",
+    "env": [],
+    "timeout": 30000
+  },
+  "experimental": {
+    "isolation_session": {
+      "unrecognizedSetting": {
+        "nested": "value",
+        "futureField": true
+      }
+    }
+  }
+}

@@ -37,6 +37,19 @@ These scripts are local helpers. Not every script is run by CI because several
 depend on local OS features such as Windows Sandbox, WHP, proxy setup, or stress
 test duration.
 
+**Skip semantics for the IsolationSession suites.** Availability is decided by a
+single `wxc-exec --probe` call reading `probes.isolationSessionAvailable`, which
+covers both a host that cannot activate the API and a binary built without
+`--features isolation_session`. When unavailable the suite prints `SKIPPED` and
+exits 0, so running on an unsupported host degrades gracefully rather than
+reporting failures.
+
+Because a skip exits 0, **a caller that only reads the exit code cannot tell a
+skipped suite from a passing one.** Any automated runner that treats these
+suites as validation evidence must therefore check the `SKIPPED` line or the
+executed count, not just the exit status. Independently, a run that reaches the
+summary having executed zero tests always fails, since it substantiates nothing.
+
 ### Manual smoke tests
 
 Manual smokes are visual-inspection scripts for rendering and event-propagation

@@ -15,28 +15,80 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import fs from 'fs';
+import fs from 'node:fs';
+import path from 'node:path';
 import os from 'os';
-import path from 'path';
 import {
   execInSandboxAsync,
+  MxcError,
   provisionSandbox,
   startSandbox,
   stopSandbox,
 } from '@microsoft/mxc-sdk';
-import { createTempDir, probeStateAwareRuntime, safeDeprovision, sandboxSkipReason } from './test-helpers.js';
+import {
+  probeIsolationSessionFeature,
+  probeStateAwareRuntime,
+  safeDeprovision,
+  sandboxSkipReason,
+} from './test-helpers.js';
 
-const skipReason = os.platform() !== 'win32'
-  ? 'IsolationSession is Windows-only'
-  : sandboxSkipReason ?? await probeStateAwareRuntime('isolation_session');
+/**
+ * Builds a structurally valid `iso:` sandbox id for tests that need to get PAST
+ * id decoding to reach the behaviour under test. The id format is
+ * `iso:<base64url-nopad(JSON)>`; a bare string after the prefix no longer
+ * decodes.
+ */
+const wellFormedSandboxId = (agentUserName: string): string =>
+  `iso:${Buffer.from(JSON.stringify({ version: 1, agentUserName }), 'utf8').toString('base64url')}`;
+
+const platformSkipReason =
+  os.platform() !== 'win32' ? 'IsolationSession is Windows-only' : undefined;
+
+// Host-dependent gate: adds the runtime probe (and the CI opt-out) on top of
+// the platform check. `??` short-circuits, so the probe is never spawned on a
+// non-Windows host.
+const skipReason =
+  platformSkipReason ?? sandboxSkipReason ?? (await probeStateAwareRuntime('isolation_session'));
+
+// Gate for the policy-validation suite far below. Its rationale lives at that
+// `describe`; what must stay HERE is the `await`.
+//
+// Every top-level `await` in this file has to happen before the first
+// `describe` registers. `run-tests.js` runs the suite with `--test-force-exit`,
+// and the runner force-exits once the tests it knows about have finished -- so
+// a `describe` that registers after a later top-level await is silently
+// dropped: no tests, no failure, exit 0. That is not hypothetical, it is what
+// this line did when it sat next to its own `describe`, and it is invisible
+// precisely where it matters most: CI sets `MXC_SKIP_OS_BUILD_DEPENDENT_TESTS`,
+// which makes `skipReason` above short-circuit without awaiting, leaving this
+// as the first suspension in the module.
+const policyValidationSkipReason =
+  platformSkipReason ?? (await probeIsolationSessionFeature());
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', {}, { experimental: true });
+    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
     const sandboxId = provisionResult.sandboxId;
     assert.ok(
       sandboxId.startsWith('iso:'),
       `Expected sandboxId to start with 'iso:', got '${sandboxId}'`,
+    );
+
+    // Provision now returns the agent SID and the shared ephemeral workspace
+    // path alongside the agent user name.
+    const metadata = provisionResult.metadata;
+    assert.ok(metadata, 'provision result carries metadata');
+    assert.ok(
+      (metadata?.agentUserName?.length ?? 0) > 0,
+      `metadata.agentUserName is non-empty: ${JSON.stringify(metadata)}`,
+    );
+    assert.ok(
+      (metadata?.agentUserSid?.length ?? 0) > 0,
+      `metadata.agentUserSid is non-empty: ${JSON.stringify(metadata)}`,
+    );
+    assert.ok(
+      (metadata?.ephemeralWorkspacePath?.length ?? 0) > 0,
+      `metadata.ephemeralWorkspacePath is non-empty: ${JSON.stringify(metadata)}`,
     );
 
     try {
@@ -60,8 +112,68 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     }
   });
 
+  it('shares files with the session through the ephemeral workspace', async () => {
+    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
+    const sandboxId = provisionResult.sandboxId;
+    const workspace = provisionResult.metadata?.ephemeralWorkspacePath;
+    assert.ok(
+      workspace && workspace.length > 0,
+      `provision did not return an ephemeralWorkspacePath: ${JSON.stringify(provisionResult.metadata)}`,
+    );
+    // node:assert's `ok` does not narrow the type, so pin it explicitly for tsc.
+    const ws = workspace as string;
+
+    try {
+      await startSandbox(sandboxId, {}, { experimental: true });
+
+      // Caller -> session: the test (the calling user) stages a file into the
+      // shared workspace and the session reads it back. Proves the SDK surfaces
+      // a *usable* path a consumer can share files through, not just a non-empty
+      // string.
+      fs.writeFileSync(path.join(ws, 'caller_to_session.txt'), 'from-caller', 'ascii');
+      const readResult = await execInSandboxAsync(
+        sandboxId,
+        { process: { commandLine: `cmd /c type "${ws}\\caller_to_session.txt"` } },
+        { experimental: true },
+      );
+      assert.strictEqual(
+        readResult.exitCode,
+        0,
+        `read exit: stdout=${readResult.stdout}, stderr=${readResult.stderr}`,
+      );
+      assert.ok(
+        readResult.stdout.includes('from-caller'),
+        `session did not see the caller's file: ${readResult.stdout}`,
+      );
+
+      // Session -> caller: the session writes into its workspace and the caller
+      // reads it back on the host.
+      const writeResult = await execInSandboxAsync(
+        sandboxId,
+        { process: { commandLine: `cmd /c echo from-session> "${ws}\\session_to_caller.txt"` } },
+        { experimental: true },
+      );
+      assert.strictEqual(
+        writeResult.exitCode,
+        0,
+        `write exit: stdout=${writeResult.stdout}, stderr=${writeResult.stderr}`,
+      );
+      const backFile = path.join(ws, 'session_to_caller.txt');
+      assert.ok(fs.existsSync(backFile), 'caller does not see the file the session wrote');
+      assert.match(
+        fs.readFileSync(backFile, 'ascii'),
+        /from-session/,
+        'caller could not read the session output',
+      );
+
+      await stopSandbox(sandboxId, undefined, { experimental: true });
+    } finally {
+      await safeDeprovision(sandboxId);
+    }
+  });
+
   it('exec surfaces a non-zero script exit as ExecResult.exitCode', async () => {
-    const provisionResult = await provisionSandbox('isolation_session', {}, { experimental: true });
+    const provisionResult = await provisionSandbox('isolation_session', { network: { defaultPolicy: 'allow', allowLocalNetwork: true } }, { experimental: true });
     const sandboxId = provisionResult.sandboxId;
 
     try {
@@ -80,105 +192,186 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       await safeDeprovision(sandboxId);
     }
   });
+});
 
-  it('honors readwritePaths at provision: agent writes are visible on the host', async () => {
-    const rwDir = createTempDir('mxc-iso-rw');
-    const markerName = 'agent-write.txt';
-    const markerHostPath = path.join(rwDir, markerName);
-    const markerExpected = 'agent-wrote-this';
+// Policy rejections are raised by MXC's own validation, before any
+// IsolationSession API call: the dispatcher runs `validate_provision` ahead of
+// `provision`, and `IsolationSessionRunner` is a stateless marker whose
+// construction touches no WinRT. So these need a `wxc-exec.exe` built with
+// `--features isolation_session` (which CI builds) but *not* a host that can
+// actually run isolation sessions.
+//
+// Keeping them out of the probe-gated suite above is deliberate. That suite is
+// additionally gated on `sandboxSkipReason`, and both CI systems set
+// `MXC_SKIP_OS_BUILD_DEPENDENT_TESTS=1`, so anything inside it never runs in
+// CI. These assertions cover the full chain this feature depends on — Rust
+// envelope serialisation → dispatcher → SDK parse → typed `MxcError` — which
+// is exactly the path where drift would otherwise go unnoticed.
+//
+// The gate is therefore the platform check plus a feature-presence probe, and
+// deliberately not the suite-wide `skipReason`: the runtime probe would skip
+// these on every host without IsolationSession runtime support, which is the
+// coverage loss this block exists to avoid. It is computed at the top of the
+// file rather than here because its `await` must precede the first `describe`
+// -- see the note there before moving it back.
+describe('IsolationSession state-aware policy validation', { skip: policyValidationSkipReason }, () => {
+  // The TypeScript type makes `network` required (and pins its value) at
+  // provision, but a plain-JS caller can bypass that. These assert the backend
+  // itself refuses a missing or non-canonical network acknowledgment — the
+  // "respect or refuse" guarantee must not rest on the compile-time type alone.
+  type UntypedProvision = (
+    containment: 'isolation_session',
+    config: unknown,
+    options: unknown,
+  ) => Promise<unknown>;
+  const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
 
-    const provisionResult = await provisionSandbox(
-      'isolation_session',
-      { filesystem: { readwritePaths: [rwDir] } },
-      { experimental: true },
+  it('backend refuses a provision that omits the network acknowledgment', async () => {
+    await assert.rejects(
+      () => provisionUntyped('isolation_session', {}, { experimental: true }),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
     );
-    const sandboxId = provisionResult.sandboxId;
-
-    try {
-      await startSandbox(sandboxId, {}, { experimental: true });
-
-      const result = await execInSandboxAsync(
-        sandboxId,
-        { process: { commandLine: `cmd /c echo ${markerExpected}> "${rwDir}\\${markerName}"` } },
-        { experimental: true },
-      );
-
-      assert.strictEqual(result.exitCode, 0, `exec exit code: stdout=${result.stdout}, stderr=${result.stderr}`);
-      assert.ok(fs.existsSync(markerHostPath), `expected ${markerHostPath} to exist after agent write`);
-      assert.strictEqual(fs.readFileSync(markerHostPath, 'utf-8').trim(), markerExpected);
-
-      await stopSandbox(sandboxId, undefined, { experimental: true });
-    } finally {
-      await safeDeprovision(sandboxId);
-      fs.rmSync(rwDir, { recursive: true, force: true });
-    }
   });
 
-  it('honors readonlyPaths at provision: agent reads pre-seeded content', async () => {
-    const roDir = createTempDir('mxc-iso-ro');
-    const markerName = 'host-seeded.txt';
-    const markerHostPath = path.join(roDir, markerName);
-    const markerExpected = 'host-seeded-content';
-    fs.writeFileSync(markerHostPath, markerExpected, 'utf-8');
-
-    const provisionResult = await provisionSandbox(
-      'isolation_session',
-      { filesystem: { readonlyPaths: [roDir] } },
-      { experimental: true },
-    );
-    const sandboxId = provisionResult.sandboxId;
-
-    try {
-      await startSandbox(sandboxId, {}, { experimental: true });
-
-      const result = await execInSandboxAsync(
-        sandboxId,
-        { process: { commandLine: `cmd /c type "${roDir}\\${markerName}"` } },
+  it('backend refuses a provision with a non-canonical network (defaultPolicy=block)', async () => {
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        { network: { defaultPolicy: 'block' } },
         { experimental: true },
-      );
-
-      assert.strictEqual(result.exitCode, 0, `exec exit code: stdout=${result.stdout}, stderr=${result.stderr}`);
-      assert.ok(
-        result.stdout.includes(markerExpected),
-        `stdout did not contain seeded content '${markerExpected}': ${result.stdout}`,
-      );
-
-      await stopSandbox(sandboxId, undefined, { experimental: true });
-    } finally {
-      await safeDeprovision(sandboxId);
-      fs.rmSync(roDir, { recursive: true, force: true });
-    }
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
   });
 
-  it('honors readonlyPaths at provision: agent writes to a readonly path fail', async () => {
-    const roDir = createTempDir('mxc-iso-ro-write');
-    const markerName = 'agent-should-not-write.txt';
-
-    const provisionResult = await provisionSandbox(
-      'isolation_session',
-      { filesystem: { readonlyPaths: [roDir] } },
-      { experimental: true },
-    );
-    const sandboxId = provisionResult.sandboxId;
-
-    try {
-      await startSandbox(sandboxId, {}, { experimental: true });
-
-      const result = await execInSandboxAsync(
-        sandboxId,
-        { process: { commandLine: `cmd /c echo nope> "${roDir}\\${markerName}"` } },
+  it('backend refuses a provision whose network omits allowLocalNetwork', async () => {
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        { network: { defaultPolicy: 'allow' } },
         { experimental: true },
-      );
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
 
-      assert.notStrictEqual(
-        result.exitCode, 0,
-        `expected non-zero exit when writing to a readonly path, got ${result.exitCode}; stdout=${result.stdout}, stderr=${result.stderr}`,
-      );
+  // Full chain, negative case. An oversized appId is rejected by MXC's
+  // own validation, before any IsolationSession API call is made. The
+  // structured failure fields describe an API operation that was in flight;
+  // none was, so they must reach the caller absent rather than empty —
+  // `nativeCode` and `remediation` never appear without `operation`.
+  //
+  // The canonical network acknowledgment is supplied so the only thing wrong
+  // with this request is the appId; that keeps the assertion on the message
+  // independent of the order in which the backend runs its validations.
+  it('a policy rejection reaches the SDK with no structured failure fields', async () => {
+    await assert.rejects(
+      () => provisionSandbox(
+        'isolation_session',
+        {
+          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          appId: 'x'.repeat(257),
+        },
+        { experimental: true },
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof MxcError, `expected MxcError, got ${String(err)}`);
+        assert.strictEqual(err.code, 'policy_validation');
+        assert.match(err.message, /appId/i, `expected the message to name appId: ${err.message}`);
+        assert.strictEqual(err.operation, undefined, 'operation must be absent');
+        assert.strictEqual(err.nativeCode, undefined, 'nativeCode must be absent');
+        assert.strictEqual(err.remediation, undefined, 'remediation must be absent');
+        return true;
+      },
+    );
+  });
 
-      await stopSandbox(sandboxId, undefined, { experimental: true });
-    } finally {
-      await safeDeprovision(sandboxId);
-      fs.rmSync(roDir, { recursive: true, force: true });
-    }
+  // --- Runtime backend guard for UI policy --------------------------------
+  // `ui` is absent from every IsolationSession per-phase Config, so a
+  // TypeScript caller cannot pass it. It is a cross-cutting field though, so a
+  // plain-JS caller who supplies it still gets it lifted to the top level of
+  // the envelope. The backend must refuse: the isolation session is a separate
+  // OS session, which isolates the host's UI from the contained code but does
+  // not deny it UI capabilities (window creation, GDI and the session's own
+  // clipboard all work inside it), so a UI restriction cannot be honored.
+  // Validation runs before the OS service is touched, so nothing is
+  // provisioned and no cleanup is needed.
+  type UntypedStart = (
+    sandboxId: string,
+    config: unknown,
+    options: unknown,
+  ) => Promise<unknown>;
+  const startUntyped = startSandbox as unknown as UntypedStart;
+
+  it('backend refuses a provision that supplies a ui policy', async () => {
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        {
+          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          ui: { disable: true },
+        },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('backend refuses a lockdown-equivalent ui policy too (presence, not value)', async () => {
+    // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
+    // indistinguishable by value from an absent one — presence drives the
+    // refusal, exactly as it does for the network acknowledgment.
+    await assert.rejects(
+      () => provisionUntyped(
+        'isolation_session',
+        {
+          network: { defaultPolicy: 'allow', allowLocalNetwork: true },
+          ui: {},
+        },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('backend refuses a ui policy on a post-provision phase', async () => {
+    // No provision needed: `validate_start` refuses the policy before the
+    // sandbox id is ever resolved against the OS service. The id must still be
+    // STRUCTURALLY valid, though -- decoding happens first, so a malformed id
+    // would short-circuit with `malformed_id` and never exercise the policy
+    // path this test is about.
+    await assert.rejects(
+      () => startUntyped(
+        wellFormedSandboxId('not-a-real-sandbox'),
+        { ui: { disable: false, clipboard: 'all', injection: true } },
+        { experimental: true },
+      ),
+      (err: unknown) => err instanceof MxcError && err.code === 'policy_validation',
+    );
+  });
+
+  it('rejects a structurally invalid sandboxId with malformed_id', async () => {
+    // The companion to the test above: an id that does not decode fails on the
+    // id itself, before any policy check. Pinning both keeps the ordering
+    // honest -- if decoding ever moved after policy validation, one of the two
+    // would flip.
+    await assert.rejects(
+      () => startUntyped('iso:not-a-real-sandbox', {}, { experimental: true }),
+      (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
+    );
+  });
+
+  it('rejects a sandboxId minted by a newer MXC with an actionable message', async () => {
+    const payload = Buffer.from(
+      JSON.stringify({ version: 9999, agentUserName: 'future' }),
+      'utf8',
+    ).toString('base64url');
+    await assert.rejects(
+      () => startUntyped(`iso:${payload}`, {}, { experimental: true }),
+      (err: unknown) =>
+        err instanceof MxcError &&
+        err.code === 'malformed_id' &&
+        /newer MXC/.test(err.message),
+    );
   });
 });

@@ -4,10 +4,7 @@
 <#
 .SYNOPSIS
     Runs IsolationSession E2E tests. Requires a Windows host with the
-    in-proc Windows.AI.IsolationSession IsoSessionOps APIs available
-    (IsoSessionApp.dll registered, Feature_IsoBrokerSessionApis enabled,
-    and Feature_IsoBrokerCommandLineSessions enabled for the Composable
-    config-id path).
+    in-proc IsolationSession service available.
 
 .DESCRIPTION
     - Locates wxc-exec.exe (built with --features isolation_session)
@@ -110,51 +107,103 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 
 # ---------------- Backend-availability probe ----------------
 #
-# Three-tier probe mirroring run_isolation_session_state_aware_tests.ps1:
-#   1. IsoSessionApp.dll present in System32
-#   2. WinRT activatable class IsoSessionOps registered
-#   3. wxc-exec responds to a state-aware request without backend_unavailable
-#      (catches feature-flag-off builds)
-# Any failure surfaces as SKIP rather than a forest of FAILed tests.
+# Availability is decided by a single call to `wxc-exec --probe`, which reports
+# `probes.isolationSessionAvailable`. That one signal covers both reasons this
+# suite can be unrunnable:
+#
+#   - the host cannot activate the isolation session API, or
+#   - wxc-exec was built without `--features isolation_session`, in which case
+#     the field stays false because the backend is not compiled in.
+#
+# This deliberately replaces the earlier checks for a specific DLL and a
+# hard-coded WinRT activatable-class registry key. Those named a runtime class
+# directly, so they silently stopped tracking what the code actually activates
+# when the backend moved to the Preview API — leaving a gate that could pass or
+# skip for reasons unrelated to whether the suite can run. Probing the binary
+# under test cannot drift, because it asks that binary what it can do.
+#
+# The former third tier — provisioning a sandbox as a smoke check — is also
+# gone. It sent a provision request with no `network` block, which this backend
+# now refuses outright, so it could no longer provision anything and its
+# success branch was unreachable. `--probe` is read-only and cannot leak.
+#
+# Returns one of three statuses, because collapsing them loses the distinction
+# that matters:
+#
+#   available   -> run the suite
+#   unavailable -> the probe answered, and the answer is "no": a clean skip
+#   error       -> the probe did not answer at all. That is an infrastructure
+#                  failure, NOT a statement about the backend, so it must not
+#                  be reported as a skip.
+#
+# stdout and stderr are captured SEPARATELY. Merging them would let any stderr
+# line corrupt the JSON, and stderr is not hypothetical here: wxc-exec runs a
+# best-effort DACL-recovery pass BEFORE the `--probe` arm and reports it on
+# stderr (`core/wxc/src/main.rs`), so a host carrying leftover state from a
+# crashed prior run would emit unparseable output and be judged "unavailable"
+# while being perfectly capable. That failure mode is inverted with respect to
+# risk — the dirtier the host, the likelier the false skip — which is exactly
+# the kind of silent green this gate exists to prevent.
+function Get-IsolationSessionProbe {
+    param([string]$Exe)
 
-if (-not (Test-Path 'C:\Windows\System32\IsoSessionApp.dll')) {
-    Write-Host "SKIPPED: IsoSessionApp.dll not present in System32" -ForegroundColor Yellow
-    exit 0
-}
-$IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
-if (-not (Test-Path $IsoSessionOpsKey)) {
-    Write-Host "SKIPPED: Windows.AI.IsolationSession.IsoSessionOps WinRT class not registered" -ForegroundColor Yellow
-    exit 0
-}
-
-# Helper: send an inline state-aware request via --config-base64 and return
-# { Stdout, ExitCode }.
-function Invoke-StateAwareProbe {
-    param([hashtable]$Request)
-    $json = $Request | ConvertTo-Json -Compress -Depth 8
-    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-    $out = & $WxcExec --experimental --config-base64 $b64 2>&1 | Out-String
-    @{ Stdout = $out; ExitCode = $LASTEXITCODE }
-}
-
-$probe = Invoke-StateAwareProbe -Request @{ phase = 'provision'; containment = 'isolation_session' }
-$probeEnv = $null
-try { $probeEnv = $probe.Stdout | ConvertFrom-Json } catch { }
-if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
-    Write-Host "SKIPPED: wxc-exec reports backend_unavailable (likely built without --features isolation_session)" -ForegroundColor Yellow
-    exit 0
-}
-# On a healthy build the probe successfully provisions an agent user --
-# deprovision it immediately so the probe doesn't leak.
-if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
-    $probeSandboxId = [string]$probeEnv.result.sandboxId
-    $probeAgent = if ($probeEnv.result.metadata) { [string]$probeEnv.result.metadata.agentUserName } else { '<absent>' }
-    Write-Host "Backend probe: provisioned $probeSandboxId (agentUserName=$probeAgent), deprovisioning ..." -ForegroundColor DarkGray
-    $deprov = Invoke-StateAwareProbe -Request @{ phase = 'deprovision'; sandboxId = $probeSandboxId }
-    if ($deprov.ExitCode -ne 0) {
-        Write-Host "WARN: probe deprovision returned exit $($deprov.ExitCode); local user $probeAgent may persist" -ForegroundColor Yellow
-        Write-Host "  Stdout: $($deprov.Stdout)" -ForegroundColor Gray
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prevPref = $ErrorActionPreference
+    try {
+        # This script runs under `$ErrorActionPreference = "Stop"`, which turns
+        # a native command's stderr output into a terminating error. The probe
+        # is expected to write to stderr on a host carrying leftover state, so
+        # relax it for the duration of the call — the same idiom used around
+        # the wxc-exec invocation in Run-IsolationSessionTest below.
+        $ErrorActionPreference = "Continue"
+        $stdout = (& $Exe --probe 2>$errFile) | Out-String
+        $exitCode = $LASTEXITCODE
+        $stderr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+    } catch {
+        return @{ Status = 'error'; Detail = "could not run '$Exe --probe': $($_.Exception.Message)" }
+    } finally {
+        $ErrorActionPreference = $prevPref
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
     }
+
+    $stderrNote = if ([string]::IsNullOrWhiteSpace($stderr)) { '' } else { " stderr: $($stderr.Trim())" }
+
+    if ($exitCode -ne 0) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe exited $exitCode.$stderrNote" }
+    }
+    $parsed = $null
+    try { $parsed = $stdout | ConvertFrom-Json } catch {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe did not emit valid JSON.$stderrNote" }
+    }
+    if ($null -eq $parsed -or $null -eq $parsed.probes) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes' object.$stderrNote" }
+    }
+    if ($parsed.probes.PSObject.Properties.Name -notcontains 'isolationSessionAvailable') {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes.isolationSessionAvailable' field.$stderrNote" }
+    }
+    # Only a literal boolean is meaningful. Treating anything else as `false`
+    # would recreate the conflation this function exists to remove: a value of
+    # `null`, a string, or a number is a malformed answer, not a statement that
+    # the backend is unavailable, and it gets the same infrastructure-failure
+    # treatment as a missing field.
+    $value = $parsed.probes.isolationSessionAvailable
+    if ($value -is [bool]) {
+        if ($value) { return @{ Status = 'available' } }
+        return @{ Status = 'unavailable' }
+    }
+    return @{ Status = 'error'; Detail = "wxc-exec --probe reported a non-boolean 'probes.isolationSessionAvailable' ($(if ($null -eq $value) { 'null' } else { "'$value'" })).$stderrNote" }
+}
+
+$probeResult = Get-IsolationSessionProbe -Exe $WxcExec
+if ($probeResult.Status -eq 'unavailable') {
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
+    exit 0
+}
+if ($probeResult.Status -ne 'available') {
+    Write-Host "FAILED: could not determine whether the isolation session backend is available." -ForegroundColor Red
+    Write-Host "  $($probeResult.Detail)" -ForegroundColor Red
+    Write-Host "  This is an infrastructure failure, not an unsupported host, so it is not a skip." -ForegroundColor Red
+    exit 1
 }
 
 # Helper: run one IsolationSession test config.
@@ -256,54 +305,7 @@ function Run-IsolationSessionTest {
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
 
-# Creates a directory with a locked-down DACL: inheritance disabled, ACEs
-# reset to current user + SYSTEM + Administrators (FullControl). Used by
-# the filesystem-policy test so the agent user has no inherited access by
-# default -- the test then proves the share_folders grant is what enables
-# read access.
-function Setup-LockedDownTestDir {
-    param([string]$Path)
-
-    New-Item -Path $Path -ItemType Directory -Force | Out-Null
-
-    $acl = Get-Acl $Path
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $inherit = "ContainerInherit,ObjectInherit"
-    foreach ($principal in @($currentUser, "SYSTEM", "Administrators")) {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $principal, "FullControl", $inherit, "None", "Allow")))
-    }
-    Set-Acl -Path $Path -AclObject $acl
-}
-
 [System.Collections.ArrayList]$results = @()
-
-# Filesystem-policy test scaffolding: a locked-down dir the test expects
-# the agent to read via a readwritePaths grant. Setup runs at file scope,
-# BEFORE the outer try and BEFORE any agent provision/deprovision cycles.
-# Empirically, running Setup-LockedDownTestDir AFTER agent lifecycles have
-# happened in this cmd.exe session causes Set-Acl to fail with
-# SeSecurityPrivilege on non-elevated consoles; running it BEFORE works
-# (state-aware uses this same ordering for its host-side dirs).
-$FsTestRoot = 'C:\mxc_share_test_oneshot'
-$FsMarkerContent = 'oneshot-marker-content'
-Setup-LockedDownTestDir $FsTestRoot
-$FsMarkerContent | Set-Content -Path (Join-Path $FsTestRoot 'marker.txt') -NoNewline
-
-# Filter test scaffolding: same file-scope ordering as $FsTestRoot above.
-# The outer-try finally also cleans this up between runs so a stale
-# inheritance-disabled directory does not require SeSecurityPrivilege on
-# re-run (Set-Acl on an existing inheritance-disabled directory writes
-# the SACL slot, which non-elevated admins cannot do).
-$FilterTestRoot = 'C:\mxc_filter_test_oneshot'
-$FilterMarkerContent = 'oneshot-filter-marker-content'
-Setup-LockedDownTestDir $FilterTestRoot
-$FilterMarkerContent | Set-Content -Path (Join-Path $FilterTestRoot 'marker.txt') -NoNewline
-
-try {
 
 Write-Host "--- Tests ---" -ForegroundColor Cyan
 # Setup for isolation_session_hello.json: cwd must exist before agent start.
@@ -312,9 +314,9 @@ $HostWhoami = (& whoami).Trim()
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
     -OutputLineNotEqual @($HostWhoami)))
-# Same shape as hello.json but with experimental.isolation_session.configurationId=medium.
-# Proves the Medium config-id end-to-ends through the one-shot path on the target build.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_hello_medium.json" `
+# Same shape as hello.json with an unknown configurationId in the experimental block.
+# The backend should ignore that field and run normally.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_ignored.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
     -OutputLineNotEqual @($HostWhoami)))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
@@ -332,44 +334,67 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_
 # the agent to exit with code 1.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExit 1))
-# Filesystem policy: agent has a readwritePaths grant on $FsTestRoot which
-# was locked-down and populated with a marker file at file scope above.
-# The `type` exit being 0 + the marker content in stdout proves the grant
-# was applied and the agent has read access.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_filesystem.json" `
-    -OutputContains @($FsMarkerContent)))
 
-# Filter test: readwritePaths contains both protected (C:\Windows, C:\) and
-# non-protected ($FilterTestRoot, locked-down and populated at file scope
-# above) entries. The wxc-exec filesystem-policy path filter (MXC issue
-# #330) drops the protected entries silently, leaves the non-protected one
-# in place, and provisioning continues. The `type ...marker.txt` exit being
-# 0 + marker content in stdout proves the non-protected grant was applied
-# (positive control); the absence of any error envelope proves the protected
-# entries were dropped without surfacing.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_filtered.json" `
-    -OutputContains @($FilterMarkerContent)))
+# One-shot takes no backend configuration at all, so any key under
+# `experimental.isolation_session` is just an unrecognised key in the
+# deliberately permissive `experimental` block and is ignored — the run
+# proceeds normally. Guarding it with an explicit rejection would be
+# scaffolding that graduation to the closed stable surface deletes anyway.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_ignored.json" `
+    -ExpectedExit 0 `
+    -OutputContains @("ONE_SHOT_STRAY_CONFIG_IGNORED")))
 
-# One-shot rejection: experimental.isolation_session.user is only honored on
-# the state-aware path. validate_runner rejects any one-shot request that
-# carries the user bundle so callers do not silently get a non-Entra agent.
-$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_user_rejected.json" `
+# One-shot network rejection: the isolation session container's network is
+# unrestricted and cannot be filtered or denied, so a non-canonical network
+# policy (here defaultPolicy=block) is refused at provision. Only the canonical
+# acknowledgment (defaultPolicy=allow + allowLocalNetwork=true) is accepted.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected.json" `
     -ExpectedExit -1 `
-    -OutputContains @("user is not supported in one-shot mode")))
+    -OutputContains @("network is unrestricted")))
+
+# Inbound axis: `allow` outbound without `allowLocalNetwork` is still refused --
+# a process inside CAN listen on a localhost-reachable port, so the caller must
+# acknowledge inbound too. Both axes must be the unrestricted form.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_no_local.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("network is unrestricted")))
+
+# Host rules: even with the canonical allow + allowLocalNetwork base, any
+# allowedHosts/blockedHosts entry is refused -- the backend cannot filter hosts.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_hosts.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("network is unrestricted")))
+
+# One-shot UI rejection: the isolation session is a separate OS session, which
+# isolates the host's UI from the contained code but does not deny it UI
+# capabilities -- window creation, GDI and the session's own clipboard all work
+# inside it. A `ui` policy therefore cannot be honored and is refused rather
+# than accepted and dropped. Presence drives the refusal (UiPolicy's default is
+# full lockdown, so an explicit lockdown `ui` is indistinguishable by value).
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_ui_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("UI policy is not supported")))
+
+# One-shot lifecycle rejection: the in-proc API exposes no session-lifetime
+# knob, so one-shot always stops the session and removes the agent user before
+# returning. `destroyOnExit: true` (the default) matches that and is accepted;
+# `false` asks for something the backend cannot deliver.
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_lifecycle_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("lifecycle.destroyOnExit=false")))
 
 # ---------------- Concurrent one-shot test ----------------
 #
 # Three wxc-exec processes (A, B, C) run a per-agent PowerShell script
-# from a shared rw-policy directory. Each script writes timestamped lines
-# to its own X.log file: "X-started", "X-still-alive-1" .. "X-still-alive-N",
-# "X-done", with one second between iterations. After all three wxc-execs
-# exit, the test reads each agent's log file and asserts (a) the wxc-exec
-# exited 0, (b) the log contains start / final-still-alive / done markers,
-# (c) timestamps are monotonic. This decouples the regid-leak check from
-# OS-side teardown timing -- if any of the three isolation sessions were
-# torn down mid-run its log would be truncated, and if cleanup failed its
-# wxc-exec exit code would be non-zero. A fresh fourth process (D) then
-# proves the leak does not poison subsequent sandboxes either.
+# from a shared host directory that grants Authenticated Users write access.
+# Each script writes timestamped lines to its own X.log file: "X-started",
+# "X-still-alive-1" .. "X-still-alive-N", "X-done", with one second
+# between iterations. After all three wxc-execs exit, the test reads each
+# agent's log file and asserts (a) the wxc-exec exited 0, (b) the log
+# contains start / final-still-alive / done markers, (c) timestamps are
+# monotonic. If any isolation session is torn down mid-run its log is
+# truncated, and if cleanup fails its wxc-exec exit code is non-zero. A
+# fresh fourth process (D) then proves subsequent sandboxes still work.
 #
 # Each launch is gated on the previously-launched agent's "X-started"
 # line appearing in its log file. Polling the log file (not wxc-exec's
@@ -381,12 +406,17 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_user_
 Write-Host ""
 Write-Host "--- Concurrent one-shot ---" -ForegroundColor Cyan
 
-# Shared rw directory the three agent PS1 scripts and X.log files live in.
-# Each X.json grants the agent rw access to this path via
-# policy.readwritePaths.
+# Shared host directory the three agent PS1 scripts and X.log files live in.
+# The backend no longer accepts filesystem policy, so grant write access at
+# the host ACL layer to Authenticated Users (S-1-5-11). Agent users are local
+# accounts and are members of that group.
 $concurrentLogDir = 'C:\mxc_concurrent_log'
 Remove-Item -Recurse -Force $concurrentLogDir -ErrorAction SilentlyContinue
 New-Item -Path $concurrentLogDir -ItemType Directory -Force | Out-Null
+$aclOutput = & icacls $concurrentLogDir /grant '*S-1-5-11:(OI)(CI)M' 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to grant Authenticated Users write access to ${concurrentLogDir}: $aclOutput"
+}
 
 # wxc-exec stdout/stderr capture dir (preserved across runs for inspection;
 # cleaned at the start of each run).
@@ -571,10 +601,6 @@ try {
     Write-Host "  (concurrent stdout/stderr preserved at: $concurrentTempRoot)" -ForegroundColor DarkGray
 }
 
-} finally {
-    Remove-Item -Recurse -Force $FsTestRoot -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force $FilterTestRoot -ErrorAction SilentlyContinue
-}
 
 # Summary -- wrap each filtered pipeline in @(...) to force array context.
 # Without @(), a Where-Object that returns a single hashtable is unwrapped
@@ -588,6 +614,20 @@ $total = $results.Count
 $executed = $passed + $failed
 
 Write-Host "`n==========================" -ForegroundColor Cyan
+# A suite that collected tests but executed none of them is not a pass:
+# without this, an aggregator reading only the exit code cannot tell
+# "everything passed" from "nothing ran".
+#
+# This deliberately cannot fire on an unsupported host. That case exits at the
+# availability probe near the top of the script, long before the summary, and
+# remains a clean skip — graceful degradation on an OS that cannot run these
+# tests is not a failure. Reaching this line means the backend *was* available,
+# so a zero execution count is anomalous rather than environmental.
+if ($executed -eq 0) {
+    Write-Host "FAILED: backend was available but no tests executed ($total collected, $skipped skipped)" -ForegroundColor Red
+    Write-Host "  A zero-execution run cannot substantiate anything; treating it as a failure." -ForegroundColor Red
+    exit 1
+}
 if ($failed -eq 0) {
     Write-Host "$passed/$total passed$(if ($skipped -gt 0) { ", $skipped skipped" })" -ForegroundColor Green
 } else {

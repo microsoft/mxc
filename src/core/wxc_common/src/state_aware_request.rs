@@ -218,7 +218,6 @@ pub enum MxcRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::IsolationSessionConfig;
     use crate::mxc_error::MxcErrorCode;
     use serde::Deserialize;
     use serde_json::json;
@@ -475,31 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_config_redacts_secret_values() {
-        let exp = json!({
-            "isolation_session": {
-                "start": {
-                    "user": {
-                        "upn": "alice@contoso.com",
-                        "wamToken": 123456789
-                    }
-                }
-            }
-        });
-        let parsed = parsed_with_experimental(Some(exp), Phase::Start);
-
-        let error = parsed
-            .deserialize_config::<IsolationSessionConfig>("isolation_session", "start")
-            .unwrap_err();
-
-        assert!(error
-            .message
-            .contains("experimental.isolation_session.start.user.wamToken"));
-        assert!(error.message.contains("invalid secret value"));
-        assert!(!error.message.contains("123456789"));
-    }
-
-    #[test]
     fn deserialize_config_preserves_location_with_escaped_sibling_key() {
         // A sibling key in the permissive `experimental` object carries a JSON
         // escape (`\u005F` decodes to `_`). A borrowed-`&str`-keyed map parse
@@ -587,50 +561,6 @@ mod tests {
         assert!(
             err.message.contains("line 5"),
             "CRLF endings must not shift the whole-file line (want line 5), got: {}",
-            err.message
-        );
-    }
-
-    #[test]
-    fn deserialize_config_positional_path_redacts_secret_with_whole_file_location() {
-        // Positional (source_text) path AND secret redaction together: the
-        // wamToken secret value is malformed; the message must redact the value,
-        // carry the full path, and report the whole-file line (7), not the
-        // fragment-local one.
-        let source_text = "\
-{
-  \"experimental\": {
-    \"isolation_session\": {
-      \"start\": {
-        \"user\": {
-          \"upn\": \"alice@contoso.com\",
-          \"wamToken\": 123456789
-        }
-      }
-    }
-  }
-}";
-        let parsed = parsed_with_source(source_text, Phase::Start);
-
-        let err = parsed
-            .deserialize_config::<IsolationSessionConfig>("isolation_session", "start")
-            .unwrap_err();
-
-        assert!(
-            err.message
-                .contains("experimental.isolation_session.start.user.wamToken"),
-            "expected the full secret path, got: {}",
-            err.message
-        );
-        assert!(err.message.contains("invalid secret value"));
-        assert!(
-            !err.message.contains("123456789"),
-            "secret leaked: {}",
-            err.message
-        );
-        assert!(
-            err.message.contains("line 7"),
-            "expected whole-file secret location line 7, got: {}",
             err.message
         );
     }
