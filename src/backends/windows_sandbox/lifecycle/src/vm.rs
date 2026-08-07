@@ -133,13 +133,17 @@ fn write_fresh(path: &Path, content: &str) -> std::io::Result<()> {
 
 /// Launch Windows Sandbox with the given .wsb file.
 pub(crate) async fn launch(wsb_path: &Path) -> Result<()> {
-    eprintln!("[daemon] launching WindowsSandbox.exe with {:?}", wsb_path);
+    // Resolve `WindowsSandbox.exe` under the trusted System directory
+    // (`GetSystemDirectoryW`, not `%SystemRoot%` or the executable search order),
+    // so a binary planted in the app dir or CWD can't be launched in its place.
+    let sandbox_exe = wxc_common::system_dir::system_directory().join("WindowsSandbox.exe");
+    eprintln!("[daemon] launching {:?} with {:?}", sandbox_exe, wsb_path);
 
-    let status = Command::new("WindowsSandbox.exe")
+    let status = Command::new(&sandbox_exe)
         .arg(wsb_path)
         .status()
         .await
-        .context("spawn WindowsSandbox.exe")?;
+        .with_context(|| format!("spawn {}", sandbox_exe.display()))?;
 
     if !status.success() {
         anyhow::bail!(
