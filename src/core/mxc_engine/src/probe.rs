@@ -106,11 +106,7 @@ fn windows_backends() -> Vec<AvailableBackend> {
 
     // `processcontainer` is always present and the only backend with a tier
     // ladder, so it carries its effective (highest-reachable) tier.
-    let tier = select_tier(
-        is_base_container_usable(),
-        cfg!(feature = "tier2_bfs"),
-        bfscfg_available(),
-    );
+    let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
     let mut backends = vec![AvailableBackend::tiered(
         ContainmentBackend::ProcessContainer.wire_name(),
         tier.as_str(),
@@ -143,34 +139,26 @@ fn windows_backends() -> Vec<AvailableBackend> {
     backends
 }
 
-/// Whether `bfscfg.exe` is resolvable on this host. The BFS tier enforces
-/// filesystem policy through `bfscfg.exe`, so a policy-carrying request only
-/// reaches BFS when it is present — otherwise [`detect`](appcontainer_common::fallback_detector::detect)
-/// falls through to DACL. Mirrored here so the reported tier ceiling matches
-/// what a real request achieves, rather than the `tier2_bfs` build flag alone.
-/// With the feature off, `find_bfscfg_exe` always returns `Ok(None)`.
-#[cfg(target_os = "windows")]
-fn bfscfg_available() -> bool {
-    appcontainer_common::fallback_detector::find_bfscfg_exe()
-        .map(|path| path.is_some())
-        .unwrap_or(false)
-}
-
 /// Effective process-container tier, strongest reachable rung first:
 /// BaseContainer → AppContainerBfs → AppContainerDacl. Split from the host
-/// detectors so precedence is testable without a real Windows host, the
-/// `tier2_bfs` feature, or `bfscfg.exe` on disk. BFS requires both the feature
-/// and a resolvable `bfscfg.exe`, matching `detect`'s policy-carrying path.
+/// detectors so precedence is testable without a real Windows host or the
+/// `tier2_bfs` feature.
+///
+/// This reports the tier **ceiling** — the strongest tier the host can reach
+/// for *some* request. On a `tier2_bfs` build that is `AppContainerBfs`
+/// regardless of `bfscfg.exe`: a request with no filesystem policy reaches BFS
+/// without it (`fallback_detector::detect`). `bfscfg.exe` only decides whether a
+/// *policy-carrying* request stays at BFS or drops to DACL, so it belongs in
+/// request-time dispatch, not in the ceiling.
 #[cfg(target_os = "windows")]
 fn select_tier(
     base_container_usable: bool,
     tier2_bfs_enabled: bool,
-    bfscfg_present: bool,
 ) -> appcontainer_common::fallback_detector::IsolationTier {
     use appcontainer_common::fallback_detector::IsolationTier;
     if base_container_usable {
         IsolationTier::BaseContainer
-    } else if tier2_bfs_enabled && bfscfg_present {
+    } else if tier2_bfs_enabled {
         IsolationTier::AppContainerBfs
     } else {
         IsolationTier::AppContainerDacl
@@ -313,29 +301,13 @@ mod tests {
     #[test]
     fn tier_precedence_prefers_the_strongest_reachable_rung() {
         use appcontainer_common::fallback_detector::IsolationTier;
-        // BaseContainer wins whenever usable, regardless of tier2_bfs / bfscfg.
-        assert_eq!(
-            select_tier(true, false, false),
-            IsolationTier::BaseContainer
-        );
-        assert_eq!(select_tier(true, true, true), IsolationTier::BaseContainer);
-        // BFS requires BOTH the tier2_bfs feature and a resolvable bfscfg.exe.
-        assert_eq!(
-            select_tier(false, true, true),
-            IsolationTier::AppContainerBfs
-        );
-        assert_eq!(
-            select_tier(false, true, false),
-            IsolationTier::AppContainerDacl
-        );
-        assert_eq!(
-            select_tier(false, false, true),
-            IsolationTier::AppContainerDacl
-        );
-        assert_eq!(
-            select_tier(false, false, false),
-            IsolationTier::AppContainerDacl
-        );
+        // BaseContainer wins whenever usable, regardless of tier2_bfs.
+        assert_eq!(select_tier(true, false), IsolationTier::BaseContainer);
+        assert_eq!(select_tier(true, true), IsolationTier::BaseContainer);
+        // The ceiling is BFS on any tier2_bfs build (a no-policy request reaches
+        // it without bfscfg.exe); bfscfg gating lives in request-time dispatch.
+        assert_eq!(select_tier(false, true), IsolationTier::AppContainerBfs);
+        assert_eq!(select_tier(false, false), IsolationTier::AppContainerDacl);
     }
 
     #[cfg(not(target_os = "windows"))]
