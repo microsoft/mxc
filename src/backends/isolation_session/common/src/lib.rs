@@ -32,6 +32,8 @@ mod policy;
 #[cfg(target_os = "windows")]
 mod process_options;
 #[cfg(target_os = "windows")]
+mod regfree;
+#[cfg(target_os = "windows")]
 mod sandbox_id;
 #[cfg(target_os = "windows")]
 mod state_aware;

@@ -149,7 +149,8 @@ pub(super) fn with_service_timeout_grace(mut options: ProcessOptions) -> Process
 pub(super) fn build_iso_process_options(
     options: &ProcessOptions,
 ) -> Result<IsoSessionProcessOptions, IsolationSessionError> {
-    let proc_options = IsoSessionProcessOptions::new()
+    let proc_options = super::regfree::activate_from_runtime_dir::<IsoSessionProcessOptions>()
+        .unwrap_or_else(IsoSessionProcessOptions::new)
         .map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e))?;
 
     proc_options
