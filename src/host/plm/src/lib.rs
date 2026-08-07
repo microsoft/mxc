@@ -6,10 +6,10 @@
 //! gated per-module. The `plm` binary in `main.rs` is Windows-only.
 
 pub mod access_event;
-pub mod access_failure;
+#[cfg(target_os = "windows")]
+pub mod analysis;
 pub mod config;
 pub mod coordination;
-pub mod event_parser;
 pub mod extract_caps;
 pub mod profile_gen;
 

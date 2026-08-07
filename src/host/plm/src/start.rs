@@ -294,6 +294,12 @@ mod tests {
              provider (GUID 811a1ddb-2e69-5f25-adc0-4b186170e760); without it the \
              event-id=14/27 detection pipeline has nothing to consume",
         );
+        assert!(
+            wprp.contains("EP_Microsoft-Windows-Kernel-General")
+                && wprp.contains("a68ca8b7-004f-d7b6-a698-07e2de0f1f5d"),
+            "EMBEDDED_WPRP must enable Microsoft-Windows-Kernel-General for \
+             learningModeLogging block events",
+        );
 
         // The profile also wires the kernel collector for process/loader
         // events the parser uses to attribute access failures to a

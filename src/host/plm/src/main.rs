@@ -258,6 +258,12 @@ enum Cmd {
         /// supplied file is parsed as-is.
         #[arg(long)]
         trace_file: Option<PathBuf>,
+        /// Exact destination for the ETL produced by `wpr -stop`.
+        #[arg(long, conflicts_with = "trace_file")]
+        trace_output: Option<PathBuf>,
+        /// Workload exit code to record in the canonical denials JSON.
+        #[arg(long, default_value_t = 0)]
+        exit_code: i32,
         /// Emit per-event/per-ACE diagnostic output.
         #[arg(long)]
         verbose_logging: bool,
@@ -426,19 +432,25 @@ fn main() -> Result<()> {
             bin_path,
             config_path,
             trace_file,
+            trace_output,
+            exit_code,
             verbose_logging,
         } => {
             let _singleton = acquire_singleton_if_needed()?;
-            stop::run(
+            let result = stop::run(
                 stop::StopOptions {
                     log_dir,
                     bin_path,
                     config_path,
                     trace_file,
+                    trace_output,
+                    exit_code,
                     verbose: verbose_logging,
                 },
                 &exe,
-            )
+            )?;
+            println!("{}", serde_json::to_string(&result)?);
+            Ok(())
         }
         Cmd::ExtractCaps {
             hex_bytes,

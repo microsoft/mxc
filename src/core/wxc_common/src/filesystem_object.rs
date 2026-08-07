@@ -36,6 +36,7 @@
 
 use crate::logger::Logger;
 use crate::models::ContainerPolicy;
+use std::path::Path;
 
 /// Intent class for a policy path, ordered least → most restrictive so that
 /// `max()` yields the strictest intent in a group of aliases.
@@ -94,6 +95,17 @@ enum PathResolution {
     Unknown,
 }
 
+/// Result of comparing two paths by filesystem-object identity.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExistingObjectComparison {
+    /// Both paths resolved to the same object.
+    Same,
+    /// At least one path is absent, or both resolved to different objects.
+    Different,
+    /// At least one existing or potentially existing path could not be examined.
+    Unknown,
+}
+
 /// Resolve a path to its filesystem-object identity, following symlinks so two
 /// names for the same target collide.
 ///
@@ -102,7 +114,7 @@ enum PathResolution {
 /// ([`PathResolution::Unknown`]), so the caller can fail closed on the latter
 /// without rejecting the common "path created at mount time" case.
 #[cfg(unix)]
-fn resolve_object(path: &str) -> PathResolution {
+fn resolve_object(path: &Path) -> PathResolution {
     use std::os::unix::fs::MetadataExt;
     // `metadata` follows symlinks, giving the target object's identity.
     match std::fs::metadata(path) {
@@ -121,7 +133,8 @@ fn resolve_object(path: &str) -> PathResolution {
 }
 
 #[cfg(windows)]
-fn resolve_object(path: &str) -> PathResolution {
+fn resolve_object(path: &Path) -> PathResolution {
+    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
@@ -132,7 +145,11 @@ fn resolve_object(path: &str) -> PathResolution {
         OPEN_EXISTING,
     };
 
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
     // FILE_READ_ATTRIBUTES is the minimum access GetFileInformationByHandleEx
@@ -192,10 +209,28 @@ fn resolve_object(path: &str) -> PathResolution {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn resolve_object(_path: &str) -> PathResolution {
+fn resolve_object(_path: &Path) -> PathResolution {
     // No way to determine object identity on unsupported platforms; treat as
     // unexaminable so the fail-closed path applies when deniedPaths are present.
     PathResolution::Unknown
+}
+
+/// Compare two paths by filesystem-object identity.
+pub fn compare_existing_filesystem_objects(a: &Path, b: &Path) -> ExistingObjectComparison {
+    match (resolve_object(a), resolve_object(b)) {
+        (PathResolution::Object(a), PathResolution::Object(b)) if a == b => {
+            ExistingObjectComparison::Same
+        }
+        (PathResolution::Absent, _) | (_, PathResolution::Absent) => {
+            ExistingObjectComparison::Different
+        }
+        (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
+            ExistingObjectComparison::Unknown
+        }
+        (PathResolution::Object(_), PathResolution::Object(_)) => {
+            ExistingObjectComparison::Different
+        }
+    }
 }
 
 /// Detect cross-path object conflicts and return a tightened copy of `policy`.
@@ -254,7 +289,7 @@ pub fn normalize_object_conflicts(
     let has_denied = !policy.denied_paths.is_empty();
     let mut groups: HashMap<ObjectId, Vec<usize>> = HashMap::new();
     for (i, (path, intent)) in entries.iter().enumerate() {
-        match resolve_object(path) {
+        match resolve_object(Path::new(path)) {
             PathResolution::Object(id) => {
                 groups.entry(id).or_default().push(i);
             }

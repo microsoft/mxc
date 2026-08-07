@@ -10,15 +10,16 @@
 
 use anyhow::{Context, Result};
 use chrono::Local;
+use learning_mode_core::AnalysisResult;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use crate::analysis::{analyze_trace, legacy_config_inputs, write_detection_summary};
 use crate::config::{
     deny_file_set, initialize_filesystem, update_from_access_events, write_added_paths_summary,
 };
 use crate::coordination::PLM_LOG_START_IN_FLIGHT;
-use crate::event_parser::parse_events;
 use crate::start;
 use crate::stop::{stop_plm_trace_with, WprExeStopper};
 use std::sync::atomic::Ordering;
@@ -33,6 +34,10 @@ fn prompt_enter(message: &str) -> Result<()> {
         .read_line(&mut line)
         .context("failed to read from stdin")?;
     Ok(())
+}
+
+fn can_generate_policy_preview(analysis: &AnalysisResult) -> bool {
+    !analysis.denied_resources_truncated
 }
 
 pub fn run(
@@ -72,18 +77,25 @@ pub fn run(
         println!("Beginning event parsing, this may take several minutes");
     }
 
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
-    // Discover capability SIDs here, at the CLI boundary, so the parse
-    // itself is deterministic and can be driven with an injected index.
-    let capability_index = crate::extract_caps::discover_capabilities(verbose);
-    let parse = parse_events(&trace_file, cwd.as_deref(), verbose, capability_index);
+    let analysis = analyze_trace(&trace_file);
 
-    // Clean up the temp .etl regardless of parse outcome.
+    // Clean up the temp .etl regardless of analysis outcome.
     let _ = std::fs::remove_file(&trace_file);
 
-    let parse = parse?;
+    let analysis = analysis?;
+    write_detection_summary(&analysis);
+    if !can_generate_policy_preview(&analysis) {
+        eprintln!(
+            "[plm] warning: denial analysis was truncated; skipping blank-config preview \
+             because the learned policy would be incomplete"
+        );
+        return Ok(());
+    }
+    let current_directory = std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    let (valid_access_events, _) =
+        legacy_config_inputs(&analysis.denials, current_directory.as_deref());
 
     // Synthesize a blank config and run the FS merge to preview what a
     // policy authored from scratch would receive. Capability and UI
@@ -96,13 +108,8 @@ pub fn run(
     // that will never match a real event's file path.
     let bin_path = String::from("\\\\plm-blank-config-bin-sentinel");
 
-    let added = update_from_access_events(
-        &mut blank,
-        &bin_path,
-        &parse.valid_access_events,
-        &deny,
-        verbose,
-    )?;
+    let added =
+        update_from_access_events(&mut blank, &bin_path, &valid_access_events, &deny, verbose)?;
 
     write_added_paths_summary(&added, verbose);
 
@@ -111,4 +118,18 @@ pub fn run(
     println!("{}", serde_json::to_string_pretty(&blank)?);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_generate_policy_preview;
+    use learning_mode_core::AnalysisResult;
+
+    #[test]
+    fn truncated_analysis_cannot_generate_policy_preview() {
+        assert!(!can_generate_policy_preview(&AnalysisResult {
+            denials: Vec::new(),
+            denied_resources_truncated: true,
+        }));
+    }
 }
