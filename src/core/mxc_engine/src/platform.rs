@@ -2,9 +2,15 @@
 // Licensed under the MIT License.
 
 //! Host platform support detection — the Rust port of the SDK's
-//! `getPlatformSupport`. Lets callers discover host support in-process instead
-//! of depending on the TypeScript SDK, and lives in the engine so both the
-//! public SDK and the executor binaries share one implementation.
+//! `getPlatformSupport`.
+//!
+//! Reports whether MXC can run on the current host and which containment
+//! backends are available. This lets callers stop depending on the TypeScript
+//! SDK for platform discovery.
+//!
+//! This host probing lives in the engine alongside the backend dispatch in
+//! `dispatch.rs`, so both the public SDK and the executor binaries can share a
+//! single implementation.
 
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
@@ -25,8 +31,14 @@ pub struct PlatformSupport {
     pub available_methods: Vec<String>,
 }
 
-/// Detect MXC support on the current host — see [`PlatformSupport::available_methods`]
-/// for what the reported set does and does not promise.
+/// Detect MXC support on the current host.
+///
+/// Mirrors the SDK's `getPlatformSupport`. On Windows the isolation tier and UI
+/// capabilities come from the in-process fallback probe rather than a
+/// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
+/// WSL Container runtime (requires the `wslc` feature). See
+/// [`PlatformSupport::available_methods`] for what the reported set does and
+/// does not promise.
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
@@ -48,8 +60,10 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "linux")]
     {
-        // `lxc` is a shallow `lxc-ls --version` check; `bubblewrap` additionally
-        // needs a new-enough `bwrap` (see `bwrap_common::bwrap_version`).
+        // `lxc` availability is a shallow `lxc-ls --version` check. For
+        // `bubblewrap`, presence alone is not enough: `bwrap` must also be new
+        // enough for every flag the argument builder emits (see
+        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`).
         let mut methods: Vec<String> = Vec::new();
         if lxc_common::availability::is_lxc_available() {
             methods.push("lxc".to_string());
