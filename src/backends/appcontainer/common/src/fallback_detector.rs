@@ -33,6 +33,15 @@ pub enum IsolationTier {
 }
 
 impl IsolationTier {
+    /// Every tier, ordered strongest-first (matching the variant order). The
+    /// single canonical set of tiers — enumerate this instead of hardcoding the
+    /// list, so adding a tier is a one-line change here plus [`as_str`](Self::as_str).
+    pub const ALL: [IsolationTier; 3] = [
+        IsolationTier::BaseContainer,
+        IsolationTier::AppContainerBfs,
+        IsolationTier::AppContainerDacl,
+    ];
+
     /// Stable kebab-case identifier for serialization.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -40,6 +49,19 @@ impl IsolationTier {
             IsolationTier::AppContainerBfs => "appcontainer-bfs",
             IsolationTier::AppContainerDacl => "appcontainer-dacl",
         }
+    }
+}
+
+impl std::str::FromStr for IsolationTier {
+    type Err = ();
+
+    /// Inverse of [`as_str`](Self::as_str), derived from it via [`ALL`](Self::ALL)
+    /// so the two directions cannot drift.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        IsolationTier::ALL
+            .into_iter()
+            .find(|tier| tier.as_str() == s)
+            .ok_or(())
     }
 }
 
@@ -155,7 +177,7 @@ pub fn detect(
     // the tests silently no-op'd).
     #[cfg(test)]
     if let Ok(forced) = std::env::var("MXC_FORCE_TIER") {
-        if let Some(tier) = parse_force_tier(&forced) {
+        if let Ok(tier) = forced.parse::<IsolationTier>() {
             return forced_decision(tier, policy, denied);
         }
     }
@@ -413,16 +435,6 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
             path: path.to_path_buf(),
             reason: e.to_string(),
         }),
-    }
-}
-
-#[cfg(test)]
-fn parse_force_tier(s: &str) -> Option<IsolationTier> {
-    match s {
-        "base-container" => Some(IsolationTier::BaseContainer),
-        "appcontainer-bfs" => Some(IsolationTier::AppContainerBfs),
-        "appcontainer-dacl" => Some(IsolationTier::AppContainerDacl),
-        _ => None,
     }
 }
 
@@ -686,7 +698,7 @@ mod tests {
     }
     #[test]
     fn empty_policy_t1_when_bc_present_and_preferred() {
-        let _g = ForceTierGuard::set("base-container");
+        let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let policy = empty_policy();
         let d = detect(&policy, true).expect("forced base-container should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
@@ -695,7 +707,7 @@ mod tests {
     }
     #[test]
     fn empty_policy_no_filesystem_t2_path() {
-        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let policy = empty_policy();
         let d = detect(&policy, true).expect("forced bfs should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
@@ -703,7 +715,7 @@ mod tests {
     }
     #[test]
     fn denied_paths_disabled_blocks_t1() {
-        let _g = ForceTierGuard::set("base-container");
+        let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
@@ -713,7 +725,7 @@ mod tests {
     }
     #[test]
     fn denied_paths_disabled_blocks_t2() {
-        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
@@ -723,7 +735,7 @@ mod tests {
     }
     #[test]
     fn denied_paths_disabled_blocks_t3() {
-        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
@@ -800,19 +812,29 @@ mod tests {
         );
     }
     #[test]
+    fn tier_name_round_trips_through_from_str() {
+        // `FromStr` is derived from `as_str` via `ALL`, so every tier must
+        // round-trip and the set stays in sync automatically.
+        for tier in IsolationTier::ALL {
+            assert_eq!(tier.as_str().parse::<IsolationTier>(), Ok(tier));
+        }
+    }
+
+    #[test]
     fn force_tier_env_var_parses_all_three_values() {
-        assert!(matches!(
-            parse_force_tier("base-container"),
-            Some(IsolationTier::BaseContainer)
-        ));
-        assert!(matches!(
-            parse_force_tier("appcontainer-bfs"),
-            Some(IsolationTier::AppContainerBfs)
-        ));
-        assert!(matches!(
-            parse_force_tier("appcontainer-dacl"),
-            Some(IsolationTier::AppContainerDacl)
-        ));
+        assert_eq!(
+            "base-container".parse::<IsolationTier>(),
+            Ok(IsolationTier::BaseContainer)
+        );
+        assert_eq!(
+            "appcontainer-bfs".parse::<IsolationTier>(),
+            Ok(IsolationTier::AppContainerBfs)
+        );
+        assert_eq!(
+            "appcontainer-dacl".parse::<IsolationTier>(),
+            Ok(IsolationTier::AppContainerDacl)
+        );
+        assert!("not-a-real-tier".parse::<IsolationTier>().is_err());
     }
     #[test]
     fn force_tier_env_var_invalid_value_falls_through_to_real_probes() {
@@ -970,7 +992,7 @@ mod tests {
     }
     #[test]
     fn compute_decision_with_force_tier_carries_warnings_empty() {
-        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = empty_policy();
         policy.fallback.allow_dacl_mutation = true;
         let d = detect(&policy, true).expect("forced dacl with allow_dacl_mutation=true");

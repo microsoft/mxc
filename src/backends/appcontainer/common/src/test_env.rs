@@ -53,6 +53,13 @@ impl ForceTierGuard {
         }
         ForceTierGuard { _lock: guard }
     }
+
+    /// Typed variant: forces a real tier by its canonical serialized name, so
+    /// call-sites don't hardcode the string. Prefer this over [`set`](Self::set),
+    /// which remains for negative tests that need an intentionally invalid value.
+    pub(crate) fn set_tier(tier: crate::fallback_detector::IsolationTier) -> Self {
+        Self::set(tier.as_str())
+    }
 }
 
 impl Drop for ForceTierGuard {

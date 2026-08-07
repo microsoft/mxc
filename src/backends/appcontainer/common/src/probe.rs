@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn run_probe_with_force_tier() {
-        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let policy = ContainerPolicy::default();
         let out = run_probe(&policy);
         assert_eq!(out.tier, Some("appcontainer-bfs"));
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn run_probe_handles_dacl_disabled_error() {
-        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = ContainerPolicy::default();
         policy.fallback.allow_dacl_mutation = false;
         let out = run_probe(&policy);
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn omitted_fields_when_error() {
-        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = ContainerPolicy::default();
         policy.fallback.allow_dacl_mutation = false;
         let out = run_probe(&policy);
