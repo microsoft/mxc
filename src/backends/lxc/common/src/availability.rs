@@ -15,11 +15,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often to poll the child while waiting for it to exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// Outcome of running `lxc-ls --version`.
+/// Outcome of running `lxc-ls --version`. Only `ExitedSuccess` means available;
+/// the other variants are distinct for clarity but map to unavailable. The exit
+/// code isn't retained — nothing reads it, and keeping it would be dead code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LxcLsOutcome {
     ExitedSuccess,
-    ExitedFailure(Option<i32>),
+    ExitedFailure,
     SpawnFailed,
     TimedOut,
 }
@@ -54,7 +56,7 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> LxcLsOutcome {
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return LxcLsOutcome::ExitedSuccess,
-            Ok(Some(status)) => return LxcLsOutcome::ExitedFailure(status.code()),
+            Ok(Some(_)) => return LxcLsOutcome::ExitedFailure,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
@@ -81,8 +83,7 @@ mod tests {
     #[test]
     fn only_a_clean_exit_means_available() {
         assert!(available_from(LxcLsOutcome::ExitedSuccess));
-        assert!(!available_from(LxcLsOutcome::ExitedFailure(Some(1))));
-        assert!(!available_from(LxcLsOutcome::ExitedFailure(None)));
+        assert!(!available_from(LxcLsOutcome::ExitedFailure));
         assert!(!available_from(LxcLsOutcome::SpawnFailed));
         assert!(!available_from(LxcLsOutcome::TimedOut));
     }
