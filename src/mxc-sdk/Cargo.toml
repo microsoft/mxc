@@ -30,7 +30,12 @@ required-features = ["wslc"]
 default = []
 wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
 link-wslcsdk = ["dep:zip"]
-isolation_session = ["dep:windows-collections", "dep:windows-future"]
+isolation_session = [
+    "dep:windows-bindgen",
+    "dep:windows-collections",
+    "dep:windows-future",
+    "dep:zip",
+]
 test-support = []
 microvm = []
 hyperlight = [
@@ -74,6 +79,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+windows-bindgen = { version = "=0.62.1", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]

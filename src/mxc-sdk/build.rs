@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[cfg(feature = "isolation_session")]
 #[path = "build/build_isolation_session_bindings.rs"]
 mod build_isolation_session_bindings;
 #[allow(dead_code)]
@@ -27,6 +28,7 @@ mod nanvix_build_common;
 mod nanvix_common;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "isolation_session")]
     build_isolation_session_bindings::run();
     build_mxc_telemetry::run();
     if let Some((bin_dir, use_prefetched_binaries)) = build_nanvix_binaries::run() {
