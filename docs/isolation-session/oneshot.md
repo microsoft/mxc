@@ -157,11 +157,62 @@ The runner calls into the WinRT API namespaced
 Session service (running as SYSTEM via `svchost.exe`). The API is gated
 on an internal Windows feature flag.
 
-Activation goes through the WinRT activation factory for the
-`Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class.
-Activation requires `RoInitialize(RO_INIT_MULTITHREADED)` (handled in
-`main.rs` at startup, applied unconditionally because it's benign for other
-backends).
+### Two activation paths and the selection rule
+
+The runtime class `IsoSessionOps` (and `IsoSessionProcessOptions`) can be
+activated two ways, both funneled through
+`src/backends/isolation_session/common/src/regfree.rs`:
+
+1. **Coresident explicit load (preferred when present).** MXC
+   `LoadLibraryExW`s the MSI-installed `IsoSessionApp.dll` **by full path**
+   and calls its `DllGetActivationFactory` export directly, bypassing the
+   WinRT activation catalog. This binds the MSI-installed runtime — the App
+   DLL's coresidency logic then sibling-loads the MSI `IsoSessionClient.dll`
+   and the matching side-by-side service instance. No machine-wide registry
+   mutation is involved. This is what lets a packaged product (openclaw)
+   ship and run a specific runtime version without touching the inbox
+   binaries.
+
+2. **Default system activation (fallback).** When no coresident
+   `IsoSessionApp.dll` is present at the runtime folder, activation falls
+   back to `IsoSessionOps::new()`, which resolves through the OS WinRT
+   activation catalog to the inbox `System32` binaries.
+
+**Selection rule.** `regfree::activate_from_runtime_dir` resolves the runtime
+folder (see *Runtime folder resolution* below), then:
+
+- **absent** at the default folder → fall back to system activation (a host
+  without the paired MSI keeps working);
+- **loaded** → use the coresident factory;
+- **present or explicitly configured but unloadable** (wrong architecture,
+  missing dependency, corrupt image, or an explicit override whose folder
+  does not resolve) → the error is **surfaced**, never silently redirected to
+  the inbox binaries — otherwise MXC would bind a *different* binary set under
+  the guise of success.
+
+### Runtime folder resolution
+
+The coresident folder is `DEFAULT_RUNTIME_DIR`
+(`C:\Program Files\Microsoft\Agentic Runtime\2026.08` — the fixed MSI install
+location) unless overridden by the `MXC_ISOSESSION_RUNTIME_DIR` environment
+variable:
+
+| Variable | Effect |
+|---|---|
+| `MXC_ISOSESSION_RUNTIME_DIR` | Absolute path to the folder holding the coresident runtime binaries (`IsoSessionApp.dll`, `IsoSessionClient.dll`, `IsoSession.manifest`, …). Intended for tests and side-by-side validation machines. **Must be absolute** — a relative value is rejected (with a warning) and the default is used, because the value is also the DLL dependency search root and a relative value would make it CWD-relative (a DLL-planting surface). When set to an absolute path it is *authoritative*: if its folder does not resolve, the run fails rather than silently binding the inbox runtime. |
+| `DEFAULT_RUNTIME_DIR` (compile-time constant, not an env var) | The hardcoded MSI install location used when the override is unset/empty/rejected. |
+
+### Apartment initialization
+
+The coresident path obtains the factory via `DllGetActivationFactory` and
+calls `IActivationFactory::ActivateInstance` directly — which, unlike the
+inbox `RoActivateInstance` path, does **not** implicitly initialize the
+WinRT/COM apartment. `src/core/wxc/src/main.rs` calls
+`CoInitializeEx(COINIT_MULTITHREADED)` at startup, and `regfree.rs`
+additionally calls `CoInitializeEx` (best-effort; `S_FALSE` /
+`RPC_E_CHANGED_MODE` ignored) before activation so the factory's internal COM
+activation (coresident client → service) has an initialized apartment even on
+the `--probe` path, which returns before `main`'s initialization.
 
 The API surface includes the lifecycle methods plus
 `IsoSessionProcess` (the running-process handle). The runner uses the
@@ -365,10 +416,18 @@ The following were observed during VM testing and are accepted for v0.1.
 **For end users:**
 
 - A Windows build with the IsolationSession feature enabled.
-- The OS-side isolation-session host binary present in
-  `%SystemRoot%\System32\` (ships with Windows as part of the OS-side
-  service).
-- WinRT initialized as MTA (handled by `wxc-exec`).
+- The isolation-session runtime binaries available via **one** of:
+  - the paired **MSI** installed at `DEFAULT_RUNTIME_DIR`
+    (`C:\Program Files\Microsoft\Agentic Runtime\2026.08`), which MXC binds
+    coresidently by path (preferred — this is how a packaged product ships a
+    specific runtime version); or
+  - the OS-side inbox host binaries in `%SystemRoot%\System32\` (ships with
+    Windows), used as the fallback when no MSI runtime is present.
+- WinRT/COM initialized as MTA (handled by `wxc-exec` and `regfree.rs`).
+
+Set `MXC_ISOSESSION_RUNTIME_DIR` (absolute path) to point at a specific
+runtime folder for tests or side-by-side validation; see *OS API Dependency →
+Runtime folder resolution*.
 
 **For developers:**
 
