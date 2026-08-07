@@ -90,23 +90,38 @@ jobs:
             - pwsh: |
                 Write-Host "##vso[task.logissue type=warning]DRY RUN: skipping ESRP publish for ${{ crate }} (staged .crate only)."
               displayName: "DRY RUN: skip publish ${{ crate }}"
+          # SAFETY GUARD -- present on release/v0.0.0-smoketest only, and
+          # deliberately absent from the PR branch.  The real ESRP publish
+          # task is commented out below so that no misconfiguration --
+          # a wrong dryRun value, a bad condition, a template change --
+          # can reach crates.io from a smoke test.  crates.io does not
+          # allow a name or version to be deleted or reused once it is
+          # published, so an accidental publish cannot be undone.
+          #
+          # This branch fires only when dryRun is false.  It fails on
+          # purpose: a silent warning could let someone believe a publish
+          # succeeded when nothing was uploaded.
           - ${{ else }}:
-            - task: EsrpRelease@12
-              displayName: "Publish ${{ crate }} to crates.io"
-              inputs:
-                connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-                usemanagedidentity: false
-                keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-                authcertname: ${{ parameters.ESRPInfo.authCertName }}
-                signcertname: ${{ parameters.ESRPInfo.signCertName }}
-                clientid: ${{ parameters.ESRPInfo.clientId }}
-                intent: 'PackageDistribution'
-                contenttype: 'Rust'
-                contentsource: 'Folder'
-                folderlocation: $(esrpDir)
-                owners: ${{ parameters.ESRPInfo.OwnersEmail }}
-                approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
-                waitforreleasecompletion: true
-                serviceendpointurl: 'https://api.esrp.microsoft.com'
-                mainpublisher: 'ESRPRELPACMAN'
-                domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
+            - pwsh: |
+                Write-Host "##vso[task.logissue type=error]SAFETY GUARD: the ESRP publish task is commented out on release/v0.0.0-smoketest. NOTHING was published for ${{ crate }}. To publish for real, run from a branch that still has the EsrpRelease task."
+                exit 1
+              displayName: "BLOCKED: publish ${{ crate }} disabled on smoketest"
+            # - task: EsrpRelease@12
+            #   displayName: "Publish ${{ crate }} to crates.io"
+            #   inputs:
+            #     connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+            #     usemanagedidentity: false
+            #     keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+            #     authcertname: ${{ parameters.ESRPInfo.authCertName }}
+            #     signcertname: ${{ parameters.ESRPInfo.signCertName }}
+            #     clientid: ${{ parameters.ESRPInfo.clientId }}
+            #     intent: 'PackageDistribution'
+            #     contenttype: 'Rust'
+            #     contentsource: 'Folder'
+            #     folderlocation: $(esrpDir)
+            #     owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+            #     approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+            #     waitforreleasecompletion: true
+            #     serviceendpointurl: 'https://api.esrp.microsoft.com'
+            #     mainpublisher: 'ESRPRELPACMAN'
+            #     domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
