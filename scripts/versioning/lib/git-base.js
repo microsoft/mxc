@@ -140,9 +140,18 @@ function listFilesAtCommit(repoRoot, commit, path) {
   // containing non-ASCII bytes, quotes, backslashes or control characters, and
   // the literal comparison below would silently miss it.
   const gitPath = repoRelativeGitPath(repoRoot, path);
+  const args = [
+    "--literal-pathspecs",
+    "ls-tree",
+    "-r",
+    "-z",
+    "--name-only",
+    commit,
+  ];
+  if (gitPath) args.push("--", gitPath);
   const output = git(
     repoRoot,
-    ["ls-tree", "-r", "-z", "--name-only", commit, "--", gitPath],
+    args,
     { trim: false }
   );
   return output ? output.split("\0").filter(Boolean) : [];

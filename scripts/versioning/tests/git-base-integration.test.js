@@ -121,6 +121,43 @@ test("listFilesAtCommit lists tracked files under a directory", () => {
   }
 });
 
+test("listFilesAtCommit lists the repository root", () => {
+  const dir = scratchRepo((d) => {
+    mkdirSync(join(d, "schemas"), { recursive: true });
+    writeFileSync(join(d, "root.json"), "{}\n");
+    writeFileSync(join(d, "schemas", "nested.json"), "{}\n");
+    commitAll(d, "add");
+  });
+  try {
+    assert.deepEqual(listFilesAtCommit(dir, "HEAD", dir).sort(), [
+      "root.json",
+      "schemas/nested.json",
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listFilesAtCommit treats pathspec magic as a literal filename", () => {
+  const dir = scratchRepo((d) => {
+    writeFileSync(join(d, "a.txt"), "ordinary\n");
+    writeFileSync(join(d, "[ab].txt"), "magic-looking\n");
+    commitAll(d, "add");
+  });
+  try {
+    assert.deepEqual(
+      listFilesAtCommit(dir, "HEAD", "[ab].txt"),
+      ["[ab].txt"]
+    );
+    assert.equal(
+      readFileAtCommit(dir, "HEAD", "[ab].txt"),
+      "magic-looking\n"
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveBaseCommit honours an explicit base ref", () => {
   const dir = scratchRepo((d) => {
     writeFileSync(join(d, "a.txt"), "one\n");

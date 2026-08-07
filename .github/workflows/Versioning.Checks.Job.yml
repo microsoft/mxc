@@ -8,7 +8,7 @@ jobs:
     name: Versioning Checks
     runs-on: ubuntu-latest
     env:
-      MXC_VERSIONING_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD^' }}
+      MXC_VERSIONING_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event_name == 'push' && github.event.before || 'HEAD^' }}
     steps:
       - uses: actions/checkout@v4
         with:
