@@ -37,6 +37,12 @@ pub fn available_backends() -> Vec<AvailableBackend>;
 ```
 
 Example results:
+> **"Stock Windows"** here means a clean Windows install with only the default
+> optional features enabled (no BaseContainer, Windows Sandbox, etc.), so the
+> process-container backend falls to its `appcontainer-dacl` floor. See
+> [`docs/process-container/os-version-support.md`](process-container/os-version-support.md)
+> for the per-release policy-support matrix that determines the reachable tier.
+
 | Host | Result |
 | --- | --- |
 | Stock Windows | `[{ backend: "processcontainer", tier: Some("appcontainer-dacl") }]` |
@@ -91,7 +97,7 @@ for them **cannot be built just yet**.
 | Backend | What a real probe needs | What exists today | Risk if faked |
 | --- | --- | --- | --- |
 | `windows_sandbox` | DISM/registry check of the *Containers-DisposableClientVM* optional feature | only a private "is the `.exe` on disk" check | reports available when the feature is off → launch fails |
-| `isolation_session` | build ≥ 26300.8553 **and** `IsoSessionApp.dll` resolvable **and** feature compiled | build gate lives **only in the TypeScript SDK** | wrong OS builds falsely pass |
+| `isolation_session` | activation of the in-proc `Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class succeeds (the API class is registered on the OS **and** its OS feature gate is on) **and** the backend feature is compiled | as of #761, detection queries whether the API class is registered rather than gating on a build number; a `CLASS_E_CLASSNOTAVAILABLE` / `REGDB_E_CLASSNOTREG` activation failure means unavailable | none for false-availability now — a machine without the API registered fails activation cleanly; still needs a cheap probe seam so callers don't have to attempt a real activation |
 | `microvm` | feature compiled, NanVix runtime files staged, and WHP usable on Windows or `/dev/kvm` readable/writable on Linux | nothing | checking only a hypervisor can report availability when required runtime files are missing |
 | `hyperlight` | hypervisor present + feature compiled | nothing | same VM-boot risk |
 
@@ -134,7 +140,7 @@ guarding against drift between this API and the tier ladder.
 
 Writing the missing detectors and wiring the TypeScript projection, one issue each:
 1. `windows_sandbox` - optional-feature (DISM/registry) detector.
-2. `isolation_session` - port the build-number + `IsoSessionApp.dll` gate from TypeScript to Rust.
+2. `isolation_session` - probe whether the `Windows.AI.IsolationSession.Preview` `IsoSessionOps` API class is registered on the OS (activation-factory resolvable), replacing the old build-number gate (see #761), and expose it to Rust.
 3. `microvm` / `hyperlight` - hypervisor-presence probe.
 4. `lxc` - port the `lxc-ls` presence check from TypeScript to Rust,
 so the probe (not just the SDK) can report it (§4.2, step 1).
