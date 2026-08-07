@@ -1230,6 +1230,7 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
+            capture_denials: None,
         };
         let err = build_request(&policy, None).expect_err("0.3 is below the supported floor");
         assert_eq!(err.code, crate::ErrorCode::VersionIncompatible);
@@ -1458,7 +1459,7 @@ mod tests {
 
     fn policy_with_capture_denials(section: CaptureDenialsSection) -> SandboxPolicy {
         SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
+            version: "0.8.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1579,6 +1580,7 @@ mod tests {
     #[test]
     fn wire_contract_accepts_capture_denials_together_with_a_network_proxy() {
         let config = serde_json::json!({
+            "version": "0.8.0-alpha",
             "process": { "commandLine": "echo hello" },
             "containment": "processcontainer",
             "network": {
@@ -1619,6 +1621,7 @@ mod tests {
             proxy: Some(ProxySpec::Localhost(8080)),
             ..NetworkSection::default()
         });
+        policy.version = "0.8.0-alpha".to_string();
         policy.capture_denials = Some(CaptureDenialsSection {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),

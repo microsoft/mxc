@@ -320,7 +320,7 @@ export interface ProcessContainer {
   capabilities?: string[] | null;
   /**
    * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
-   *
+   * 
    * Introduced at 0.8.
    */
   captureDenials?: CaptureDenials | null;
@@ -575,3 +575,4 @@ export interface MXCConfiguration {
    */
   version?: string | null;
 }
+
