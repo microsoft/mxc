@@ -29,7 +29,6 @@ pub struct AvailableBackend {
 }
 
 impl AvailableBackend {
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn tierless(backend: &str) -> Self {
         Self {
             backend: backend.to_string(),
