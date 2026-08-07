@@ -20,25 +20,21 @@ pub struct PlatformSupport {
     pub is_supported: bool,
     /// Why the platform is unsupported, when `is_supported` is false.
     pub reason: Option<String>,
-    /// Containment backends detected as runnable on this host, by wire name
-    /// (e.g. `"seatbelt"`, `"lxc"`, `"processcontainer"`, `"windows_sandbox"`).
-    ///
-    /// A **host-capability** signal (broader than the "backends `mxc-sdk` can
-    /// launch" subset), and only the **currently detected** slice of it:
-    /// backends without a Rust detector yet (notably `isolation_session`) are
-    /// omitted even when the host could run them, so absence means "not affirmed
-    /// here", not "cannot run".
+    /// Containment backends available on this host, by wire name
+    /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).
     pub available_methods: Vec<String>,
 }
 
 /// Detect MXC support on the current host.
 ///
-/// Mirrors the SDK's `getPlatformSupport`. On Windows the isolation tier and UI
+/// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
+/// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
 /// capabilities come from the in-process fallback probe rather than a
 /// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
-/// WSL Container runtime (requires the `wslc` feature). See
-/// [`PlatformSupport::available_methods`] for what the reported set does and
-/// does not promise.
+/// WSL Container runtime (requires the `wslc` feature). The broader
+/// host-capability set (backends the host can run but the SDK cannot launch,
+/// e.g. `lxc`, `windows_sandbox`, `isolation_session`) is reported separately by
+/// [`available_backends`](crate::available_backends).
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
@@ -60,48 +56,31 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "linux")]
     {
-        // `lxc` availability is a shallow `lxc-ls --version` check. For
-        // `bubblewrap`, presence alone is not enough: `bwrap` must also be new
-        // enough for every flag the argument builder emits (see
-        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`).
-        let mut methods: Vec<String> = Vec::new();
-        if lxc_common::availability::is_lxc_available() {
-            methods.push("lxc".to_string());
-        }
-        let bwrap = bwrap_common::bwrap_version::probe_bwrap();
-        if bwrap.is_ok() {
-            methods.push("bubblewrap".to_string());
-        }
-
-        if methods.is_empty() {
-            // Surface why `bwrap` failed — `lxc`'s probe has no structured reason.
-            let reason = match bwrap {
-                Err(err) => err.to_string(),
-                Ok(_) => "No Linux containment backend is available".to_string(),
-            };
-            PlatformSupport {
-                reason: Some(reason),
-                ..Default::default()
-            }
-        } else {
-            PlatformSupport {
+        // Presence alone is not enough: `bwrap` must also be new enough for
+        // every flag the argument builder emits (see
+        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
+        // host-capability backend the SDK can't launch, so it is reported by
+        // `available_backends()` rather than here.
+        match bwrap_common::bwrap_version::probe_bwrap() {
+            Ok(_) => PlatformSupport {
                 is_supported: true,
-                available_methods: methods,
+                available_methods: vec!["bubblewrap".to_string()],
                 ..Default::default()
-            }
+            },
+            Err(err) => PlatformSupport {
+                reason: Some(err.to_string()),
+                ..Default::default()
+            },
         }
     }
 
     #[cfg(target_os = "windows")]
     {
         let mut available_methods = vec!["processcontainer".to_string()];
-        if windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
-            available_methods.push("windows_sandbox".to_string());
-        }
-        #[cfg(feature = "isolation_session")]
-        if isolation_session_common::availability::is_isolation_session_available() {
-            available_methods.push("isolation_session".to_string());
-        }
+        // `windows_sandbox` and `isolation_session` are host-capability backends
+        // the SDK can't launch, so they are reported by `available_backends()`
+        // rather than here.
+        //
         // WSLC is an additional, opt-in backend rather than a fallback: report
         // it only when the host can actually run it (WSL2 + the WSLC runtime),
         // which is the same preflight the runner performs.
