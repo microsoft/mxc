@@ -30,6 +30,109 @@ use crate::network_iptables::NetworkIptablesManager;
 #[cfg(target_os = "linux")]
 use wxc_common::logger::{Logger, Mode};
 
+/// How much of the active sandbox a fatal signal should roll back.
+///
+/// The one-shot runner and the state-aware lifecycle both install a firewall
+/// chain, but they own the container very differently, and rolling back the
+/// wrong amount is damaging in both directions. Destroying a provisioned
+/// state-aware container would discard a resource its owner expects to survive
+/// the process; leaving a one-shot container behind would leak it forever.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum SignalRollback {
+    /// One-shot: this process created the container to run a single script, so
+    /// a signal takes the firewall and the container with it.
+    #[default]
+    DestroyContainer,
+    /// State-aware: the container is provisioned and deliberately outlives this
+    /// process, so a signal removes only the firewall this process installed.
+    /// The container is stopped, not destroyed, and left for a later `stop` or
+    /// `deprovision` to reclaim.
+    NetworkOnly,
+}
+
+/// One action the watchdog takes on a fatal signal.
+///
+/// The watchdog is Linux-only, so this is dead code elsewhere. It stays
+/// compiled on every target rather than being `cfg`-gated so Windows and macOS
+/// CI still type-check and test the ordering.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RollbackStep {
+    /// Halt the container without discarding it.
+    StopContainer,
+    /// Remove the firewall chain and hooks this process created.
+    RemoveFirewall,
+    /// Discard the container entirely.
+    DestroyContainer,
+}
+
+/// The steps a signal rollback runs, in the order they must run.
+///
+/// Ordering is the whole content of this function, and it differs by rollback
+/// kind for a reason.
+///
+/// A state-aware start installs the chain *before* `lxc-start` so the container
+/// is never up without it. The rollback has to preserve that invariant in
+/// reverse: `lxc-start` may already have succeeded when the signal lands, so
+/// removing the firewall first would leave a running container unfiltered with
+/// no process left to notice. Stopping first cannot produce that state.
+///
+/// The one-shot path is the mirror. Its container is going away entirely, and
+/// `destroy` subsumes stopping it, so the only hazard is leaking host state
+/// that outlives the process -- which argues for removing the firewall while
+/// the name is still unambiguous, before the container is gone.
+///
+/// A process that never created the chain must not remove one: chain names
+/// derive from the container name and truncate to 20 characters, so the name
+/// may by now answer for a different, live container.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn rollback_plan(rollback: SignalRollback, owns_firewall: bool) -> Vec<RollbackStep> {
+    let mut plan = Vec::new();
+    match rollback {
+        SignalRollback::NetworkOnly => {
+            plan.push(RollbackStep::StopContainer);
+            if owns_firewall {
+                plan.push(RollbackStep::RemoveFirewall);
+            }
+        }
+        SignalRollback::DestroyContainer => {
+            if owns_firewall {
+                plan.push(RollbackStep::RemoveFirewall);
+            }
+            plan.push(RollbackStep::DestroyContainer);
+        }
+    }
+    plan
+}
+
+/// Runs `plan`, asking `run_step` to perform each step and report whether it
+/// succeeded.
+///
+/// A failed `StopContainer` abandons the rest of the plan. The steps after it
+/// exist to clean up a container that is no longer running, and the only one
+/// that follows it is `RemoveFirewall` -- so continuing would strip the egress
+/// chain off a container that is still up, which is precisely the state the
+/// ordering above exists to prevent. Ordering alone does not achieve that;
+/// `lxc-stop` can fail, and then the order it ran in no longer matters.
+///
+/// Stopping is the only gate. In a `DestroyContainer` plan nothing precedes
+/// `RemoveFirewall`, and `DestroyContainer` is last, so neither can be reached
+/// with a container left running behind it.
+///
+/// Bailing out leaks the chain rather than exposing the container, which is the
+/// same trade the ordinary stop path already makes deliberately: it propagates
+/// the stop error and leaves the rules in place rather than unfilter a
+/// still-running container (`state_aware.rs`, `stop`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn execute_rollback(plan: &[RollbackStep], run_step: &mut impl FnMut(RollbackStep) -> bool) {
+    for &step in plan {
+        let ok = run_step(step);
+        if !ok && step == RollbackStep::StopContainer {
+            return;
+        }
+    }
+}
+
 /// What the watchdog needs to roll back on a fatal signal: the container
 /// name (so we can `lxc-destroy` it), the host-side veth interface when
 /// known (so we can also remove the iptables FORWARD hook the runner
@@ -43,6 +146,20 @@ use wxc_common::logger::{Logger, Mode};
 struct ActiveSandbox {
     name: Option<String>,
     veth: Option<String>,
+    /// Read only by the Linux watchdog, but written on every target.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    rollback: SignalRollback,
+    /// Which per-family chains and FORWARD hooks this process created for
+    /// `name`, so the watchdog removes only what this process installed.
+    ///
+    /// The chain name is derived from the container name, so two processes
+    /// starting the same sandbox target the same chain and only one of them
+    /// creates it. Without this the watchdog would tear the chain down on a
+    /// signal no matter which process it interrupted, and interrupting the
+    /// loser would strip the firewall off the winner's running container. The
+    /// record is published the moment a creating command succeeds, so the
+    /// whole window in which the resource exists is covered and no wider.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     created: CreatedResources,
 }
 
@@ -66,7 +183,68 @@ pub fn set_active(name: &str) {
     let mut slot = lock_slot();
     slot.name = Some(name.to_owned());
     slot.veth = None;
+    slot.rollback = SignalRollback::DestroyContainer;
     slot.created = CreatedResources::default();
+}
+
+/// Records `name` as the currently active container for the *state-aware*
+/// lifecycle, where a fatal signal must remove the firewall this process
+/// installed but must not destroy the container.
+///
+/// The state-aware `start` phase installs the chain before the container runs,
+/// so a signal in that window would otherwise leave the chain behind with no
+/// one to remove it — the watchdog only acts on a registered name, and until
+/// now only the one-shot runner ever registered one. Registering with
+/// [`set_active`] instead would be worse than leaking: it would destroy a
+/// container that was provisioned to outlive this process.
+///
+/// Call [`clear_active`] once the start has succeeded. Leaving the
+/// registration in place past that point would let a later signal strip the
+/// firewall off a container that is up and running.
+pub fn set_active_network_only(name: &str) {
+    let mut slot = lock_slot();
+    slot.name = Some(name.to_owned());
+    slot.veth = None;
+    slot.rollback = SignalRollback::NetworkOnly;
+    slot.created = CreatedResources::default();
+}
+
+/// Records which iptables chains and FORWARD hooks this process created for
+/// the active container, so the watchdog removes exactly those on a fatal
+/// signal.
+///
+/// Called by [`crate::network_iptables::NetworkIptablesManager`] the moment a
+/// creating command succeeds — the instant the resource starts existing, and
+/// not before. Registering a name is deliberately not enough on its own: a
+/// process whose `-N` lost the race to a concurrent start of the same sandbox
+/// owns nothing, and a signal must not make it delete the winner's chain and
+/// leave the winner's container running unfiltered.
+///
+/// Publication is whole-record rather than incremental: each call supersedes
+/// the previous one, so callers pass the complete set they own.
+///
+/// No-op if no container is currently registered.
+pub(crate) fn set_active_created(created: CreatedResources) {
+    let mut slot = lock_slot();
+    if slot.name.is_some() {
+        slot.created = created;
+    }
+}
+
+/// Unregisters the active sandbox, so a later signal rolls nothing back.
+///
+/// Used at the end of a successful state-aware start: the chain and the
+/// container are both meant to persist from there on, and rolling either back
+/// would be the bug rather than the fix.
+///
+/// Also the mirror of [`set_active_created`] after a successful teardown.
+/// Chain names are derived from the container name and truncate to 20
+/// characters, so they can collide; an ownership record left published after a
+/// successful teardown would let a later signal run cleanup against a name that
+/// by then may answer for a different, live container — stripping its firewall
+/// while it runs.
+pub fn clear_active() {
+    *lock_slot() = ActiveSandbox::default();
 }
 
 /// Records the host-side veth interface for the active container so the
@@ -79,32 +257,12 @@ pub fn set_active_veth(veth: &str) {
     }
 }
 
-/// Records which iptables chains and FORWARD hooks the runner has created so
-/// far, so signal-time cleanup removes exactly those and nothing else.
-///
-/// No-op when no container is registered. Backends that never call
-/// [`set_active`] — Bubblewrap builds the same firewall manager but installs
-/// no watchdog — therefore publish nothing, which keeps the watchdog from
-/// acting on a lifecycle it does not manage.
-pub(crate) fn set_active_created(created: CreatedResources) {
-    let mut slot = lock_slot();
-    if slot.name.is_some() {
-        slot.created = created;
-    }
-}
-
 /// Reads back what the watchdog would act on. Test-only: production code has
 /// exactly one reader, and it is the watchdog itself.
 #[cfg(test)]
 fn active_snapshot() -> (Option<String>, Option<String>, CreatedResources) {
     let slot = lock_slot();
     (slot.name.clone(), slot.veth.clone(), slot.created)
-}
-
-/// Returns the slot to its process-start state so a test leaves nothing behind.
-#[cfg(test)]
-fn clear_active() {
-    *lock_slot() = ActiveSandbox::default();
 }
 
 /// Block SIGHUP/SIGTERM/SIGINT in the calling thread and spawn a watchdog
@@ -165,20 +323,25 @@ fn run_watchdog(mask: SigSet) -> ! {
         let Ok(sig) = mask.wait() else { continue };
         let active = std::mem::take(&mut *lock_slot());
         if let Some(name) = active.name {
-            // Remove iptables rules first so the FORWARD hook and chain
-            // don't outlive the container. The veth disappears once the
-            // container is destroyed below; cleaning up first avoids a
-            // dangling reference. Best-effort with a buffered logger so
-            // signal-time output doesn't interleave with whatever else
-            // might still be writing to the host's stdio.
+            // Best-effort, with a buffered logger so signal-time output doesn't
+            // interleave with whatever else might still be writing to the
+            // host's stdio. The order comes from `rollback_plan`, which is
+            // where the reasoning about it lives.
             let mut buf_logger = Logger::new(Mode::Buffer);
-            NetworkIptablesManager::force_cleanup(
-                &name,
-                active.veth.as_deref(),
-                active.created,
-                &mut buf_logger,
-            );
-            let _ = LxcContainer::new(&name, None).destroy();
+            let plan = rollback_plan(active.rollback, !active.created.is_empty());
+            execute_rollback(&plan, &mut |step| match step {
+                RollbackStep::StopContainer => LxcContainer::new(&name, None).stop().is_ok(),
+                RollbackStep::RemoveFirewall => {
+                    NetworkIptablesManager::force_cleanup(
+                        &name,
+                        active.veth.as_deref(),
+                        active.created,
+                        &mut buf_logger,
+                    );
+                    true
+                }
+                RollbackStep::DestroyContainer => LxcContainer::new(&name, None).destroy().is_ok(),
+            });
         }
         std::process::exit(128 + sig as i32);
     }
@@ -187,6 +350,205 @@ fn run_watchdog(mask: SigSet) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records the steps `execute_rollback` actually ran, failing whichever
+    /// steps `failing` names.
+    fn run_plan(plan: &[RollbackStep], failing: &[RollbackStep]) -> Vec<RollbackStep> {
+        let mut ran = Vec::new();
+        execute_rollback(plan, &mut |step| {
+            ran.push(step);
+            !failing.contains(&step)
+        });
+        ran
+    }
+
+    #[test]
+    fn a_stop_that_failed_does_not_unfilter_the_container_anyway() {
+        // Ordering the stop first is not enough on its own: `lxc-stop` can
+        // fail, and then removing the firewall next leaves a running container
+        // with no egress policy -- the exact state the ordering exists to
+        // prevent, reached by a different route. The rollback must abandon the
+        // rest of the plan instead.
+        //
+        // Leaking the chain is the correct trade here, and the ordinary stop
+        // path already makes it deliberately: it propagates the stop error and
+        // leaves the rules in place rather than unfilter a still-running
+        // container (`state_aware.rs`, `stop`).
+        let plan = rollback_plan(SignalRollback::NetworkOnly, true);
+        assert_eq!(
+            run_plan(&plan, &[RollbackStep::StopContainer]),
+            vec![RollbackStep::StopContainer],
+            "a failed stop must not be followed by removing the firewall"
+        );
+    }
+
+    #[test]
+    fn a_stop_that_succeeded_still_removes_the_firewall() {
+        // The negative control for the test above. Bailing out is only correct
+        // when the stop actually failed; a rollback that never removed the
+        // firewall would leak the chain on every signal, so "always bail" must
+        // not pass.
+        let plan = rollback_plan(SignalRollback::NetworkOnly, true);
+        assert_eq!(
+            run_plan(&plan, &[]),
+            vec![RollbackStep::StopContainer, RollbackStep::RemoveFirewall],
+            "a successful stop must still be followed by removing the firewall"
+        );
+    }
+
+    #[test]
+    fn a_destroy_rollback_removes_the_firewall_even_though_nothing_stopped_first() {
+        // The gate is specific to a failed stop. Nothing precedes
+        // `RemoveFirewall` in a destroy plan, so it can never run behind a
+        // container that is still up, and a failed `destroy` has nothing after
+        // it to suppress. Gating on any failure at all would break this path.
+        let plan = rollback_plan(SignalRollback::DestroyContainer, true);
+        assert_eq!(
+            run_plan(&plan, &[RollbackStep::DestroyContainer]),
+            vec![RollbackStep::RemoveFirewall, RollbackStep::DestroyContainer],
+            "a destroy rollback must still remove the firewall it created"
+        );
+    }
+
+    #[test]
+    fn a_state_aware_rollback_stops_the_container_before_unfiltering_it() {
+        // The start phase installs the chain before lxc-start so the container
+        // is never up without it. A signal can land after lxc-start has already
+        // succeeded, so a rollback that removed the firewall first would create
+        // exactly the state the ordering exists to prevent -- a running,
+        // unfiltered container with no process left to notice. Nothing later
+        // repairs it: the watchdog exits the process immediately afterward.
+        let plan = rollback_plan(SignalRollback::NetworkOnly, true);
+        assert_eq!(
+            plan,
+            vec![RollbackStep::StopContainer, RollbackStep::RemoveFirewall],
+            "a state-aware rollback must stop the container before removing its firewall"
+        );
+
+        // The container is provisioned to outlive this process, so the rollback
+        // stops it and never destroys it.
+        assert!(
+            !plan.contains(&RollbackStep::DestroyContainer),
+            "a provisioned container must survive a signal"
+        );
+
+        // A process that created no chain must remove none: names truncate to
+        // 20 characters and can collide, so the chain may by now belong to a
+        // different live container. The container this process was starting is
+        // still stopped, because that start is what is being rolled back.
+        assert_eq!(
+            rollback_plan(SignalRollback::NetworkOnly, false),
+            vec![RollbackStep::StopContainer],
+            "a rollback that owns no chain must not remove one"
+        );
+    }
+
+    #[test]
+    fn a_one_shot_rollback_removes_the_firewall_then_destroys_the_container() {
+        // The mirror case. This container is going away entirely and destroy
+        // subsumes stopping it, so the only hazard is host state outliving the
+        // process -- which argues for removing the chain while the name still
+        // unambiguously refers to this container.
+        assert_eq!(
+            rollback_plan(SignalRollback::DestroyContainer, true),
+            vec![RollbackStep::RemoveFirewall, RollbackStep::DestroyContainer],
+        );
+
+        // Same ownership rule, and the destroy is unconditional: a one-shot
+        // container is this process's to reclaim whether or not a chain was
+        // ever created.
+        assert_eq!(
+            rollback_plan(SignalRollback::DestroyContainer, false),
+            vec![RollbackStep::DestroyContainer],
+        );
+    }
+
+    /// The registration slot is process-global, so these assertions cannot be
+    /// split across test functions without racing each other.
+    #[test]
+    fn registration_records_who_owns_the_container_not_just_its_name() {
+        // One-shot: this process made the container, so a signal takes it.
+        set_active("box");
+        {
+            let slot = lock_slot();
+            assert_eq!(slot.name.as_deref(), Some("box"));
+            assert_eq!(slot.rollback, SignalRollback::DestroyContainer);
+        }
+
+        // State-aware: the container is provisioned and must survive a signal,
+        // so only the firewall this process installed is rolled back.
+        set_active_network_only("provisioned-box");
+        {
+            let slot = lock_slot();
+            assert_eq!(slot.name.as_deref(), Some("provisioned-box"));
+            assert_eq!(slot.rollback, SignalRollback::NetworkOnly);
+        }
+
+        // A veth discovered later attaches to whichever registration is live.
+        set_active_veth("mxcv-abc");
+        assert_eq!(lock_slot().veth.as_deref(), Some("mxcv-abc"));
+
+        // Registering a name is not by itself a claim on the firewall chain.
+        // The watchdog gates its ownership-blind force_cleanup on this record,
+        // so a process whose `iptables -N` lost the race to a concurrent start
+        // must not be holding one — otherwise a signal would make the loser
+        // delete the winner's chain and leave the winner unfiltered.
+        assert!(lock_slot().created.is_empty());
+
+        // The manager publishes it the moment its own creating command succeeds.
+        let v4_only = CreatedResources::for_test(true, false, true, false);
+        set_active_created(v4_only);
+        assert_eq!(lock_slot().created, v4_only);
+
+        // A successful teardown gives the claim back. Without this the record
+        // outlives the chain it describes, and since chain names truncate to 20
+        // characters and can collide, a signal arriving afterwards would run
+        // cleanup against a name that may by then answer for a different, live
+        // container.
+        set_active_network_only("torn-down-box");
+        set_active_created(v4_only);
+        assert!(!lock_slot().created.is_empty());
+        set_active_created(CreatedResources::default());
+        assert!(lock_slot().created.is_empty());
+
+        // Giving the claim back is not the same as unregistering: the container
+        // is still the active one, so a signal must still roll back whatever
+        // else the registration covers.
+        assert_eq!(lock_slot().name.as_deref(), Some("torn-down-box"));
+
+        // Re-registering a different container drops the claim with it.
+        set_active_network_only("yet-another-box");
+        assert!(lock_slot().created.is_empty());
+        set_active_created(v4_only);
+        assert!(!lock_slot().created.is_empty());
+        set_active("one-shot-box");
+        assert!(lock_slot().created.is_empty());
+
+        // Clearing leaves nothing to roll back. Without this, a signal after a
+        // successful start would strip the firewall off a running container.
+        clear_active();
+        {
+            let slot = lock_slot();
+            assert!(slot.name.is_none());
+            assert!(slot.veth.is_none());
+            assert!(slot.created.is_empty());
+        }
+
+        // Neither late registration may resurrect a cleared slot.
+        set_active_veth("mxcv-def");
+        set_active_created(v4_only);
+        {
+            let slot = lock_slot();
+            assert!(slot.veth.is_none());
+            assert!(slot.created.is_empty());
+        }
+
+        // Re-registering resets the veth, since the new container has not had
+        // one discovered yet.
+        set_active_network_only("another-box");
+        assert!(lock_slot().veth.is_none());
+        clear_active();
+    }
 
     /// `ACTIVE_CONTAINER` is process-global and the test binary runs tests in
     /// parallel, so the whole publication contract is asserted in one test.

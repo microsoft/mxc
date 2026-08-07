@@ -27,6 +27,7 @@ import {
   nonExecCall,
   spawnAndCollect,
   tryParseErrorEnvelope,
+  tryParseErrorEnvelopeFromLines,
 } from './state-aware-helper.js';
 
 /**
@@ -79,9 +80,10 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 /**
  * Streams a script execution inside a started sandbox. Returns an
  * `IPty` for live stdout/stderr/exit handling, mirroring `spawnSandbox`.
- * On dispatch failure the executor emits a single error envelope on stdout;
- * the SDK does not parse it here — callers consuming `IPty.onData` see the
- * raw bytes. Use `execInSandboxAsync` when typed-error throwing is needed.
+ * On dispatch failure the executor emits a single error envelope on stderr,
+ * because stdout is carrying the container's raw output; the SDK does not
+ * parse it here — callers consuming `IPty.onData` see the raw bytes. Use
+ * `execInSandboxAsync` when typed-error throwing is needed.
  */
 export function execInSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
@@ -121,8 +123,9 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
 /**
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
  * on script completion. Throws an `MxcError` (with the wire-format `code`
- * field set) when the executor reports a dispatch failure (recognised by
- * exit != 0 and stdout being a complete `{error}` envelope).
+ * field set) when the executor reports a dispatch failure, recognised by
+ * exit != 0 together with a complete `{error}` envelope on stdout, or -- for
+ * LXC, the one backend whose executor owns stderr -- on stderr.
  */
 export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
@@ -140,7 +143,31 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   const { stdout, stderr, exitCode } = await spawnAndCollect(envelope, options);
 
   if (exitCode !== 0) {
-    const errorEnvelope = tryParseErrorEnvelope(stdout);
+    // A dispatch failure can land on either channel. A non-streaming exec (dry
+    // run) keeps stdout as its single client-facing channel; a streaming one has
+    // already written the container's raw output there, so its envelope goes to
+    // stderr instead.
+    //
+    // The stderr fallback is scoped to LXC because only its executor owns that
+    // channel. LXC streams the guest on a pty whose primary end is relayed to
+    // the executor's stdout, so guest stderr is merged into stdout and the only
+    // writer to stderr is the executor itself. Windows Sandbox instead forwards
+    // guest `FrameKind::Stderr` frames straight through
+    // (`backends/windows_sandbox/lifecycle/src/state_aware.rs:408-414`), so its
+    // last stderr line can be the script's own -- and a script that ends with
+    // envelope-shaped stderr and a nonzero exit would be turned into a thrown
+    // MxcError rather than the result it is.
+    //
+    // Within LXC, do not additionally gate on stdout being empty. A script
+    // timeout is a dispatch failure raised *after* the script has streamed
+    // output, so that gate would drop the envelope for a killed script and hand
+    // the caller an ordinary result for a run that never finished. The
+    // narrowing that keeps a script's own output from being misread lives in
+    // `tryParseErrorEnvelopeFromLines`, which considers only the last non-empty
+    // line.
+    const errorEnvelope =
+      tryParseErrorEnvelope(stdout) ??
+      (backendKey === 'lxc' ? tryParseErrorEnvelopeFromLines(stderr) : null);
     if (errorEnvelope) {
       const e = errorEnvelope.error;
       throw mxcErrorFromCode(e.code, e.message, e.details);

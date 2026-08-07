@@ -386,6 +386,128 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     );
   });
 
+  it('throws the typed MxcError when a streaming exec reports its dispatch failure on stderr', async () => {
+    // A streaming exec has already written the container's raw output to
+    // stdout, so the executor puts its error envelope on stderr instead
+    // (src/core/lxc/src/main.rs). Parsing stdout alone turned every such
+    // dispatch failure into an ordinary exit-1 ExecResult, so callers saw a
+    // script that "ran and failed" rather than a sandbox that was never
+    // started.
+    const fake = fakeSpawn({
+      stdout: '',
+      stderr: '{"error":{"code":"not_started","message":"sandbox is not started"}}\n',
+      exitCode: 1,
+    });
+    _setSpawnImpl(fake.spawn);
+    const id = 'lxc:prov-1' as SandboxId<'lxc'>;
+    await assert.rejects(
+      () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, testOptions()),
+      (err: unknown) => err instanceof MxcError && err.code === 'not_started',
+    );
+  });
+
+  it('finds the error envelope on stderr even behind the flushed diagnostic buffer', async () => {
+    // The executor flushes its buffered log to stderr before the envelope, so
+    // stderr is several lines and whole-string JSON parsing never matches.
+    const fake = fakeSpawn({
+      stdout: '',
+      stderr:
+        'lxc: preparing container\nlxc: policy validated\n' +
+        '{"error":{"code":"not_started","message":"sandbox is not started"}}\n',
+      exitCode: 1,
+    });
+    _setSpawnImpl(fake.spawn);
+    const id = 'lxc:prov-1' as SandboxId<'lxc'>;
+    await assert.rejects(
+      () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, testOptions()),
+      (err: unknown) => err instanceof MxcError && err.code === 'not_started',
+    );
+  });
+
+  it('throws when a script that already produced output is killed by its timeout', async () => {
+    // A script timeout is a dispatch failure raised *after* the script has
+    // streamed its output, so stdout is non-empty and the envelope is on
+    // stderr. Requiring stdout to be empty before reading stderr dropped this
+    // envelope and handed the caller an ordinary ExecResult -- a run that was
+    // killed mid-flight, reported as one that finished with exit code 3.
+    //
+    // This is an LXC id because LXC is the backend whose executor owns stderr:
+    // its streaming exec puts the guest on a pty whose primary end is relayed
+    // to the executor's stdout (mxc_pty run_with_pty), so guest stderr is
+    // merged into stdout and cannot appear here.
+    const fake = fakeSpawn({
+      stdout: 'partial output before the kill\n',
+      stderr:
+        'diagnostic: attaching to container\n' +
+        '{"error":{"code":"backend_error","message":"Execution failed: script timed out after 5000ms"}}\n',
+      exitCode: 3,
+    });
+    _setSpawnImpl(fake.spawn);
+    const id = 'lxc:abc' as SandboxId<'lxc'>;
+    await assert.rejects(
+      execInSandboxAsync(id, { process: { commandLine: 'slow' } }, testOptions()),
+      (err: Error) => err.message.includes('script timed out after 5000ms'),
+    );
+  });
+
+  it('does not treat an envelope buried mid-stderr as a dispatch failure', async () => {
+    // A genuine dispatch failure ends the stream with its envelope, because the
+    // executor writes the diagnostic buffer, then the envelope, then exits.
+    // Anything still writing afterwards is the guest, so the envelope was the
+    // guest's too.
+    const fake = fakeSpawn({
+      stdout: '',
+      stderr:
+        '{"error":{"code":"not_started","message":"printed by the script"}}\n' +
+        'script kept going after printing that\n',
+      exitCode: 4,
+    });
+    _setSpawnImpl(fake.spawn);
+    const id = 'lxc:abc' as SandboxId<'lxc'>;
+    const result = await execInSandboxAsync(
+      id,
+      { process: { commandLine: 'noisy' } },
+      testOptions(),
+    );
+    assert.strictEqual(result.exitCode, 4);
+  });
+
+  it('does not read stderr as an envelope for backends that relay the guest there', async () => {
+    // The stderr fallback rests on LXC merging guest stderr into stdout, and
+    // that reasoning is backend-specific. Windows Sandbox forwards guest
+    // FrameKind::Stderr frames straight to this stream
+    // (backends/windows_sandbox/lifecycle/src/state_aware.rs:408-414), and the
+    // isolation-session exec relays the guest to wxc-exec's own stdout and
+    // stderr. On both, the last stderr line can be the script's own -- so a
+    // script that ends with envelope-shaped stderr and exits nonzero would be
+    // turned into a thrown MxcError rather than the result it actually is.
+    const stderrLookingLikeADispatchFailure =
+      '{"error":{"code":"not_started","message":"the script printed this itself"}}\n';
+
+    for (const id of [
+      'wsb:abc' as SandboxId<'windows_sandbox'>,
+      'iso:abc' as SandboxId<'isolation_session'>,
+    ]) {
+      const fake = fakeSpawn({
+        stdout: 'script output\n',
+        stderr: stderrLookingLikeADispatchFailure,
+        exitCode: 7,
+      });
+      _setSpawnImpl(fake.spawn);
+      const result = await execInSandboxAsync(
+        id as SandboxId<'windows_sandbox'>,
+        { process: { commandLine: 'noisy' } },
+        testOptions(),
+      );
+      assert.strictEqual(
+        result.exitCode,
+        7,
+        `${id} must return the script's result, not throw its stderr as a dispatch failure`,
+      );
+      assert.strictEqual(result.stderr, stderrLookingLikeADispatchFailure);
+    }
+  });
+
   it('closes the child stdin so a stdin-reading command sees EOF instead of hanging', async () => {
     // Regression for the buffered-exec hang: the Rust state-aware path waits
     // for stdin EOF before closing guest stdin, so spawnAndCollect must end()

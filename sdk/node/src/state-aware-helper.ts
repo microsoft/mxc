@@ -13,19 +13,21 @@ export const STATE_AWARE_VERSION = '0.6.0-alpha';
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
-export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] as const;
+export const CROSS_CUTTING_FIELDS = ['containerId', 'filesystem', 'network', 'ui', 'process'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
 // Rust `<Backend>Runner::ID_PREFIX` const and is the leading segment of a
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
+export const LXC_ID_PREFIX = 'lxc';
 export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
 // Mapping from a sandboxId's leading prefix segment to the wire-format
 // backend key. Extended as more state-aware backends opt in.
 export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
   [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
+  [LXC_ID_PREFIX]: 'lxc',
   [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
 };
 
@@ -147,6 +149,44 @@ export function tryParseErrorEnvelope(stdout: string): WireErrorEnvelope | null 
     }
   } catch {
     // Not JSON. Definitely script output.
+  }
+  return null;
+}
+
+/**
+ * Attempts to find an `{error}` envelope at the end of `stderr`.
+ *
+ * A streaming exec cannot put its error envelope on stdout, because stdout is
+ * carrying the container's raw output by then, so the executor writes it to
+ * stderr instead. Whole-string parsing is no use there: stderr also carries the
+ * flushed diagnostic buffer, so the envelope is one line among several rather
+ * than the entire stream.
+ *
+ * Only the last non-empty line is considered, and only when it is a well-formed
+ * envelope. That narrowness is what keeps an ordinary diagnostic line that
+ * happens to be JSON from being read as a dispatch failure. A genuine dispatch
+ * failure always ends the stream with its envelope, because the executor emits
+ * the diagnostic buffer, then the envelope, then exits.
+ *
+ * The guest's own output is not a hazard on this channel *for LXC*, which is
+ * the only backend whose executor reserves stderr for the envelope: its
+ * streaming exec runs the guest on a pty whose primary end is relayed to the
+ * executor's *stdout*, so guest stderr is merged into stdout and never reaches
+ * this stream. Callers must therefore not additionally require stdout to be
+ * empty — a script timeout produces both a full stdout and an envelope here.
+ *
+ * That reasoning is backend-specific and does not generalize. The Windows
+ * Sandbox executor forwards guest `FrameKind::Stderr` frames straight to this
+ * stream (`backends/windows_sandbox/lifecycle/src/state_aware.rs:408-414`), so
+ * there the last non-empty stderr line can be the script's own. Callers must
+ * apply this only to backends that own the channel; see `execInSandboxAsync`.
+ */
+export function tryParseErrorEnvelopeFromLines(stderr: string): WireErrorEnvelope | null {
+  const lines = stderr.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const trimmed = lines[i].trim();
+    if (trimmed === '') continue;
+    return tryParseErrorEnvelope(trimmed);
   }
   return null;
 }

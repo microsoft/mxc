@@ -257,6 +257,10 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     // first byte from inside the child so the input forwarder doesn't
     // race the inner shell's `tcsetattr` init.
     let (ready_tx, ready_rx) = mpsc::channel::<()>();
+    // Lets the drain below tell a reader that is still forwarding output from a
+    // reader that is merely blocked on a pty a leaked process left open.
+    let bytes_forwarded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let reader_progress = std::sync::Arc::clone(&bytes_forwarded);
     let output_thread = thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut signaled = false;
@@ -271,6 +275,7 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
                     }
                     let _ = stdout.write_all(&buf[..n]);
                     let _ = stdout.flush();
+                    reader_progress.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(_) => break,
             }
@@ -312,6 +317,26 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
         }
     });
 
+    // Kill the timed-out (or errored) child together with its whole process
+    // group. The child is its own process-group leader — its `pre_exec` calls
+    // `setsid`, so its PGID equals its PID — so signalling the group also
+    // reaps processes the timed-out command spawned that stayed in that group
+    // (e.g. a backgrounded job under a non-job-control shell). A bare
+    // `child.kill()` would only hit the `lxc-attach` wrapper and orphan those
+    // in-container processes. A process that started its own session escapes
+    // the group; the bounded drain below keeps such a straggler from hanging
+    // us instead.
+    fn kill_child_and_group(child: &mut std::process::Child) {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        // Negative pid targets the process group whose leader is `pid`.
+        if let Ok(pid) = i32::try_from(child.id()) {
+            let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     let outcome = match deadline {
         None => {
             let status = child.wait().map_err(|e| format!("wait: {}", e))?;
@@ -322,29 +347,151 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
                 Ok(Some(status)) => break PtyOutcome::Exited(status),
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        kill_child_and_group(&mut child);
                         break PtyOutcome::TimedOut;
                     }
                     thread::sleep(PtyOptions::POLL_INTERVAL);
                 }
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_child_and_group(&mut child);
                     return Err(format!("try_wait: {}", e));
                 }
             }
         },
     };
 
-    // Drain remaining output before returning. The secondary fds are closed
-    // on child exit, so primary_reader hits EOF and the thread exits.
-    let _ = output_thread.join();
+    // Drain remaining output before returning.
+    const DRAIN_GRACE: Duration = Duration::from_secs(2);
+    match outcome {
+        PtyOutcome::Exited(_) => {
+            // Normally the child's exit closes its secondary fds, primary_reader
+            // hits EOF, and the drain thread finishes on its own — so join
+            // unbounded and every last byte is flushed.
+            //
+            // But the direct child exiting does not guarantee EOF. A process it
+            // left running that escaped into its own session still holds the pty
+            // secondary open, and then this join blocks forever. That defeats a
+            // requested timeout exactly as the killed-child case does, just via
+            // a different outcome. So whenever a deadline was asked for, bound
+            // the drain.
+            //
+            // Neither a flat grace nor the remaining budget is the right bound
+            // on its own. A flat grace charges the common case -- a child that
+            // exits quickly having buffered a lot of output -- for a hazard a
+            // different one creates, and truncates output this function promises
+            // to forward. The remaining budget alone lets a silent leaked holder
+            // keep the caller for the whole timeout the run never needed, which
+            // is worse than the flat grace for precisely the case the bound
+            // exists for.
+            //
+            // The two are distinguishable: a real drain keeps producing bytes,
+            // and a leaked holder of an idle pty produces none. So the bound is
+            // silence, capped by the budget. Output flowing extends the wait,
+            // DRAIN_GRACE of nothing ends it, and a pathological slow drip still
+            // cannot outlast what the caller already authorized.
+            match deadline {
+                Some(d) => {
+                    let _ = join_while_draining(
+                        output_thread,
+                        &bytes_forwarded,
+                        DRAIN_GRACE,
+                        d + DRAIN_GRACE,
+                    );
+                }
+                None => {
+                    let _ = output_thread.join();
+                }
+            }
+        }
+        PtyOutcome::TimedOut => {
+            // We killed the child's process group, but a process it left
+            // running inside the sandbox that escaped into its own session can
+            // still hold the pty secondary open — primary_reader would then
+            // never see EOF and an unbounded join would block forever,
+            // defeating the very timeout we just enforced. Give the drain a
+            // short grace to flush buffered output, then abandon the reader.
+            // The executor process exits right after a (state-aware) exec, so
+            // the OS reaps the detached thread.
+            let _ = join_with_timeout(output_thread, DRAIN_GRACE);
+        }
+    }
 
     Ok(outcome)
 }
 
-/// Background thread that watches for SIGWINCH on the outer pty
+/// Join `handle`, returning once the thread finishes or `grace` elapses —
+/// whichever comes first. Returns `true` if the thread finished within the
+/// grace period, `false` if it was abandoned.
+///
+/// [`run_with_pty`] uses this to drain a killed child's buffered output on the
+/// timeout path without risking a permanent hang: a process the timed-out
+/// child left running inside the sandbox can keep the pty open, so the reader
+/// thread never sees EOF and a plain `JoinHandle::join` would block forever.
+/// The abandoned reader thread dies when the (one-shot-per-invocation)
+/// executor process exits.
+///
+/// Implemented with a helper thread that performs the blocking join and
+/// signals a channel, since the standard library has no join-with-timeout.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+fn join_with_timeout(handle: std::thread::JoinHandle<()>, grace: Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(grace).is_ok()
+}
+
+/// Join `handle`, waiting for as long as it keeps making progress but giving up
+/// after `idle_grace` of silence, and in no case later than `hard_deadline`.
+///
+/// Returns whether the thread finished.
+///
+/// `progress` is a monotonically increasing count the joined thread bumps
+/// whenever it does the work being waited on. That is what separates the two
+/// situations a plain timeout cannot tell apart: a reader still forwarding a
+/// large buffered backlog, which deserves as long as it needs, and a reader
+/// blocked on a pty a leaked process is holding open, which will never finish
+/// and must not hold the caller. `hard_deadline` keeps even a pathological slow
+/// drip from outlasting the budget the caller authorized.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+fn join_while_draining(
+    handle: std::thread::JoinHandle<()>,
+    progress: &std::sync::atomic::AtomicU64,
+    idle_grace: Duration,
+    hard_deadline: std::time::Instant,
+) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = tx.send(());
+    });
+
+    let mut last_seen = progress.load(Ordering::Relaxed);
+    loop {
+        let budget =
+            idle_grace.min(hard_deadline.saturating_duration_since(std::time::Instant::now()));
+        match rx.recv_timeout(budget) {
+            Ok(()) => return true,
+            // The joining helper vanished without reporting; nothing further to
+            // wait for.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if std::time::Instant::now() >= hard_deadline {
+                    return false;
+                }
+                let seen = progress.load(Ordering::Relaxed);
+                if seen == last_seen {
+                    return false;
+                }
+                last_seen = seen;
+            }
+        }
+    }
+}
+
 /// (delivered to *some* thread because fd 0 is the outer secondary) and
 /// forwards the new window size to the inner pty primary via TIOCSWINSZ.
 ///
@@ -526,6 +673,126 @@ mod tests {
         assert_eq!(PtyOptions::POLL_INTERVAL, Duration::from_millis(500));
     }
 
+    #[test]
+    fn join_with_timeout_returns_true_when_thread_finishes() {
+        let handle = std::thread::spawn(|| {});
+        assert!(join_with_timeout(handle, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn join_with_timeout_gives_up_on_a_blocked_thread() {
+        // A thread that blocks far past the grace must not make
+        // join_with_timeout wait for it — this is what stops a leaked
+        // pty-holding child from hanging exec forever.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            // Blocks until the test drops `tx`, well past the grace below.
+            let _ = rx.recv();
+        });
+        let start = std::time::Instant::now();
+        assert!(!join_with_timeout(handle, Duration::from_millis(200)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "join_with_timeout must return near the grace, not block"
+        );
+        drop(tx); // let the abandoned thread exit before the test ends
+    }
+
+    #[test]
+    fn a_drain_that_keeps_producing_output_is_allowed_past_the_idle_grace() {
+        // The point of the idle bound: a child that exits having buffered a lot
+        // of output has done nothing wrong, and a flat grace would truncate it.
+        // This thread keeps reporting progress well past the grace and must be
+        // joined in full.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let progress = Arc::new(AtomicU64::new(0));
+        let worker_progress = Arc::clone(&progress);
+        let handle = std::thread::spawn(move || {
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(60));
+                worker_progress.fetch_add(4096, Ordering::Relaxed);
+            }
+        });
+
+        assert!(
+            join_while_draining(
+                handle,
+                &progress,
+                Duration::from_millis(100),
+                std::time::Instant::now() + Duration::from_secs(30),
+            ),
+            "a reader still forwarding bytes must be waited for, not abandoned"
+        );
+        assert_eq!(progress.load(Ordering::Relaxed), 40960);
+    }
+
+    #[test]
+    fn a_silent_drain_is_abandoned_after_the_idle_grace_not_at_the_deadline() {
+        // The mirror case, and the one the bound exists for: a process the child
+        // left behind holds the pty open, so the reader blocks and produces
+        // nothing. Waiting out the caller's remaining budget here would hand a
+        // leaked descendant the whole timeout the run never needed.
+        use std::sync::atomic::AtomicU64;
+
+        let progress = AtomicU64::new(0);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+
+        let start = std::time::Instant::now();
+        assert!(!join_while_draining(
+            handle,
+            &progress,
+            Duration::from_millis(150),
+            std::time::Instant::now() + Duration::from_secs(30),
+        ));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "a silent reader must be abandoned at the idle grace, not at the \
+             far-off deadline; took {:?}",
+            start.elapsed()
+        );
+        drop(tx);
+    }
+
+    #[test]
+    fn even_a_steadily_progressing_drain_cannot_outlast_the_deadline() {
+        // Progress extends the wait, so on its own it would let a leak that
+        // drips a byte at a time hold the caller forever -- this test hangs
+        // outright without the backstop. The budget the caller authorized is
+        // what bounds it.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let progress = Arc::new(AtomicU64::new(0));
+        let worker_progress = Arc::clone(&progress);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            while rx.try_recv().is_err() {
+                std::thread::sleep(Duration::from_millis(20));
+                worker_progress.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let start = std::time::Instant::now();
+        assert!(!join_while_draining(
+            handle,
+            &progress,
+            Duration::from_millis(50),
+            std::time::Instant::now() + Duration::from_millis(300),
+        ));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the hard deadline must cap a drain that never stops dripping; \
+             took {:?}",
+            start.elapsed()
+        );
+        drop(tx);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn echo_runs_under_pty() {
@@ -551,6 +818,36 @@ mod tests {
         };
         let outcome = run_with_pty(cmd, opts).expect("bridge spawns");
         assert!(matches!(outcome, PtyOutcome::TimedOut));
+    }
+
+    /// Regression for the exec-timeout hang: a timed-out command that left a
+    /// process running (here a backgrounded `sleep` sibling of the foreground
+    /// command) must not stall `run_with_pty`. The leaked process inherits the
+    /// pty secondary, so without the process-group kill + bounded drain the
+    /// output reader never sees EOF and the join blocks until the straggler
+    /// exits (~30s). With the fix the whole process group is killed and the
+    /// call returns right after the (sub-second) timeout.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn timeout_returns_promptly_despite_leaked_background_process() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cmd = Command::new("/bin/sh");
+        // Background one sleep, then become another via exec. `sleep 30`
+        // (not 300) bounds any worst-case leak if this ever regresses.
+        cmd.arg("-c").arg("sleep 30 & exec sleep 30");
+        let opts = PtyOptions {
+            timeout: Some(Duration::from_millis(750)),
+            ..PtyOptions::default()
+        };
+        let start = std::time::Instant::now();
+        let outcome = run_with_pty(cmd, opts).expect("bridge spawns");
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, PtyOutcome::TimedOut));
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "exec must return promptly after timeout, took {elapsed:?} (leaked \
+             process hung the drain?)"
+        );
     }
 
     /// Documents the libc invariant motivating the FD_CLOEXEC fixup

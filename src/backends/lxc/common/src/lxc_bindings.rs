@@ -122,6 +122,68 @@ fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> 
     args
 }
 
+/// What an LXC config file says about the container's network interfaces.
+///
+/// Carries the `lxc.include` answer alongside the indices because a caller that
+/// filters egress cannot act on the indices without it: an include can add
+/// interfaces this file never mentions, so a count taken from this file alone
+/// would understate the container and let a policy claim to be enforced when it
+/// is not.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct NetInterfaceConfig {
+    /// The `N` of every `lxc.net.N.*` key in this file, sorted and deduplicated.
+    pub indices: Vec<u32>,
+    /// Whether this file pulls in another config with `lxc.include`.
+    pub has_include: bool,
+}
+
+/// Extract the network-interface picture from an LXC config file.
+///
+/// Split out of [`LxcContainer::configured_net_indices`] so the parse is
+/// testable without a container on disk. A key matches only when the segment
+/// after `lxc.net.` parses as an integer and is followed by a `.`, so
+/// `lxc.network.0.type` (the pre-2.1 spelling) and a bare `lxc.net.0` with no
+/// sub-key are both ignored — neither declares an interface liblxc will bring
+/// up under the modern schema. Comment lines are skipped, since `#` prefixes a
+/// comment in this format and a commented-out interface is not configured.
+///
+/// `lxc.include` is reported rather than followed. Following it correctly means
+/// resolving relative paths and directory globs the way liblxc does, and
+/// getting that subtly wrong would produce exactly the false confidence this
+/// function exists to prevent. A caller that needs certainty refuses instead.
+fn parse_net_interface_config(config_contents: &str) -> NetInterfaceConfig {
+    let mut indices: Vec<u32> = Vec::new();
+    let mut has_include = false;
+
+    for line in config_contents.lines() {
+        let Some((lhs, _)) = line.split_once('=') else {
+            continue;
+        };
+        let key = lhs.trim();
+        if key.starts_with('#') {
+            continue;
+        }
+        if key == "lxc.include" {
+            has_include = true;
+            continue;
+        }
+        if let Some(rest) = key.strip_prefix("lxc.net.") {
+            if let Some((index, _)) = rest.split_once('.') {
+                if let Ok(n) = index.parse::<u32>() {
+                    indices.push(n);
+                }
+            }
+        }
+    }
+
+    indices.sort_unstable();
+    indices.dedup();
+    NetInterfaceConfig {
+        indices,
+        has_include,
+    }
+}
+
 /// Safe wrapper around an LXC container.
 pub struct LxcContainer {
     name: String,
@@ -209,6 +271,13 @@ impl LxcContainer {
         Self::run_status(cmd, "lxc-create")
     }
 
+    /// Marker comment written immediately above every `lxc.mount.entry` line
+    /// that MXC itself adds, so [`clear_mxc_mount_entries`](Self::clear_mxc_mount_entries)
+    /// can remove only MXC's own mounts and leave baseline entries the distro
+    /// template or the user placed in the config untouched. It is a real LXC
+    /// comment (`#`), so liblxc ignores it when parsing the file.
+    const MXC_MOUNT_MARKER: &'static str = "# mxc-managed-mount";
+
     /// Set a configuration item on the container.
     ///
     /// Appends `key = value` to the container's config file. The error
@@ -232,6 +301,144 @@ impl LxcContainer {
                     key, value, e, config_path
                 )
             })
+    }
+
+    /// Remove every configuration line for `key` from the container's config
+    /// file.
+    ///
+    /// [`set_config_item`](Self::set_config_item) *appends* a `key = value`
+    /// line, and list-type keys such as `lxc.mount.entry` accumulate one line
+    /// per call. liblxc replays every occurrence when it parses the file at
+    /// start, so a caller that re-derives a list from policy on each start must
+    /// clear the previous run's lines first — otherwise a restart inherits
+    /// stale entries (e.g. mounts a tightened policy meant to drop).
+    ///
+    /// A line matches when the token before its first `=` (trimmed) equals
+    /// `key`, so `lxc.mount.entry` is matched but neighbouring keys like
+    /// `lxc.mount` are left intact, and `=` inside a value (e.g.
+    /// `create=dir`) is irrelevant. A missing config file is treated as
+    /// already-clear (`Ok`).
+    pub fn clear_config_item(&self, key: &str) -> Result<(), String> {
+        let config_path = self.config_file_path();
+        let contents = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read config to clear {}: {} (config file: {})",
+                    key, e, config_path
+                ))
+            }
+        };
+
+        let mut out = String::with_capacity(contents.len());
+        for line in contents.lines() {
+            let matches_key = line
+                .split_once('=')
+                .map(|(lhs, _)| lhs.trim() == key)
+                .unwrap_or(false);
+            if !matches_key {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+
+        std::fs::write(&config_path, out).map_err(|e| {
+            format!(
+                "Failed to rewrite config to clear {}: {} (config file: {})",
+                key, e, config_path
+            )
+        })
+    }
+
+    /// Append an `lxc.mount.entry` that MXC owns, tagged with a marker comment
+    /// so it can later be removed without disturbing baseline mounts.
+    ///
+    /// Writes [`MXC_MOUNT_MARKER`](Self::MXC_MOUNT_MARKER) on its own line
+    /// immediately before the `lxc.mount.entry = value` line. liblxc treats the
+    /// marker as a comment and the entry exactly as if it had been added with
+    /// [`set_config_item`](Self::set_config_item);
+    /// [`clear_mxc_mount_entries`](Self::clear_mxc_mount_entries) keys off the
+    /// marker to reclaim only these lines on a restart.
+    pub fn set_mxc_mount_entry(&self, value: &str) -> Result<(), String> {
+        let config_path = self.config_file_path();
+        let entry = format!("{}\nlxc.mount.entry = {}\n", Self::MXC_MOUNT_MARKER, value);
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(entry.as_bytes())
+            })
+            .map_err(|e| {
+                format!(
+                    "Failed to set MXC mount entry {}: {} (config file: {})",
+                    value, e, config_path
+                )
+            })
+    }
+
+    /// Remove only the `lxc.mount.entry` lines MXC itself added, identified by
+    /// the [`MXC_MOUNT_MARKER`](Self::MXC_MOUNT_MARKER) comment written above
+    /// each one by [`set_mxc_mount_entry`](Self::set_mxc_mount_entry).
+    ///
+    /// Unlike [`clear_config_item`](Self::clear_config_item), which drops *every*
+    /// line for a key, this preserves foreign `lxc.mount.entry` lines that the
+    /// distribution template or the user placed in the config. `set_mxc_mount_entry`
+    /// appends and liblxc accumulates every entry across restarts, so a caller
+    /// that re-derives its mounts from policy on each start must reclaim the
+    /// previous run's MXC lines first — but clearing unrelated baseline mounts
+    /// would silently delete container storage the operator relies on.
+    ///
+    /// A marker line and the `lxc.mount.entry` line immediately following it are
+    /// dropped together. An orphaned marker (no entry after it) is dropped on its
+    /// own so a partial write cannot accumulate stray comments. A missing config
+    /// file is treated as already-clear (`Ok`).
+    pub fn clear_mxc_mount_entries(&self) -> Result<(), String> {
+        let config_path = self.config_file_path();
+        let contents = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read config to clear MXC mounts: {} (config file: {})",
+                    e, config_path
+                ))
+            }
+        };
+
+        let lines: Vec<&str> = contents.lines().collect();
+        let mut out = String::with_capacity(contents.len());
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            if line.trim() == Self::MXC_MOUNT_MARKER {
+                // Drop the marker, and the MXC mount entry it tags if one
+                // directly follows. A marker with no following entry is simply
+                // dropped so a half-written pair leaves nothing behind.
+                let next_is_entry = lines
+                    .get(i + 1)
+                    .map(|l| {
+                        l.split_once('=')
+                            .map(|(lhs, _)| lhs.trim() == "lxc.mount.entry")
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                i += if next_is_entry { 2 } else { 1 };
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+            i += 1;
+        }
+
+        std::fs::write(&config_path, out).map_err(|e| {
+            format!(
+                "Failed to rewrite config to clear MXC mounts: {} (config file: {})",
+                e, config_path
+            )
+        })
     }
 
     /// Start the container.
@@ -373,8 +580,34 @@ impl LxcContainer {
     }
 
     /// Get the path to the container's config file.
-    fn config_file_path(&self) -> String {
+    pub(crate) fn config_file_path(&self) -> String {
         format!("{}/{}/config", self.lxc_path, self.name)
+    }
+
+    /// What this container's config says about its network interfaces.
+    ///
+    /// Provision adopts an existing container as readily as it creates one, and
+    /// an adopted container can carry more network interfaces than the single
+    /// `lxc.net.0` MXC configures for itself. A caller that filters egress needs
+    /// to know that before it claims to have filtered anything. A missing config
+    /// file reports nothing configured, consistent with
+    /// [`clear_config_item`](Self::clear_config_item) treating it as
+    /// already-clear.
+    pub fn configured_net_interfaces(&self) -> Result<NetInterfaceConfig, String> {
+        let config_path = self.config_file_path();
+        let contents = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(NetInterfaceConfig::default())
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read config to enumerate network interfaces: {} (config file: {})",
+                    e, config_path
+                ))
+            }
+        };
+        Ok(parse_net_interface_config(&contents))
     }
 
     /// Get the current system architecture string for LXC templates.
@@ -532,6 +765,83 @@ mod tests {
     }
 
     #[test]
+    fn a_single_interface_config_reports_one_network_index() {
+        let config = "lxc.uts.name = box\n\
+                      lxc.net.0.type = veth\n\
+                      lxc.net.0.link = lxcbr0\n\
+                      lxc.net.0.flags = up\n";
+        let net = parse_net_interface_config(config);
+        assert_eq!(net.indices, vec![0]);
+        assert!(!net.has_include);
+    }
+
+    #[test]
+    fn every_configured_interface_is_reported_so_a_caller_can_refuse_to_half_filter() {
+        let config = "lxc.net.0.type = veth\n\
+                      lxc.net.1.type = veth\n\
+                      lxc.net.1.link = br1\n\
+                      lxc.net.4.type = macvlan\n";
+        assert_eq!(parse_net_interface_config(config).indices, vec![0, 1, 4]);
+    }
+
+    #[test]
+    fn an_include_is_reported_because_it_can_declare_interfaces_this_file_never_names() {
+        // The visible count here is 1, which would otherwise look enforceable.
+        // The include can add an interface that routes around the single hook,
+        // so the caller has to know the count is only a lower bound.
+        let config = "lxc.net.0.type = veth\nlxc.include = /usr/share/lxc/config/common.conf\n";
+        let net = parse_net_interface_config(config);
+        assert_eq!(net.indices, vec![0]);
+        assert!(net.has_include);
+    }
+
+    #[test]
+    fn a_commented_out_include_does_not_count_as_an_include() {
+        let config = "lxc.net.0.type = veth\n# lxc.include = /some/file.conf\n";
+        assert!(!parse_net_interface_config(config).has_include);
+    }
+
+    #[test]
+    fn a_config_with_no_network_keys_reports_no_interfaces() {
+        let config = "lxc.uts.name = box\nlxc.rootfs.path = /var/lib/lxc/box/rootfs\n";
+        assert!(parse_net_interface_config(config).indices.is_empty());
+    }
+
+    #[test]
+    fn a_commented_out_interface_is_not_counted_as_configured() {
+        // liblxc ignores the line, so counting it would make MXC refuse a
+        // container it can in fact fully filter.
+        let config = "lxc.net.0.type = veth\n# lxc.net.1.type = veth\n";
+        assert_eq!(parse_net_interface_config(config).indices, vec![0]);
+    }
+
+    #[test]
+    fn the_legacy_lxc_network_spelling_is_not_mistaken_for_a_modern_interface() {
+        let config = "lxc.net.0.type = veth\nlxc.network.1.type = veth\n";
+        assert_eq!(parse_net_interface_config(config).indices, vec![0]);
+    }
+
+    #[test]
+    fn repeated_keys_for_one_interface_still_count_as_one_interface() {
+        // set_config_item appends, so a restart can leave several lines for the
+        // same index. Counting lines instead of indices would refuse a
+        // single-interface container.
+        let config = "lxc.net.0.type = veth\n\
+                      lxc.net.0.veth.pair = mxcv-aaaa\n\
+                      lxc.net.0.veth.pair = mxcv-bbbb\n";
+        assert_eq!(parse_net_interface_config(config).indices, vec![0]);
+    }
+
+    #[test]
+    fn a_missing_config_file_reports_nothing_configured_rather_than_an_error() {
+        let c = LxcContainer::new("definitely-not-provisioned", Some("/nonexistent-lxcpath"));
+        assert_eq!(
+            c.configured_net_interfaces(),
+            Ok(NetInterfaceConfig::default())
+        );
+    }
+
+    #[test]
     fn lxc_container_honors_explicit_lxc_path() {
         let c = LxcContainer::new("my-box", Some("/opt/lxc"));
         assert_eq!(c.lxc_path(), "/opt/lxc");
@@ -578,7 +888,64 @@ mod tests {
         );
     }
 
-    // ---- build_attach_args ----------------------------------------------
+    #[test]
+    fn clear_config_item_removes_only_matching_key_lines() {
+        // Set up a real config file with two `lxc.mount.entry` lines (the
+        // list-type key that accumulates across restarts), a similarly-named
+        // key that must be preserved, and unrelated keys.
+        let base = std::env::temp_dir().join(format!(
+            "mxc-clear-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let name = "box";
+        std::fs::create_dir_all(base.join(name)).unwrap();
+        let container = LxcContainer::new(name, Some(base.to_str().unwrap()));
+
+        let original = "lxc.arch = amd64\n\
+             lxc.mount.entry = /host/a a none bind,create=dir 0 0\n\
+             lxc.mount = /some/fstab\n\
+             lxc.mount.entry = /host/b b none bind,ro,create=dir 0 0\n\
+             lxc.uts.name = box\n";
+        std::fs::write(container.config_file_path(), original).unwrap();
+
+        container.clear_config_item("lxc.mount.entry").unwrap();
+
+        let after = std::fs::read_to_string(container.config_file_path()).unwrap();
+        assert!(
+            !after.contains("lxc.mount.entry"),
+            "all lxc.mount.entry lines must be removed, got:\n{after}"
+        );
+        // The prefix-sharing `lxc.mount` key and unrelated keys survive.
+        assert!(after.contains("lxc.mount = /some/fstab"));
+        assert!(after.contains("lxc.arch = amd64"));
+        assert!(after.contains("lxc.uts.name = box"));
+
+        // Re-clearing is idempotent.
+        container.clear_config_item("lxc.mount.entry").unwrap();
+        let after2 = std::fs::read_to_string(container.config_file_path()).unwrap();
+        assert_eq!(after, after2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clear_config_item_missing_file_is_ok() {
+        // A container whose config file does not exist is already "clear".
+        let bogus_base = std::env::temp_dir().join(format!(
+            "mxc-clear-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let container = LxcContainer::new("ghost", Some(bogus_base.to_str().unwrap()));
+        assert!(container.clear_config_item("lxc.mount.entry").is_ok());
+    }
 
     #[test]
     fn build_attach_args_no_env_no_cwd_is_unchanged_legacy_shape() {

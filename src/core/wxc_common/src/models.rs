@@ -543,6 +543,17 @@ pub struct ContainerPolicy {
     pub denied_paths: Vec<String>,
     pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,
+    /// Whether the wire config carried an explicit `network.defaultPolicy`.
+    ///
+    /// The wire type `Network::default_policy` is `Option<NetworkPolicy>`, but
+    /// this flattened field is not, so an explicit `defaultPolicy: "block"` and
+    /// an omitted one both land here as the struct default (`Block`). The parser
+    /// sets this flag when the wire value was present, preserving the presence
+    /// bit the `Option` carried so a backend can distinguish "the user asked for
+    /// a default policy" from "no network block at all" — which
+    /// `default_network_policy` alone cannot express. Defaults to `false`, and
+    /// the struct's `#[serde(default)]` keeps the addition backward-compatible.
+    pub default_network_policy_present: bool,
     pub network_enforcement_mode: NetworkEnforcementMode,
     /// When true, the sandboxed process may bind() + listen() on local IPs
     /// and accept incoming connections. Independent of `default_network_policy`

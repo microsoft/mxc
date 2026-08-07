@@ -232,7 +232,7 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session` and `windows_sandbox` (both Windows-only; both still experimental, so every call must pass `{ experimental: true }`). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session` and `windows_sandbox` (both Windows-only; both still experimental, so every call must pass `{ experimental: true }`) and `lxc` (Linux-only; not experimental).  Streaming exec — `execInSandbox`, which returns an `IPty` — is not available for `lxc`; use the non-streaming `execInSandboxAsync` instead.  The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
 
 ```typescript
 import {
@@ -369,10 +369,10 @@ spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | Chi
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
-// State-aware lifecycle (currently `isolation_session` and `windows_sandbox` — both Windows-only)
+// State-aware lifecycle (`isolation_session` and `windows_sandbox` — Windows-only, experimental; `lxc` — Linux-only)
 provisionSandbox(containment, config?, options?) → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(sandboxId, config, options?)       → IPty             // streaming
+execInSandbox(sandboxId, config, options?)       → IPty             // streaming (not available for lxc)
 execInSandboxAsync(sandboxId, config, options?)  → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
 deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>

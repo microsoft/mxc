@@ -1,0 +1,9 @@
+{
+  "phase": "provision",
+  "containment": "lxc",
+  "experimental": {
+    "lxc": {
+      "provision": { "distribution": "alpine", "release": "3.20" }
+    }
+  }
+}

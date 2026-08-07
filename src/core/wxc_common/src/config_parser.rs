@@ -292,7 +292,8 @@ const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] =
+    &["windows_sandbox", "wslc", "isolation_session", "lxc"];
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -592,9 +593,12 @@ fn validate_experimental_backend_keys(
         return Ok(());
     };
 
-    let matching_key = containment
-        .and_then(|c| c.section_path())
-        .and_then(|path| path.strip_prefix("experimental."));
+    let matching_key = match containment {
+        Some(ContainmentBackend::Lxc) => Some("lxc"),
+        _ => containment
+            .and_then(|c| c.section_path())
+            .and_then(|path| path.strip_prefix("experimental.")),
+    };
 
     let present: Vec<&'static str> = KNOWN_EXPERIMENTAL_BACKENDS
         .iter()
@@ -991,6 +995,11 @@ fn convert_wire_config(
 
         if let Some(p) = net.default_policy {
             policy.default_network_policy = p.into();
+            // Preserve the presence bit the wire `Option<NetworkPolicy>` carried:
+            // once flattened, an explicit `defaultPolicy: "block"` is otherwise
+            // indistinguishable from the struct default a policy-free start
+            // produces.
+            policy.default_network_policy_present = true;
         }
 
         if let Some(m) = net.enforcement_mode {
@@ -2773,6 +2782,56 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+    }
+
+    #[test]
+    fn network_default_policy_absent_leaves_presence_false() {
+        // Absent `defaultPolicy` must not set the presence bit.  The struct
+        // default is Block, so without this bit an explicit "block" would be
+        // indistinguishable from a policy-free start.
+        let json = r#"{"process": {"commandLine": "print('test')"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            !req.policy.default_network_policy_present,
+            "absent defaultPolicy must not set the presence bit"
+        );
+    }
+
+    #[test]
+    fn network_default_policy_block_sets_presence_true() {
+        // An explicit "block" must set both the policy value and the presence bit.
+        // The presence bit is what lets `requires_firewall_enforcement` distinguish
+        // a caller-requested default-deny from the struct default a policy-free
+        // start produces.
+        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "block"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        assert!(
+            req.policy.default_network_policy_present,
+            "explicit defaultPolicy: \"block\" must set the presence bit"
+        );
+    }
+
+    #[test]
+    fn network_default_policy_allow_sets_presence_true() {
+        // An explicit "allow" must set the presence bit even though Allow is not
+        // a firewall restriction.
+        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "allow"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+        assert!(
+            req.policy.default_network_policy_present,
+            "explicit defaultPolicy: \"allow\" must set the presence bit"
+        );
     }
 
     #[test]
@@ -5225,6 +5284,33 @@ mod tests {
             msg.contains("experimental.wslc"),
             "error did not name the foreign section: {msg}"
         );
+    }
+
+    #[test]
+    fn state_aware_lxc_experimental_backend_key_is_accepted() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "lxc",
+            "experimental": {
+                "lxc": {"provision": {"distribution": "alpine", "release": "3.20"}}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_mxc_request(&encoded, &mut logger, true)
+            .expect("state-aware lxc config should parse");
+        match req {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Provision);
+                assert_eq!(p.containment, Some(ContainmentBackend::Lxc));
+                assert!(p
+                    .experimental_raw
+                    .as_ref()
+                    .and_then(|v| v.get("lxc"))
+                    .is_some());
+            }
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
     }
 
     // ---- Abstract-intent coverage ----

@@ -105,7 +105,7 @@ impl CreatedResources {
     /// Only reachable from the signal path, which is Linux-only; kept
     /// compiled on every target so Windows and macOS CI still type-check it.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         !self.v4_chain && !self.v6_chain && !self.v4_hook && !self.v6_hook
     }
 
@@ -562,9 +562,200 @@ impl NetworkIptablesManager {
         Self::run_firewall_command("iptables", args, logger)
     }
 
+    /// FNV-1a over the container name, used to derive a fixed-width token for
+    /// names with a tight length budget.
+    ///
+    /// Not a security primitive: FNV-1a is invertible. It exists to remove the
+    /// accidental collisions that truncation produces, not to make the token
+    /// unforgeable.
+    fn name_hash(name: &str) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+        let mut hash = FNV_OFFSET;
+        for byte in name.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    /// Encode the full 64-bit name hash as a fixed 11-character base36 token
+    /// (`0-9a-z`). 36^11 ≈ 2^56.9, so the hash is reduced modulo 36^11 rather
+    /// than truncated to 32 bits: this preserves ~56.9 bits of the hash while
+    /// fitting the tight `IFNAMSIZ` budget of the veth interface name. Base36
+    /// is valid in Linux interface names. Zero-padded so the token is always
+    /// exactly 11 characters, keeping the derived name fixed-width.
+    fn hash_token(name: &str) -> String {
+        const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        // 36^11 = 131_621_703_842_267_136 ≈ 2^56.9, fits in u64.
+        const MODULUS: u64 = 36u64.pow(11);
+
+        let mut value = Self::name_hash(name) % MODULUS;
+        let mut buf = [b'0'; 11];
+        for slot in buf.iter_mut().rev() {
+            *slot = ALPHABET[(value % 36) as usize];
+            value /= 36;
+        }
+        // `value` is now 0: 11 base36 digits cover the full [0, 36^11) range.
+        String::from_utf8(buf.to_vec()).expect("base36 alphabet is valid ASCII")
+    }
+
+    /// Derive the deterministic host-side veth interface name for a container.
+    ///
+    /// The firewall must be installed *before* the container starts, but the
+    /// veth pair liblxc creates by default has a random name that is only known
+    /// once the container is running. Pinning `lxc.net.0.veth.pair` to this name
+    /// lets the FORWARD hook reference the interface by name ahead of time —
+    /// iptables accepts a not-yet-existing interface — so there is no window in
+    /// which a started container has unfiltered network.
+    ///
+    /// The name must fit the kernel `IFNAMSIZ` limit of 15 characters and be
+    /// unique per container, so a `mxcv` prefix (4) is followed by an
+    /// 11-character base36 hash token (15 chars total).
+    pub fn deterministic_veth_name(container_name: &str) -> String {
+        format!("mxcv{}", Self::hash_token(container_name))
+    }
+
+    /// Whether this manager currently owns any chain or FORWARD hook.
+    ///
+    /// The state-aware start path uses this to decide whether a failed apply
+    /// left anything of ours behind that must be torn down through *this*
+    /// manager rather than a fresh one.
+    pub fn owns_resources(&self) -> bool {
+        !self.created.is_empty()
+    }
+
+    /// The set of chains and hooks this manager created, for handing to
+    /// signal-time cleanup.
+    pub(crate) fn created(&self) -> CreatedResources {
+        self.created
+    }
+
     /// Run an ip6tables command and return success/failure.
     fn run_ip6tables(args: &[&str], logger: &mut Logger) -> Result<bool, String> {
         Self::run_firewall_command("ip6tables", args, logger)
+    }
+
+    /// Read `<tool> -S FORWARD`, or `None` when the ruleset cannot be read.
+    fn read_forward_chain(tool: &str) -> Option<String> {
+        match Command::new(tool).args(["-S", "FORWARD"]).output() {
+            Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+            _ => None,
+        }
+    }
+
+    /// Whether `chain` currently exists in `tool`'s filter table.
+    ///
+    /// `-S <chain>` is read-only and fails when the chain is absent, so the
+    /// exit status alone answers the question. A host without the tool at all
+    /// reports absent, which is the right answer for teardown: a chain that
+    /// cannot be addressed cannot be removed, and there is nothing to remove.
+    fn chain_exists(tool: &str, chain: &str) -> bool {
+        matches!(
+            Command::new(tool).args(["-S", chain]).output(),
+            Ok(o) if o.status.success()
+        )
+    }
+
+    /// Build an ownership record from what is actually installed right now,
+    /// rather than from what this process created.
+    ///
+    /// Teardown is gated on a [`CreatedResources`] record so that a process
+    /// removes only what it installed. `stop` and `deprovision` cannot satisfy
+    /// that gate: they run in a different process from the `start` that created
+    /// the chain, so their record is empty and a record-gated teardown would do
+    /// nothing. They are nonetheless the documented remedy for a stranded chain
+    /// -- `apply_network_policy` tells the caller to "stop or deprovision the
+    /// sandbox to clear it", and the start path `mem::forget`s its manager
+    /// precisely because stop and deprovision are what remove the chain later.
+    /// A no-op teardown would strand the chain and leave the sandbox unable to
+    /// start again, since the next start fails on the chain it finds.
+    ///
+    /// Observing live state keeps that authoritative teardown honest. An
+    /// all-true record would assume four resources exist, then fail `-X`
+    /// against chains that never did, log those failures, and retain residual
+    /// ownership that schedules a pointless retry in `Drop`. Probing reports
+    /// exactly what is present, so an already-clean container issues no
+    /// commands at all and a half-installed one removes only its own half.
+    fn observe_existing(chain_name: &str) -> CreatedResources {
+        let hooked = |tool: &str| {
+            Self::read_forward_chain(tool)
+                .map(|dump| !Self::forward_hook_deletions(&dump, chain_name).is_empty())
+                .unwrap_or(false)
+        };
+        CreatedResources {
+            v4_chain: Self::chain_exists("iptables", chain_name),
+            v6_chain: Self::chain_exists("ip6tables", chain_name),
+            v4_hook: hooked("iptables"),
+            v6_hook: hooked("ip6tables"),
+        }
+    }
+
+    /// Parse `<tool> -S FORWARD` output into a `-D` argument list for every
+    /// rule that jumps to `chain`.
+    ///
+    /// Each `-A FORWARD ... -j <chain>` line becomes the same rule spec with the
+    /// leading `-A` swapped for `-D`, so the delete matches the exact rule that
+    /// was appended regardless of the `-i`/`-o` interface qualifiers it carries.
+    /// Split out from process execution so the matching is testable without
+    /// iptables, and family-agnostic because both tables print the same syntax.
+    fn forward_hook_deletions(forward_dump: &str, chain: &str) -> Vec<Vec<String>> {
+        let mut deletions = Vec::new();
+        for line in forward_dump.lines() {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.first() != Some(&"-A") || tokens.get(1) != Some(&"FORWARD") {
+                continue;
+            }
+            let jumps_to_chain = tokens.windows(2).any(|w| w[0] == "-j" && w[1] == chain);
+            if !jumps_to_chain {
+                continue;
+            }
+            let mut deletion: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+            deletion[0] = "-D".to_string();
+            deletions.push(deletion);
+        }
+        deletions
+    }
+
+    /// Delete every rule in `tool`'s FORWARD chain that jumps to `chain_name`,
+    /// whatever interface each was scoped to.
+    ///
+    /// Reads the live ruleset with `<tool> -S FORWARD` and issues a matching
+    /// `-D` for each jump, so the hook is removed even when the veth is unknown
+    /// or was never discovered. Deleting by the remembered `-i <veth>` instead
+    /// leaves the jump behind on any teardown that never learned the veth --
+    /// signal-time `force_cleanup` is exactly that case. Because the chain then
+    /// stays referenced, the `-X` fails too and the whole chain leaks, in a
+    /// state nothing later can reclaim.
+    ///
+    /// Returns whether FORWARD is now free of jumps to this chain. That verdict
+    /// gates the `-F` that follows, because flushing is the dangerous half of
+    /// teardown: an emptied user chain returns to its caller instead of reaching
+    /// its own closing DROP, so a chain that is still hooked but no longer
+    /// filtering is a fail-open. Deleting is the safe half -- `-X` on a still
+    /// referenced chain simply fails and the chain stays, owned and filtering,
+    /// for a later teardown to retry.
+    ///
+    /// An unreadable FORWARD (no privilege, no iptables) answers `false`: the
+    /// question was not answered, so it is read as still hooked. Being wrong
+    /// that way costs a retry; being wrong the other way unfilters a live
+    /// container.
+    fn remove_forward_hooks(tool: &str, chain_name: &str, logger: &mut Logger) -> bool {
+        let Some(dump) = Self::read_forward_chain(tool) else {
+            return false;
+        };
+        for deletion in Self::forward_hook_deletions(&dump, chain_name) {
+            let args: Vec<&str> = deletion.iter().map(String::as_str).collect();
+            let _ = Self::run_firewall_command(tool, &args, logger);
+        }
+        // Re-read rather than trust the deletes. A `-D` can fail for a rule
+        // another process is also tearing down, and the exit code does not say
+        // whether the rule is gone -- only whether this call removed it.
+        match Self::read_forward_chain(tool) {
+            Some(after) => Self::forward_hook_deletions(&after, chain_name).is_empty(),
+            None => false,
+        }
     }
 
     /// Classify whether `ip6tables` is usable, given whether the read-only
@@ -934,12 +1125,7 @@ impl NetworkIptablesManager {
         match self.install_firewall_rules(policy, logger, &mut created) {
             Ok(()) => Ok(created),
             Err(e) => {
-                let residual = Self::teardown_created(
-                    &self.chain_name,
-                    self.veth_interface.as_deref(),
-                    &created,
-                    logger,
-                );
+                let residual = Self::teardown_created(&self.chain_name, &created, logger);
                 Err((e, residual))
             }
         }
@@ -1086,28 +1272,30 @@ impl NetworkIptablesManager {
     /// returning, so signal-time cleanup retries exactly the leftovers.
     fn teardown_created(
         chain_name: &str,
-        veth_interface: Option<&str>,
         created: &CreatedResources,
         logger: &mut Logger,
     ) -> CreatedResources {
         let mut residual = *created;
 
-        // Remove from FORWARD only for families this attempt hooked. Must
-        // match the `-i` direction used at insertion so the delete finds the
-        // rule; a `-o` delete would leak the FORWARD hook.
-        if let Some(iface) = veth_interface {
-            if created.v4_hook
-                && Self::run_iptables(&["-D", "FORWARD", "-i", iface, "-j", chain_name], logger)
-                    .is_ok()
-            {
-                residual.v4_hook = false;
-            }
-            if created.v6_hook
-                && Self::run_ip6tables(&["-D", "FORWARD", "-i", iface, "-j", chain_name], logger)
-                    .is_ok()
-            {
-                residual.v6_hook = false;
-            }
+        // Remove from FORWARD only for families this attempt hooked.
+        //
+        // Deleted by enumerating the live FORWARD chain and matching on the
+        // `-j <chain>` target rather than by replaying the remembered
+        // `-i <veth>` rule spec. A teardown that never learned the veth --
+        // signal-time `force_cleanup`, or a veth that was never discovered --
+        // has no interface to replay, so the interface-scoped delete removed
+        // nothing, the hook survived, and `teardown_chain` below then correctly
+        // refused to flush or delete a still-referenced chain. The result was a
+        // permanently leaked chain plus hook that no later pass could reclaim,
+        // because every later pass hit the same missing veth.
+        //
+        // Enumerating removes exactly what was installed whether or not the
+        // veth is known, and each family is enumerated in its own table.
+        if created.v4_hook && Self::remove_forward_hooks("iptables", chain_name, logger) {
+            residual.v4_hook = false;
+        }
+        if created.v6_hook && Self::remove_forward_hooks("ip6tables", chain_name, logger) {
+            residual.v6_hook = false;
         }
 
         // Flush and delete only the chains this attempt created, and only once
@@ -1149,12 +1337,7 @@ impl NetworkIptablesManager {
             self.chain_name
         ));
 
-        let residual = Self::teardown_created(
-            &self.chain_name,
-            self.veth_interface.as_deref(),
-            &self.created,
-            logger,
-        );
+        let residual = Self::teardown_created(&self.chain_name, &self.created, logger);
 
         // A removal command can fail, and what survived is still ours. Clearing
         // the gate here regardless would strand it: Drop would then skip the
@@ -1198,6 +1381,58 @@ impl NetworkIptablesManager {
         // thread and unreachable from here.
         mgr.rules_applied = true;
         mgr.created = created;
+        let _ = mgr.remove_firewall_rules(logger);
+    }
+
+    /// Remove whatever firewall state currently exists for `container_name`,
+    /// regardless of which process installed it.
+    ///
+    /// This is the counterpart to [`force_cleanup`](Self::force_cleanup), and
+    /// the difference between them is authority, not thoroughness.
+    /// `force_cleanup` removes only what its caller created, because its
+    /// callers -- signal rollback, and a start that lost the chain to a
+    /// concurrent start -- may be looking at a chain somebody else owns and
+    /// still needs. Deleting it there would leave a live container unfiltered,
+    /// which is why the empty-record guard exists.
+    ///
+    /// `stop` and `deprovision` are in the opposite position. Each has already
+    /// stopped or destroyed the container before calling this, and propagates a
+    /// failure rather than continuing, so by the time teardown runs no process
+    /// is filtered by this chain. Keeping it would protect nothing and would
+    /// block the next start, which fails on a chain it did not create. They are
+    /// also what `apply_network_policy` names as the remedy when it finds a
+    /// stranded chain, so they must actually clear one.
+    ///
+    /// The residual race is a `start` of the same sandbox interleaved with a
+    /// `stop` or `deprovision` of it, which can delete the chain that start
+    /// just installed. That is not a new exposure: the same interleaving has
+    /// the stop or destroy tearing the container itself out from under that
+    /// start. Concurrent lifecycle calls on one sandbox are a caller error, and
+    /// the alternative -- never clearing a chain whose creator has exited --
+    /// strands every state-aware sandbox that ever installed one.
+    ///
+    /// Linux-only in practice, like `force_cleanup`; kept compiled everywhere
+    /// so Windows and macOS CI still type-check it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn force_cleanup_authoritative(
+        container_name: &str,
+        veth_interface: Option<&str>,
+        logger: &mut Logger,
+    ) {
+        let mut mgr = Self::new(container_name);
+        // Ask the host what is installed instead of asserting it, so a
+        // container with nothing left issues no commands and logs no failures.
+        let observed = Self::observe_existing(&mgr.chain_name);
+        if observed.is_empty() {
+            return;
+        }
+        if let Some(v) = veth_interface {
+            mgr.set_veth_interface(v);
+        }
+        // Bypass the rules_applied gate: the manager that set it belonged to
+        // the start process and is long gone.
+        mgr.rules_applied = true;
+        mgr.created = observed;
         let _ = mgr.remove_firewall_rules(logger);
     }
 }

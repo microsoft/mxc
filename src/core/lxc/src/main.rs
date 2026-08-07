@@ -6,10 +6,13 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::{load_mxc_request, ParseError};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::handle_dry_run_exit;
+use wxc_common::state_aware_dispatch::DispatchOutcome;
+use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use wxc_common::telemetry;
 
 use lxc_common::signal_cleanup;
@@ -112,6 +115,80 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
     }
 }
 
+fn run_state_aware_main(
+    mut parsed: ParsedStateAwareRequest,
+    dry_run: bool,
+    experimental: bool,
+    testing_features: bool,
+    logger: &mut Logger,
+) -> ! {
+    parsed.request.experimental_enabled = experimental;
+    parsed.request.testing_features_enabled = testing_features;
+    parsed.request.dry_run = dry_run;
+
+    // A non-dry-run exec streams the container's raw output straight to this
+    // process's stdout (the PTY relay in the exec phase), so for that phase
+    // stdout is no longer a clean JSON channel. A dispatch error must not print
+    // its envelope there: a consumer parsing stdout as JSON would find the
+    // envelope glued onto the tail of the streamed output. Capture the decision
+    // here, before `parsed` is moved into the telemetry-wrapped dispatch.
+    let exec_streams_stdout = matches!(parsed.phase, Phase::Exec) && !dry_run;
+
+    // Shares the `wxc` executor's telemetry / correlation-vector orchestration
+    // rather than calling dispatch directly, so a Linux lifecycle emits the same
+    // events, carries the same MS-CV, and installs the same crash hook.
+    let outcome = mxc_engine::run_state_aware_with_telemetry(parsed, dry_run, experimental, logger);
+
+    // Mirrors the wxc executor: on dispatch failure the error goes only to the
+    // auxiliary diagnostic sinks (log file / diagnostic pipe), never the primary
+    // buffer/stderr, so the client-facing error envelope below is not shadowed
+    // by a duplicate.
+    if let Err(error) = &outcome {
+        logger.log_diagnostic_line(&error.to_string());
+    }
+
+    let buffered = logger.get_buffer().to_string();
+    if !buffered.is_empty() {
+        eprint!("{}", buffered);
+    }
+    match outcome {
+        Ok(DispatchOutcome::Envelope(value)) => {
+            println!("{}", value);
+            process::exit(0);
+        }
+        Ok(DispatchOutcome::ExecCompleted { exit_code }) => process::exit(exit_code),
+        Err(e) => {
+            // For a streaming exec the envelope goes to stderr so it stays
+            // unambiguously separable from the raw output already written to
+            // stdout. Every other phase keeps stdout as its single client-facing
+            // channel, matching the success envelope.
+            let envelope = error_envelope_string(&e);
+            if exec_streams_stdout {
+                eprintln!("{}", envelope);
+            } else {
+                println!("{}", envelope);
+            }
+            process::exit(1);
+        }
+    }
+}
+
+fn print_error_envelope(error: &MxcError) {
+    println!("{}", error_envelope_string(error));
+}
+
+/// Serialise `error` to its JSON response-envelope string. Split out of
+/// [`print_error_envelope`] so the streaming-exec path can route the same
+/// envelope to stderr, and so both paths share one serialisation (including the
+/// last-resort fallback when the envelope itself fails to serialise).
+fn error_envelope_string(error: &MxcError) -> String {
+    let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
+    serde_json::to_string(&envelope).unwrap_or_else(|_| {
+        r#"{"error":{"code":"backend_error","message":"failed to serialise error envelope"}}"#
+            .to_string()
+    })
+}
+
 fn main() {
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
@@ -195,14 +272,27 @@ fn main() {
     }
 
     // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
-        Ok(r) => r,
-        Err(_) => {
+    let request = match load_mxc_request(&config_data, &mut logger, is_base64) {
+        Ok(MxcRequest::OneShot(req)) => req,
+        Ok(MxcRequest::StateAware(parsed)) => run_state_aware_main(
+            parsed,
+            cli.dry_run,
+            cli.experimental,
+            cli.allow_testing_features,
+            &mut logger,
+        ),
+        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::StateAware(e)) => {
+            print_error_envelope(&e);
+            eprint!("{}", logger.get_buffer());
             process::exit(1);
         }
     };
 
+    let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;

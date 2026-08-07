@@ -68,6 +68,7 @@ run_test "LXC Network Dual-Stack Hostname" "$SCRIPT_DIR/run_lxc_network_dualstac
 run_test "LXC Network CIDR Boundary" "$SCRIPT_DIR/run_lxc_network_cidr_boundary_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
+run_test "LXC State-Aware Lifecycle" "$SCRIPT_DIR/run_lxc_state_aware_test.sh"
 
 echo "================================"
 echo "Results: $PASSED passed, $FAILED failed, $SKIPPED skipped"

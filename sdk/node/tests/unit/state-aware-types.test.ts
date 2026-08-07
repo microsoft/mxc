@@ -11,9 +11,11 @@ import {
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
   IsolationSessionUserConfig,
+  LxcNetworkConfig,
   ProvisionMetadataFor,
   ProvisionResult,
   SandboxId,
+  StartConfigFor,
   StartMetadataFor,
   StopConfigFor,
   WindowsSandboxProvisionConfig,
@@ -154,6 +156,97 @@ describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () 
     assert.ok(stopCfg);
     assert.ok(deprovCfg);
     assert.ok(wrongStop);
+  });
+});
+
+describe('LxcStartConfig', () => {
+  it('accepts the network fields LXC actually enforces', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      version: '0.6.0-alpha',
+      filesystem: { readwritePaths: ['/workspace'] },
+      network: {
+        enforcementMode: 'firewall',
+        defaultPolicy: 'block',
+        allowedHosts: ['example.com'],
+        blockedHosts: ['blocked.example.com'],
+      },
+    };
+    assert.strictEqual(cfg.network?.defaultPolicy, 'block');
+  });
+
+  it('rejects network.proxy because the LXC runner rejects it at start', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — LXC state-aware start does not support network.proxy.
+        proxy: { builtinTestServer: true },
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects removeRulesOnExit, which Rust would reject as an unknown field', () => {
+    // `wire::Network` is `deny_unknown_fields` and has no `removeRulesOnExit`,
+    // so emitting it inside the top-level `network` object fails the request.
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — SDK-only field; not part of the LXC wire surface.
+        removeRulesOnExit: true,
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects allowLocalNetwork, which the LXC backend never enforces', () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — accepted by the wire type but ignored by LXC.
+        allowLocalNetwork: true,
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it("rejects enforcementMode 'capabilities', which LXC cannot implement", () => {
+    const cfg: StartConfigFor<'lxc'> = {
+      network: {
+        // @ts-expect-error — LXC enforces network policy only via iptables.
+        enforcementMode: 'capabilities',
+      },
+    };
+    assert.ok(cfg);
+  });
+
+  it('requires an explicit firewall mode when the policy carries a restriction', () => {
+    // Rust treats an omitted enforcementMode as `Capabilities` and rejects any
+    // restriction it cannot enforce, so an optional mode made these compile and
+    // then fail at run time. See `requires_firewall_enforcement`,
+    // src/backends/lxc/common/src/state_aware.rs:166.
+
+    // @ts-expect-error — an explicit default-deny is a restriction, so the mode is required.
+    const defaultDeny: LxcNetworkConfig = { defaultPolicy: 'block' };
+
+    // @ts-expect-error — allowedHosts is a restriction, so the mode is required.
+    const allowed: LxcNetworkConfig = { allowedHosts: ['example.com'] };
+
+    // @ts-expect-error — blockedHosts is a restriction, so the mode is required.
+    const blocked: LxcNetworkConfig = { blockedHosts: ['blocked.example.com'] };
+
+    assert.ok(defaultDeny);
+    assert.ok(allowed);
+    assert.ok(blocked);
+  });
+
+  it('still accepts the policies Rust does not treat as restrictive', () => {
+    // `requires_firewall_enforcement` counts only a non-empty allowedHosts, a
+    // non-empty blockedHosts, or an explicit `defaultPolicy: 'block'`. An
+    // explicit 'allow' and a policy-free start are not restrictions and must
+    // keep compiling without an enforcementMode; the latter is the plain start
+    // exercised by run_lxc_state_aware_test.sh, which must not be rejected.
+    const explicitAllow: LxcNetworkConfig = { defaultPolicy: 'allow' };
+    const policyFree: LxcNetworkConfig = {};
+
+    assert.strictEqual(explicitAllow.defaultPolicy, 'allow');
+    assert.ok(policyFree);
   });
 });
 

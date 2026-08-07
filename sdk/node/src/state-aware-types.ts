@@ -4,6 +4,7 @@
 import {
   ContainmentBackend,
   FilesystemConfig,
+  NetworkConfig,
   ProcessConfig,
 } from './types.js';
 
@@ -18,7 +19,7 @@ export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
  */
 export type StateAwareContainmentBackend = Extract<
   ContainmentBackend,
-  'isolation_session' | 'windows_sandbox'
+  'isolation_session' | 'lxc' | 'windows_sandbox'
 >;
 
 /**
@@ -102,12 +103,116 @@ export interface IsolationSessionDeprovisionConfig {
   version?: string;
 }
 
+export interface LxcProvisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /** Optional externally assigned LXC container name. */
+  containerId?: string;
+  /** Linux distribution for the container rootfs, e.g. "alpine" or "ubuntu". */
+  distribution: string;
+  /** Distribution release version, e.g. "3.20" or "24.04". */
+  release: string;
+}
+
+/**
+ * Network policy accepted by LXC state-aware `start`.
+ *
+ * Deliberately narrowed to the fields this backend actually honors, rather
+ * than derived from `NetworkConfig`, so configurations that would fail or be
+ * silently ignored are caught at compile time:
+ *
+ * - `proxy` is rejected at start (`apply_network_policy` returns a
+ *   policy-validation error).
+ * - `removeRulesOnExit` is an SDK-only field emitted inside the top-level
+ *   `network` object. Rust's `wire::Network` is `deny_unknown_fields`, so
+ *   sending it fails the whole request.
+ * - `allowLocalNetwork` deserializes, but the LXC backend never translates it
+ *   into an iptables rule, so it would be silently ignored.
+ * - `enforcementMode` is restricted to the firewall modes. LXC has no
+ *   capability-based network enforcement, so `'capabilities'` cannot enforce
+ *   anything; start rejects it when the policy carries any restriction.
+ *
+ * The union below is what makes that last bullet true at compile time. An
+ * optional `enforcementMode` alone did not: `{ defaultPolicy: 'block' }` type
+ * checked, then failed at run time, because Rust treats an omitted mode as
+ * `Capabilities` and rejects a restriction it cannot enforce.
+ *
+ * The split mirrors `requires_firewall_enforcement`
+ * (`src/backends/lxc/common/src/state_aware.rs:166`) exactly. A restriction is
+ * a non-empty `allowedHosts`, a non-empty `blockedHosts`, or an explicit
+ * `defaultPolicy: 'block'` — and nothing else. An explicit
+ * `defaultPolicy: 'allow'` and an omitted `defaultPolicy` are *not*
+ * restrictions, so they must keep working without an `enforcementMode`; the
+ * plain start in `run_lxc_state_aware_test.sh` is exactly that case.
+ */
+type LxcFirewallEnforcementMode = 'firewall' | 'both';
+
+/**
+ * A policy carrying at least one restriction LXC can only deliver through
+ * iptables. `enforcementMode` is mandatory here.
+ */
+export interface LxcRestrictedNetworkConfig {
+  /** LXC enforces network policy only via iptables. */
+  enforcementMode: LxcFirewallEnforcementMode;
+  defaultPolicy?: NetworkConfig['defaultPolicy'];
+  allowedHosts?: NetworkConfig['allowedHosts'];
+  blockedHosts?: NetworkConfig['blockedHosts'];
+}
+
+/**
+ * A policy expressing no restriction. `enforcementMode` may be omitted, and
+ * the restrictive fields are forbidden rather than optional so that adding one
+ * moves the value to `LxcRestrictedNetworkConfig`, where the mode is required.
+ */
+export interface LxcUnrestrictedNetworkConfig {
+  /** LXC enforces network policy only via iptables. */
+  enforcementMode?: LxcFirewallEnforcementMode;
+  /** Only the non-restrictive default is expressible without a firewall mode. */
+  defaultPolicy?: Extract<NetworkConfig['defaultPolicy'], 'allow'>;
+  allowedHosts?: never;
+  blockedHosts?: never;
+}
+
+export type LxcNetworkConfig =
+  | LxcRestrictedNetworkConfig
+  | LxcUnrestrictedNetworkConfig;
+
+export interface LxcStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /** Filesystem mounts to apply before starting the container. */
+  filesystem?: FilesystemConfig;
+  /** iptables policy to apply after the container starts. `proxy` is not supported by this backend. */
+  network?: LxcNetworkConfig;
+}
+
+export interface LxcExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+}
+
+export interface LxcStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface LxcDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
 /**
  * IsolationSession's provision-phase metadata: the per-instance agent user
  * account name minted for this sandbox.
  */
 export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
+}
+
+export interface LxcProvisionMetadata {
+  containerName: string;
+  created: boolean;
 }
 
 // WindowsSandbox per-(backend, phase) Configs. WindowsSandbox holds a single
@@ -181,6 +286,13 @@ type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
     stop: IsolationSessionStopConfig;
     deprovision: IsolationSessionDeprovisionConfig;
   };
+  lxc: {
+    provision: LxcProvisionConfig;
+    start: LxcStartConfig;
+    exec: LxcExecConfig;
+    stop: LxcStopConfig;
+    deprovision: LxcDeprovisionConfig;
+  };
   windows_sandbox: {
     provision: WindowsSandboxProvisionConfig;
     start: WindowsSandboxStartConfig;
@@ -234,6 +346,10 @@ export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
   isolation_session: {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
+  };
+  lxc: {
+    provision?: LxcProvisionMetadata;
+    // LXC returns no metadata for start, stop, or deprovision.
   };
   // WindowsSandbox returns no metadata for any phase (provision yields only the
   // sandbox id). The key still participates so `StateAwareMetadata[C]` type-
