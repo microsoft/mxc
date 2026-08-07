@@ -208,14 +208,20 @@ pub struct ProcessContainer {
     pub capabilities: Option<Vec<String>>,
     /// Windows denial capture. When present, the runner records the sandboxed
     /// process's access attempts to a learning-mode ETL trace for later
-    /// inspection. Requires a host that exposes the learning-mode OS API.
+    /// inspection. Requires a host that exposes the complete official V2
+    /// Learning Mode and process security-environment API set. Cannot be
+    /// combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths`
+    /// additionally requires the V2 deny-support capability.
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
 }
 
 /// Windows denial-capture settings. The presence of the `captureDenials`
-/// object enables capture; all fields are optional.
+/// object enables capture; all fields are optional. Capture is incompatible
+/// with `processContainer.leastPrivilege` and `network.proxy`. Explicit
+/// `filesystem.deniedPaths` requires the host's V2 process security-environment
+/// support query to advertise native deny enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -225,10 +231,17 @@ pub struct CaptureDenials {
     /// mode only decides whether that access is blocked or allowed. Defaults to
     /// `block` when omitted.
     pub mode: Option<CaptureDenialsMode>,
-    /// Absolute path where the denial ETL trace is written. The caller names
-    /// the path; the OS opens it under the caller's own identity when the trace
-    /// is sealed. When omitted, MXC writes the trace to a managed per-run
-    /// temporary file. The parent directory must already exist.
+    /// Absolute path where the JSON denials output file is written — the
+    /// deliverable a consuming application reads to learn what the workload
+    /// was denied. It is a single JSON document `{ "denials": [...],
+    /// "summary": {...} }`. A per-run identifier (process id plus random
+    /// suffix) is inserted into the file stem (e.g. `denials.json` ->
+    /// `denials.<run-id>.json`) so concurrent and sequential captures do not
+    /// collide; the actual path is reported on stderr. When omitted, MXC
+    /// writes it to a managed per-run temporary file and prints its path on
+    /// stderr. The parent directory must already exist. (The intermediate ETL
+    /// trace is an internal, runner-managed temp file that is decoded then
+    /// deleted.)
     pub output_path: Option<String>,
 }
 

@@ -127,6 +127,7 @@ fn build_request_rejects_empty_version() {
         network: None,
         ui: None,
         timeout_ms: None,
+        capture_denials: None,
     };
 
     let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
@@ -147,6 +148,7 @@ fn build_request_host_rules_require_outbound() {
         }),
         ui: None,
         timeout_ms: None,
+        capture_denials: None,
     };
 
     // Unix backends accept host rules without `allowOutbound`; only Windows
@@ -179,6 +181,7 @@ fn build_request_then_run_seatbelt() {
         network: None,
         ui: None,
         timeout_ms: Some(10000),
+        capture_denials: None,
     };
 
     let mut request = build_request(&policy, None).expect("build_request should succeed");
@@ -211,23 +214,35 @@ fn platform_support_linux_methods_are_lxc_or_bubblewrap() {
 fn platform_support_windows_includes_processcontainer() {
     let support = platform_support();
     assert!(support.is_supported, "reason: {:?}", support.reason);
-    // `windows_sandbox` (and, with the feature, `isolation_session`) may also
-    // appear, so the exact vector is host-dependent.
-    assert!(
-        support
-            .available_methods
-            .contains(&"processcontainer".to_string()),
-        "processcontainer must always be reported on Windows: {:?}",
-        support.available_methods
+    // ProcessContainer is always available on Windows and is reported first.
+    assert_eq!(
+        support.available_methods.first().map(String::as_str),
+        Some("processcontainer")
     );
+    // `windows_sandbox`, `isolation_session` (with the feature), and `wslc` may
+    // also appear, so the exact vector is host-dependent.
     for method in &support.available_methods {
         assert!(
-            method == "processcontainer"
-                || method == "windows_sandbox"
-                || method == "isolation_session",
+            matches!(
+                method.as_str(),
+                "processcontainer" | "windows_sandbox" | "isolation_session" | "wslc"
+            ),
             "unexpected Windows method: {method}"
         );
     }
+}
+
+/// Without the `wslc` feature the backend cannot run at all, so it must never be
+/// advertised — regardless of whether the host happens to have the runtime.
+#[cfg(all(target_os = "windows", not(feature = "wslc")))]
+#[test]
+fn platform_support_windows_omits_wslc_when_not_compiled_in() {
+    let support = platform_support();
+    assert!(
+        !support.available_methods.iter().any(|m| m == "wslc"),
+        "wslc must not be advertised without the feature: {:?}",
+        support.available_methods
+    );
 }
 
 #[test]

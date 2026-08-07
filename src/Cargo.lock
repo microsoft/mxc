@@ -88,7 +88,11 @@ version = "0.7.0"
 dependencies = [
  "flatbuffers",
  "getrandom 0.2.17",
+ "learning_mode_core",
+ "learning_mode_windows",
+ "process_security_environment_spec",
  "sandbox_spec",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1265,11 +1269,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "learning_mode_core"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "learning_mode_windows"
 version = "0.7.0"
 dependencies = [
  "flatbuffers",
- "sandbox_spec",
+ "learning_mode_core",
+ "process_security_environment_spec",
  "thiserror",
  "windows",
  "windows-core",
@@ -1763,6 +1777,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process_security_environment_spec"
+version = "0.7.0"
+dependencies = [
+ "flatbuffers",
 ]
 
 [[package]]

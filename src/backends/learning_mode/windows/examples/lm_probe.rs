@@ -4,12 +4,13 @@
 //! Manual validation probe for the Learning Mode trace + security-environment API.
 //!
 //! Prints whether `processmodel.dll` on this machine exposes the Learning Mode trace
-//! exports (`StartLearningModeTrace` / `StopLearningModeTrace`) and the 2-phase
-//! security-environment exports (`CreateProcessSecurityEnvironment` /
-//! `CreateProcessAsUserInsideSecurityEnvironment` / `CloseProcessSecurityEnvironment`),
-//! reporting the exact resolved name for each (plain vs `Experimental_`). Intended to
-//! be run on a feature-enabled Windows build to confirm the runtime FFI resolves
-//! against the real API.
+//! exports (`StartLearningModeTrace` / `StopLearningModeTrace` /
+//! `CloseLearningModeTrace`) and the 2-phase security-environment exports
+//! (`CreateProcessSecurityEnvironment` /
+//! `QueryProcessSecurityEnvironmentSupport` /
+//! `CloseProcessSecurityEnvironment`),
+//! reporting each official export that resolves. Intended to be run on a
+//! feature-enabled Windows build to confirm the runtime FFI resolves against the real API.
 //!
 //! ```text
 //! cargo run -p learning_mode_windows --example lm_probe
@@ -34,7 +35,7 @@ fn run_probe() -> i32 {
 
     let report = learning_mode_windows::probe_security_environment_exports();
     println!("  create export = {:?}", report.create);
-    println!("  launch export = {:?}", report.launch);
+    println!("  query support = {:?}", report.query_support);
     println!("  close  export = {:?}", report.close);
 
     match learning_mode_windows::SecurityEnvironmentApi::load() {

@@ -68,9 +68,12 @@ production configs and the dev schema when working on experimental features:
                                            // is logged (deny-by-default preserved). "allow":
                                            // access is allowed and logged (audit; relaxes
                                            // deny-by-default, emits a security warning).
-            "outputPath": "C:\\logs\\denials.etl"  // attempts to a learning-mode ETL trace. The
-        }                                  // parent dir must already exist; omit outputPath
-                                           // for a managed per-run temp file.
+            "outputPath": "C:\\logs\\denials.json" // JSON denials file the app reads. The parent
+        }                                  // dir must already exist; a unique per-run id is stamped
+                                           // into the stem (denials.<run-id>.json) and the actual
+                                           // path printed on stderr. Omit outputPath for a managed temp file.
+                                           // captureDenials cannot be combined with leastPrivilege.
+                                           // captureDenials cannot currently be combined with network.proxy.
     },
 
     "lxc": {                               // LXC-specific

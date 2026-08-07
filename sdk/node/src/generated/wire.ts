@@ -38,7 +38,7 @@ export interface BaseProcessUi {
 }
 
 /**
- * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Capture is incompatible with `processContainer.leastPrivilege` and `network.proxy`. Explicit `filesystem.deniedPaths` requires the host's V2 process security-environment support query to advertise native deny enforcement.
  */
 export interface CaptureDenials {
   /**
@@ -46,7 +46,7 @@ export interface CaptureDenials {
    */
   mode?: CaptureDenialsMode | null;
   /**
-   * Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist.
+   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file that is decoded then deleted.)
    */
   outputPath?: string | null;
 }
@@ -319,7 +319,7 @@ export interface ProcessContainer {
    */
   capabilities?: string[] | null;
   /**
-   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the learning-mode OS API.
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
    */
   captureDenials?: CaptureDenials | null;
   /**

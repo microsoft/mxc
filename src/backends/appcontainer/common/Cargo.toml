@@ -18,14 +18,18 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 getrandom = { workspace = true }
+semver = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 windows-core = { workspace = true }
 flatbuffers = { workspace = true }
 sandbox_spec = { workspace = true }
+process_security_environment_spec = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
+learning_mode_windows = { workspace = true }
+learning_mode_core = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

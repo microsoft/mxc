@@ -86,6 +86,12 @@ pub fn platform_support() -> PlatformSupport {
         if isolation_session_common::availability::is_isolation_session_available() {
             available_methods.push("isolation_session".to_string());
         }
+        // WSLC is an additional, opt-in backend rather than a fallback: report
+        // it only when the host can actually run it (WSL2 + the WSLC runtime),
+        // which is the same preflight the runner performs.
+        if wslc_available() {
+            available_methods.push("wslc".to_string());
+        }
         PlatformSupport {
             is_supported: true,
             available_methods,
@@ -99,6 +105,21 @@ pub fn platform_support() -> PlatformSupport {
             reason: Some("MXC is not supported on this platform".to_string()),
             ..Default::default()
         }
+    }
+}
+
+/// Whether this host can run the WSL Container backend, probing the WSLC
+/// runtime the same way the runner's preflight does. Always `false` when the
+/// backend isn't compiled in, so the caller needs no `cfg` of its own.
+#[cfg(target_os = "windows")]
+fn wslc_available() -> bool {
+    #[cfg(feature = "wslc")]
+    {
+        wslc_common::is_available()
+    }
+    #[cfg(not(feature = "wslc"))]
+    {
+        false
     }
 }
 

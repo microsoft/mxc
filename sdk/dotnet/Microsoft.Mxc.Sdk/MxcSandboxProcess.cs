@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Mxc.Sdk.Native;
 
 namespace Microsoft.Mxc.Sdk;
@@ -152,6 +154,47 @@ public sealed class MxcSandboxProcess : IDisposable
     /// </summary>
     public Stream? StandardError => TakeReadStream(ref _stderrState, ref _stderr, stdout: false);
 
+    /// <summary>
+    /// Structured outputs produced by optional sandbox features. Metadata is
+    /// available after a terminal wait completes; before then this is null.
+    /// </summary>
+    public SandboxOutputMetadata? OutputMetadata
+    {
+        get
+        {
+            lock (_controlLock)
+            {
+                ThrowIfDisposed();
+                unsafe
+                {
+                    byte* json = null;
+                    var status = NativeMethods.mxc_sandbox_output_metadata_json(_handle.Ptr, &json);
+                    if (status != (int)ErrorCode.Success)
+                    {
+                        throw new MxcException(
+                            (ErrorCode)status,
+                            "retrieving sandbox output metadata failed");
+                    }
+                    if (json is null)
+                    {
+                        return null;
+                    }
+                    try
+                    {
+                        var text = Marshal.PtrToStringUTF8((IntPtr)json);
+                        return string.IsNullOrEmpty(text)
+                            ? null
+                            : JsonSerializer.Deserialize<SandboxOutputMetadata>(text);
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_string_free(json);
+                    }
+                }
+            }
+        }
+    }
+
     private Stream? TakeReadStream(ref ReadStreamState state, ref MxcReadPipeStream? slot, bool stdout)
     {
         lock (_controlLock)
@@ -228,7 +271,11 @@ public sealed class MxcSandboxProcess : IDisposable
             }
             if (running == 0)
             {
-                return new SandboxWaitResult { ExitCode = exit, TimedOut = false };
+                // try_wait is intentionally a non-blocking root-process poll.
+                // Complete the native wait so descendant termination and any
+                // backend finalization (including captureDenials) finish before
+                // the managed Wait/WaitAsync contract returns.
+                return WaitBlocking();
             }
 
             // try_wait only reports exited / still-running, never a timeout, and

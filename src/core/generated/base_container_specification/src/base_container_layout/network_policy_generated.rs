@@ -21,6 +21,8 @@ impl<'a> ::flatbuffers::Follow<'a> for NetworkPolicy<'a> {
 
 impl<'a> NetworkPolicy<'a> {
     pub const VT_PROXY: ::flatbuffers::VOffsetT = 4;
+    pub const VT_EGRESS: ::flatbuffers::VOffsetT = 6;
+    pub const VT_ALLOWED_APPCONTAINER_PEER: ::flatbuffers::VOffsetT = 8;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -37,6 +39,12 @@ impl<'a> NetworkPolicy<'a> {
         args: &'args NetworkPolicyArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<NetworkPolicy<'bldr>> {
         let mut builder = NetworkPolicyBuilder::new(_fbb);
+        if let Some(x) = args.allowed_appcontainer_peer {
+            builder.add_allowed_appcontainer_peer(x);
+        }
+        if let Some(x) = args.egress {
+            builder.add_egress(x);
+        }
         if let Some(x) = args.proxy {
             builder.add_proxy(x);
         }
@@ -45,7 +53,15 @@ impl<'a> NetworkPolicy<'a> {
 
     pub fn unpack(&self) -> NetworkPolicyT {
         let proxy = self.proxy().map(|x| alloc::boxed::Box::new(x.unpack()));
-        NetworkPolicyT { proxy }
+        let egress = self.egress().map(|x| alloc::boxed::Box::new(x.unpack()));
+        let allowed_appcontainer_peer = self
+            .allowed_appcontainer_peer()
+            .map(|x| alloc::string::ToString::to_string(x));
+        NetworkPolicyT {
+            proxy,
+            egress,
+            allowed_appcontainer_peer,
+        }
     }
 
     #[inline]
@@ -56,6 +72,31 @@ impl<'a> NetworkPolicy<'a> {
         unsafe {
             self._tab
                 .get::<::flatbuffers::ForwardsUOffset<proxy_info>>(NetworkPolicy::VT_PROXY, None)
+        }
+    }
+    #[inline]
+    pub fn egress(&self) -> Option<endpoint_policy<'a>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<endpoint_policy>>(
+                    NetworkPolicy::VT_EGRESS,
+                    None,
+                )
+        }
+    }
+    #[inline]
+    pub fn allowed_appcontainer_peer(&self) -> Option<&'a str> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(
+                NetworkPolicy::VT_ALLOWED_APPCONTAINER_PEER,
+                None,
+            )
         }
     }
 }
@@ -72,17 +113,33 @@ impl ::flatbuffers::Verifiable for NetworkPolicy<'_> {
                 Self::VT_PROXY,
                 false,
             )?
+            .visit_field::<::flatbuffers::ForwardsUOffset<endpoint_policy>>(
+                "egress",
+                Self::VT_EGRESS,
+                false,
+            )?
+            .visit_field::<::flatbuffers::ForwardsUOffset<&str>>(
+                "allowed_appcontainer_peer",
+                Self::VT_ALLOWED_APPCONTAINER_PEER,
+                false,
+            )?
             .finish();
         Ok(())
     }
 }
 pub struct NetworkPolicyArgs<'a> {
     pub proxy: Option<::flatbuffers::WIPOffset<proxy_info<'a>>>,
+    pub egress: Option<::flatbuffers::WIPOffset<endpoint_policy<'a>>>,
+    pub allowed_appcontainer_peer: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for NetworkPolicyArgs<'a> {
     #[inline]
     fn default() -> Self {
-        NetworkPolicyArgs { proxy: None }
+        NetworkPolicyArgs {
+            proxy: None,
+            egress: None,
+            allowed_appcontainer_peer: None,
+        }
     }
 }
 
@@ -98,6 +155,24 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> NetworkPolicyBuilder<'a, 'b, 
                 NetworkPolicy::VT_PROXY,
                 proxy,
             );
+    }
+    #[inline]
+    pub fn add_egress(&mut self, egress: ::flatbuffers::WIPOffset<endpoint_policy<'b>>) {
+        self.fbb_
+            .push_slot_always::<::flatbuffers::WIPOffset<endpoint_policy>>(
+                NetworkPolicy::VT_EGRESS,
+                egress,
+            );
+    }
+    #[inline]
+    pub fn add_allowed_appcontainer_peer(
+        &mut self,
+        allowed_appcontainer_peer: ::flatbuffers::WIPOffset<&'b str>,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            NetworkPolicy::VT_ALLOWED_APPCONTAINER_PEER,
+            allowed_appcontainer_peer,
+        );
     }
     #[inline]
     pub fn new(
@@ -120,6 +195,11 @@ impl ::core::fmt::Debug for NetworkPolicy<'_> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         let mut ds = f.debug_struct("NetworkPolicy");
         ds.field("proxy", &self.proxy());
+        ds.field("egress", &self.egress());
+        ds.field(
+            "allowed_appcontainer_peer",
+            &self.allowed_appcontainer_peer(),
+        );
         ds.finish()
     }
 }
@@ -127,10 +207,16 @@ impl ::core::fmt::Debug for NetworkPolicy<'_> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetworkPolicyT {
     pub proxy: Option<alloc::boxed::Box<proxy_infoT>>,
+    pub egress: Option<alloc::boxed::Box<endpoint_policyT>>,
+    pub allowed_appcontainer_peer: Option<alloc::string::String>,
 }
 impl Default for NetworkPolicyT {
     fn default() -> Self {
-        Self { proxy: None }
+        Self {
+            proxy: None,
+            egress: None,
+            allowed_appcontainer_peer: None,
+        }
     }
 }
 impl NetworkPolicyT {
@@ -139,6 +225,18 @@ impl NetworkPolicyT {
         _fbb: &mut ::flatbuffers::FlatBufferBuilder<'b, A>,
     ) -> ::flatbuffers::WIPOffset<NetworkPolicy<'b>> {
         let proxy = self.proxy.as_ref().map(|x| x.pack(_fbb));
-        NetworkPolicy::create(_fbb, &NetworkPolicyArgs { proxy })
+        let egress = self.egress.as_ref().map(|x| x.pack(_fbb));
+        let allowed_appcontainer_peer = self
+            .allowed_appcontainer_peer
+            .as_ref()
+            .map(|x| _fbb.create_string(x));
+        NetworkPolicy::create(
+            _fbb,
+            &NetworkPolicyArgs {
+                proxy,
+                egress,
+                allowed_appcontainer_peer,
+            },
+        )
     }
 }
