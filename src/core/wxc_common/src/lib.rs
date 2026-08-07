@@ -52,6 +52,8 @@ pub mod filesystem_dacl;
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod string_util;
+#[cfg(target_os = "windows")]
+pub mod system_dir;
 
 // Unix-specific modules (shared by the Seatbelt and Bubblewrap backends).
 #[cfg(unix)]
