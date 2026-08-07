@@ -113,6 +113,12 @@ fn windows_backends() -> Vec<AvailableBackend> {
         backends.push(AvailableBackend::tierless("wslc"));
     }
 
+    // Available when the `IsoSessionOps` WinRT class is registered on the OS.
+    #[cfg(feature = "isolation_session")]
+    if isolation_session_common::availability::is_isolation_session_available() {
+        backends.push(AvailableBackend::tierless("isolation_session"));
+    }
+
     backends
 }
 
@@ -202,13 +208,14 @@ mod tests {
 
     /// Every backend literal the probe can emit, across all platforms/features —
     /// must mirror the per-platform arms of `available_backends`.
-    const EMITTABLE_BACKENDS: [&str; 6] = [
+    const EMITTABLE_BACKENDS: [&str; 7] = [
         "seatbelt",
         "bubblewrap",
         "lxc",
         "processcontainer",
         "windows_sandbox",
         "wslc",
+        "isolation_session",
     ];
 
     /// Complements [`every_reported_backend_is_a_real_wire_name`] (host subset)

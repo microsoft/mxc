@@ -211,7 +211,8 @@ fn platform_support_linux_methods_are_lxc_or_bubblewrap() {
 fn platform_support_windows_includes_processcontainer() {
     let support = platform_support();
     assert!(support.is_supported, "reason: {:?}", support.reason);
-    // `windows_sandbox` may also appear, so the exact vector is host-dependent.
+    // `windows_sandbox` (and, with the feature, `isolation_session`) may also
+    // appear, so the exact vector is host-dependent.
     assert!(
         support
             .available_methods
@@ -221,7 +222,9 @@ fn platform_support_windows_includes_processcontainer() {
     );
     for method in &support.available_methods {
         assert!(
-            method == "processcontainer" || method == "windows_sandbox",
+            method == "processcontainer"
+                || method == "windows_sandbox"
+                || method == "isolation_session",
             "unexpected Windows method: {method}"
         );
     }

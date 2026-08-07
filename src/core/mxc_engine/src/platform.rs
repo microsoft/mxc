@@ -82,6 +82,10 @@ pub fn platform_support() -> PlatformSupport {
         if windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
             available_methods.push("windows_sandbox".to_string());
         }
+        #[cfg(feature = "isolation_session")]
+        if isolation_session_common::availability::is_isolation_session_available() {
+            available_methods.push("isolation_session".to_string());
+        }
         PlatformSupport {
             is_supported: true,
             available_methods,

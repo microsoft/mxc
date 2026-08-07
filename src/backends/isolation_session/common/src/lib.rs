@@ -14,6 +14,8 @@
 //!   across multiple `wxc-exec` invocations by an external orchestrator.
 
 #[cfg(target_os = "windows")]
+pub mod availability;
+#[cfg(target_os = "windows")]
 mod console_mode;
 #[cfg(target_os = "windows")]
 mod console_relay;
