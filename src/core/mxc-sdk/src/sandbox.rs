@@ -237,6 +237,7 @@ mod tests {
                     exit_code: 0,
                     total_denials: 2,
                     denied_resources_truncated: false,
+                    etl_path: None,
                 }),
             }),
         }));

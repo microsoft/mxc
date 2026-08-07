@@ -1266,9 +1266,9 @@ impl BaseContainerRunner {
         }
 
         // Resolve two paths for the capture:
-        //   * `capture_etl_path` — an always-internal, runner-managed temp `.etl`
-        //     that the OS broker seals into. It is decoded then deleted in
-        //     `run_teardown`; callers never see it.
+        //   * `capture_etl_path` — a runner-managed temp `.etl` that the OS
+        //     broker seals into. It is decoded in `run_teardown`, then deleted
+        //     unless `captureDenials.retainEtl` was requested.
         //   * `capture_output_path` — the JSON denials deliverable that consuming
         //     apps read: caller-specified via `captureDenials.outputPath` when
         //     provided, else a managed per-run temp `.json` file.
@@ -1980,6 +1980,9 @@ impl BaseContainerRunner {
             security_environment,
             capture_etl_path,
             capture_output_path,
+            retain_capture_etl: capture_denials
+                .as_ref()
+                .is_some_and(|config| config.retain_etl),
         })
     }
 }
@@ -2013,12 +2016,14 @@ struct BaseChild {
     /// Non-capture PSEC environment for schema 0.8+ requests. Retained until
     /// the child exits so policy enforcement outlives the process tree.
     security_environment: Option<ProcessSecurityEnvironment>,
-    /// Internal runner-managed temp `.etl` the broker seals into. Decoded
-    /// then deleted in `run_teardown`. `Some` iff `capture_session` is `Some`.
+    /// Internal runner-managed temp `.etl` the broker seals into. Decoded in
+    /// `run_teardown`. `Some` iff `capture_session` is `Some`.
     capture_etl_path: Option<PathBuf>,
     /// Resolved JSON denials deliverable path (caller-specified or a managed
     /// per-run temp file). `Some` iff `capture_session` is `Some`.
     capture_output_path: Option<PathBuf>,
+    /// Whether the sealed ETL is retained after analysis.
+    retain_capture_etl: bool,
 }
 
 impl SandboxBackend for BaseContainerRunner {
@@ -2184,6 +2189,8 @@ struct BaseContainerSandboxProcess {
     capture_etl_path: Option<PathBuf>,
     /// Resolved JSON denials deliverable path.
     capture_output_path: Option<PathBuf>,
+    /// Whether the sealed ETL is retained after analysis.
+    retain_capture_etl: bool,
     /// Exit code of the child, recorded by `wait` before teardown so the
     /// denials summary can carry it. `None` on the `Drop`/early-exit path.
     last_exit_code: Option<i32>,
@@ -2227,6 +2234,7 @@ impl BaseContainerSandboxProcess {
             security_environment: child.security_environment.take(),
             capture_etl_path: child.capture_etl_path.take(),
             capture_output_path: child.capture_output_path.take(),
+            retain_capture_etl: child.retain_capture_etl,
             last_exit_code: None,
             output_metadata: None,
         }
@@ -2240,39 +2248,40 @@ impl BaseContainerSandboxProcess {
 
         // Seal the learning-mode ETL trace now that the child has exited and
         // been reaped (both `wait` and `Drop` kill + reap before calling this).
-        // The ETL is an internal temp: seal it, decode it into the JSON denials
-        // deliverable that consuming apps read, delete the temp, and retain
-        // structured metadata for the caller. Any seal/decode/write failure is
-        // returned through `wait()`.
+        // Seal the ETL, decode it into the JSON denials deliverable, and either
+        // delete it or report its retained path according to the request. Any
+        // seal/decode/write failure is returned through `wait()`.
         let capture_result = if let Some(session) = self.capture_session.take() {
             let etl_path = self.capture_etl_path.take();
             let output_path = self.capture_output_path.take();
             let exit_code = self.last_exit_code.unwrap_or(-1);
             let result = match session.finish(etl_path.as_deref()) {
                 Ok(()) => match (&etl_path, &output_path) {
-                    (Some(etl), Some(output)) => {
-                        Self::decode_write_and_cleanup(&EtlDenialAnalyzer, etl, output, exit_code)
-                            .map(Some)
-                    }
-                    _ => combine_capture_and_cleanup_results(
+                    (Some(etl), Some(output)) => Self::decode_write_and_finalize(
+                        &EtlDenialAnalyzer,
+                        etl,
+                        output,
+                        exit_code,
+                        self.retain_capture_etl,
+                    )
+                    .map(Some),
+                    _ => finalize_capture_result(
                         Err(std::io::Error::other(
                             "captureDenials internal output paths were not initialized",
                         )),
-                        etl_path
-                            .as_deref()
-                            .map(remove_internal_capture_file)
-                            .unwrap_or(Ok(())),
-                    ),
+                        etl_path.as_deref(),
+                        self.retain_capture_etl,
+                    )
+                    .map(Some),
                 },
-                Err(error) => combine_capture_and_cleanup_results(
+                Err(error) => finalize_capture_result(
                     Err(std::io::Error::other(format!(
                         "captureDenials failed to finalize the denial capture: {error}"
                     ))),
-                    etl_path
-                        .as_deref()
-                        .map(remove_internal_capture_file)
-                        .unwrap_or(Ok(())),
-                ),
+                    etl_path.as_deref(),
+                    self.retain_capture_etl,
+                )
+                .map(Some),
             };
             if let Ok(Some(metadata)) = &result {
                 self.output_metadata = Some(SandboxOutputMetadata {
@@ -2349,20 +2358,56 @@ impl BaseContainerSandboxProcess {
             exit_code: pointer.exit_code,
             total_denials: pointer.total_denials,
             denied_resources_truncated: pointer.denied_resources_truncated,
+            etl_path: None,
         })
     }
 
-    fn decode_write_and_cleanup(
+    fn decode_write_and_finalize(
         analyzer: &dyn DenialAnalyzer,
         etl_path: &Path,
         output_path: &Path,
         exit_code: i32,
+        retain_etl: bool,
     ) -> std::io::Result<CaptureDenialsOutput> {
-        combine_capture_and_cleanup_results(
+        finalize_capture_result(
             Self::decode_and_write_denials(analyzer, etl_path, output_path, exit_code),
-            remove_internal_capture_file(etl_path),
+            Some(etl_path),
+            retain_etl,
         )
     }
+}
+
+fn finalize_capture_result(
+    capture_result: std::io::Result<CaptureDenialsOutput>,
+    etl_path: Option<&Path>,
+    retain_etl: bool,
+) -> std::io::Result<CaptureDenialsOutput> {
+    if retain_etl {
+        let Some(etl_path) = etl_path else {
+            return capture_result;
+        };
+        let retained_path = etl_path.to_string_lossy().into_owned();
+        return capture_result
+            .map(|mut output| {
+                output.etl_path = Some(retained_path);
+                output
+            })
+            .map_err(|error| {
+                if etl_path.exists() {
+                    std::io::Error::other(format!(
+                        "{error}; retained ETL file at {}",
+                        etl_path.display()
+                    ))
+                } else {
+                    error
+                }
+            });
+    }
+
+    combine_capture_and_cleanup_results(
+        capture_result,
+        etl_path.map(remove_internal_capture_file).unwrap_or(Ok(())),
+    )
 }
 
 fn remove_internal_capture_file(path: &Path) -> std::io::Result<()> {
@@ -2612,12 +2657,10 @@ fn combine_process_and_teardown_results(
         (Ok(exit_code), Ok(())) => Ok(exit_code),
         (Ok(_), Err(teardown_error)) => Err(teardown_error),
         (Err(wait_error), Ok(())) => Err(wait_error),
-        (Err(wait_error), Err(teardown_error)) => {
-            write_stderr_line_best_effort(format_args!(
-                "captureDenials teardown also failed after process wait failure: {teardown_error}"
-            ));
-            Err(wait_error)
-        }
+        (Err(wait_error), Err(teardown_error)) => Err(std::io::Error::new(
+            wait_error.kind(),
+            format!("{wait_error}; captureDenials teardown also failed: {teardown_error}"),
+        )),
     }
 }
 
@@ -2902,16 +2945,95 @@ mod tests {
             result: Err("simulated decode failure"),
         };
 
-        let error = BaseContainerSandboxProcess::decode_write_and_cleanup(
+        let error = BaseContainerSandboxProcess::decode_write_and_finalize(
             &analyzer,
             &etl_path,
             &output_path,
             0,
+            false,
         )
         .expect_err("decode should fail");
 
         assert!(error.to_string().contains("simulated decode failure"));
         assert!(!etl_path.exists());
+        assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn default_etl_cleanup_removes_file_after_success() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let etl_path = directory.path().join("capture.etl");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+        let analyzer = FakeAnalyzer {
+            result: Ok(AnalysisResult::complete(Vec::new())),
+        };
+
+        let metadata = BaseContainerSandboxProcess::decode_write_and_finalize(
+            &analyzer,
+            &etl_path,
+            &output_path,
+            0,
+            false,
+        )
+        .expect("decode should succeed");
+
+        assert!(metadata.etl_path.is_none());
+        assert!(!etl_path.exists());
+        assert!(output_path.exists());
+    }
+
+    #[test]
+    fn requested_etl_retention_reports_path_and_preserves_file() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let etl_path = directory.path().join("capture.etl");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+        let analyzer = FakeAnalyzer {
+            result: Ok(AnalysisResult::complete(Vec::new())),
+        };
+
+        let metadata = BaseContainerSandboxProcess::decode_write_and_finalize(
+            &analyzer,
+            &etl_path,
+            &output_path,
+            0,
+            true,
+        )
+        .expect("decode should succeed");
+
+        assert_eq!(
+            metadata.etl_path.as_deref(),
+            Some(etl_path.to_string_lossy().as_ref())
+        );
+        assert!(etl_path.exists());
+        assert!(output_path.exists());
+    }
+
+    #[test]
+    fn requested_etl_retention_preserves_file_when_analysis_fails() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let etl_path = directory.path().join("capture.etl");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+        let analyzer = FakeAnalyzer {
+            result: Err("simulated decode failure"),
+        };
+
+        let error = BaseContainerSandboxProcess::decode_write_and_finalize(
+            &analyzer,
+            &etl_path,
+            &output_path,
+            0,
+            true,
+        )
+        .expect_err("decode should fail");
+
+        let message = error.to_string();
+        assert!(message.contains("simulated decode failure"));
+        assert!(message.contains("retained ETL file at"));
+        assert!(message.contains(&etl_path.to_string_lossy().into_owned()));
+        assert!(etl_path.exists());
         assert!(!output_path.exists());
     }
 
@@ -2922,6 +3044,26 @@ mod tests {
                 .expect_err("capture failure must override successful process exit");
 
         assert!(error.to_string().contains("seal failed"));
+    }
+
+    #[test]
+    fn wait_and_capture_failures_preserve_retained_etl_path() {
+        let error = combine_process_and_teardown_results(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "script timed out after 1000ms",
+            )),
+            Err(std::io::Error::other(
+                r"decode failed; retained ETL file at C:\Temp\capture.etl",
+            )),
+        )
+        .expect_err("both failures should be reported");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let message = error.to_string();
+        assert!(message.contains("script timed out after 1000ms"));
+        assert!(message.contains("decode failed"));
+        assert!(message.contains(r"C:\Temp\capture.etl"));
     }
 
     #[test]

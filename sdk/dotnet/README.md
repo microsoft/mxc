@@ -40,7 +40,8 @@ catch (MxcException ex)
 thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
 Optional feature outputs are returned through `RunResult.OutputMetadata`; for
 `captureDenials`, `OutputMetadata.CaptureDenials.OutputPath` identifies the
-generated JSON document and carries its summary.
+generated JSON document and carries its summary. When ETL retention is enabled,
+`OutputMetadata.CaptureDenials.EtlPath` identifies the retained trace.
 
 ### Streaming
 

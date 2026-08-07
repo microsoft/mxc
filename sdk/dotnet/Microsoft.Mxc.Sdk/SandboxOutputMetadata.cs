@@ -35,4 +35,8 @@ public sealed class CaptureDenialsOutput
     /// <summary>Whether the emitted denial set was truncated.</summary>
     [JsonPropertyName("deniedResourcesTruncated")]
     public bool DeniedResourcesTruncated { get; init; }
+
+    /// <summary>Absolute path to the retained ETL trace, when requested.</summary>
+    [JsonPropertyName("etlPath")]
+    public string? EtlPath { get; init; }
 }

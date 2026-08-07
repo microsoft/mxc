@@ -79,14 +79,17 @@ let policy = SandboxPolicy {
         // Absolute path; a per-run id is stamped into the stem
         // (`denials.json` -> `denials.<run-id>.json`). `None` uses a managed temp.
         output_path: None,
+        // Preserve the sealed ETL and report its path in output metadata.
+        retain_etl: false,
     }),
 };
 ```
 
 `Allow` relaxes containment for the run — it is reported through `warnings()`.
 Read the resulting file path and denial summary from `output_metadata()` after
-the process terminates. The section is ignored on Linux and macOS, whose
-backends have no learning-mode API.
+the process terminates. When `retain_etl` is enabled, the capture output's
+`etl_path` identifies the retained trace. The section is ignored on Linux and
+macOS, whose backends have no learning-mode API.
 
 ## Live stdio + kill (streaming)
 
@@ -134,7 +137,8 @@ The handle is modelled on [`std::process::Child`]:
 - `warnings()` returns policy security warnings detected while spawning the
   sandbox, such as `permissiveLearningMode` weakening deny-by-default.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
-  For `captureDenials`, it contains the generated JSON file path and summary.
+  For `captureDenials`, it contains the generated JSON file path and summary,
+  plus the retained ETL path when requested.
 - `kill()` terminates the sandboxed process **and its descendants** (a
   process-tree kill): on Unix the child leads its own process group and the
   whole group is signalled (an immediate `SIGKILL`, no graceful `SIGTERM`);
