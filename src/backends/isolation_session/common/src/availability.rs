@@ -28,24 +28,41 @@ fn available_from(activation: Result<(), HRESULT>) -> bool {
 }
 
 fn probe_activation() -> Result<(), HRESULT> {
-    // `is_ok()` covers S_OK and the S_FALSE "already initialized (same mode)"
-    // success — both of which we own and must balance below. A failure return
-    // (e.g. RPC_E_CHANGED_MODE) means another apartment is already active on this
-    // thread: activation still works, and we must NOT uninitialize it.
-    // SAFETY: standard COM init/uninit pairing.
-    let owns_com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-
-    let result = match IsoSessionOps::new() {
+    // Guard uninitializes on drop, so a panic in `IsoSessionOps::new()` still
+    // balances `CoInitializeEx`. The `_ops` handle drops before `_apartment`
+    // (reverse declaration order), preserving COM's create-before-uninit rule.
+    let _apartment = ComApartment::enter();
+    match IsoSessionOps::new() {
         Ok(_ops) => Ok(()),
         Err(e) => Err(e.code()),
-    };
-
-    if owns_com {
-        // SAFETY: balances the CoInitializeEx above; only when we owned the init.
-        unsafe { CoUninitialize() };
     }
+}
 
-    result
+/// Owns the COM apartment for the duration of a probe and uninitializes it on
+/// drop, but only when this guard actually performed the initialization.
+struct ComApartment {
+    owns_com: bool,
+}
+
+impl ComApartment {
+    fn enter() -> Self {
+        // `is_ok()` covers S_OK and the S_FALSE "already initialized (same
+        // mode)" success — both of which we own and must balance. A failure
+        // (e.g. RPC_E_CHANGED_MODE) means another apartment is already active on
+        // this thread: activation still works, and we must NOT uninitialize it.
+        // SAFETY: standard COM init; balanced by `CoUninitialize` in `drop`.
+        let owns_com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+        Self { owns_com }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.owns_com {
+            // SAFETY: balances the `CoInitializeEx` in `enter`; only when owned.
+            unsafe { CoUninitialize() };
+        }
+    }
 }
 
 #[cfg(test)]

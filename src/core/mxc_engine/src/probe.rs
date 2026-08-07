@@ -106,9 +106,11 @@ fn windows_backends() -> Vec<AvailableBackend> {
         backends.push(AvailableBackend::tierless("windows_sandbox"));
     }
 
-    // Available when the `wslcsdk.dll` runtime loads and all exports resolve.
+    // Report WSLC only when the host can actually run it (WSL2 + the WSLC
+    // runtime present), matching `platform_support()` and the runner preflight.
+    // `WslcSdk::load()` alone only proves the DLL and its exports resolve.
     #[cfg(feature = "wslc")]
-    if wslc_common::wslc_bindings::WslcSdk::load().is_ok() {
+    if wslc_common::is_available() {
         backends.push(AvailableBackend::tierless("wslc"));
     }
 

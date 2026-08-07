@@ -21,49 +21,57 @@ use std::sync::OnceLock;
 
 use wxc_common::models::ContainerPolicy;
 
-/// Selected isolation tier. The variant order corresponds to descending
-/// security strength.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsolationTier {
-    /// Tier 1 — a supported BaseContainer contract from `processmodel.dll`.
-    BaseContainer,
-    /// Tier 2 — AppContainer + `bfscfg.exe` BFS filesystem policy.
-    AppContainerBfs,
-    /// Tier 3 — AppContainer + DACL-based filesystem policy on host paths.
-    AppContainerDacl,
-}
-
-impl IsolationTier {
-    /// Every tier, ordered strongest-first (matching the variant order). The
-    /// single canonical set of tiers — enumerate this instead of hardcoding the
-    /// list, so adding a tier is a one-line change here plus [`as_str`](Self::as_str).
-    pub const ALL: [IsolationTier; 3] = [
-        IsolationTier::BaseContainer,
-        IsolationTier::AppContainerBfs,
-        IsolationTier::AppContainerDacl,
-    ];
-
-    /// Stable kebab-case identifier for serialization.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            IsolationTier::BaseContainer => "base-container",
-            IsolationTier::AppContainerBfs => "appcontainer-bfs",
-            IsolationTier::AppContainerDacl => "appcontainer-dacl",
+/// Declares [`IsolationTier`] together with its variant↔string mapping in one
+/// place, so [`ALL`](IsolationTier::ALL), [`as_str`](IsolationTier::as_str), and
+/// the [`FromStr`] impl are all generated from the same tier list and cannot
+/// drift. Adding a tier is a single line in the invocation below; the compiler
+/// then forces `as_str`, `from_str`, and `ALL` to cover it.
+macro_rules! isolation_tiers {
+    ($($(#[$variant_doc:meta])* $variant:ident => $name:literal),+ $(,)?) => {
+        /// Selected isolation tier. The variant order corresponds to descending
+        /// security strength.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum IsolationTier {
+            $($(#[$variant_doc])* $variant,)+
         }
-    }
+
+        impl IsolationTier {
+            /// Every tier, ordered strongest-first (matching the variant order).
+            pub const ALL: [IsolationTier; [$(isolation_tiers!(@count $variant)),+].len()] =
+                [$(IsolationTier::$variant),+];
+
+            /// Stable kebab-case identifier for serialization.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(IsolationTier::$variant => $name,)+
+                }
+            }
+        }
+
+        impl std::str::FromStr for IsolationTier {
+            type Err = ();
+
+            /// Inverse of [`as_str`](Self::as_str). Generated from the same tier
+            /// list via an exhaustive match, so the two directions cannot drift.
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($name => Ok(IsolationTier::$variant),)+
+                    _ => Err(()),
+                }
+            }
+        }
+    };
+    // Counts each variant as one array element so `ALL`'s length tracks the list.
+    (@count $variant:ident) => { () };
 }
 
-impl std::str::FromStr for IsolationTier {
-    type Err = ();
-
-    /// Inverse of [`as_str`](Self::as_str), derived from it via [`ALL`](Self::ALL)
-    /// so the two directions cannot drift.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        IsolationTier::ALL
-            .into_iter()
-            .find(|tier| tier.as_str() == s)
-            .ok_or(())
-    }
+isolation_tiers! {
+    /// Tier 1 — a supported BaseContainer contract from `processmodel.dll`.
+    BaseContainer => "base-container",
+    /// Tier 2 — AppContainer + `bfscfg.exe` BFS filesystem policy.
+    AppContainerBfs => "appcontainer-bfs",
+    /// Tier 3 — AppContainer + DACL-based filesystem policy on host paths.
+    AppContainerDacl => "appcontainer-dacl",
 }
 
 /// Outcome of [`detect`]: the chosen tier plus any operator-visible warnings
