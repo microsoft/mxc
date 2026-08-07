@@ -69,7 +69,7 @@ pub const RUNTIME_DIR_ENV: &str = "MXC_ISOSESSION_RUNTIME_DIR";
 /// openclaw packager installs the MSI here; MXC needs no configuration to find
 /// it. An override via [`RUNTIME_DIR_ENV`] takes precedence (used by tests and
 /// side-by-side validation).
-pub const DEFAULT_RUNTIME_DIR: &str = r"C:\Program Files\Microsoft\Agentic Runtime\2026.08";
+pub const DEFAULT_RUNTIME_DIR: &str = r"C:\Program Files\Microsoft\Agentic Runtime\2608";
 
 /// Name of the WinRT activation DLL inside the runtime folder.
 const APP_DLL_NAME: &str = "IsoSessionApp.dll";
