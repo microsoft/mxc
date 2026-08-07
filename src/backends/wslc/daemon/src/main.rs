@@ -23,7 +23,7 @@
 mod control_server;
 mod session_manager;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -81,6 +81,11 @@ async fn run() -> Result<()> {
 
     let shutdown = Arc::new(Notify::new());
     let active_clients = Arc::new(AtomicUsize::new(0));
+    // Monotonic connection counter. The idle watchdog compares it across polls
+    // so a client that connects *and* finishes entirely between two polls (both
+    // `active_clients` and the container count momentarily back at zero) still
+    // resets the idle streak instead of being missed.
+    let activity = Arc::new(AtomicU64::new(0));
 
     let server = tokio::spawn(control_server::run(
         session.clone(),
@@ -88,12 +93,14 @@ async fn run() -> Result<()> {
         security,
         first_instance,
         active_clients.clone(),
+        activity.clone(),
         shutdown.clone(),
     ));
 
     let watchdog = tokio::spawn(idle_watchdog(
         session.clone(),
         active_clients,
+        activity,
         shutdown.clone(),
     ));
 
@@ -114,31 +121,54 @@ async fn run() -> Result<()> {
 }
 
 /// Poll the live-container count; once it has been zero for `IDLE_TIMEOUT` with
-/// no in-flight requests, notify shutdown.
+/// no in-flight requests and no new connections since the previous poll, notify
+/// shutdown.
+///
+/// Idle is only declared when three signals agree: the container count is zero,
+/// no client request is in flight (`active_clients`), and the monotonic
+/// `activity` counter has not advanced since the last poll. The last guard
+/// closes the window where a client connects and completes entirely between two
+/// polls — the count and `active_clients` would both read zero again, but the
+/// bumped `activity` generation still resets the idle streak.
 async fn idle_watchdog(
     session: session_manager::SessionHandle,
     active_clients: Arc<AtomicUsize>,
+    activity: Arc<AtomicU64>,
     shutdown: Arc<Notify>,
 ) {
     let mut idle_for = Duration::ZERO;
+    let mut last_activity = activity.load(Ordering::SeqCst);
     loop {
         tokio::time::sleep(IDLE_POLL).await;
-        match session.container_count().await {
-            // A provision holds the count at zero while it runs, so also require
-            // no in-flight client requests before counting as idle.
-            Ok(0) if active_clients.load(Ordering::SeqCst) == 0 => {
-                idle_for += IDLE_POLL;
-                if idle_for >= IDLE_TIMEOUT {
-                    shutdown.notify_waiters();
-                    return;
-                }
-            }
-            Ok(_) => idle_for = Duration::ZERO,
+        // Query the count first: it is serialized on the worker, so it cannot
+        // observe zero while a provision that will make it non-zero is in flight.
+        let count = match session.container_count().await {
+            Ok(count) => count,
             Err(_) => {
                 // Worker gone: nothing left to serve.
                 shutdown.notify_waiters();
                 return;
             }
+        };
+        // Read the monotonic generation last — after count and active_clients —
+        // so a client that connects and completes entirely within this poll
+        // (bumping `activity`, then dropping `active_clients` back to zero) is
+        // still observed here as `generation != last_activity`, instead of
+        // slipping through with both zero-reads while the generation bump goes
+        // unsampled.
+        let active = active_clients.load(Ordering::SeqCst);
+        let generation = activity.load(Ordering::SeqCst);
+        let idle = count == 0 && active == 0 && generation == last_activity;
+        last_activity = generation;
+
+        if idle {
+            idle_for += IDLE_POLL;
+            if idle_for >= IDLE_TIMEOUT {
+                shutdown.notify_waiters();
+                return;
+            }
+        } else {
+            idle_for = Duration::ZERO;
         }
     }
 }

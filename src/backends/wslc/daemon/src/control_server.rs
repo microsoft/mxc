@@ -17,7 +17,7 @@
 //! connect to the control plane.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -38,10 +38,10 @@ use windows::Win32::Security::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use wslc_common::daemon_protocol::{
-    encode_frame, DaemonRequest, DaemonResponse, ErrKind, StreamFrame, MAX_FRAME_SIZE,
+    encode_frame, DaemonRequest, DaemonResponse, StreamFrame, MAX_FRAME_SIZE,
 };
 
-use crate::session_manager::SessionHandle;
+use crate::session_manager::{SessionHandle, WorkerError};
 
 /// Bind the first pipe instance and build the owner-only security descriptor.
 ///
@@ -58,13 +58,16 @@ pub fn bind(pipe_name: &str) -> Result<(OwnerOnlySecurity, NamedPipeServer)> {
 /// Keeps one un-connected server instance listening; when it connects, hand it
 /// to a task and create the next instance so the next client is never refused.
 /// `active_clients` tracks in-flight requests so the idle watchdog does not tear
-/// the daemon down mid-request.
+/// the daemon down mid-request; `activity` is a monotonic connection counter the
+/// watchdog compares across polls to catch bursts that start and finish between
+/// two of its samples.
 pub async fn run(
     session: SessionHandle,
     pipe_name: String,
     security: OwnerOnlySecurity,
     first_instance: NamedPipeServer,
     active_clients: Arc<AtomicUsize>,
+    activity: Arc<AtomicU64>,
     shutdown: Arc<Notify>,
 ) -> Result<()> {
     let mut server = first_instance;
@@ -82,6 +85,9 @@ pub async fn run(
                 server = create_secured_instance(&pipe_name, &security, false)?;
                 let session = session.clone();
                 let active = active_clients.clone();
+                // Record the connection so an idle streak that spans this
+                // request is invalidated even if it completes between polls.
+                activity.fetch_add(1, Ordering::SeqCst);
                 active.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(connected, session).await {
@@ -221,7 +227,7 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
         DaemonRequest::Provision(config) => {
             let resp = match session.provision(config).await {
                 Ok(sandbox_id) => DaemonResponse::Provisioned { sandbox_id },
-                Err(e) => err_response(ErrKind::Backend, e),
+                Err(e) => worker_err_response(e),
             };
             write_frame(&mut pipe, &resp).await?;
         }
@@ -244,7 +250,15 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
     Ok(())
 }
 
-/// Exec: admit with `Ok`, then stream the run's outcome as [`StreamFrame`]s.
+/// Exec: validate-then-admit, then stream the run's outcome as [`StreamFrame`]s.
+///
+/// The sandbox is validated (exists + started) *before* the `Ok` admission is
+/// written, and — critically — admission is **atomic** with the start of the
+/// run on the worker thread (see [`SessionHandle::exec`]): the worker validates
+/// and begins running within one command handler, so no `Stop`/`Deprovision`
+/// can invalidate the checked state between the admission and the run. An
+/// unknown/not-started sandbox therefore comes back as a pre-admission typed
+/// [`DaemonResponse::Err`] rather than a post-admission stream `Error` frame.
 ///
 /// TODO(fill-in): bidirectional live stdio (client `Stdin` frames -> process,
 /// process stdout/stderr -> `Stdout`/`Stderr` frames). The skeleton runs the
@@ -254,29 +268,42 @@ async fn handle_exec(
     session: SessionHandle,
     config: wslc_common::daemon_protocol::ExecConfig,
 ) -> Result<()> {
+    // Await the worker's admission decision before writing anything: a rejected
+    // exec is a pre-admission typed error, never a post-admission stream frame.
+    let done = match session.exec(config).await {
+        Ok(done) => done,
+        Err(e) => {
+            write_frame(&mut pipe, &worker_err_response(e)).await?;
+            return Ok(());
+        }
+    };
     write_frame(&mut pipe, &DaemonResponse::Ok).await?;
-    let terminal = match session.exec(config).await {
-        Ok(code) => StreamFrame::Exit { code },
-        Err(e) => StreamFrame::Error {
-            message: format!("{e:#}"),
+    let terminal = match done.await {
+        Ok(Ok(code)) => StreamFrame::Exit { code },
+        Ok(Err(e)) => StreamFrame::Error {
+            message: e.to_string(),
+        },
+        Err(_) => StreamFrame::Error {
+            message: "WSLc worker dropped the exec reply channel".to_string(),
         },
     };
     write_frame(&mut pipe, &terminal).await?;
     Ok(())
 }
 
-/// Map a `Result<()>` to `Ok` / `Err` response.
-fn ok_or_err(result: Result<()>) -> DaemonResponse {
+/// Map a worker `Result<()>` to an `Ok` / typed `Err` response.
+fn ok_or_err(result: Result<(), WorkerError>) -> DaemonResponse {
     match result {
         Ok(()) => DaemonResponse::Ok,
-        Err(e) => err_response(ErrKind::Backend, e),
+        Err(e) => worker_err_response(e),
     }
 }
 
-fn err_response(kind: ErrKind, e: anyhow::Error) -> DaemonResponse {
+/// Build a [`DaemonResponse::Err`] carrying the worker error's protocol `kind`.
+fn worker_err_response(e: WorkerError) -> DaemonResponse {
     DaemonResponse::Err {
-        kind,
-        message: format!("{e:#}"),
+        kind: e.kind(),
+        message: e.to_string(),
     }
 }
 
