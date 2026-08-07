@@ -1,113 +1,176 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script that verifies the workspace's `windows` crate version matches
-//! the version the generated bindings were produced for.
+//! Build script that regenerates the IsolationSession Preview WinRT bindings
+//! from the checked-in SDK nuget at compile time, so the crate is always built
+//! directly against the pinned `Microsoft.Windows.AI.IsolationSession.SDK`
+//! package rather than a committed snapshot.
+//!
+//! Pipeline: locate the single `*.nupkg` under
+//! `external/windows-sdk/isolation-session/`, extract its Preview WinMD (a
+//! nupkg is a zip), then run `windows-bindgen` over it into `$OUT_DIR/bindings.rs`
+//! (included by `lib.rs`). The invocation mirrors the canonical OS-side
+//! generator (`RustBindingsGenerator`).
+
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    // Path to the generation provenance file. This crate lives at
-    // <repo>/src/backends/isolation_session/bindings, so four `..` segments
-    // walk back up to the repo root, where `external/` lives.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let info_path = std::path::Path::new(&manifest_dir)
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+
+    // This crate lives at <repo>/src/backends/isolation_session/bindings, so
+    // four `..` segments reach the repo root where `external/` lives.
+    let sdk_dir = Path::new(&manifest_dir)
         .join("..")
         .join("..")
         .join("..")
         .join("..")
         .join("external")
         .join("windows-sdk")
-        .join("isolation-session")
-        .join("GENERATION_INFO.toml");
+        .join("isolation-session");
 
-    // If the provenance file doesn't exist yet (e.g., first-time setup before
-    // generation has been run), skip the check.
-    if !info_path.exists() {
-        return;
-    }
-
-    let contents = std::fs::read_to_string(&info_path).unwrap_or_default();
-
-    // Extract the expected windows crate version from the TOML.
-    let expected = contents.lines().find_map(|line| {
-        let line = line.trim();
-        if line.starts_with("target_windows_crate") {
-            line.split('=')
-                .nth(1)
-                .map(|v| v.trim().trim_matches('"').to_string())
-        } else {
-            None
-        }
+    let nupkg = find_nupkg(&sdk_dir).unwrap_or_else(|| {
+        panic!(
+            "isolation_session_bindings: no .nupkg found in {}",
+            sdk_dir.display()
+        )
     });
 
-    let Some(expected_version) = expected else {
-        // No version constraint found — skip check.
-        return;
-    };
+    // Rebuild whenever the pinned package or this script changes.
+    println!("cargo:rerun-if-changed={}", nupkg.display());
+    println!("cargo:rerun-if-changed=build.rs");
 
-    // Read the actual windows crate version from Cargo.lock. The workspace root
-    // (and its Cargo.lock) is at <repo>/src, three `..` up from this crate.
-    let lock_path = std::path::Path::new(&manifest_dir)
-        .join("..")
-        .join("..")
-        .join("..")
-        .join("Cargo.lock");
+    // Extract the Preview WinMD from the nuget into OUT_DIR.
+    let winmd_bytes = extract_preview_winmd(&nupkg);
+    let winmd_path = Path::new(&out_dir).join("windows.ai.isolationsession.preview.winmd");
+    fs::write(&winmd_path, &winmd_bytes)
+        .unwrap_or_else(|e| panic!("write extracted winmd to {}: {e}", winmd_path.display()));
 
-    if !lock_path.exists() {
-        return;
+    let bindings_path = Path::new(&out_dir).join("bindings.rs");
+
+    // Generate bindings for the IsolationSession Preview namespace only. The
+    // literal "default" input combines the SDK WinMD with windows-bindgen's
+    // bundled Windows metadata; "windows,skip-root,Windows.Foundation" maps the
+    // Windows.Foundation dependencies (DateTime, TypedEventHandler) onto the
+    // full `windows` crate (Foundation feature enabled in Cargo.toml). This
+    // mirrors RustBindingsGenerator exactly.
+    let warnings = windows_bindgen::bindgen([
+        "--in",
+        winmd_path.to_str().expect("winmd path is valid UTF-8"),
+        "--in",
+        "default",
+        "--out",
+        bindings_path.to_str().expect("out path is valid UTF-8"),
+        "--filter",
+        "Windows.AI.IsolationSession.Preview",
+        "--reference",
+        "windows,skip-root,Windows.Foundation",
+        "--flat",
+        "--implement",
+    ]);
+
+    let warning_text = format!("{warnings}");
+    for line in warning_text.lines().filter(|l| !l.trim().is_empty()) {
+        println!("cargo:warning=isosession-bindgen: {line}");
     }
 
-    let lock_contents = std::fs::read_to_string(&lock_path).unwrap_or_default();
+    // windows-bindgen emits a leading `#![allow(...)]` inner attribute. That is
+    // invalid once the file is `include!`-ed inside `mod bindings { ... }`
+    // (an inner attribute cannot annotate the `include!` item macro). The
+    // module already carries an equivalent OUTER `#[allow(...)]` in lib.rs, so
+    // strip the generated leading inner-attribute block here.
+    let generated = fs::read_to_string(&bindings_path)
+        .unwrap_or_else(|e| panic!("read generated {}: {e}", bindings_path.display()));
+    let cleaned = strip_leading_inner_attrs(&generated);
+    fs::write(&bindings_path, cleaned)
+        .unwrap_or_else(|e| panic!("rewrite cleaned {}: {e}", bindings_path.display()));
+}
 
-    // Simple parser: find the [[package]] block for windows.
-    let actual_version = lock_contents
-        .split("[[package]]")
-        .find(|block| {
-            let has_name = block.lines().any(|l| l.trim() == "name = \"windows\"");
-            // Exclude windows-* crates (windows-core, windows-sys, etc.)
-            let not_prefixed = !block.lines().any(|l| {
-                let t = l.trim();
-                t.starts_with("name = \"windows-")
-            });
-            has_name && not_prefixed
+/// Drops leading `#![...]` inner-attribute blocks (single- or multi-line) from
+/// the generated file, preserving leading comments/blank lines and copying the
+/// rest of the body verbatim once the first real item is reached.
+fn strip_leading_inner_attrs(src: &str) -> String {
+    let mut result = String::with_capacity(src.len());
+    let mut in_inner = false;
+    let mut started_body = false;
+    for line in src.lines() {
+        if started_body {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        if in_inner {
+            if line.contains(']') {
+                in_inner = false;
+            }
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#![") {
+            if !trimmed.contains(']') {
+                in_inner = true;
+            }
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        started_body = true;
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
+}
+
+/// Returns the single `*.nupkg` under `dir` (lexicographically last if several,
+/// so a version bump that leaves an old package behind still picks the newest).
+fn find_nupkg(dir: &Path) -> Option<PathBuf> {
+    let mut hits: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .map(|x| x.eq_ignore_ascii_case("nupkg"))
+                .unwrap_or(false)
         })
-        .and_then(|block| {
-            block.lines().find_map(|l| {
-                let t = l.trim();
-                if t.starts_with("version = ") {
-                    Some(t.split('=').nth(1)?.trim().trim_matches('"').to_string())
-                } else {
-                    None
-                }
-            })
+        .collect();
+    hits.sort();
+    hits.into_iter().next_back()
+}
+
+/// Extracts the `*preview.winmd` entry from the nuget (a zip archive),
+/// tolerant of path-separator variations in the entry name.
+fn extract_preview_winmd(nupkg: &Path) -> Vec<u8> {
+    let file = fs::File::open(nupkg).unwrap_or_else(|e| panic!("open {}: {e}", nupkg.display()));
+    let mut archive =
+        zip::ZipArchive::new(file).unwrap_or_else(|e| panic!("read zip {}: {e}", nupkg.display()));
+
+    let entry_name = (0..archive.len())
+        .find_map(|i| {
+            let name = archive.by_index(i).ok()?.name().to_string();
+            if name.to_ascii_lowercase().ends_with("preview.winmd") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "isolation_session_bindings: no *preview.winmd entry in {}",
+                nupkg.display()
+            )
         });
 
-    // Build a caret requirement from the major.minor of `expected_version`.
-    // This matches "compatible with X.Y" — same loose-on-patch intent as the
-    // prior `starts_with` check, but via a real semver parser so e.g. "0.6"
-    // cannot silently accept "0.62".
-    let parts: Vec<&str> = expected_version.split('.').take(2).collect();
-    let req_pattern = if parts.len() == 2 {
-        format!("^{}.{}", parts[0], parts[1])
-    } else {
-        return; // Unexpected format — skip check rather than fail loudly.
-    };
-    let Ok(req) = semver::VersionReq::parse(&req_pattern) else {
-        return;
-    };
-
-    if let Some(actual) = actual_version {
-        let Ok(actual_ver) = semver::Version::parse(&actual) else {
-            return;
-        };
-        if !req.matches(&actual_ver) {
-            panic!(
-                "\n\n\
-                 isolation_session_bindings: generated code targets windows crate {expected},\n\
-                 but workspace has {actual}. Bindings must be regenerated.\n\
-                 \n",
-                expected = expected_version,
-                actual = actual,
-            );
-        }
-    }
+    let mut entry = archive
+        .by_name(&entry_name)
+        .unwrap_or_else(|e| panic!("open zip entry {entry_name}: {e}"));
+    let mut buf = Vec::new();
+    entry
+        .read_to_end(&mut buf)
+        .unwrap_or_else(|e| panic!("read zip entry {entry_name}: {e}"));
+    buf
 }

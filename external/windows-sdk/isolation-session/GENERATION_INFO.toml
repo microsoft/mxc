@@ -1,14 +1,18 @@
-# Provenance information for the generated isolation_session_bindings crate.
-# Updated manually after regenerating the bindings; verified by the bindings crate's build.rs.
+# Provenance for the isolation_session_bindings crate.
+#
+# Bindings are regenerated at BUILD TIME by the crate's build.rs from the
+# Preview WinMD inside the pinned SDK nuget checked in beside this file --
+# there is no committed bindings.rs. This file is provenance documentation;
+# build.rs derives the actual output from the .nupkg.
 
 [tool]
+# Must match the `windows-bindgen` build-dependency pin in the crate's Cargo.toml
+# and stay in lockstep with the workspace `windows` crate major.minor.
 windows_bindgen_version = "0.62.1"
 target_windows_crate = "0.62"
 generated_date = "2026-08-14"
 
 [source]
-# The pinned SDK package these bindings were generated from (checked in beside
-# this file). Bindings come from the Preview WinMD inside it.
 nupkg = "Microsoft.Windows.AI.IsolationSession.SDK.0.2606.0.nupkg"
 winmd = "metadata/windows.ai.isolationsession.preview.winmd"
 winmd_sha256 = "1A9DBDC2CBFDEDC7FF366939DB4BA1564179D55B6EA3E70B99BD82C532428147"
