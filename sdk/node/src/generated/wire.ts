@@ -297,7 +297,7 @@ export interface Process {
    */
   commandLine?: string | null;
   /**
-   * Working directory for the process.
+   * Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` ("Working Directory").
    */
   cwd?: string | null;
   /**

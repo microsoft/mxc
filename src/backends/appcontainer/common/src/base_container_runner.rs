@@ -1307,14 +1307,16 @@ impl BaseContainerRunner {
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
-        // Working directory (NULL falls back to the current directory).
-        let cwd_wide;
-        let cwd_ptr = if request.working_directory.is_empty() {
-            ptr::null()
-        } else {
-            cwd_wide = string_util::to_wide(&request.working_directory);
-            cwd_wide.as_ptr()
-        };
+        // Resolved via the shared helper so both Windows launch paths agree and
+        // neither can pass a NULL cwd (see `working_directory`).
+        let working_directory = crate::working_directory::launch_working_directory(&request);
+        let _ = writeln!(
+            logger,
+            "working directory: {}",
+            working_directory.describe()
+        );
+        let cwd_wide = string_util::to_wide(&working_directory.path);
+        let cwd_ptr = cwd_wide.as_ptr();
 
         let legacy_destroy_on_exit =
             !use_process_security_environment && request.lifecycle.destroy_on_exit;
@@ -1814,7 +1816,10 @@ impl BaseContainerRunner {
                 &request.policy.readonly_paths,
             );
 
-            let mut extended_error = format!("{launch_api_name} failed: {err:?}");
+            let mut extended_error = format!(
+                "{launch_api_name} failed: {err:?} (working directory: {})",
+                working_directory.describe()
+            );
             if let Some(cleanup_error) = capture_cleanup_error {
                 let _ = write!(
                     extended_error,
