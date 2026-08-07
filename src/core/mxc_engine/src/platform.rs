@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 //! Host platform support detection — the Rust port of the SDK's
-//! `getPlatformSupport`, shared by the public SDK and the executor binaries.
+//! `getPlatformSupport`. Lets callers discover host support in-process instead
+//! of depending on the TypeScript SDK, and lives in the engine so both the
+//! public SDK and the executor binaries share one implementation.
 
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
