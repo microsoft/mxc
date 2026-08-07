@@ -29,6 +29,7 @@ use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
+use crate::container_steps::sdk_error;
 use crate::policy_mapping;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
@@ -591,16 +592,6 @@ enum TarFormat {
     Rootfs,
     /// Unrecognized format — not a valid tar or missing expected entries.
     Unknown,
-}
-
-/// Create a ScriptResponse error from an HRESULT failure with optional SDK error message.
-fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
-    let msg = if sdk_msg.is_empty() {
-        format!("{}: HRESULT 0x{:08X}", context, hr as u32)
-    } else {
-        format!("{}: {} (HRESULT 0x{:08X})", context, sdk_msg, hr as u32)
-    };
-    ScriptResponse::error(&msg)
 }
 
 /// Builds a user-facing prerequisite error for the components `WslcGetMissingComponents`
