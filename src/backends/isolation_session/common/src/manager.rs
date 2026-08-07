@@ -135,9 +135,15 @@ fn classify_apartment(apartment: APTTYPE, qualifier: APTTYPEQUALIFIER) -> Apartm
 }
 
 /// Activates the in-proc IsolationSession runtime factory and returns the
-/// instance.
+/// instance. When a coresident `IsoSessionApp.dll` is present (see
+/// [`super::regfree`]), the factory is loaded **by full path** from the MSI
+/// runtime folder, binding the MSI-installed runtime instead of the inbox
+/// `System32` one; otherwise it falls back to default system activation.
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
-    match IsoSessionOps::new() {
+    let activated =
+        super::regfree::activate_from_runtime_dir::<IsoSessionOps>().unwrap_or_else(IsoSessionOps::new);
+
+    match activated {
         Ok(ops) => Ok(ops),
         // The HRESULT→error mapping lives in `activation_error` so it stays
         // testable without depending on whether this host can activate the
