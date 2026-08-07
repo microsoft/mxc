@@ -193,7 +193,7 @@ folder (see *Runtime folder resolution* below), then:
 ### Runtime folder resolution
 
 The coresident folder is `DEFAULT_RUNTIME_DIR`
-(`C:\Program Files\Microsoft\Agentic Runtime\2026.08` — the fixed MSI install
+(`C:\Program Files\Microsoft\Agentic Runtime\2608` — the fixed MSI install
 location) unless overridden by the `MXC_ISOSESSION_RUNTIME_DIR` environment
 variable:
 
@@ -418,7 +418,7 @@ The following were observed during VM testing and are accepted for v0.1.
 - A Windows build with the IsolationSession feature enabled.
 - The isolation-session runtime binaries available via **one** of:
   - the paired **MSI** installed at `DEFAULT_RUNTIME_DIR`
-    (`C:\Program Files\Microsoft\Agentic Runtime\2026.08`), which MXC binds
+    (`C:\Program Files\Microsoft\Agentic Runtime\2608`), which MXC binds
     coresidently by path (preferred — this is how a packaged product ships a
     specific runtime version); or
   - the OS-side inbox host binaries in `%SystemRoot%\System32\` (ships with
