@@ -87,16 +87,33 @@ Write-Host "=======================================" -ForegroundColor Cyan
 Write-Host "Binary: $WxcExec`n" -ForegroundColor Gray
 
 # ---------------- Prerequisite probes ----------------
+#
+# The runtime can be provided two ways (mirrors
+# backends/isolation_session/common/src/regfree.rs): inbox (IsoSessionApp.dll
+# in System32 + IsoSessionOps WinRT class registered) or coresident MSI
+# (IsoSessionApp.dll under DEFAULT_RUNTIME_DIR, or MXC_ISOSESSION_RUNTIME_DIR
+# when set to an absolute path). Accept EITHER so an MSI-only host is exercised
+# rather than skipped.
 
-if (-not (Test-Path 'C:\Windows\System32\IsoSessionApp.dll')) {
-    Write-Host "SKIPPED: IsoSessionApp.dll not present in System32" -ForegroundColor Yellow
+$inboxDll = Test-Path 'C:\Windows\System32\IsoSessionApp.dll'
+$IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
+$inboxRegistered = Test-Path $IsoSessionOpsKey
+$inboxAvailable = $inboxDll -and $inboxRegistered
+
+$runtimeDir = $env:MXC_ISOSESSION_RUNTIME_DIR
+if ([string]::IsNullOrWhiteSpace($runtimeDir) -or -not [System.IO.Path]::IsPathRooted($runtimeDir.Trim())) {
+    $runtimeDir = 'C:\Program Files\Microsoft\Agentic Runtime\2026.08'
+} else {
+    $runtimeDir = $runtimeDir.Trim()
+}
+$coresidentAvailable = Test-Path (Join-Path $runtimeDir 'IsoSessionApp.dll')
+
+if (-not ($inboxAvailable -or $coresidentAvailable)) {
+    Write-Host "SKIPPED: no IsolationSession runtime found (no inbox IsoSessionApp.dll + registration in System32, and no coresident IsoSessionApp.dll under '$runtimeDir')" -ForegroundColor Yellow
     exit 0
 }
-
-$IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
-if (-not (Test-Path $IsoSessionOpsKey)) {
-    Write-Host "SKIPPED: Windows.AI.IsolationSession.IsoSessionOps WinRT class not registered" -ForegroundColor Yellow
-    exit 0
+if ($coresidentAvailable -and -not $inboxAvailable) {
+    Write-Host "Backend probe: using coresident runtime at '$runtimeDir' (inbox System32 activation not present)" -ForegroundColor DarkGray
 }
 
 # ---------------- Helpers ----------------
