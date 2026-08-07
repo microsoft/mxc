@@ -10,6 +10,7 @@
 //! narrower "what can `mxc-sdk` itself launch?" question and reports no tier.
 
 use serde::Serialize;
+use wxc_common::models::ContainmentBackend;
 
 /// One host-available backend, plus its effective isolation tier (if any).
 ///
@@ -76,7 +77,9 @@ pub fn available_backends() -> Vec<AvailableBackend> {
 fn macos_backends() -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
     if std::path::Path::new("/usr/bin/sandbox-exec").exists() {
-        backends.push(AvailableBackend::tierless("seatbelt"));
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::Seatbelt.wire_name(),
+        ));
     }
     backends
 }
@@ -85,10 +88,14 @@ fn macos_backends() -> Vec<AvailableBackend> {
 fn linux_backends() -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
     if bwrap_common::bwrap_version::probe_bwrap().is_ok() {
-        backends.push(AvailableBackend::tierless("bubblewrap"));
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::Bubblewrap.wire_name(),
+        ));
     }
     if lxc_common::availability::is_lxc_available() {
-        backends.push(AvailableBackend::tierless("lxc"));
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::Lxc.wire_name(),
+        ));
     }
     backends
 }
@@ -99,11 +106,20 @@ fn windows_backends() -> Vec<AvailableBackend> {
 
     // `processcontainer` is always present and the only backend with a tier
     // ladder, so it carries its effective (highest-reachable) tier.
-    let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
-    let mut backends = vec![AvailableBackend::tiered("processcontainer", tier.as_str())];
+    let tier = select_tier(
+        is_base_container_usable(),
+        cfg!(feature = "tier2_bfs"),
+        bfscfg_available(),
+    );
+    let mut backends = vec![AvailableBackend::tiered(
+        ContainmentBackend::ProcessContainer.wire_name(),
+        tier.as_str(),
+    )];
 
     if windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
-        backends.push(AvailableBackend::tierless("windows_sandbox"));
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::WindowsSandbox.wire_name(),
+        ));
     }
 
     // Report WSLC only when the host can actually run it (WSL2 + the WSLC
@@ -111,31 +127,50 @@ fn windows_backends() -> Vec<AvailableBackend> {
     // `WslcSdk::load()` alone only proves the DLL and its exports resolve.
     #[cfg(feature = "wslc")]
     if wslc_common::is_available() {
-        backends.push(AvailableBackend::tierless("wslc"));
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::Wslc.wire_name(),
+        ));
     }
 
     // Available when the `IsoSessionOps` WinRT class is registered on the OS.
     #[cfg(feature = "isolation_session")]
     if isolation_session_common::availability::is_isolation_session_available() {
-        backends.push(AvailableBackend::tierless("isolation_session"));
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::IsolationSession.wire_name(),
+        ));
     }
 
     backends
 }
 
+/// Whether `bfscfg.exe` is resolvable on this host. The BFS tier enforces
+/// filesystem policy through `bfscfg.exe`, so a policy-carrying request only
+/// reaches BFS when it is present — otherwise [`detect`](appcontainer_common::fallback_detector::detect)
+/// falls through to DACL. Mirrored here so the reported tier ceiling matches
+/// what a real request achieves, rather than the `tier2_bfs` build flag alone.
+/// With the feature off, `find_bfscfg_exe` always returns `Ok(None)`.
+#[cfg(target_os = "windows")]
+fn bfscfg_available() -> bool {
+    appcontainer_common::fallback_detector::find_bfscfg_exe()
+        .map(|path| path.is_some())
+        .unwrap_or(false)
+}
+
 /// Effective process-container tier, strongest reachable rung first:
 /// BaseContainer → AppContainerBfs → AppContainerDacl. Split from the host
-/// detectors so precedence is testable without a real Windows host or the
-/// `tier2_bfs` feature.
+/// detectors so precedence is testable without a real Windows host, the
+/// `tier2_bfs` feature, or `bfscfg.exe` on disk. BFS requires both the feature
+/// and a resolvable `bfscfg.exe`, matching `detect`'s policy-carrying path.
 #[cfg(target_os = "windows")]
 fn select_tier(
     base_container_usable: bool,
     tier2_bfs_enabled: bool,
+    bfscfg_present: bool,
 ) -> appcontainer_common::fallback_detector::IsolationTier {
     use appcontainer_common::fallback_detector::IsolationTier;
     if base_container_usable {
         IsolationTier::BaseContainer
-    } else if tier2_bfs_enabled {
+    } else if tier2_bfs_enabled && bfscfg_present {
         IsolationTier::AppContainerBfs
     } else {
         IsolationTier::AppContainerDacl
@@ -207,28 +242,32 @@ mod tests {
         }
     }
 
-    /// Every backend literal the probe can emit, across all platforms/features —
-    /// must mirror the per-platform arms of `available_backends`.
-    const EMITTABLE_BACKENDS: [&str; 7] = [
-        "seatbelt",
-        "bubblewrap",
-        "lxc",
-        "processcontainer",
-        "windows_sandbox",
-        "wslc",
-        "isolation_session",
+    /// Every backend the probe can emit, across all platforms/features — derived
+    /// from `ContainmentBackend` (the same source as the `push` calls) so the
+    /// emitted names can't be typo'd, and checked against the `wire::Containment`
+    /// serde names so the two enums can't drift.
+    const EMITTABLE_BACKENDS: [ContainmentBackend; 7] = [
+        ContainmentBackend::Seatbelt,
+        ContainmentBackend::Bubblewrap,
+        ContainmentBackend::Lxc,
+        ContainmentBackend::ProcessContainer,
+        ContainmentBackend::WindowsSandbox,
+        ContainmentBackend::Wslc,
+        ContainmentBackend::IsolationSession,
     ];
 
     /// Complements [`every_reported_backend_is_a_real_wire_name`] (host subset)
-    /// by checking every literal unconditionally, so a typo in an arm this host
-    /// or feature doesn't exercise (e.g. `"wslc"`) still can't drift.
+    /// by checking every emittable backend unconditionally, so a mismatch for a
+    /// backend this host or feature doesn't exercise (e.g. `wslc`) still can't
+    /// drift between `ContainmentBackend::wire_name` and `wire::Containment`.
     #[test]
-    fn all_emittable_backend_literals_are_real_wire_names() {
+    fn all_emittable_backend_names_are_real_wire_names() {
         let known = all_wire_names();
-        for literal in EMITTABLE_BACKENDS {
+        for backend in EMITTABLE_BACKENDS {
             assert!(
-                known.contains(&literal.to_string()),
-                "emittable backend literal {literal:?} is not a Containment wire name"
+                known.contains(&backend.wire_name().to_string()),
+                "emittable backend {backend:?} wire name {:?} is not a Containment wire name",
+                backend.wire_name()
             );
         }
     }
@@ -274,11 +313,29 @@ mod tests {
     #[test]
     fn tier_precedence_prefers_the_strongest_reachable_rung() {
         use appcontainer_common::fallback_detector::IsolationTier;
-        // BaseContainer wins whenever usable, regardless of tier2_bfs.
-        assert_eq!(select_tier(true, false), IsolationTier::BaseContainer);
-        assert_eq!(select_tier(true, true), IsolationTier::BaseContainer);
-        assert_eq!(select_tier(false, true), IsolationTier::AppContainerBfs);
-        assert_eq!(select_tier(false, false), IsolationTier::AppContainerDacl);
+        // BaseContainer wins whenever usable, regardless of tier2_bfs / bfscfg.
+        assert_eq!(
+            select_tier(true, false, false),
+            IsolationTier::BaseContainer
+        );
+        assert_eq!(select_tier(true, true, true), IsolationTier::BaseContainer);
+        // BFS requires BOTH the tier2_bfs feature and a resolvable bfscfg.exe.
+        assert_eq!(
+            select_tier(false, true, true),
+            IsolationTier::AppContainerBfs
+        );
+        assert_eq!(
+            select_tier(false, true, false),
+            IsolationTier::AppContainerDacl
+        );
+        assert_eq!(
+            select_tier(false, false, true),
+            IsolationTier::AppContainerDacl
+        );
+        assert_eq!(
+            select_tier(false, false, false),
+            IsolationTier::AppContainerDacl
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
