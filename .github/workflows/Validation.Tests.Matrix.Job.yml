@@ -48,6 +48,11 @@ jobs:
           name: ${{ matrix.artifact }}
           path: artifacts/bin
 
+      - name: Prepare backend prerequisites
+        if: matrix.command == 'microvm'
+        shell: pwsh
+        run: ./scripts/ci/check-whp.ps1
+
       - name: Prepare Process Container host
         if: matrix.backend == 'process-t3'
         shell: pwsh
@@ -109,37 +114,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          exec > >(tee -a "$RUNNER_TEMP/mxc-ci.log") 2>&1
-          chmod +x artifacts/bin/lxc-exec
-          case '${{ matrix.command }}' in
-            bubblewrap)
-              if ! command -v bwrap >/dev/null 2>&1; then
-                if command -v apt-get >/dev/null 2>&1; then
-                  if ! sudo apt-get update; then
-                    echo "WARNING: apt-get update reported repository errors; continuing with available package indexes." >&2
-                  fi
-                  sudo apt-get install -y --no-install-recommends bubblewrap
-                elif command -v dnf >/dev/null 2>&1; then
-                  sudo dnf install -y bubblewrap
-                elif command -v yum >/dev/null 2>&1; then
-                  sudo yum install -y bubblewrap
-                elif command -v microdnf >/dev/null 2>&1; then
-                  sudo microdnf install -y bubblewrap
-                else
-                  echo "No supported package manager found to install bubblewrap." >&2
-                  exit 1
-                fi
-              fi
-              command -v bwrap
-              if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
-                sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-              fi
-              ;;
-            lxc)
-              command -v lxc-start
-              sudo -n true
-              ;;
-          esac
+          bash scripts/ci/install-linux-backend-prereqs.sh \
+            '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee -a "$RUNNER_TEMP/mxc-ci.log"
 
       - name: Run backend tests
         shell: bash

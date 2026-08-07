@@ -1,5 +1,5 @@
 #!/bin/bash
-# Artifact-only macOS Seatbelt executor tests.
+# THIS SCRIPT IS FOR TESTING CI INFRASTRUCTURE. THIS IS NOT A STABLE TEST SUITE. 
 set -uo pipefail
 
 if [[ $# -ne 1 ]]; then

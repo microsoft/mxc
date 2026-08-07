@@ -22,10 +22,14 @@ release_directory="$repo_root/src/target/release"
 
 case "$backend" in
     microvm)
+        # Keep unwired commands explicit so accidental activation fails loudly.
+        # Future test script: run_microvm_tests.sh
         echo "The MicroVM CI handler is not wired to an artifact-only Linux test entry point yet." >&2
         exit 2
         ;;
     hyperlight)
+        # Keep unwired commands explicit so accidental activation fails loudly.
+        # Future test script: run_hyperlight_tests.sh
         echo "The Hyperlight CI handler is not wired to an existing backend test entry point yet." >&2
         exit 2
         ;;
@@ -49,7 +53,7 @@ case "$backend" in
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"
         test -x "$binary_directory/unix-test-proxy"
-        bash "$script_root/run_seatbelt_all_tests.sh" "$binary_directory"
+        bash "$script_root/TEMP_run_seatbelt_all_tests.sh" "$binary_directory"
         ;;
     *)
         usage

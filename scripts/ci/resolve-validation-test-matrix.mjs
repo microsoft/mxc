@@ -74,9 +74,10 @@ export function validateCatalog(catalog) {
         if (architecture === 'arm64' && ARM64_UNSUPPORTED_BACKENDS.has(backend)) {
           throw new Error(`${backend} cannot be scheduled on arm64 (${platform.id})`);
         }
-        if (!catalog.handlers?.[platform.family]?.[backend]) {
-          throw new Error(`missing ${platform.family} handler entry for ${backend}`);
-        }
+        assertNonEmptyString(
+          catalog.handlers?.[platform.family]?.[backend],
+          `${platform.family} handler entry for ${backend}`
+        );
         backends.add(backend);
       }
     }
@@ -141,10 +142,6 @@ export function expandPlan(catalog, plan) {
         if (!details.backends.includes(backend)) {
           continue;
         }
-        const handler = catalog.handlers[platform.family][backend];
-        if (handler.architectures && !handler.architectures.includes(architecture)) {
-          continue;
-        }
         combinations.push({
           plan,
           os: platform.id,
@@ -156,8 +153,7 @@ export function expandPlan(catalog, plan) {
           pool: details.pool,
           runner: details.runner,
           backend,
-          command: handler.command,
-          handler_status: handler.status
+          command: catalog.handlers[platform.family][backend]
         });
       }
     }
@@ -175,12 +171,11 @@ export function resolvePlan(catalog, plan) {
   const matrices = Object.fromEntries(FAMILIES.map(family => [family, []]));
 
   for (const combination of expandPlan(catalog, plan)) {
-    if (combination.handler_status === 'wired' && combination.command) {
-      // family selects the workflow job and handler_status is validation-only;
-      // neither belongs in the matrix consumed by the runner.
-      const { family, handler_status: _, ...matrixEntry } = combination;
-      matrices[family].push(matrixEntry);
-    }
+    // A trigger entry means "run this". A backend without a test script fails
+    // in the dispatcher, which is an actionable result: write the tests or
+    // remove the backend from the trigger.
+    const { family, ...matrixEntry } = combination;
+    matrices[family].push(matrixEntry);
   }
 
   suppressNonMacArm64(matrices);

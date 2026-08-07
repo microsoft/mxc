@@ -315,58 +315,22 @@
   ],
   "handlers": {
     "windows": {
-      "process-t1": {
-        "command": "process-container",
-        "status": "wired"
-      },
-      "process-t3": {
-        "command": "process-container",
-        "status": "wired"
-      },
-      "isolation-session": {
-        "command": "isolation-session",
-        "status": "wired"
-      },
-      "wslc": {
-        "command": "wslc",
-        "status": "wired",
-        "architectures": [
-          "x64"
-        ]
-      },
-      "windows-sandbox": {
-        "command": "windows-sandbox",
-        "status": "wired"
-      },
-      "microvm": {
-        "command": "microvm",
-        "status": "wired"
-      },
-      "hyperlight": {
-        "status": "placeholder"
-      }
+      "process-t1": "process-container",
+      "process-t3": "process-container",
+      "isolation-session": "isolation-session",
+      "wslc": "wslc",
+      "windows-sandbox": "windows-sandbox",
+      "microvm": "microvm",
+      "hyperlight": "hyperlight"
     },
     "linux": {
-      "bubblewrap": {
-        "command": "bubblewrap",
-        "status": "wired"
-      },
-      "lxc": {
-        "command": "lxc",
-        "status": "wired"
-      },
-      "microvm": {
-        "status": "placeholder"
-      },
-      "hyperlight": {
-        "status": "placeholder"
-      }
+      "bubblewrap": "bubblewrap",
+      "lxc": "lxc",
+      "microvm": "microvm",
+      "hyperlight": "hyperlight"
     },
     "macos": {
-      "seatbelt": {
-        "command": "seatbelt",
-        "status": "wired"
-      }
+      "seatbelt": "seatbelt"
     }
   },
   "triggers": {
@@ -528,7 +492,9 @@
       {
         "os": "windows-25h2",
         "backends": [
-          "process-t3"
+          "process-t3",
+          "microvm",
+          "hyperlight"
         ]
       },
       {
@@ -546,25 +512,30 @@
       {
         "os": "ubuntu-26.04",
         "backends": [
-          "bubblewrap"
+          "bubblewrap",
+          "lxc"
         ]
       },
       {
         "os": "ubuntu-24.04",
         "backends": [
-          "bubblewrap"
+          "bubblewrap",
+          "lxc",
+          "microvm"
         ]
       },
       {
         "os": "rhel-10",
         "backends": [
-          "bubblewrap"
+          "bubblewrap",
+          "lxc"
         ]
       },
       {
         "os": "debian-13",
         "backends": [
-          "bubblewrap"
+          "bubblewrap",
+          "lxc"
         ]
       },
       {
