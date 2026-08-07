@@ -5,31 +5,21 @@
 //! `isWindowsSandboxAvailable()`).
 //!
 //! Detects availability by the presence of `WindowsSandbox.exe`, which Windows
-//! installs only when the `Containers-DisposableClientVM` feature is enabled.
-//!
-//! We deliberately skip the SDK's authoritative DISM query: `dism /online`
-//! requires elevation, and this probe only ever runs unelevated (via `wxc-exec`,
-//! which does not self-elevate), so DISM would always fail through to this same
-//! executable check.
+//! installs only when the `Containers-DisposableClientVM` feature is enabled. We
+//! skip the SDK's DISM query: `dism /online` needs elevation and this probe only
+//! runs unelevated, so it would always fall through to this same exe check.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Whether the Windows Sandbox backend looks available on this host.
-///
-/// True when `WindowsSandbox.exe` is present in the system directory.
 pub fn is_windows_sandbox_available() -> bool {
     system_directory().join("WindowsSandbox.exe").exists()
 }
 
-/// Windows system directory (e.g. `C:\Windows\System32`), resolved via
-/// `GetSystemDirectoryW` and cached.
-///
-/// Must not read `%SystemRoot%`: UAC inherits an unelevated parent's
-/// environment, so an env-derived path would let a standard user plant a fake
-/// `WindowsSandbox.exe` and spoof availability. See `src/host/plm/src/wpr_path.rs`
-/// for the same requirement. The `System32` literal fallback is a compile-time
-/// constant (never env-derived).
+/// Resolved via `GetSystemDirectoryW`, not `%SystemRoot%`: UAC inherits an
+/// unelevated parent's environment, so an env-derived path would let a standard
+/// user plant a fake `WindowsSandbox.exe` and spoof availability (see
+/// `src/host/plm/src/wpr_path.rs`). The literal fallback is not env-derived.
 fn system_directory() -> &'static Path {
     static SYSTEM_DIR: OnceLock<PathBuf> = OnceLock::new();
     SYSTEM_DIR
@@ -48,8 +38,8 @@ fn resolve_system_directory() -> Option<PathBuf> {
     if n == 0 {
         return None;
     }
-    // `n >= buf.len()` means the buffer was too small and `n` is the required
-    // size (including the NUL) — grow and retry once.
+    // `n >= buf.len()`: buffer was too small and `n` is the required size — grow
+    // and retry once.
     if n as usize >= buf.len() {
         buf = vec![0u16; n as usize];
         n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
