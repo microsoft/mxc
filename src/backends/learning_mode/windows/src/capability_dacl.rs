@@ -480,6 +480,9 @@ fn parse_ace(bytes: &[u8], cursor: usize) -> Result<ParsedAce<'_>, DaclDecodeErr
     let declared_ace_size =
         u16::from_le_bytes([bytes[cursor + STANDARD_ACE_SIZE_OFFSET], bytes[cursor + 3]]) as usize;
     let (mask_offset, sid_offset, declared_end) = if declared_ace_size == 0 {
+        if bytes.len() - cursor < LEGACY_ACE_HEADER_SIZE + SID_FIXED_HEADER_SIZE {
+            return Err(DaclDecodeError::TruncatedAce(cursor));
+        }
         (
             cursor + LEGACY_ACE_ACCESS_MASK_OFFSET,
             cursor + LEGACY_ACE_HEADER_SIZE,
@@ -500,11 +503,15 @@ fn parse_ace(bytes: &[u8], cursor: usize) -> Result<ParsedAce<'_>, DaclDecodeErr
         )
     };
     let mask = u32::from_le_bytes(
-        bytes[mask_offset..mask_offset + 4]
+        bytes
+            .get(mask_offset..mask_offset + 4)
+            .ok_or(DaclDecodeError::TruncatedAce(cursor))?
             .try_into()
             .map_err(|_| DaclDecodeError::TruncatedAce(cursor))?,
     );
-    let sub_authorities = bytes[sid_offset + 1] as usize;
+    let sub_authorities = *bytes
+        .get(sid_offset + 1)
+        .ok_or(DaclDecodeError::TruncatedAce(cursor))? as usize;
     let sid_size = SID_FIXED_HEADER_SIZE + SID_SUB_AUTHORITY_SIZE * sub_authorities;
     let sid_end = sid_offset
         .checked_add(sid_size)
@@ -805,6 +812,15 @@ mod tests {
         let (names, error) = walk_aces(&bytes, &index);
         assert_eq!(names, HashSet::from(["internetClient"]));
         assert!(matches!(error, Some(DaclDecodeError::TruncatedAce(_))));
+    }
+
+    #[test]
+    fn truncated_legacy_ace_returns_error_instead_of_panicking() {
+        let bytes = vec![0; STANDARD_ACE_HEADER_SIZE + SID_FIXED_HEADER_SIZE];
+        assert!(matches!(
+            parse_ace(&bytes, 0),
+            Err(DaclDecodeError::TruncatedAce(0))
+        ));
     }
 
     #[test]
