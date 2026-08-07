@@ -4,6 +4,8 @@
 const { execFileSync, spawnSync } = require("child_process");
 const { isAbsolute, resolve } = require("path");
 
+const GIT_MAX_BUFFER = 100 * 1024 * 1024;
+
 function argumentValue(argv, name) {
   const index = argv.indexOf(name);
   if (index < 0) return null;
@@ -27,7 +29,7 @@ function git(repoRoot, args, { trim = true } = {}) {
   const output = execFileSync("git", args, {
     cwd: repoRoot,
     encoding: "utf8",
-    maxBuffer: Infinity,
+    maxBuffer: GIT_MAX_BUFFER,
     stdio: ["ignore", "pipe", "pipe"],
   });
   return trim ? output.trimEnd() : output;
