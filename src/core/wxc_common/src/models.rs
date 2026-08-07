@@ -562,6 +562,33 @@ pub struct ContainerPolicy {
     pub capture_denials: Option<CaptureDenialsConfig>,
 }
 
+/// Do the host lists refine the default egress policy (i.e. require per-host
+/// filtering)? Only the list that can tighten the default matters:
+/// `Block` → allowlist; `Allow` → blocklist. Shared by the config parser and
+/// the WSLc backend so both agree on what "host filtering" means.
+pub fn needs_host_filtering(
+    is_default_block: bool,
+    allowed_hosts: &[String],
+    blocked_hosts: &[String],
+) -> bool {
+    if is_default_block {
+        !allowed_hosts.is_empty()
+    } else {
+        !blocked_hosts.is_empty()
+    }
+}
+
+impl ContainerPolicy {
+    /// True when this policy's host lists require per-host egress filtering.
+    pub fn needs_host_filtering(&self) -> bool {
+        needs_host_filtering(
+            self.default_network_policy == NetworkPolicy::Block,
+            &self.allowed_hosts,
+            &self.blocked_hosts,
+        )
+    }
+}
+
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
 /// The presence of this struct on [`ContainerPolicy::capture_denials`] enables
 /// capture; the runner records the sandboxed process's ungranted access
