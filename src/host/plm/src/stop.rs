@@ -354,10 +354,19 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
 ///
 /// Existing files are canonicalized directly. For a not-yet-created output,
 /// the existing parent is canonicalized before the leaf is reattached, which
-/// still resolves junctions, symlinks, short names, and `.`/`..`. The final
-/// comparison is case-insensitive because Windows paths are case-insensitive.
+/// still resolves junctions, symlinks, short names, and `.`/`..`. Existing
+/// targets are also compared by volume/file ID so hard links cannot bypass the
+/// pre-capture check. The final path comparison is case-insensitive because
+/// Windows paths are case-insensitive.
 fn same_config_target(a: &Path, b: &Path) -> bool {
-    target_comparison_key(a) == target_comparison_key(b)
+    use wxc_common::filesystem_object::{
+        compare_existing_filesystem_objects, ExistingObjectComparison,
+    };
+
+    match compare_existing_filesystem_objects(a, b) {
+        ExistingObjectComparison::Same | ExistingObjectComparison::Unknown => true,
+        ExistingObjectComparison::Different => target_comparison_key(a) == target_comparison_key(b),
+    }
 }
 
 fn target_comparison_key(path: &Path) -> String {
@@ -383,20 +392,21 @@ fn target_comparison_key(path: &Path) -> String {
         .map(|rest| format!(r"\\{rest}"))
         .or_else(|| key.strip_prefix(r"\\?\").map(str::to_string))
         .unwrap_or(key);
-    let key = if is_verbatim {
-        key
-    } else {
-        normalize_nonverbatim_win32_components(&key)
-    };
+    let key = normalize_win32_components(&key, !is_verbatim);
     key.to_ascii_lowercase()
 }
 
-fn normalize_nonverbatim_win32_components(path: &str) -> String {
+fn normalize_win32_components(path: &str, trim_trailing_dots_and_spaces: bool) -> String {
     path.split('\\')
         .map(|component| {
             if component.is_empty() || component.ends_with(':') {
                 component
             } else {
+                let component = if trim_trailing_dots_and_spaces {
+                    component.trim_end_matches([' ', '.'])
+                } else {
+                    component
+                };
                 let default_stream_suffix = "::$DATA";
                 let component = component
                     .get(..component.len().saturating_sub(default_stream_suffix.len()))
@@ -408,7 +418,11 @@ fn normalize_nonverbatim_win32_components(path: &str) -> String {
                             })
                     })
                     .unwrap_or(component);
-                component.trim_end_matches([' ', '.'])
+                if trim_trailing_dots_and_spaces {
+                    component.trim_end_matches([' ', '.'])
+                } else {
+                    component
+                }
             }
         })
         .collect::<Vec<_>>()
@@ -590,6 +604,22 @@ mod tests {
     }
 
     #[test]
+    fn source_config_hard_link_collision_is_rejected_before_capture() {
+        let dir = std::env::temp_dir().join(format!("plm_hard_link_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("config.json");
+        let trace = dir.join("trace.etl");
+        std::fs::write(&source, "{}").unwrap();
+        std::fs::hard_link(&source, &trace).unwrap();
+
+        let error =
+            prepare_config_output_paths(Some(&source), &dir, &trace, &dir.join("denials.json"))
+                .unwrap_err();
+        assert!(error.to_string().contains("source config"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn same_config_target_matches_identical_existing_path() {
         // Two spellings of the same existing file must be detected as
         // the same target so the snapshot-clobber guard fires.
@@ -607,6 +637,18 @@ mod tests {
             !same_config_target(&a, &other),
             "distinct files must not collide"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_matches_existing_hard_links() {
+        let dir = std::env::temp_dir().join(format!("plm_hard_link_key_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.json");
+        let alias = dir.join("alias.json");
+        std::fs::write(&source, "{}").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+        assert!(same_config_target(&source, &alias));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -651,5 +693,34 @@ mod tests {
             &dir.join("denials.json")
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_trailing_characters_after_default_stream() {
+        let dir = std::env::temp_dir().join(format!("plm_stream_trim_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for alias in ["denials.json::$DATA.", "denials.json::$DATA "] {
+            assert!(same_config_target(
+                &dir.join(alias),
+                &dir.join("denials.json")
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_default_stream_for_verbatim_outputs() {
+        assert!(same_config_target(
+            Path::new(r"\\?\C:\captures\denials.json::$DATA"),
+            Path::new(r"\\?\C:\captures\denials.json")
+        ));
+    }
+
+    #[test]
+    fn same_config_target_preserves_trailing_dot_for_verbatim_outputs() {
+        assert!(!same_config_target(
+            Path::new(r"\\?\C:\captures\denials.json."),
+            Path::new(r"\\?\C:\captures\denials.json")
+        ));
     }
 }

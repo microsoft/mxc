@@ -176,6 +176,15 @@ pub fn build_denial_from_access_check(
         .map(|v| v.trim_matches('"').to_string())
         .filter(|name| !name.is_empty())?;
 
+    if resource_type == ResourceType::File {
+        let app_path = find_prop(&parts.props, "AppPath")
+            .or_else(|| find_prop(&parts.props, "ApplicationPath"))
+            .map(|value| value.trim_matches('"'));
+        if app_path.is_some_and(|app_path| is_self_access(&object_name, app_path)) {
+            return None;
+        }
+    }
+
     let access_type = if resource_type == ResourceType::Capability {
         // Capability checks report a mask (often 0x1) that is not a
         // read/write/execute verb, so don't run the file/registry
@@ -200,6 +209,48 @@ pub fn build_denial_from_access_check(
         filetime,
         event_id: parts.event_id,
     })
+}
+
+fn is_self_access(object_name: &str, app_path: &str) -> bool {
+    let object_name = strip_dos_namespace_prefix(object_name);
+    let app_path = strip_dos_namespace_prefix(app_path);
+    match (
+        volume_relative_path(object_name),
+        volume_relative_path(app_path),
+    ) {
+        (Some(object_relative), Some(app_relative)) => {
+            !object_relative.is_empty() && object_relative.eq_ignore_ascii_case(app_relative)
+        }
+        _ => false,
+    }
+}
+
+fn strip_dos_namespace_prefix(path: &str) -> &str {
+    for prefix in [r"\??\", r"\\?\", r"\\.\"] {
+        if let Some(path) = path.strip_prefix(prefix) {
+            return path;
+        }
+    }
+    path
+}
+
+fn volume_relative_path(path: &str) -> Option<&str> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return path.get(2..);
+    }
+
+    const VOLUME_PREFIX: &str = r"\Device\HarddiskVolume";
+    if path
+        .get(..VOLUME_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(VOLUME_PREFIX))
+    {
+        return path
+            .get(VOLUME_PREFIX.len()..)?
+            .find('\\')
+            .and_then(|separator| path.get(VOLUME_PREFIX.len() + separator..));
+    }
+    None
 }
 
 /// Builds a [`RawDenial`] from a `LearningModeViolation` (event 27) payload.
@@ -476,6 +527,39 @@ mod tests {
         );
         let ev = extract_denial(&p, 1, FIXED_FILETIME).unwrap();
         assert_eq!(ev.access_type, AccessType::Write);
+    }
+
+    #[test]
+    fn access_check_drops_workload_self_access() {
+        for app_path in [
+            r#""\Device\HarddiskVolume3\Tools\app.exe""#,
+            r#""C:\Tools\app.exe""#,
+        ] {
+            let p = parts(
+                14,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", r#""\??\C:\Tools\App.EXE""#),
+                    ("AppPath", app_path),
+                    ("AccessMask", "0x1"),
+                ],
+            );
+            assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        }
+    }
+
+    #[test]
+    fn access_check_keeps_same_name_at_different_path() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""C:\app.exe""#),
+                ("AppPath", r#""\Device\HarddiskVolume3\Tools\app.exe""#),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
     }
 
     #[test]
