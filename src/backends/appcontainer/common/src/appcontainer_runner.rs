@@ -63,6 +63,12 @@ pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
 /// by the windows crate.
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 
+/// Bounded grace period for reaping the root process after `kill()`. A
+/// successful `TerminateJobObject` reaps almost immediately; this bound
+/// exists so a still-active process left behind by a genuine termination
+/// failure cannot hang `wait()`/`Drop` forever on an infinite wait.
+const REAP_AFTER_KILL_TIMEOUT_MS: u32 = 5_000;
+
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
 
@@ -1725,20 +1731,24 @@ impl SandboxProcess for AppContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
-        //
-        // A failure here is recorded but never propagated: this is a
-        // best-effort cleanup path whose most common failure is "the job's
-        // processes already exited", and every caller (`wait()`, `Drop`, and
-        // the `SandboxProcess` consumer) relies on it staying infallible.
         if let Err(error) = self.job.terminate(u32::MAX) {
-            if !self.audit_enabled() {
-                return Ok(());
+            // `TerminateJobObject` fails with `ERROR_ACCESS_DENIED` once every
+            // process in the job has already exited -- that's a benign race,
+            // not a genuine termination failure. Recheck before deciding
+            // whether to report a clean teardown or propagate the failure.
+            let already_exited = matches!(self.try_wait(), Ok(Some(_)));
+            if !already_exited {
+                if self.audit_enabled() {
+                    let record = self
+                        .audit(AuditEventName::ProcessKillFailed)
+                        .str("kill_method", KillMethod::TerminateJobObject.as_str())
+                        .i64("error_code", error.code().0 as i64);
+                    self.audit_logger.log_audit_event(&record);
+                }
+                return Err(std::io::Error::other(format!(
+                    "TerminateJobObject failed: {error}"
+                )));
             }
-            let record = self
-                .audit(AuditEventName::ProcessKillFailed)
-                .str("kill_method", KillMethod::TerminateJobObject.as_str())
-                .i64("error_code", error.code().0 as i64);
-            self.audit_logger.log_audit_event(&record);
         } else {
             self.kill_requested = true;
         }
@@ -1797,7 +1807,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // can finish.
         let _ = self.kill();
         unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+            let _ = WaitForSingleObject(self.process.get(), REAP_AFTER_KILL_TIMEOUT_MS);
         }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
@@ -1813,7 +1823,7 @@ impl Drop for AppContainerSandboxProcess {
         // enforcement (or leak as an orphan). `kill()` terminates the job.
         let _ = self.kill();
         unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+            let _ = WaitForSingleObject(self.process.get(), REAP_AFTER_KILL_TIMEOUT_MS);
         }
         self.run_teardown();
     }
