@@ -66,4 +66,24 @@ public class MxcSandboxTests
         Assert.Equal("read", root.GetProperty("ui").GetProperty("clipboard").GetString());
         Assert.True(root.GetProperty("ui").GetProperty("allowWindows").GetBoolean());
     }
+
+    [Fact]
+    public void CaptureDenialsOutput_DeserializesRetainedEtlPath()
+    {
+        const string json = """
+            {
+              "type": "captureDenials",
+              "outputPath": "denials.json",
+              "exitCode": 0,
+              "totalDenials": 1,
+              "deniedResourcesTruncated": false,
+              "etlPath": "capture.etl"
+            }
+            """;
+
+        var output = JsonSerializer.Deserialize<CaptureDenialsOutput>(json);
+
+        Assert.NotNull(output);
+        Assert.Equal("capture.etl", output.EtlPath);
+    }
 }

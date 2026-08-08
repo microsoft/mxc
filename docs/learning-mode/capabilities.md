@@ -219,6 +219,19 @@ The pointer echoes the file's `summary`; the authoritative record is the file
 itself. In-process Rust callers receive the same information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
 C# SDK exposes it through `RunResult.OutputMetadata` and
-`MxcSandboxProcess.OutputMetadata`. The intermediate ETW `.etl` trace is an
-internal, runner-managed temp file that MXC decodes and then deletes — callers
-never see it.
+`MxcSandboxProcess.OutputMetadata`.
+
+By default, the intermediate ETW `.etl` trace is an internal, runner-managed
+temp file that MXC deletes after analysis. Set `captureDenials.retainEtl` to
+`true` to preserve the sealed trace for diagnostics. When retention succeeds,
+the structured pointer and in-process metadata include its absolute
+`etlPath`:
+
+```json
+{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false,"etlPath":"C:\\Users\\runneradmin\\AppData\\Local\\Temp\\mxc_capture_denials_4321_0123456789abcdef0123456789abcdef.etl"}
+```
+
+If analysis fails while retention is enabled, MXC preserves the ETL and
+includes its path in the returned error. ETL traces can contain sensitive
+resource paths and identifiers; callers that retain them are responsible for
+restricting access and deleting them when they are no longer needed.

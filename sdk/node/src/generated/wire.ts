@@ -46,9 +46,13 @@ export interface CaptureDenials {
    */
   mode?: CaptureDenialsMode | null;
   /**
-   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file that is decoded then deleted.)
+   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file.)
    */
   outputPath?: string | null;
+  /**
+   * Keep the sealed ETL trace after analysis and report its path in output metadata. Defaults to `false`, which deletes the trace after analysis. Retained traces can contain sensitive resource paths and identifiers; callers are responsible for securing and deleting them.
+   */
+  retainEtl?: boolean | null;
 }
 
 /**

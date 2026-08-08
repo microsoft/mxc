@@ -579,9 +579,11 @@ pub struct CaptureDenialsConfig {
     /// `denials.<run-id>.json`) so concurrent and sequential captures don't
     /// collide, and reports the actual path on stderr. When `None`, the runner
     /// falls back to a managed per-run temporary file and prints its path on
-    /// stderr. (The intermediate ETL trace is an internal runner temp that is
-    /// decoded then deleted.)
+    /// stderr.
     pub output_path: Option<String>,
+    /// Whether to preserve the sealed ETL trace after analysis. Defaults to
+    /// `false`, which deletes the internal trace.
+    pub retain_etl: bool,
 }
 
 /// How `captureDenials` handles each ungranted access check while recording it.
@@ -836,6 +838,9 @@ pub struct CaptureDenialsOutput {
     pub total_denials: usize,
     /// Whether the emitted denial set was truncated.
     pub denied_resources_truncated: bool,
+    /// Absolute path to the retained ETL trace, when retention was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etl_path: Option<String>,
 }
 
 impl CaptureDenialsOutput {
@@ -891,6 +896,36 @@ mod tests {
             let back: FailurePhase = serde_json::from_str(wire).unwrap();
             assert_eq!(back, variant, "round-trip {wire}");
         }
+    }
+
+    #[test]
+    fn capture_denials_output_omits_unretained_etl_path() {
+        let output = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: "denials.json".to_string(),
+            exit_code: 0,
+            total_denials: 1,
+            denied_resources_truncated: false,
+            etl_path: None,
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+        assert!(value.get("etlPath").is_none());
+    }
+
+    #[test]
+    fn capture_denials_output_serializes_retained_etl_path() {
+        let output = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: "denials.json".to_string(),
+            exit_code: 0,
+            total_denials: 1,
+            denied_resources_truncated: false,
+            etl_path: Some("capture.etl".to_string()),
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["etlPath"], "capture.etl");
     }
 
     #[test]

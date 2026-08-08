@@ -432,13 +432,23 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
                 }
                 response
             }
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
-                exit_code: -1,
-                error_message: format!("script timed out after {}ms", request.script_timeout),
-                output_metadata: child.output_metadata().cloned().map(Box::new),
-                failure_phase: FailurePhase::Timeout,
-                ..Default::default()
-            },
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                let timeout_message =
+                    format!("script timed out after {}ms", request.script_timeout);
+                let detail = e.to_string();
+                let error_message = if detail.starts_with(&timeout_message) {
+                    detail
+                } else {
+                    format!("{timeout_message}; {detail}")
+                };
+                ScriptResponse {
+                    exit_code: -1,
+                    error_message,
+                    output_metadata: child.output_metadata().cloned().map(Box::new),
+                    failure_phase: FailurePhase::Timeout,
+                    ..Default::default()
+                }
+            }
             Err(e) => {
                 let mut response = ScriptResponse::error(&format!("wait failed: {e}"));
                 response.output_metadata = child.output_metadata().cloned().map(Box::new);
