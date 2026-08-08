@@ -9,6 +9,8 @@
  * `processContainer.learningMode: true` to enable deny-and-record learning
  * mode. Learning-mode capability names are reserved and must not be supplied
  * directly in `processContainer.capabilities`.
+ * On Linux, `getPlatformSupport()` reports failures for individual backends
+ * through `PlatformSupport.unavailableReasons`, including when none is usable.
  *
  * @example
  * ```typescript

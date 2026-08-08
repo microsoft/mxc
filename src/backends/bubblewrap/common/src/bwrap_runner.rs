@@ -55,10 +55,15 @@ impl BubblewrapScriptRunner {
     pub fn new() -> Self {
         Self
     }
-}
 
-impl SandboxBackend for BubblewrapScriptRunner {
-    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    fn validate_with_probe<F>(
+        &self,
+        request: &ExecutionRequest,
+        probe: F,
+    ) -> Result<(), ScriptResponse>
+    where
+        F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
+    {
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
@@ -75,11 +80,17 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
-        if let Err(err) = bwrap_version::probe_bwrap() {
+        if let Err(err) = probe() {
             return Err(ScriptResponse::error(&err.to_string()));
         }
 
         Ok(())
+    }
+}
+
+impl SandboxBackend for BubblewrapScriptRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        self.validate_with_probe(request, bwrap_version::probe_bwrap_uncached)
     }
 
     fn spawn(
@@ -90,6 +101,17 @@ impl SandboxBackend for BubblewrapScriptRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         validate_common(request)?;
         self.validate(request)?;
+        self.spawn_after_validation(request, logger, stdio)
+    }
+}
+
+impl BubblewrapScriptRunner {
+    fn spawn_after_validation(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         // Object-based FS-policy normalization (D6): tighten aliases of the same
         // host object to the strictest intent (deny > ro > rw). Done here, close
         // to mount — config_parser stays string-only and the TOCTOU window
@@ -654,7 +676,9 @@ mod tests {
         req.testing_features_enabled = false;
 
         let runner = BubblewrapScriptRunner::new();
-        assert!(runner.validate(&req).is_ok());
+        assert!(runner
+            .validate_with_probe(&req, || Ok(bwrap_version::MIN_BWRAP_VERSION))
+            .is_ok());
     }
 
     #[test]
@@ -665,8 +689,34 @@ mod tests {
         req.script_code = String::new();
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
+        let err = runner
+            .validate_with_probe(&req, || {
+                panic!("environment probe must not run for invalid input")
+            })
+            .unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
+    }
+
+    #[test]
+    fn validate_surfaces_every_environment_probe_failure() {
+        let request = base_request();
+        let failures = [
+            bwrap_version::BwrapUnavailable::NotFound,
+            bwrap_version::BwrapUnavailable::ProbeFailed {
+                status: Some(126),
+                detail: "permission denied".to_string(),
+            },
+            bwrap_version::BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
+            bwrap_version::BwrapUnavailable::TooOld(bwrap_version::BwrapVersion::new(0, 4, 1)),
+        ];
+
+        for failure in failures {
+            let expected = failure.to_string();
+            let error = BubblewrapScriptRunner::new()
+                .validate_with_probe(&request, || Err(failure))
+                .unwrap_err();
+            assert_eq!(error.error_message, expected);
+        }
     }
 
     /// A denied symlink pointing at a **directory** is rewritten to its canonical
