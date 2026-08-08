@@ -119,6 +119,25 @@ process — only possible if the container stayed warm), filesystem volumes, bri
 proxy, validation rejections, and idle teardown. Fixtures live in
 `tests/configs/wslc_state_aware_*.json`.
 
+### Running the fixtures (ordering + id substitution)
+
+The `wslc_state_aware_*.json` fixtures are **stateful** — unlike the one-shot configs, they cannot be
+run individually or in an arbitrary order:
+
+- **Order is mandatory.** A sandbox must go through `provision → start → exec… → stop → deprovision`.
+  `provision` is what boots the session and mints the id; every other phase fails without it
+  (`start`/`exec` before provision → `not_provisioned` / `not_started`, and any phase after
+  `deprovision` → `not_provisioned`).
+- **The id must be threaded through.** `provision` returns the real `wslc:<32-hex>` id on stdout
+  (`result.sandboxId`). The post-provision fixtures (`_start`, `_stop`, `_deprovision`, and every
+  `_exec_*`) ship with a literal **`{{SANDBOX_ID}}` placeholder** that must be replaced with that
+  minted id before the config is passed to `wxc-exec`. Running a post-provision fixture as-is sends
+  the literal placeholder and fails validation.
+
+`run_wslc_state_aware_tests.ps1` handles both concerns automatically (it drives the phases in order
+and does the `{{SANDBOX_ID}}` substitution from each provision's output), which is why the fixtures
+should be exercised **through the harness**, not by pointing `wxc-exec --config` at them directly.
+
 ## Known limitations
 
 - **Serialized exec (deferred).** Because the daemon's single worker thread blocks on
