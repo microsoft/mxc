@@ -1,0 +1,14 @@
+{
+    "phase": "provision",
+    "containment": "wslc",
+    "network": {
+        "defaultPolicy": "allow"
+    },
+    "experimental": {
+        "wslc": {
+            "provision": {
+                "image": "alpine:latest"
+            }
+        }
+    }
+}

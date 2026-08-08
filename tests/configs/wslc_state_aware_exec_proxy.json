@@ -1,0 +1,11 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "network": {
+        "proxy": { "url": "http://127.0.0.1:8888" }
+    },
+    "process": {
+        "commandLine": "sh -c 'echo HTTP_PROXY=[$HTTP_PROXY] https_proxy=[$https_proxy]'",
+        "timeout": 30000
+    }
+}

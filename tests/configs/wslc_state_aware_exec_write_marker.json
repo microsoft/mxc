@@ -1,0 +1,8 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "sh -c 'echo wslc-warm-marker-content > /tmp/wslc_sa_marker; echo wrote'",
+        "timeout": 30000
+    }
+}

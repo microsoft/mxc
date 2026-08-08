@@ -21,7 +21,7 @@
 //! [`DaemonClient::connect`] fast-paths onto a live, ready, protocol-compatible
 //! daemon. Otherwise it takes the cross-process [`TransitionLock`] (so two phase
 //! processes cannot both spawn a daemon), re-checks, spawns
-//! `wxc-wslc-daemon.exe` (detached, co-located with the current executable) if
+//! `wxc-wslc-daemon.exe` (co-located with the current executable) if
 //! none exists, and waits for it to publish a `ready` record.
 //!
 //! Windows-only: the daemon and its named-pipe transport are a Windows feature
@@ -30,6 +30,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -78,6 +79,46 @@ pub struct ExecResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
+
+/// A typed failure from a daemon call. `Daemon` carries the daemon's stable
+/// [`ErrKind`] token so the state-aware backend can map it onto the matching
+/// `MxcError` code (e.g. `NotProvisioned` / `NotStarted`) without string
+/// matching; `Transport` covers connection, framing, and protocol violations,
+/// which map to a generic backend error.
+#[derive(Debug)]
+pub enum DaemonError {
+    /// The daemon returned a structured [`DaemonResponse::Err`].
+    Daemon { kind: ErrKind, message: String },
+    /// A transport / protocol failure (connect, framing, or an unexpected
+    /// reply shape).
+    Transport(anyhow::Error),
+}
+
+impl DaemonError {
+    fn transport(message: impl Into<String>) -> Self {
+        Self::Transport(anyhow::anyhow!(message.into()))
+    }
+}
+
+impl std::fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Daemon { kind, message } => write!(f, "daemon error [{kind:?}]: {message}"),
+            Self::Transport(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for DaemonError {}
+
+impl From<anyhow::Error> for DaemonError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Transport(e)
+    }
+}
+
+/// Convenience alias for the typed daemon-call result.
+pub type DaemonResult<T> = std::result::Result<T, DaemonError>;
 
 /// A connected handle to the live daemon. Cheap to hold: it caches only the
 /// resolved pipe name plus the daemon's trusted identity (PID + creation time
@@ -153,34 +194,39 @@ impl DaemonClient {
     }
 
     /// Liveness probe. Returns `Ok(())` iff the daemon answers with `Pong`.
-    pub fn ping(&self) -> Result<()> {
+    pub fn ping(&self) -> DaemonResult<()> {
         match self.call(&DaemonRequest::Ping)? {
             DaemonResponse::Pong => Ok(()),
-            other => bail!("unexpected reply to ping: {other:?}"),
+            DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
+            other => Err(DaemonError::transport(format!(
+                "unexpected reply to ping: {other:?}"
+            ))),
         }
     }
 
     /// Provision a container; returns the daemon-minted sandbox id.
-    pub fn provision(&self, config: ProvisionConfig) -> Result<String> {
+    pub fn provision(&self, config: ProvisionConfig) -> DaemonResult<String> {
         match self.call(&DaemonRequest::Provision(config))? {
             DaemonResponse::Provisioned { sandbox_id } => Ok(sandbox_id),
-            DaemonResponse::Err { kind, message } => Err(daemon_err(kind, &message)),
-            other => bail!("unexpected reply to provision: {other:?}"),
+            DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
+            other => Err(DaemonError::transport(format!(
+                "unexpected reply to provision: {other:?}"
+            ))),
         }
     }
 
     /// Start a provisioned container.
-    pub fn start(&self, config: StartConfig) -> Result<()> {
+    pub fn start(&self, config: StartConfig) -> DaemonResult<()> {
         expect_ok(self.call(&DaemonRequest::Start(config))?)
     }
 
     /// Stop a running container (keeps it created for a later `start`).
-    pub fn stop(&self, config: StopConfig) -> Result<()> {
+    pub fn stop(&self, config: StopConfig) -> DaemonResult<()> {
         expect_ok(self.call(&DaemonRequest::Stop(config))?)
     }
 
     /// Deprovision (delete) a container.
-    pub fn deprovision(&self, config: DeprovisionConfig) -> Result<()> {
+    pub fn deprovision(&self, config: DeprovisionConfig) -> DaemonResult<()> {
         expect_ok(self.call(&DaemonRequest::Deprovision(config))?)
     }
 
@@ -190,14 +236,20 @@ impl DaemonClient {
     /// After the daemon admits the exec with `Ok`, this reads the
     /// [`StreamFrame`] data phase — accumulating stdout/stderr — until the
     /// terminal [`StreamFrame::Exit`] (or [`StreamFrame::Error`]).
-    pub fn exec(&self, config: ExecConfig) -> Result<ExecResult> {
+    pub fn exec(&self, config: ExecConfig) -> DaemonResult<ExecResult> {
         let mut pipe = self.open_pipe()?;
         write_frame(&mut pipe, &DaemonRequest::Exec(config))?;
 
         match read_frame::<DaemonResponse>(&mut pipe)? {
             DaemonResponse::Ok => {}
-            DaemonResponse::Err { kind, message } => return Err(daemon_err(kind, &message)),
-            other => bail!("unexpected exec admission reply: {other:?}"),
+            DaemonResponse::Err { kind, message } => {
+                return Err(DaemonError::Daemon { kind, message })
+            }
+            other => {
+                return Err(DaemonError::transport(format!(
+                    "unexpected exec admission reply: {other:?}"
+                )))
+            }
         }
 
         let mut result = ExecResult::default();
@@ -209,9 +261,13 @@ impl DaemonClient {
                     result.exit_code = code;
                     return Ok(result);
                 }
-                StreamFrame::Error { message } => bail!("exec failed: {message}"),
+                StreamFrame::Error { message } => {
+                    return Err(DaemonError::transport(format!("exec failed: {message}")))
+                }
                 StreamFrame::Stdin { .. } => {
-                    bail!("protocol error: daemon sent a Stdin frame to the client")
+                    return Err(DaemonError::transport(
+                        "protocol error: daemon sent a Stdin frame to the client",
+                    ))
                 }
             }
         }
@@ -219,10 +275,10 @@ impl DaemonClient {
 
     /// Issue a single non-streaming request on a fresh connection and return the
     /// daemon's reply.
-    fn call(&self, request: &DaemonRequest) -> Result<DaemonResponse> {
+    fn call(&self, request: &DaemonRequest) -> DaemonResult<DaemonResponse> {
         let mut pipe = self.open_pipe()?;
         write_frame(&mut pipe, request)?;
-        read_frame(&mut pipe)
+        Ok(read_frame(&mut pipe)?)
     }
 
     /// Open a fresh synchronous connection to the daemon pipe, retrying past the
@@ -339,28 +395,76 @@ fn ready_daemon() -> Result<Option<DaemonRecord>> {
     }
 }
 
-/// Spawn `wxc-wslc-daemon.exe` (co-located with the current executable) as a
-/// detached background process. It publishes its own discovery record; we do not
-/// hold a handle to it.
+/// Spawn `wxc-wslc-daemon.exe` (co-located with the current executable). It
+/// publishes its own discovery record; we do not hold a handle to it.
+///
+/// The WSLc SDK's session/container creation blocks forever without a console,
+/// so the daemon is given its own new console with a hidden (`SW_HIDE`) window.
+#[cfg(windows)]
 fn spawn_daemon() -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CreateProcessW, CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP, PROCESS_INFORMATION,
+        STARTF_USESHOWWINDOW, STARTUPINFOW,
+    };
+
     let exe = daemon_exe_path()?;
 
-    let mut cmd = Command::new(&exe);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    // Writable, NUL-terminated wide command line (`"<exe>"`); CreateProcessW may
+    // modify the buffer in place, so it must be a mutable local that outlives the
+    // call.
+    let mut command_line: Vec<u16> = std::iter::once(u16::from(b'"'))
+        .chain(exe.as_os_str().encode_wide())
+        .chain([u16::from(b'"'), 0])
+        .collect();
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: the daemon must outlive
-        // this phase process and not share its console.
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    // SW_HIDE == 0: the daemon owns a console but its window is never shown.
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESHOWWINDOW,
+        wShowWindow: 0,
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+
+    // SAFETY: `command_line` is a writable NUL-terminated wide buffer that lives
+    // across the call; `startup`/`info` are valid for its duration. We inherit no
+    // handles (the new console supplies the daemon's stdio).
+    unsafe {
+        CreateProcessW(
+            PCWSTR::null(),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
+            None,
+            PCWSTR::null(),
+            &startup,
+            &mut info,
+        )
+        .with_context(|| format!("spawn wslc daemon {}", exe.display()))?;
+
+        // We never wait on the daemon; release the handles we own so they do not
+        // leak (the daemon keeps running).
+        let _ = CloseHandle(info.hProcess);
+        let _ = CloseHandle(info.hThread);
     }
+    Ok(())
+}
 
-    cmd.spawn()
+/// Non-Windows stub so `wslc_common` still compiles off Windows (the daemon and
+/// its named-pipe transport are Windows-only; this path is never reached).
+#[cfg(not(windows))]
+fn spawn_daemon() -> Result<()> {
+    let exe = daemon_exe_path()?;
+    Command::new(&exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .with_context(|| format!("spawn wslc daemon {}", exe.display()))?;
     Ok(())
 }
@@ -380,18 +484,15 @@ fn daemon_exe_path() -> Result<PathBuf> {
     Ok(dir.join(name))
 }
 
-/// Map a `DaemonResponse` expected to be a bare success into `Result<()>`.
-fn expect_ok(response: DaemonResponse) -> Result<()> {
+/// Map a `DaemonResponse` expected to be a bare success into `DaemonResult<()>`.
+fn expect_ok(response: DaemonResponse) -> DaemonResult<()> {
     match response {
         DaemonResponse::Ok => Ok(()),
-        DaemonResponse::Err { kind, message } => Err(daemon_err(kind, &message)),
-        other => bail!("unexpected reply (expected ok): {other:?}"),
+        DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
+        other => Err(DaemonError::transport(format!(
+            "unexpected reply (expected ok): {other:?}"
+        ))),
     }
-}
-
-/// Build an error carrying the daemon's stable [`ErrKind`] token plus detail.
-fn daemon_err(kind: ErrKind, message: &str) -> anyhow::Error {
-    anyhow::anyhow!("daemon error [{kind:?}]: {message}")
 }
 
 /// Serialise `msg` and write it as one length-prefixed frame.
@@ -445,6 +546,13 @@ mod tests {
             message: "sandbox not started".to_string(),
         })
         .unwrap_err();
+        assert!(matches!(
+            err,
+            DaemonError::Daemon {
+                kind: ErrKind::NotStarted,
+                ..
+            }
+        ));
         assert!(err.to_string().contains("NotStarted"));
         assert!(err.to_string().contains("sandbox not started"));
 
@@ -452,8 +560,11 @@ mod tests {
     }
 
     #[test]
-    fn daemon_err_carries_kind_and_message() {
-        let err = daemon_err(ErrKind::Busy, "single-flight slot held");
+    fn daemon_error_display_carries_kind_and_message() {
+        let err = DaemonError::Daemon {
+            kind: ErrKind::Busy,
+            message: "single-flight slot held".to_string(),
+        };
         let text = err.to_string();
         assert!(text.contains("Busy"));
         assert!(text.contains("single-flight slot held"));

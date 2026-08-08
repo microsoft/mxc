@@ -58,6 +58,35 @@ const IDLE_POLL: Duration = Duration::from_secs(15);
 #[cfg(windows)]
 const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Env override for [`IDLE_TIMEOUT`] (seconds). Lets E2E tests assert
+/// idle-teardown without waiting the 5-minute production default.
+#[cfg(windows)]
+const IDLE_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS";
+
+/// Env override for [`IDLE_POLL`] (seconds).
+#[cfg(windows)]
+const IDLE_POLL_ENV: &str = "MXC_WSLC_DAEMON_IDLE_POLL_SECS";
+
+/// Resolve a `Duration` from an environment variable holding a positive whole
+/// number of seconds, falling back to `default` when the variable is unset,
+/// empty, non-numeric, or zero.
+#[cfg(windows)]
+fn duration_from_env(var: &str, default: Duration) -> Duration {
+    resolve_duration(std::env::var(var).ok().as_deref(), default)
+}
+
+/// Pure core of [`duration_from_env`]: map an optional raw string to a
+/// `Duration`, using `default` unless the string is a positive integer number
+/// of seconds. Split out so the parsing rules are unit-testable without
+/// mutating process-global environment state.
+#[cfg(windows)]
+fn resolve_duration(raw: Option<&str>, default: Duration) -> Duration {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+}
+
 // The daemon owns the WSLc SDK's live session/container handles, which only
 // exist on Windows. The Windows-only dependencies are target-gated in
 // Cargo.toml so non-Windows workspace commands (`cargo build/test --workspace`)
@@ -201,8 +230,12 @@ async fn idle_watchdog(session: session_manager::SessionHandle, signals: DaemonS
     } = signals;
     let mut idle_for = Duration::ZERO;
     let mut last_activity = activity.load(Ordering::SeqCst);
+    // Resolved once at watchdog start so the production defaults hold unless a
+    // test explicitly shortens them via the env overrides.
+    let idle_timeout = duration_from_env(IDLE_TIMEOUT_ENV, IDLE_TIMEOUT);
+    let idle_poll = duration_from_env(IDLE_POLL_ENV, IDLE_POLL);
     loop {
-        tokio::time::sleep(IDLE_POLL).await;
+        tokio::time::sleep(idle_poll).await;
         // Query the count first: it is serialized on the worker, so it cannot
         // observe zero while a provision that will make it non-zero is in flight.
         let count = match session.container_count().await {
@@ -226,8 +259,8 @@ async fn idle_watchdog(session: session_manager::SessionHandle, signals: DaemonS
         last_activity = generation;
 
         if idle {
-            idle_for += IDLE_POLL;
-            if idle_for >= IDLE_TIMEOUT {
+            idle_for += idle_poll;
+            if idle_for >= idle_timeout {
                 // Enter the draining state *before* signalling shutdown so the
                 // accept loop, once it wakes, refuses any client that connected
                 // after this final sample instead of provisioning it into a
@@ -247,6 +280,8 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::Notify;
+
+    use super::resolve_duration;
 
     /// Regression for the lost idle-shutdown wakeup: the watchdog may fire while
     /// the control server is executing a non-`notified()` `select!` branch. With
@@ -299,5 +334,38 @@ mod tests {
             .expect("idle shutdown must leave a retained permit");
 
         session.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn resolve_duration_falls_back_when_absent() {
+        assert_eq!(
+            resolve_duration(None, Duration::from_secs(300)),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn resolve_duration_honours_positive_override() {
+        assert_eq!(
+            resolve_duration(Some("20"), Duration::from_secs(300)),
+            Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn resolve_duration_trims_whitespace() {
+        assert_eq!(
+            resolve_duration(Some("  15  "), Duration::from_secs(300)),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn resolve_duration_rejects_zero_empty_and_nonnumeric() {
+        let default = Duration::from_secs(300);
+        assert_eq!(resolve_duration(Some("0"), default), default);
+        assert_eq!(resolve_duration(Some(""), default), default);
+        assert_eq!(resolve_duration(Some("abc"), default), default);
+        assert_eq!(resolve_duration(Some("-5"), default), default);
     }
 }

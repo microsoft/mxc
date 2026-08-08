@@ -40,6 +40,7 @@ pub fn run_state_aware(
         backend,
         wxc_common::models::ContainmentBackend::WindowsSandbox
             | wxc_common::models::ContainmentBackend::IsolationSession
+            | wxc_common::models::ContainmentBackend::Wslc
     ) && !parsed.request.experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
@@ -56,6 +57,11 @@ pub fn run_state_aware(
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
+        #[cfg(all(target_os = "windows", feature = "wslc"))]
+        wxc_common::models::ContainmentBackend::Wslc => {
+            let mut runner = wslc_common::WslcStateAwareRunner::new();
             wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
         _ => run_state_aware_fallback(parsed, dry_run),
@@ -77,6 +83,15 @@ pub fn exec_state_aware(
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
+            let handle =
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+            Ok(Box::new(
+                wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle),
+            ))
+        }
+        #[cfg(all(target_os = "windows", feature = "wslc"))]
+        wxc_common::models::ContainmentBackend::Wslc => {
+            let mut runner = wslc_common::WslcStateAwareRunner::new();
             let handle =
                 wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
             Ok(Box::new(

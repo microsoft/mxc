@@ -1,0 +1,15 @@
+{
+    "phase": "provision",
+    "containment": "wslc",
+    "network": {
+        "defaultPolicy": "allow",
+        "proxy": { "url": "http://127.0.0.1:8888" }
+    },
+    "experimental": {
+        "wslc": {
+            "provision": {
+                "image": "alpine:latest"
+            }
+        }
+    }
+}

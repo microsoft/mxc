@@ -1,0 +1,9 @@
+{
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "echo MY_SA_VAR=$MY_SA_VAR",
+        "env": ["MY_SA_VAR=state-aware-env-value"],
+        "timeout": 30000
+    }
+}
