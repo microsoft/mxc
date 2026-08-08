@@ -16,8 +16,8 @@ use serde::Deserialize;
 #[cfg(target_os = "windows")]
 pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.exe", "nanvix_rootfs.img", "python3.initrd"];
 
-/// All required NanVix binary filenames (flat, next to lxc-exec) — Linux.
-#[cfg(target_os = "linux")]
+/// All required NanVix binary filenames (flat, next to lxc-exec) — Linux and macOS.
+#[cfg(not(target_os = "windows"))]
 pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.elf", "nanvix_rootfs.img", "python3.initrd"];
 
 /// NanVix daemon binary name (platform-conditional).
@@ -25,7 +25,7 @@ pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.elf", "nanvix_rootfs.img", "py
 pub const NANVIXD_BINARY: &str = "nanvixd.exe";
 
 /// NanVix daemon binary name (platform-conditional).
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "windows"))]
 pub const NANVIXD_BINARY: &str = "nanvixd.elf";
 
 /// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.

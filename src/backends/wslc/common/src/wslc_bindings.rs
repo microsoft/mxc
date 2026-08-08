@@ -243,6 +243,7 @@ impl WslcSdk {
 /// initialized on the calling thread with a *different* apartment model. The
 /// existing initialization is reused and must **not** be balanced by our own
 /// `CoUninitialize`.
+#[cfg(target_os = "windows")]
 const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
 
 /// RAII guard joining the multithreaded apartment on the **current** thread for
@@ -258,6 +259,7 @@ pub(crate) struct ComApartment {
     /// Whether *this* guard performed the initialization it must balance with
     /// `CoUninitialize`. `false` when the thread was already in a different
     /// apartment model (`RPC_E_CHANGED_MODE`), which we reuse but do not own.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     owns_init: bool,
 }
 
@@ -270,6 +272,7 @@ impl ComApartment {
     /// failure to establish *any* apartment — reported as an error rather than
     /// swallowed, since the caller's soundness argument for using the SDK from
     /// this thread depends on the apartment actually existing.
+    #[cfg(target_os = "windows")]
     pub(crate) fn enter() -> Result<Self, String> {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
         // SAFETY: `CoInitializeEx` is always safe to call; the matching
@@ -286,10 +289,18 @@ impl ComApartment {
             ))
         }
     }
+
+    /// Non-Windows targets have no COM, and every WSLC entry point behind this
+    /// guard is unreachable there because `is_available` reports false.
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn enter() -> Result<Self, String> {
+        Ok(Self { owns_init: false })
+    }
 }
 
 impl Drop for ComApartment {
     fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
         if self.owns_init {
             // SAFETY: balances the `CoInitializeEx` in `enter` on the same thread.
             unsafe { windows::Win32::System::Com::CoUninitialize() };

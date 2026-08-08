@@ -1,0 +1,152 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Publishes the mxc-sdk crate closure to crates.io through ESRP Release, under
+# the microsoft-oss-releases account.  Consumes the mxc-crates-package
+# artifact.
+#
+# Emits one EsrpRelease task per crate, leaf-first, since the crates.io API
+# does not enforce dependency order.  A runtime guard asserts crateOrder is an
+# ordered subset of what was packaged.
+#
+# The pool enforces 1ES network isolation (CFSClean), so this job performs no
+# crates.io reads.  A publish that crates.io rejects fails its task and skips
+# every later crate.
+#
+# Resuming a failed release: re-queue with the already-published crates
+# removed from crateOrder.  verify-order accepts that subset only if it is
+# still in packaged leaf-first order.
+
+parameters:
+  - name: ESRPInfo
+    type: object
+  # Leaf-first crate order, a topological sort of the workspace dependency
+  # graph.
+  #
+  # GENERATED.  Do not hand-edit or hand-sort.  Regenerate with:
+  #
+  #   python3 .azure-pipelines/scripts/crates_release.py order
+  #
+  # and paste the output over every line below.
+  #
+  # Static YAML because ${{ each }} expands at compile time.  verify-order
+  # catches a stale copy at run time, before anything is published.
+  #
+  # ADDING A CRATE: add the package name to the CRATES list in
+  # scripts/crates_release.py, then run the command above and paste the result
+  # here.  Both steps are required.
+  #
+  # Drop already-published crates from this list to resume a failed release,
+  # keeping the survivors in their existing relative order.
+  - name: crateOrder
+    type: object
+    default:
+    - isolation_session_bindings
+    - learning_mode_core
+    - mxc_pty
+    - mxc_telemetry
+    - nanvix_common
+    - process_security_environment_spec
+    - sandbox_spec
+    - wxc_common
+    - hyperlight_common
+    - isolation_session_common
+    - learning_mode_windows
+    - lxc_common
+    - nanvix_runner
+    - seatbelt_common
+    - windows_sandbox_common
+    - wslc_common
+    - appcontainer_common
+    - bwrap_common
+    - windows_sandbox_lifecycle
+    - mxc_engine
+    - mxc-sdk
+  - name: cratesArtifactName
+    type: string
+    default: mxc-crates-package
+  # Compile-time backstop.  The stage condition in 1ES.Release.Crates.yml
+  # skips this job on a dry run; this guard means deleting that condition
+  # still cannot publish.
+  - name: dryRun
+    type: boolean
+    default: true
+
+jobs:
+  - job: publish_crates
+    displayName: Publish crates to crates.io (ESRP)
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+    templateContext:
+      type: releaseJob
+      isProduction: true
+      inputs:
+        - input: pipelineArtifact
+          artifactName: ${{ parameters.cratesArtifactName }}
+          targetPath: $(Pipeline.Workspace)/crates
+    variables:
+      cratesDir: $(Pipeline.Workspace)/crates
+      esrpDir: $(Pipeline.Workspace)/esrp-one
+      orderFile: $(Pipeline.Workspace)/crates/release-order.json
+      script: $(Pipeline.Workspace)/crates/crates_release.py
+    steps:
+      # python3 is frequently absent on Windows agents.
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          $exe = $null
+          foreach ($candidate in @('python', 'python3'))
+          {
+            $found = Get-Command $candidate -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found -and (& $found.Source --version) -match 'Python 3')
+            {
+              $exe = $found.Source
+              break
+            }
+          }
+          if (-not $exe) { throw 'No Python 3 interpreter found on PATH (tried python, python3).' }
+          Write-Host "Using Python interpreter: $exe"
+          Write-Host "##vso[task.setvariable variable=pythonExe]$exe"
+        displayName: Resolve Python interpreter
+
+      # A strict subset is allowed, for resuming a failed release.
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          & "$(pythonExe)" "$(script)" verify-order --order-file "$(orderFile)" --expected "$env:EXPECTED_ORDER"
+          if ($LASTEXITCODE -ne 0) { throw "verify-order failed with exit $LASTEXITCODE" }
+        displayName: Verify crate order matches package
+        env:
+          EXPECTED_ORDER: ${{ convertToJson(parameters.crateOrder) }}
+
+      - ${{ each crate in parameters.crateOrder }}:
+          - pwsh: |
+              $ErrorActionPreference = 'Stop'
+              & "$(pythonExe)" "$(script)" stage --order-file "$(orderFile)" --crate "${{ crate }}" --out-dir "$(esrpDir)"
+              if ($LASTEXITCODE -ne 0) { throw "stage ${{ crate }} failed with exit $LASTEXITCODE" }
+            displayName: "Stage ${{ crate }} for ESRP"
+
+          - ${{ if parameters.dryRun }}:
+            - pwsh: |
+                Write-Host "##vso[task.logissue type=warning]DRY RUN: skipping ESRP publish for ${{ crate }} (staged .crate only)."
+              displayName: "DRY RUN: skip publish ${{ crate }}"
+          - ${{ else }}:
+            - task: EsrpRelease@12
+              displayName: "Publish ${{ crate }} to crates.io"
+              inputs:
+                connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+                usemanagedidentity: false
+                keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+                authcertname: ${{ parameters.ESRPInfo.authCertName }}
+                signcertname: ${{ parameters.ESRPInfo.signCertName }}
+                clientid: ${{ parameters.ESRPInfo.clientId }}
+                intent: 'PackageDistribution'
+                contenttype: 'Rust'
+                contentsource: 'Folder'
+                folderlocation: $(esrpDir)
+                owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+                approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+                waitforreleasecompletion: true
+                serviceendpointurl: 'https://api.esrp.microsoft.com'
+                mainpublisher: 'ESRPRELPACMAN'
+                domaintenantid: ${{ parameters.ESRPInfo.tenantId }}

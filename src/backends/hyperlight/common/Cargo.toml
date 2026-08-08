@@ -3,6 +3,8 @@ name = "hyperlight_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Hyperlight micro-VM backend support for the MXC execution engine."
 
 [dependencies]
 wxc_common = { workspace = true }

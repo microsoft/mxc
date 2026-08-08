@@ -12,8 +12,10 @@ by the FlatBuffers compiler (`flatc`).
 
 ## Provenance
 
-The vendored schema originates from the internal Microsoft Windows OS repository
-and is not publicly redistributable. Authoritative provenance — the source
+The vendored schema originates from the internal Microsoft Windows OS repository,
+which is not publicly redistributable. The schema text itself carries an MIT
+header and is committed to this public repository; only the OS tree it was taken
+from is restricted. Authoritative provenance — the source
 pull request, the schema SHA-256, and the exact `flatc` version used — is
 recorded in
 [`external/windows-sdk/ProcessSecurityEnvironment.provenance.toml`](../../../../external/windows-sdk/ProcessSecurityEnvironment.provenance.toml).

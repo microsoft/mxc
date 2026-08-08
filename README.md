@@ -275,6 +275,7 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
 | [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |
+| [docs/crates-release.md](docs/crates-release.md) | Publishing Rust crates to crates.io via ESRP |
 
 ## Contributing
 

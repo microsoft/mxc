@@ -14,11 +14,15 @@
 //! Rust SDK).
 
 pub mod policy_mapping;
+#[cfg(target_os = "windows")]
 pub mod sandbox;
+#[cfg(target_os = "windows")]
 mod stream_buffer;
+#[cfg(target_os = "windows")]
 pub mod wsl_container_runner;
 pub mod wslc_bindings;
 pub mod wslcsdk_sys;
 
+#[cfg(target_os = "windows")]
 pub use wsl_container_runner::WSLContainerRunner;
 pub use wslc_bindings::is_available;

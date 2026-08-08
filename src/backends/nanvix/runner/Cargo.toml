@@ -3,10 +3,12 @@ name = "nanvix_runner"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "NanVix micro-VM runner used by the MXC execution engine."
 
 [dependencies]
 wxc_common = { workspace = true, features = ["microvm"] }
-nanvix_common = { path = "../common" }
+nanvix_common = { path = "../common", version = "0.7.0" }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

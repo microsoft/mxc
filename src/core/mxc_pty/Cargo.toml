@@ -3,6 +3,8 @@ name = "mxc_pty"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Unix pty helpers for MXC sandbox executors."
 
 # Unix-only at runtime: mxc_pty wraps `openpty` + `pre_exec` (TIOCSCTTY,
 # setsid) + sigwait-style helpers, none of which have a sensible Windows

@@ -3,6 +3,8 @@ name = "windows_sandbox_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shared protocol and state types for the MXC Windows Sandbox backend."
 
 [dependencies]
 wxc_common = { workspace = true }

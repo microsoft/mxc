@@ -28,6 +28,10 @@ parameters:
     displayName: Enable debug output for SDK tests
     type: boolean
     default: false
+  - name: packageCrates
+    displayName: Package crates.io release artifacts
+    type: boolean
+    default: false
 
 variables:
   # Variable group managed in Dart — see the pipeline's variable group list.
@@ -50,6 +54,7 @@ extends:
     - template: templates/1ES.Build.Stages.yml@self
       parameters:
         isOfficialBuild: true
+        packageCrates: ${{ parameters.packageCrates }}
         debug: ${{ parameters.debug }}
         ESRPInfo:
           serviceName: $(serviceName)

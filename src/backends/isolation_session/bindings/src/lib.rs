@@ -16,4 +16,5 @@
     dead_code,
     clippy::all
 )]
+#[cfg(target_os = "windows")]
 pub mod bindings;

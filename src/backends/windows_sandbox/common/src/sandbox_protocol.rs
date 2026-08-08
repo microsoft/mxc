@@ -222,12 +222,12 @@ impl DaemonResult {
         let stdout_b64 = if self.stdout.is_empty() {
             EMPTY_BASE64_PLACEHOLDER.to_string()
         } else {
-            wxc_common::string_util::base64_encode(&self.stdout)
+            wxc_common::encoding::base64_encode(&self.stdout)
         };
         let stderr_b64 = if self.stderr.is_empty() {
             EMPTY_BASE64_PLACEHOLDER.to_string()
         } else {
-            wxc_common::string_util::base64_encode(&self.stderr)
+            wxc_common::encoding::base64_encode(&self.stderr)
         };
         format!(
             "RESULT {} {} {} {}\n",
@@ -275,7 +275,7 @@ fn decode_base64_field(field: &str) -> Vec<u8> {
     if field == EMPTY_BASE64_PLACEHOLDER {
         return Vec::new();
     }
-    wxc_common::string_util::base64_decode(field).unwrap_or_default()
+    wxc_common::encoding::base64_decode(field).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

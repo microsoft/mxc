@@ -3,6 +3,8 @@ name = "isolation_session_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Windows IsolationSession backend support for the MXC execution engine."
 
 [dependencies]
 wxc_common = { workspace = true }

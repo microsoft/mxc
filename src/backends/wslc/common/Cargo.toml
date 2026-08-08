@@ -3,6 +3,8 @@ name = "wslc_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Windows Subsystem for Linux container backend support for MXC."
 
 [features]
 default = []
@@ -10,9 +12,11 @@ link-wslcsdk = []
 
 [dependencies]
 wxc_common = { workspace = true }
-windows = { workspace = true }
 tar = "0.4"
 libloading = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

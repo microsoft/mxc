@@ -3,15 +3,21 @@ name = "isolation_session_bindings"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+description = "Windows IsolationSession API bindings used by MXC."
 
-[dependencies]
+# Every dependency here is Windows-only, so the whole set is gated rather than
+# split across an unconditional [dependencies] table.  Leaving them ungated
+# breaks packaging for Linux and macOS: windows-future 0.3.2 references
+# windows_threading::submit and windows_core::imp::IMarshal unconditionally
+# while those sit behind a crate-wide cfg(windows), which is upstream
+# rust-lang/windows-rs#4738.  That fix is unreleased, so gating here is the
+# only available remedy.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
 windows-core = { workspace = true }
 windows-collections = "0.3"
 windows-future = "0.3"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true }
 
 [build-dependencies]
 semver = "1"

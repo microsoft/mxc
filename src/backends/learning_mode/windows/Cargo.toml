@@ -3,6 +3,8 @@ name = "learning_mode_windows"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Windows learning-mode backend for MXC: captures AppInfo-brokered ETW denial traces via processmodel.dll and decodes them into cross-platform records."
 
 [dependencies]
 thiserror = { workspace = true }
@@ -15,4 +17,5 @@ windows-core = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 flatbuffers = { workspace = true }
-process_security_environment_spec = { workspace = true }
+# Path-only so cargo strips it when publishing; the crate is not on crates.io.
+process_security_environment_spec = { path = "../../../core/generated/process_security_environment_specification" }

@@ -3,6 +3,8 @@ name = "lxc_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shared Linux container backend support for MXC sandboxing."
 
 [dependencies]
 wxc_common = { workspace = true }

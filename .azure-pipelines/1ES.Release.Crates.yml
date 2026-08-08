@@ -1,0 +1,137 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# MXC Crates.io Release Pipeline (ESRP)
+#
+# Packages the MXC Rust crate closure and publishes every crate to crates.io
+# through ESRP, leaf-first.
+#
+# The ref the run is queued against supplies both the source and this
+# definition.  Validate_Release_Ref accepts two shapes and fails anything else:
+#
+#   refs/heads/release/*   release branch, e.g. release/v0.8.0
+#   refs/tags/v*           release tag, e.g. v0.8.0
+#
+# Selecting a commit does not work: a commit-queued run reports its containing
+# branch in Build.SourceBranch, not the SHA.
+#
+# Crate versions come from src/Cargo.toml at that ref.
+#
+# Setup, prerequisites, known blockers, and how to resume a failed release:
+# docs/crates-release.md
+
+trigger: none
+pr: none
+
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+parameters:
+  - name: dryRun
+    displayName: 'Dry run — package and check order; publish stage is skipped'
+    type: boolean
+    default: true
+
+variables:
+  - group: MXC-ESRP-Signing
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+    customBuildTags:
+    - ES365AIMigrationTooling
+
+    sdl:
+      sourceAnalysisPool:
+        name: Azure-Pipelines-1ESPT-ExDShared
+        image: windows-latest
+        os: windows
+
+    stages:
+    # Runtime check: Build.SourceBranch is not available to compile-time
+    # ${{ }} expressions.  Every other stage depends on this one.
+    - stage: Validate_Release_Ref
+      displayName: 'Validate Release Ref'
+      dependsOn: []
+      isSkippable: false
+      jobs:
+      - job: validate_release_ref
+        displayName: 'Require a release ref'
+        steps:
+        - checkout: none
+        - pwsh: |
+            $ErrorActionPreference = 'Stop'
+            if ([string]::IsNullOrWhiteSpace($env:OWNERS))
+            {
+              Write-Host "##vso[task.logissue type=error]ESRP owners email resolved empty. The Build.RequestedForEmail predefined variable is set from the identity that queued the run; queue this pipeline as a signed-in user, or set an explicit address in 1ES.Release.Crates.yml and cut a new release ref."
+              exit 1
+            }
+            if ([string]::IsNullOrWhiteSpace($env:APPROVERS))
+            {
+              Write-Host "##vso[task.logissue type=error]ESRP approvers email resolved empty. The Build.RequestedForEmail predefined variable is set from the identity that queued the run; queue this pipeline as a signed-in user, or set an explicit address in 1ES.Release.Crates.yml and cut a new release ref."
+              exit 1
+            }
+            Write-Host "ESRP owner and approver resolved to: $env:OWNERS / $env:APPROVERS"
+          displayName: 'Require ESRP owner and approver'
+          env:
+            OWNERS: $(Build.RequestedForEmail)
+            APPROVERS: $(Build.RequestedForEmail)
+        - pwsh: |
+            $ErrorActionPreference = 'Stop'
+            $ref = $env:SOURCE_REF
+            Write-Host "Run was queued against: $ref"
+            # -clike, not -like: -like is case-insensitive and git refs are not.
+            if ($ref -clike 'refs/heads/release/?*')
+            {
+              Write-Host "OK: releasing from branch $($ref.Substring('refs/heads/'.Length))"
+            }
+            elseif ($ref -clike 'refs/tags/v?*')
+            {
+              Write-Host "OK: releasing from tag $($ref.Substring('refs/tags/'.Length))"
+            }
+            else
+            {
+              Write-Host "##vso[task.logissue type=error]This pipeline may only run from a release branch (refs/heads/release/*) or a release tag (refs/tags/v*). It was queued against '$ref'."
+              Write-Host "Cut a branch such as 'release/v0.8.0' from the commit you are releasing, confirm the release/* ruleset has frozen it, then pick it in the ref selector of the Run pipeline dialog."
+              Write-Host "Note: selecting a COMMIT does not work -- a commit-queued run still reports its containing branch here, not the SHA."
+              exit 1
+            }
+          displayName: 'Require refs/heads/release/* or refs/tags/v*'
+          env:
+            SOURCE_REF: $(Build.SourceBranch)
+
+    # Packages in a normal job, since 1ES forbids checkout in a release job.
+    - stage: Package_Crates_For_Release
+      displayName: 'Package Crates'
+      dependsOn: Validate_Release_Ref
+      jobs:
+      - template: .azure-pipelines/templates/Package.Crates.Job.yml@self
+
+    - stage: Publish_to_CratesIo
+      displayName: 'Publish Crates.io Packages'
+      dependsOn: Package_Crates_For_Release
+      condition: and(succeeded(), ${{ eq(parameters.dryRun, false) }})
+      jobs:
+      - template: .azure-pipelines/templates/Publish.CratesIo.Job.yml@self
+        parameters:
+          ESRPInfo:
+            serviceName: $(serviceName)
+            tenantId: $(tenantId)
+            azureKeyVaultName: $(azureKeyVaultName)
+            authCertName: $(authCertName)
+            signCertName: $(signCertName)
+            clientId: $(clientId)
+            OwnersEmail: $(Build.RequestedForEmail)
+            ApproversEmail: $(Build.RequestedForEmail)
+          # crateOrder lives in Publish.CratesIo.Job.yml, not here.
+          dryRun: ${{ parameters.dryRun }}

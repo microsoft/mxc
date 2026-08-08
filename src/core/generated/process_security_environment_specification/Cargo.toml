@@ -7,7 +7,11 @@ name = "process_security_environment_spec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+# appcontainer_common depends on this crate, so it has to reach crates.io too.
+# The schema carries an MIT header and already ships in this public repository;
+# the restriction noted in README.md is on the internal OS tree it came from.
+publish = true
 description = "Generated FlatBuffers bindings for ProcessSecurityEnvironment"
 
 [dependencies]
