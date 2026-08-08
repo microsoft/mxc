@@ -63,12 +63,6 @@ pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
 /// by the windows crate.
 const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 
-/// Bounded grace period for reaping the root process after `kill()`. A
-/// successful `TerminateJobObject` reaps almost immediately; this bound
-/// exists so a still-active process left behind by a genuine termination
-/// failure cannot hang `wait()`/`Drop` forever on an infinite wait.
-const REAP_AFTER_KILL_TIMEOUT_MS: u32 = 5_000;
-
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
 
@@ -1807,7 +1801,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // can finish.
         let _ = self.kill();
         unsafe {
-            let _ = WaitForSingleObject(self.process.get(), REAP_AFTER_KILL_TIMEOUT_MS);
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
         }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
@@ -1823,7 +1817,7 @@ impl Drop for AppContainerSandboxProcess {
         // enforcement (or leak as an orphan). `kill()` terminates the job.
         let _ = self.kill();
         unsafe {
-            let _ = WaitForSingleObject(self.process.get(), REAP_AFTER_KILL_TIMEOUT_MS);
+            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
         }
         self.run_teardown();
     }
