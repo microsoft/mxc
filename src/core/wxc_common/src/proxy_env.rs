@@ -29,15 +29,25 @@
 //! Functions here operate on `"KEY=VALUE"` strings, so they are
 //! platform-agnostic and unit-testable on every host.
 
+use crate::models::ProxyConfig;
+
 /// Proxy-related env var keys that are *scrubbed* from caller-supplied env so
 /// a sandboxed process cannot override or disable the cooperative proxy.
+///
+/// Both spellings of every family are listed. Matching goes through
+/// [`is_managed_proxy_key`], which is case-insensitive, so the lower-case
+/// entries are redundant for that path; they are kept so a consumer that
+/// iterates or does a case-sensitive `contains` over this slice still sees the
+/// whole set.
 pub const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
+    "FTP_PROXY",
     "http_proxy",
     "https_proxy",
     "all_proxy",
+    "ftp_proxy",
     "NO_PROXY",
     "no_proxy",
 ];
@@ -122,6 +132,34 @@ pub fn apply_cooperative_proxy_env(caller_env: &[String], proxy_url: &str) -> Ve
     }
 
     effective
+}
+
+/// Scrub proxy env vars from `env` in place, then point them at `proxy` when it
+/// carries an address.
+///
+/// This is the LXC entry point. It delegates to [`apply_cooperative_proxy_env`]
+/// so LXC scrubs and sets exactly the same key set as Bubblewrap and WSLc,
+/// rather than maintaining a parallel list that can drift.
+///
+/// `env` uses the `ExecutionRequest::env` representation: `KEY=VALUE` strings.
+/// An entry with no `=` is treated as a bare key, so a valueless `HTTP_PROXY`
+/// is still scrubbed.
+///
+/// Returns whether the caller must force a clean environment. This is always
+/// `true`, including when `env` ends up empty: the return value tells the
+/// caller to emit `--clear-env`, and an empty vector must still stop
+/// `lxc-attach` inheriting the MXC host process environment, which carries
+/// both proxy vars and credentials.
+pub fn apply_proxy_env(env: &mut Vec<String>, proxy: &ProxyConfig) -> bool {
+    if let Some(address) = &proxy.address {
+        *env = apply_cooperative_proxy_env(env, &address.to_url());
+        return true;
+    }
+
+    // With the proxy disabled the vars are still stripped, so a caller cannot
+    // point the sandbox at an egress path the policy never authorized.
+    env.retain(|entry| !is_managed_proxy_key(env_key(entry)));
+    true
 }
 
 #[cfg(test)]
