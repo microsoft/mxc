@@ -16,5 +16,17 @@ if [ ! -f "$LXC_EXEC" ]; then
 fi
 
 echo "Running LXC network test..."
+
+# When the network test fails it is usually the environment (no DHCP lease,
+# dnsmasq not answering, blocked egress) rather than the policy code. Capture
+# the container's own view first so the log distinguishes those cases. This is
+# diagnostic only and never fails the suite.
+if [ "${MXC_LXC_NETWORK_DIAGNOSTICS:-1}" = "1" ]; then
+    echo "--- LXC network diagnostics (container) ---"
+    "$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_network_diagnostics.json" 2>&1 || \
+        echo "(diagnostic container run failed)"
+    echo "--- end diagnostics ---"
+fi
+
 "$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_network_test.json"
 echo "LXC network test complete."

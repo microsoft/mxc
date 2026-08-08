@@ -1,0 +1,19 @@
+{
+  "version": "0.6.0-alpha",
+  "containerId": "CLI-LXC-Network-Diagnostics",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo '--- container interfaces ---'; ip -4 addr show eth0 2>&1 || ifconfig eth0 2>&1; echo '--- container routes ---'; ip route 2>&1; echo '--- container resolv.conf ---'; cat /etc/resolv.conf 2>&1; echo '--- gateway reachability ---'; ping -c 1 -W 3 10.0.3.1 2>&1 || echo 'gateway unreachable'; echo '--- DNS via bridge ---'; nslookup api.github.com 10.0.3.1 2>&1 || echo 'bridge DNS failed'; echo '--- DNS via configured resolver ---'; nslookup api.github.com 2>&1 || echo 'configured resolver failed'; echo '--- direct IP egress (bypasses DNS) ---'; wget -qO- --timeout=5 https://140.82.121.6/zen 2>&1 | head -c 100 || echo 'direct IP fetch failed'",
+    "timeout": 60000
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  }
+}

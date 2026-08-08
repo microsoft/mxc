@@ -492,6 +492,7 @@
       {
         "os": "windows-25h2",
         "backends": [
+          "process-t1",
           "process-t3",
           "microvm"
         ]
@@ -499,56 +500,37 @@
       {
         "os": "windows-24h2",
         "backends": [
-          "process-t3",
           "microvm"
         ]
       },
       {
         "os": "windows-23h2",
         "backends": [
-          "process-t3",
           "microvm"
         ]
       },
       {
         "os": "ubuntu-26.04",
         "backends": [
-          "bubblewrap",
-          "lxc",
-          "hyperlight"
+          "lxc"
         ]
       },
       {
         "os": "ubuntu-24.04",
         "backends": [
-          "bubblewrap",
           "lxc"
         ]
       },
       {
         "os": "rhel-10",
         "backends": [
-          "bubblewrap",
           "lxc"
         ]
       },
       {
         "os": "debian-13",
         "backends": [
-          "bubblewrap",
           "lxc"
-        ]
-      },
-      {
-        "os": "macos-26",
-        "backends": [
-          "seatbelt"
-        ]
-      },
-      {
-        "os": "macos-15",
-        "backends": [
-          "seatbelt"
         ]
       }
     ]

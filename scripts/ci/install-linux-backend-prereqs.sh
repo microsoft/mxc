@@ -120,6 +120,59 @@ start_lxc_bridge() {
     ip addr show "$bridge" || true
 }
 
+# Report the host-side state that container networking depends on. Purely
+# diagnostic: never fails the job, so a networking problem still surfaces as
+# the backend test failure rather than as a prerequisite error.
+report_lxc_network_diagnostics() {
+    local bridge="${LXC_BRIDGE:-lxcbr0}"
+
+    echo "--- LXC network diagnostics (host) ---"
+
+    echo "net.ipv4.ip_forward: $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo unknown)"
+
+    echo "Bridge $bridge:"
+    ip -4 addr show "$bridge" 2>/dev/null | sed 's/^/  /' || echo "  (absent)"
+
+    echo "dnsmasq processes:"
+    pgrep -af dnsmasq 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+
+    echo "NAT rules for the bridge subnet:"
+    sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -E '10\.0\.3|MASQUERADE' |
+        sed 's/^/  /' || echo "  (none found)"
+
+    echo "FORWARD policy and bridge rules:"
+    sudo iptables -S FORWARD 2>/dev/null | grep -E "policy|$bridge" | sed 's/^/  /' ||
+        echo "  (none found)"
+
+    echo "Host /etc/resolv.conf nameservers:"
+    grep '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+
+    echo "lxc-net configuration:"
+    grep -E '^(USE_LXC_BRIDGE|LXC_ADDR|LXC_NETMASK|LXC_DHCP_RANGE|LXC_DHCP_CONFILE)' \
+        /etc/default/lxc-net 2>/dev/null | sed 's/^/  /' || echo "  (no /etc/default/lxc-net)"
+
+    # Prove the host itself can resolve the name the network test uses. If this
+    # fails, the container was never going to succeed.
+    if command -v getent >/dev/null 2>&1; then
+        echo "Host resolution of api.github.com:"
+        getent ahostsv4 api.github.com 2>/dev/null | head -n 2 | sed 's/^/  /' ||
+            echo "  FAILED - the host cannot resolve it either"
+    fi
+
+    # Ask the bridge's own resolver, which is what a container is handed via
+    # DHCP. This isolates "dnsmasq is broken" from "the host is fine".
+    local bridge_ip
+    bridge_ip="$(ip -4 -o addr show "$bridge" 2>/dev/null |
+        awk '{print $4}' | cut -d/ -f1 | head -n 1)"
+    if [[ -n "$bridge_ip" ]] && command -v nslookup >/dev/null 2>&1; then
+        echo "Resolution via bridge resolver ($bridge_ip):"
+        nslookup api.github.com "$bridge_ip" 2>&1 | tail -n 4 | sed 's/^/  /' ||
+            echo "  FAILED - dnsmasq on $bridge is not answering"
+    fi
+
+    echo "--- end diagnostics ---"
+}
+
 chmod +x "$binary_directory/lxc-exec"
 case "$backend" in
     bubblewrap)
@@ -139,6 +192,7 @@ case "$backend" in
             sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
         fi
         start_lxc_bridge
+        report_lxc_network_diagnostics
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do

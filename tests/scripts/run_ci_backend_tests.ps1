@@ -37,7 +37,10 @@ function Assert-File {
 function Invoke-TestScript {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [string[]]$Arguments = @()
+        # Splat a hashtable, not an array. Array splatting binds elements
+        # positionally, so '-BinDir' would be passed as the first positional
+        # value rather than naming the parameter.
+        [hashtable]$Arguments = @{}
     )
 
     # PowerShell scripts do not always replace a previous native exit code.
@@ -111,28 +114,28 @@ switch ($Backend) {
         }
     }
     'isolation-session' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_isolation_session_tests.ps1') -Arguments @(
-            '-WxcExePath', $wxc
-        )
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
+            WxcExePath = $wxc
+        }
     }
     'windows-sandbox' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @(
-            '-BinDir', $binaryDirectoryPath
-        )
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @{
+            BinDir = $binaryDirectoryPath
+        }
     }
     'wslc' {
         # The current WSLC helper hardcodes the x64 target when locating assets.
         if ($Architecture -ne 'x64') {
             throw 'The existing WSLC test harness is not architecture-portable yet.'
         }
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_wslc_all_tests.ps1') -Arguments @(
-            '-WxcExecPath', $wxc
-        )
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
+            WxcExecPath = $wxc
+        }
     }
     'microvm' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_microvm_tests.ps1') -Arguments @(
-            '-BinDir', $binaryDirectoryPath
-        )
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_microvm_tests.ps1') -Arguments @{
+            BinDir = $binaryDirectoryPath
+        }
     }
     'hyperlight' {
         # Keep unwired commands explicit so accidental activation fails loudly.
