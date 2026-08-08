@@ -88,8 +88,11 @@ What this **does not** grant:
 - `FILE_READ_DATA` — irrelevant on a directory, but explicit.
 - any write rights.
 
-Because the ACEs are non-inheriting, descendant files and
-subdirectories of `C:\` are unaffected.
+Because the ACEs are non-inheriting and the write path explicitly
+suppresses automatic inheritance propagation, descendant files and
+subdirectories of `C:\` are unaffected. This also avoids normalizing
+legacy or inheritance-inconsistent ACLs elsewhere on a data volume
+when `--target` selects a non-system drive.
 
 Re-running `prepare-system-drive` is idempotent: when our exact ACE
 is already present, the scan-before-apply path detects the match and
@@ -253,10 +256,11 @@ that captures stdout/stderr itself.
   runtime check still trips if a debug build (no manifest) is
   launched without `Run as Administrator`.
 - The DACL operations for `prepare-system-drive` /
-  `unprepare-system-drive` use the same
-  `GetNamedSecurityInfoW` → `SetEntriesInAclW` →
-  `SetNamedSecurityInfoW` sequence as
-  `wxc_common::filesystem_dacl`. Apply ACEs are *not* tracked by
+  `unprepare-system-drive` read and merge the root DACL using the
+  shared `wxc_common::filesystem_dacl` helpers, then write it with
+  `SetFileSecurityW`. Unlike `SetNamedSecurityInfoW`, this changes
+  only the named drive root and does not impose the current
+  inheritance model on descendants. Apply ACEs are *not* tracked by
   `DaclManager` — the change is intentionally persistent across
   process exit. The precise-revoke path scans the existing DACL
   via `GetAce` to find ACEs matching our exact tuple, then issues
