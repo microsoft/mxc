@@ -472,7 +472,7 @@ what the user should do (upgrade OS, enable feature, change the config).
 MXC's authorization model and the platform-dependent external bounds that can
 constrain what a config relaxes.
 
-### Authorization model: one principal, secure-and-loud defaults
+### Authorization model: one principal, secure defaults and diagnostics
 
 For the agent/SDK consumers MXC is built for, the same principal authors **both**
 the config JSON and the command line. There is no second, more-privileged channel
@@ -493,15 +493,19 @@ Given that precondition, safety rests on three in-repo mechanisms:
    is `block`, `ui.disable` is `true`, clipboard/injection off, etc. (see
    [the schema reference](schema.md) for each field's default). A minimal config
    is a tight sandbox.
-2. **Explicit + loud relaxation.** Fields that open a network, UI, capability,
-   or Seatbelt boundary beyond their secure default are logged at parse time as
-   `SECURITY: boundary relaxed: …`, making them auditable in the diagnostic log.
-   Filesystem path grants and the Seatbelt pty baseline are deliberately out of
-   this audit's scope, being the request's primary purpose rather than a
-   relaxation. One known gap is `network.blockedHosts`: Hyperlight and NanVix
-   currently interpret a non-empty blocklist as allow-all-except even when
-   `network.defaultPolicy=block`, while the generic audit assumes blocklists only
-   subtract connectivity and does not log them. The backend fixes are tracked in
+2. **Diagnostic relaxation audit.** Fields that open a network, UI, capability,
+   or Seatbelt boundary beyond their secure default are recorded at parse time as
+   `SECURITY: boundary relaxed: …`. They are immediately visible with `--debug`
+   or a configured diagnostic log sink, and the default CLIs print the buffer on
+   configuration and infrastructure error paths. A successful default non-debug
+   run does not currently print the buffer, so this audit is not yet loud or
+   externally auditable in that mode. Filesystem path grants and the Seatbelt
+   pty baseline are deliberately out of this audit's scope, being the request's
+   primary purpose rather than a relaxation. One known gap is
+   `network.blockedHosts`: Hyperlight and NanVix currently interpret a non-empty
+   blocklist as allow-all-except even when `network.defaultPolicy=block`, while
+   the generic audit assumes blocklists only subtract connectivity and does not
+   log them. The backend fixes are tracked in
    [#786](https://github.com/microsoft/mxc/issues/786) and
    [#787](https://github.com/microsoft/mxc/issues/787).
 3. **Catastrophic capabilities are removed from shipped builds.** A capability
@@ -513,27 +517,29 @@ Given that precondition, safety rests on three in-repo mechanisms:
 
 ### The outer clamp (optional, platform-asymmetric)
 
-The mechanisms above bound what the *config* requests. An **outer clamp** is a
-separate, optional upper bound enforced *below* the config — an unbypassable
-ceiling a host operator can impose so that even a fully-relaxed config cannot
-exceed it. Whether such a clamp can be made truly unbypassable is
-**platform-asymmetric**, because it depends on an OS primitive MXC does not own:
+The mechanisms above initialize safe defaults, record requested relaxations, and
+reject selected catastrophic capabilities; they do not generally cap what the
+config may request. An **outer clamp** would be a separate, optional upper bound
+enforced *below* the config — a ceiling a host operator can impose so that even a
+fully-relaxed config cannot exceed it. Whether such a clamp can be made truly
+unbypassable is **platform-asymmetric**, because it depends on an OS primitive
+MXC does not own:
 
 | Platform | Clamp mechanism | Unbypassable? | Status |
 |---|---|---|---|
-| Windows — BaseContainer tier | OS sandbox broker enforces the policy inside `Experimental_CreateProcessInSandbox` | Yes — the broker is the kernel-side authority | OS-infra (outside this repo) |
-| Windows — AppContainer fallback tiers (BFS / DACL) | AppContainer + `bfscfg.exe` BFS or host-side DACL ACEs; used when the BaseContainer API is absent | Partial — enforcement is partly host-side, not a single kernel broker | Existing backend behavior: BFS is absent from a stock build and requires the non-default `tier2_bfs` feature plus `bfscfg.exe`; the DACL path is the default stock fallback, enabled unless `fallback.allowDaclMutation=false` |
+| Windows — BaseContainer tier | None separate: the OS broker enforces the caller-authored sandbox spec | No independent ceiling | Current behavior; a fully relaxed config is passed to `Experimental_CreateProcessInSandbox` |
+| Windows — AppContainer fallback tiers (BFS / DACL) | None separate: AppContainer, BFS, and DACL ACEs enforce the caller-authored paths | No independent ceiling | Current behavior; BFS is absent from a stock build and requires the non-default `tier2_bfs` feature plus `bfscfg.exe`, while DACL is the default stock fallback unless `fallback.allowDaclMutation=false` |
 | Linux (LXC) | Host LSM (AppArmor / SELinux) profile + root-owned policy file | Yes, with a host LSM; otherwise advisory | OS-infra / host config |
 | Linux (Bubblewrap) | LSM, or compile-time capability removal | Partial — bwrap is unprivileged by design | OS-infra / build |
 | macOS (Seatbelt) | Root-owned policy file + codesign / SIP | Yes, with SIP + signed binary; otherwise advisory | OS-infra (outside this repo) |
-| All platforms | Root/admin-owned **clamp-policy file** read at the trust boundary, capping the boundary relaxations that the parse-time audit logs | No — a trust-boundary gate, bypassable by a local admin, not a kernel guarantee | Deferred (in-repo candidate) |
+| All platforms | Root/admin-owned **clamp-policy file** read at the trust boundary, capping the boundary relaxations the parser accepts | No — a trust-boundary gate, bypassable by a local admin, not a kernel guarantee | Deferred (in-repo candidate) |
 
-The truly unbypassable rows (broker, LSM, SIP) live in OS infrastructure outside
-this repository and are intentionally **out of scope here**. The one piece that
-*could* live in-repo — a root-owned clamp-policy file the parser enforces as a
-ceiling on relaxations — is a meaningful additional gate but is **not a kernel
-guarantee** (a local admin can edit the file), so it is tracked as a follow-up
-rather than shipped as if it were unbypassable. Catastrophic, un-clampable
+The potential unbypassable clamps above (LSM and SIP) live in OS infrastructure
+outside this repository and are intentionally **out of scope here**. The one
+piece that *could* live in-repo — a root-owned clamp-policy file the parser
+enforces as a ceiling on relaxations — is a meaningful additional gate but is
+**not a kernel guarantee** (a local admin can edit the file), so it is tracked as
+a follow-up rather than shipped as if it were unbypassable. Catastrophic
 capabilities are handled instead by compile-time removal (above), which needs no
 OS primitive.
 
