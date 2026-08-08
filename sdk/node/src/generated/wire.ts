@@ -389,7 +389,7 @@ export interface Seatbelt {
  */
 export interface Telemetry {
   /**
-   * Explicit telemetry override. `true` = force on, `false` = force off, omitted = disabled (default off).
+   * Explicit telemetry opt-in for this invocation. `true` = opt in (still subject to the user's consent and to administrative policy — it can never turn telemetry on for someone who has not consented), `false` = force off, omitted = off.
    */
   enabled?: boolean | null;
   [k: string]: unknown;

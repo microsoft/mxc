@@ -63,7 +63,7 @@ pub struct TelemetryContext<'a> {
     pub correlation_vector: &'a str,
 }
 
-/// Data for an MXC.Execution ETW event.
+/// Data for an Execution ETW event.
 pub struct ExecutionEvent<'a> {
     pub backend: &'a str,
     pub exit_code: i32,
@@ -82,7 +82,7 @@ pub struct ExecutionEvent<'a> {
     pub correlation_vector: &'a str,
 }
 
-/// Log an MXC.Execution ETW event.
+/// Log an Execution ETW event.
 ///
 /// Delegates to the `mxc_telemetry` provider which adds common fields
 /// (Version, Channel, IsDebugging, UTCReplace_AppSessionGuid).
@@ -103,7 +103,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
     test_sink::record_execution(event);
 }
 
-/// Log an MXC.Error ETW event.
+/// Log an Error ETW event.
 ///
 /// To avoid leaking PII (paths, usernames, credentials embedded in error
 /// strings), MXC deliberately does **not** emit the free-form error message.
@@ -134,7 +134,7 @@ pub(super) mod test_sink {
     use std::cell::Cell;
     use std::sync::Mutex;
 
-    /// Owned copy of an `MXC.Execution` record as captured for a test.
+    /// Owned copy of an `Execution` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedExecution {
         pub backend: String,
@@ -146,7 +146,7 @@ pub(super) mod test_sink {
         pub correlation_vector: String,
     }
 
-    /// Owned copy of an `MXC.Error` record as captured for a test.
+    /// Owned copy of an `Error` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedError {
         pub backend: String,
@@ -182,12 +182,12 @@ pub(super) mod test_sink {
         ERRORS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
-    /// Drain and return the captured `MXC.Execution` records.
+    /// Drain and return the captured `Execution` records.
     pub fn take_executions() -> Vec<CapturedExecution> {
         std::mem::take(&mut *EXECUTIONS.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// Drain and return the captured `MXC.Error` records.
+    /// Drain and return the captured `Error` records.
     pub fn take_errors() -> Vec<CapturedError> {
         std::mem::take(&mut *ERRORS.lock().unwrap_or_else(|e| e.into_inner()))
     }

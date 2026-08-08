@@ -383,6 +383,13 @@ getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
 getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
+// Telemetry consent (Windows-only; see Telemetry Consent section below)
+getTelemetryConsent()             → TelemetryConsentState
+queryTelemetryConsent()           → { state, needsPrompt, policy, error? }
+needsTelemetryConsentPrompt()     → boolean
+setTelemetryConsent(granted, source?)
+getTelemetryPolicy()              → TelemetryPolicyState
+
 // Capability types
 UiCapabilitySupport
 
@@ -393,6 +400,89 @@ ErrorCode, MxcError, mxcErrorFromCode(code)
 Full TypeScript definitions ship with the package (`dist/index.d.ts`). All exports are named exports from `@microsoft/mxc-sdk`.
 
 </details>
+
+---
+
+## Telemetry Consent
+
+MXC only ever collects telemetry on Windows, and only after the end user has
+explicitly opted in — a persisted, MXC-owned consent flag gates every
+emission (never a Windows-level setting like Diagnostics & feedback). See
+[`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md)
+for the full design.
+
+The SDK does not ship a consent UI — call these once at first run, and again
+at any later time from your own settings surface:
+
+```typescript
+import { needsTelemetryConsentPrompt, setTelemetryConsent, getTelemetryConsent } from '@microsoft/mxc-sdk';
+
+if (needsTelemetryConsentPrompt()) {
+  // Show your own consent UI, then record the user's choice:
+  setTelemetryConsent(userOptedIn, 'prompt');
+}
+
+// Anywhere later, e.g. a settings toggle:
+const state = getTelemetryConsent(); // 'granted' | 'denied' | 'undetermined' | 'not-applicable'
+setTelemetryConsent(false, 'settings-toggle');
+```
+
+On non-Windows hosts `getTelemetryConsent()` always returns `'not-applicable'`
+and `setTelemetryConsent(...)` always throws — MXC neither collects nor offers
+consent for telemetry off Windows. Both check `process.platform` before doing
+anything else, so `needsTelemetryConsentPrompt()` is guaranteed `false` there;
+you can call it unconditionally without special-casing the platform yourself.
+
+`getTelemetryConsent()` never throws: any failure to reach `wxc-exec` reads
+back as `'undetermined'` (fail-closed — never `'granted'`). If you need to
+tell a genuine "user has not decided yet" apart from a broken install, use
+`queryTelemetryConsent()`, which returns the same state plus a diagnostic
+`error` string when the state was forced by a failure:
+
+```typescript
+const { state, needsPrompt, policy, error } = queryTelemetryConsent();
+if (error) {
+  console.warn(`mxc: could not read telemetry consent: ${error}`);
+}
+```
+
+`needsPrompt` is the same answer `needsTelemetryConsentPrompt()` returns. It
+is decided by the native layer (Rust `ConsentState::needs_prompt`) rather
+than derived in each SDK, so the Node, C#, and Rust SDKs and the
+`wxc-exec --telemetry-consent-status` CLI all agree by construction. If the
+resolved `wxc-exec` is older than this SDK and does not report the field,
+`needsPrompt` fails closed to `false` — MXC never prompts on a guess.
+
+### Administrative policy
+
+An IT administrator can block MXC telemetry device-wide via MXC's own
+Group Policy / MDM setting. `getTelemetryPolicy()` (also the `policy` field
+above) reports the result:
+
+```typescript
+import { getTelemetryPolicy } from '@microsoft/mxc-sdk';
+
+const policy = getTelemetryPolicy();
+// 'unrestricted' | 'allowed' | 'blocked' | 'not-applicable'
+if (policy === 'blocked') {
+  // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+Two things worth designing around:
+
+- The policy is a **ceiling, never a grant**. `'allowed'` does not mean
+  telemetry is on — the user must still consent. Only
+  `consent === 'granted'` *and* a non-blocking policy result in collection.
+- When the policy is `'blocked'`, `needsTelemetryConsentPrompt()` is `false`,
+  because asking for permission an administrator has already refused is a
+  meaningless question. Word any UI as "telemetry is unavailable on this
+  device" rather than blaming the user's own choice.
+
+Like every other consent surface it fails closed: an unreadable or missing
+`policy` field reads back as `'blocked'`. On non-Windows hosts it is always
+`'not-applicable'`. See
+[`docs/telemetry/telemetry-policy.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-policy.md).
 
 ---
 
@@ -409,3 +499,4 @@ Full TypeScript definitions ship with the package (`dist/index.d.ts`). All expor
 ## License
 
 [MIT](https://github.com/microsoft/mxc/blob/main/sdk/node/LICENSE.md). Contributions welcome — see the main [MXC repository](https://github.com/microsoft/mxc).
+

@@ -23,6 +23,11 @@
   <PropertyGroup>
     <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
     <MxcGeneratedBindings>$(MSBuildProjectDirectory)/Native/NativeMethods.g.cs</MxcGeneratedBindings>
+    <!-- Build the native library into the Cargo profile that
+         NativeLibraryResolver prefers for this configuration, so a Release
+         C# build does not silently bind against a stale debug mxc_ffi (which
+         has debug-only behaviour such as the LOCALAPPDATA test override). -->
+    <MxcCargoProfileArg Condition="'$(Configuration)' == 'Release'">--release</MxcCargoProfileArg>
   </PropertyGroup>
 
   <ItemGroup>
@@ -38,10 +43,20 @@
           BeforeTargets="CoreCompile"
           Inputs="$(MxcSrcDir)/ffi/mxc_ffi/src/lib.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/streaming.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/state_aware.rs;$(MxcSrcDir)/ffi/mxc_ffi/build.rs"
           Outputs="$(MxcGeneratedBindings)">
-    <Message Importance="high" Text="mxc: generating C# P/Invoke bindings (cargo build -p mxc_ffi --features dotnetsdk)" />
-    <Exec Command="cargo build -p mxc_ffi --features dotnetsdk" WorkingDirectory="$(MxcSrcDir)" />
+    <Message Importance="high" Text="mxc: generating C# P/Invoke bindings (cargo build -p mxc_ffi --features dotnetsdk $(MxcCargoProfileArg))" />
+    <Exec Command="cargo build -p mxc_ffi --features dotnetsdk $(MxcCargoProfileArg)" WorkingDirectory="$(MxcSrcDir)" />
     <Error Condition="!Exists('$(MxcGeneratedBindings)')"
            Text="Binding generation did not produce $(MxcGeneratedBindings). Ensure the Rust toolchain (cargo) is installed and on PATH." />
+  </Target>
+
+  <!-- The generated bindings are profile-independent, so the incremental
+       Inputs/Outputs check above will skip the target when only the
+       Configuration changed. Ensure the matching native library actually
+       exists for this configuration. -->
+  <Target Name="EnsureNativeLibraryForConfiguration"
+          AfterTargets="GenerateNativeBindings"
+          Condition="'$(Configuration)' == 'Release'">
+    <Exec Command="cargo build -p mxc_ffi --features dotnetsdk --release" WorkingDirectory="$(MxcSrcDir)" />
   </Target>
 
   <!-- Native mxc_ffi library for the host platform, staged into runtimes/<rid>/native
@@ -53,6 +68,10 @@
        NativeLibraryResolver from the Cargo target dir. -->
   <ItemGroup>
     <None Include="runtimes/**/*" Pack="true" PackagePath="runtimes/" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Microsoft.Mxc.Sdk.Tests" />
   </ItemGroup>
 
 </Project>

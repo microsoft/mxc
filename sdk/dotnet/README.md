@@ -1,6 +1,6 @@
 # Microsoft.Mxc.Sdk (C# SDK)
 
-A .NET binding for [MXC](../README.md) (Microsoft eXecution Container),
+A .NET binding for [MXC](../../README.md) (Microsoft eXecution Container),
 implemented in C#. It runs a command inside a sandbox described by a
 `SandboxPolicy`, capturing the output — by P/Invoking the native `mxc_ffi`
 library, which wraps the Rust engine.
@@ -78,6 +78,70 @@ process to release native resources (killing the child if still running).
 After a terminal wait, `MxcSandboxProcess.OutputMetadata` exposes the same
 structured feature outputs as `RunResult.OutputMetadata`.
 
+## Telemetry consent
+
+MXC only ever collects telemetry on Windows, and only after the end user has
+explicitly opted in — a persisted, MXC-owned consent flag gates every
+emission (never a Windows-level setting like Diagnostics & feedback). See
+[`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
+for the full design.
+
+`MxcTelemetry` is UI-agnostic: call it once at first run, and again at any
+later time from your own settings surface.
+
+```csharp
+using Microsoft.Mxc.Sdk;
+
+if (MxcTelemetry.NeedsConsentPrompt())
+{
+    // Show your own consent UI, then record the user's choice:
+    MxcTelemetry.SetConsent(userOptedIn, "prompt");
+}
+
+// Anywhere later, e.g. a settings toggle:
+var state = MxcTelemetry.GetConsent();
+MxcTelemetry.SetConsent(false, "settings-ui");
+```
+
+On non-Windows hosts `NeedsConsentPrompt()` always returns `false`, `GetConsent()` always returns
+`TelemetryConsentState.NotApplicable` and `SetConsent(...)` always throws
+`MxcException` with `Code == ErrorCode.ConsentWriteFailed` — MXC neither
+collects nor offers consent for telemetry off Windows. Both check
+`OperatingSystem.IsWindows()` before touching the native library, so the
+guarantee holds even when `mxc_ffi` is missing entirely.
+
+### Administrative policy
+
+An IT administrator can block MXC telemetry device-wide via MXC's own
+Group Policy / MDM setting. `MxcTelemetry.GetPolicy()` reports the result:
+
+```csharp
+if (MxcTelemetry.GetPolicy() == TelemetryPolicyState.Blocked)
+{
+    // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+Two things worth designing around:
+
+- The policy is a **ceiling, never a grant**. `Allowed` does not mean
+  telemetry is on — the user must still consent. Only
+  `TelemetryConsentState.Granted` *and* a non-blocking policy result in
+  collection.
+- When the policy is `Blocked`, `NeedsConsentPrompt()` returns `false`,
+  because asking for permission an administrator has already refused is a
+  meaningless question. Word any UI as "telemetry is unavailable on this
+  device" rather than blaming the user's own choice.
+
+It never throws and fails closed: if the native library cannot be loaded, it
+returns `Blocked`. On non-Windows hosts it is always `NotApplicable`. See
+[`docs/telemetry/telemetry-policy.md`](../../docs/telemetry/telemetry-policy.md).
+
+`GetConsent()` never throws for a missing, mismatched, or outdated native
+library: those fail closed to `TelemetryConsentState.Undetermined` (never
+`Granted`). Only a genuine failure reported by the native layer surfaces as
+`MxcException`.
+
 ## Projects
 
 - **`Microsoft.Mxc.Sdk`** — the class library (public API + generated P/Invoke).
@@ -85,6 +149,11 @@ structured feature outputs as `RunResult.OutputMetadata`.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit tests (`dotnet test`).
 
 Build/test everything: `dotnet test sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
+
+Run the tests in the **Debug** configuration. The telemetry-consent tests
+redirect the consent store via `MXC_TEST_LOCALAPPDATA_OVERRIDE`, which the
+native library compiles out in release builds; under `dotnet test -c Release`
+they fail loudly rather than touch the real per-user consent file.
 
 ## Native library loading
 
@@ -165,3 +234,4 @@ than linking third-party code directly against `mxc_ffi`.
   `scripts/check-dotnet-errorcode-parity.js` enforces that.
 - The C# package version tracks the Rust workspace version;
   `scripts/check-version-sync.js` enforces that.
+

@@ -34,6 +34,10 @@ const REQUIRED_ENTRY_POINTS = [
   "mxc_run_result_free",
   "mxc_string_free",
   "mxc_version",
+  "mxc_telemetry_get_consent",
+  "mxc_telemetry_set_consent",
+  "mxc_telemetry_needs_consent_prompt",
+  "mxc_telemetry_get_policy",
 ];
 
 // Remove any stale copy so we prove codegen actually (re)produces it.

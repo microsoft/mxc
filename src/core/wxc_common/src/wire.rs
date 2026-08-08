@@ -470,8 +470,10 @@ pub struct Experimental {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Telemetry {
-    /// Explicit telemetry override. `true` = force on, `false` = force off,
-    /// omitted = disabled (default off).
+    /// Explicit telemetry opt-in for this invocation. `true` = opt in (still
+    /// subject to the user's consent and to administrative policy — it can
+    /// never turn telemetry on for someone who has not consented), `false` =
+    /// force off, omitted = off.
     pub enabled: Option<bool>,
 }
 

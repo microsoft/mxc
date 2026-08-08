@@ -130,7 +130,7 @@ mod provider {
         }
     }
 
-    /// Emit an `MXC.Execution` ETW event.
+    /// Emit an `Execution` ETW event.
     ///
     /// `phase` is the state-aware lifecycle phase that produced this event —
     /// one of `provision|start|exec|stop|deprovision`. It is empty for one-shot
@@ -165,10 +165,10 @@ mod provider {
 
         tracelogging::write_event!(
             MXC_PROVIDER,
-            "MXC.Execution",
+            "Execution",
             // Informational: every completion (success or failure) is a routine
             // "what happened" record, not a fault. Severity is reserved for
-            // MXC.Error (Warning) and any future provider malfunction.
+            // Error (Warning) and any future provider malfunction.
             level(Informational),
             keyword(MICROSOFT_KEYWORD_MEASURES),
             u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
@@ -195,7 +195,7 @@ mod provider {
         );
     }
 
-    /// Emit an `MXC.Error` ETW event.
+    /// Emit an `Error` ETW event.
     ///
     /// By design this event carries **no free-form error text** — only the
     /// bounded `error_type` category and the process `exit_code`. This keeps
@@ -223,7 +223,7 @@ mod provider {
 
         tracelogging::write_event!(
             MXC_PROVIDER,
-            "MXC.Error",
+            "Error",
             // Warning, not Error/Critical: this reports an expected operational
             // failure of a *sandboxed run* (e.g. the user's script failed, a
             // backend was unavailable, a missing/rejected config) — not a
@@ -245,7 +245,7 @@ mod provider {
             // State-aware lifecycle phase (provision|start|exec|stop|
             // deprovision); empty for one-shot executions.
             str8("mxc.phase", phase),
-            // MS-CV under `__TlgCV__` (see MXC.Execution); empty for one-shot.
+            // MS-CV under `__TlgCV__` (see Execution); empty for one-shot.
             str8("__TlgCV__", correlation_vector),
         );
     }

@@ -11,8 +11,11 @@
 //!
 //! On non-Windows platforms, all telemetry functions are no-ops.
 
+pub mod consent;
+pub mod consent_cli;
 pub mod correlation_vector;
 pub mod events;
+pub mod policy;
 
 use std::time::Duration;
 
@@ -24,7 +27,9 @@ use crate::models::{ContainmentBackend, FailurePhase, ScriptResponse, TelemetryC
 use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
+pub use consent::ConsentState;
 pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
+pub use policy::PolicyState;
 
 /// Conventional process exit code for a Rust panic/abort. Used as the reported
 /// `exit_code` on crash telemetry, since the panicking process has not (and
@@ -75,7 +80,7 @@ static PROCESS_CORRELATION_VECTOR: Mutex<Option<String>> = Mutex::new(None);
 /// process. The best-effort out-of-band paths (panic hook, cancellation
 /// handler) can race the main thread's normal completion emit; this guard makes
 /// emission exactly-once so a single dispatch never yields duplicate
-/// `MXC.Execution` records.
+/// `Execution` records.
 static HAS_EMITTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
@@ -140,14 +145,41 @@ pub fn version() -> &'static str {
 
 /// Resolve whether telemetry is enabled for this invocation.
 ///
-/// Resolution:
-/// - `experimental.telemetry.enabled` in JSON config — explicit override.
-/// - Default: off (telemetry requires explicit opt-in).
+/// Resolution order (see `docs/telemetry/telemetry-consent-design.md`):
+/// 1. Persisted, per-user consent ([`consent::get_consent`]) is the gate.
+///    Without [`consent::ConsentState::Granted`], telemetry never activates
+///    — this is `NotApplicable` by construction on every non-Windows
+///    platform, so telemetry can never activate there either.
+/// 2. Administrative policy ([`policy::get_policy`]) is a *ceiling*: an
+///    administrator can deny telemetry machine-wide via MDM/Intune or Group
+///    Policy, and that denial overrides an existing user grant. It is never a
+///    grant in the other direction — no policy value can enable telemetry for
+///    a user who has not consented.
+/// 3. `experimental.telemetry.enabled` in the JSON config is an explicit
+///    per-invocation opt-in that can only ever subtract further: telemetry
+///    requires `Some(true)`, an explicit `Some(false)` always forces it off
+///    (useful for CI, support repros, or policy), and omitting the field
+///    leaves it off. `Some(true)` can never *bypass* consent — a config
+///    author cannot turn telemetry on for someone who hasn't agreed to it.
 ///
-/// Note: Consent is the SDK consumer's responsibility. MXC does not implement
-/// consent prompts or persistent consent storage.
+/// Every term is a conjunct, and each one alone can only ever subtract. MXC
+/// owns consent end-to-end (persistence, and the CLI/SDK toggle surfaces); it
+/// does not merely trust a per-request flag from the caller.
+///
+/// This function is *necessary but not sufficient*: telemetry is still an
+/// experimental feature, so the executors only reach [`init`] at all when
+/// `--experimental` was passed **and** the request carries an
+/// `experimental.telemetry` block. A consenting user who omits that block — or
+/// who supplies the block without `enabled: true` — gets no telemetry; the
+/// gates compose, and every one of them can only subtract.
 pub fn is_enabled(config: &TelemetryConfig) -> bool {
-    config.enabled.unwrap_or(false)
+    // Fail closed: only an explicit `true` opts in. `None` is not "no
+    // opinion" — an author who omits the field gets no telemetry, which is
+    // what the published schema promises.
+    if config.enabled != Some(true) {
+        return false;
+    }
+    policy::get_policy().allows_collection() && consent::get_consent().allows_collection()
 }
 
 /// Initialize the TraceLogging ETW provider.
@@ -200,8 +232,8 @@ fn classify_failure(phase: &FailurePhase) -> FailureReason {
 /// down. No-op when `active` is `false`.
 ///
 /// This is the single shared emit path for the `wxc` and `lxc` executors:
-/// it records an `MXC.Execution` event and, for failures that carry an error
-/// message, an `MXC.Error` event (category + exit code only — never the
+/// it records an `Execution` event and, for failures that carry an error
+/// message, an `Error` event (category + exit code only — never the
 /// message text), then calls [`shutdown`].
 pub fn emit_completion(
     active: bool,
@@ -258,8 +290,8 @@ pub fn emit_completion(
 ///
 /// One-shot executors validate configuration and select a backend before
 /// running; failures there call `process::exit` directly and would otherwise
-/// bypass [`emit_completion`] entirely. This records an `MXC.Execution` event
-/// (exit code 1, `failure` outcome) plus an `MXC.Error` event carrying the
+/// bypass [`emit_completion`] entirely. This records an `Execution` event
+/// (exit code 1, `failure` outcome) plus an `Error` event carrying the
 /// bounded `reason` category and exit code, so config/policy/init failures are
 /// observable. `duration_ms` is reported as `0` because no execution occurred.
 pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
@@ -411,7 +443,7 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Build the `MXC.Execution` event for an out-of-band crash/cancellation. Pure
+/// Build the `Execution` event for an out-of-band crash/cancellation. Pure
 /// (no ETW I/O) so the exit-code/reason/attribution mapping can be unit-tested.
 fn crash_event<'a>(
     ctx: TelemetryContext<'a>,
@@ -430,7 +462,7 @@ fn crash_event<'a>(
 }
 
 /// The pair of events an out-of-band crash/cancellation emits: one failure
-/// `MXC.Execution` and one `MXC.Error`, both attributed to the same backend,
+/// `Execution` and one `Error`, both attributed to the same backend,
 /// phase, exit code, and reason.
 struct CrashTelemetry<'a> {
     execution: ExecutionEvent<'a>,
@@ -468,7 +500,7 @@ fn emit_crash(ctx: TelemetryContext<'_>, exit_code: i32, reason: FailureReason) 
 ///
 /// Guarded by [`mxc_telemetry::is_active`], so it is a cheap no-op when
 /// telemetry is disabled or the provider is already shut down. It records a
-/// failure `MXC.Execution` and an `MXC.Error` categorised as
+/// failure `Execution` and an `Error` categorised as
 /// [`FailureReason::InternalError`], attributed to the process backend stashed
 /// by [`set_process_context`] and the phase stashed by [`set_process_phase`].
 ///
@@ -497,7 +529,7 @@ pub fn emit_panic() {
 ///
 /// Guarded by [`mxc_telemetry::is_active`], so it is a cheap no-op when
 /// telemetry is disabled or already shut down. It records a failure
-/// `MXC.Execution` and an `MXC.Error` categorised as [`FailureReason::Cancelled`],
+/// `Execution` and an `Error` categorised as [`FailureReason::Cancelled`],
 /// attributed to the process backend stashed by [`set_process_context`] and the
 /// phase stashed by [`set_process_phase`].
 ///
@@ -541,7 +573,7 @@ fn classify_mxc_error(err: &MxcError) -> FailureReason {
 }
 
 /// The telemetry a completed state-aware dispatch should emit: one
-/// `MXC.Execution`, plus an optional `MXC.Error` category when the dispatch was
+/// `Execution`, plus an optional `Error` category when the dispatch was
 /// an MXC infrastructure failure. Pure (no ETW I/O) so the outcome→event mapping
 /// can be unit-tested deterministically without an active provider.
 struct StateAwareEvents<'a> {
@@ -579,7 +611,7 @@ fn plan_state_aware<'a>(
                     duration_ms,
                     // A non-zero guest exit is a faithfully propagated sandbox
                     // exit code, not an MXC infrastructure error — leave the
-                    // reason unset and emit no MXC.Error (mirrors one-shot
+                    // reason unset and emit no Error (mirrors one-shot
                     // emit_completion).
                     failure_reason: None,
                     phase: ctx.phase,
@@ -618,10 +650,10 @@ fn plan_state_aware<'a>(
 /// This is the state-aware counterpart to [`emit_completion`]. Outcome mapping:
 /// - [`DispatchOutcome::Envelope`] (non-exec phases and exec dry-run) — success,
 ///   exit code 0.
-/// - [`DispatchOutcome::ExecCompleted`] — mirrors one-shot: an `MXC.Execution`
+/// - [`DispatchOutcome::ExecCompleted`] — mirrors one-shot: an `Execution`
 ///   with the sandbox exit code. A clean non-zero *sandbox* exit is not an MXC
-///   failure, so no `MXC.Error` is emitted.
-/// - `Err(MxcError)` — an `MXC.Execution` failure plus an `MXC.Error` carrying
+///   failure, so no `Error` is emitted.
+/// - `Err(MxcError)` — an `Execution` failure plus an `Error` carrying
 ///   the [`classify_mxc_error`] category.
 ///
 /// Terminal path (`run_state_aware_main` exits immediately after), so it calls
@@ -651,7 +683,54 @@ pub fn emit_state_aware(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::consent::test_support::LocalAppDataGuard;
+    use super::policy::test_support::PolicyKeyGuard;
+
+    /// A fully isolated telemetry environment: both the administrative policy
+    /// key and the user consent store are redirected to throwaway, per-test
+    /// locations.
+    ///
+    /// This is the **only** supported way to hold both guards at once. They
+    /// protect separate process-global mutexes, so acquiring them in
+    /// inconsistent orders across tests would deadlock under `cargo test`'s
+    /// multithreaded runner. Constructing them here — policy first, then
+    /// consent — is what establishes the total order that makes the pair
+    /// deadlock-free, and a caller cannot get it wrong because a caller never
+    /// sees the individual acquisitions.
+    ///
+    /// Every test that reaches [`super::is_enabled`],
+    /// [`super::consent::needs_consent_prompt`], or [`super::policy::get_policy`]
+    /// must hold this — *including* tests that only care about consent.
+    /// Otherwise they read the real machine policy and fail on an
+    /// administratively managed device.
+    pub(crate) struct TelemetryTestEnv {
+        // Fields drop in declaration order, so consent is released before
+        // policy: the exact reverse of the acquisition order below.
+        _consent: LocalAppDataGuard,
+        policy: PolicyKeyGuard,
+    }
+
+    impl TelemetryTestEnv {
+        /// Redirects the consent store to `store` and the policy key to a
+        /// fresh, empty one (i.e. an unmanaged machine).
+        pub(crate) fn new(store: &std::path::Path) -> Self {
+            let policy = PolicyKeyGuard::new();
+            let _consent = LocalAppDataGuard::set(store);
+            Self { _consent, policy }
+        }
+
+        /// Sets the administrative `AllowTelemetry` policy value.
+        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+        pub(crate) fn set_policy_value(&self, value: u32) {
+            self.policy.set_value(value);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::TelemetryTestEnv;
     use super::*;
 
     /// Serializes tests that touch the process-global emit slot / context
@@ -661,15 +740,114 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn is_enabled_explicit_true() {
+    fn is_enabled_explicit_true_alone_does_not_bypass_consent() {
+        // Consent isolated to a fresh, empty store (Undetermined) — an
+        // explicit `enabled: true` in the config must not be able to turn
+        // telemetry on for someone who has not granted consent.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
         let config = TelemetryConfig {
             enabled: Some(true),
         };
-        assert!(is_enabled(&config));
+        assert!(!is_enabled(&config));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_true_when_consent_granted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
+        consent::set_consent(true, "cli").unwrap();
+        // An explicit opt-in is required in addition to consent.
+        assert!(is_enabled(&TelemetryConfig {
+            enabled: Some(true)
+        }));
+    }
+
+    /// An administrative denial overrides an explicit user grant. This is the
+    /// MDM/Intune ceiling: policy can only ever subtract.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_false_when_policy_blocks_despite_consent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = TelemetryTestEnv::new(tmp.path());
+        consent::set_consent(true, "cli").unwrap();
+        env.set_policy_value(0);
+
+        assert!(!is_enabled(&TelemetryConfig {
+            enabled: Some(true)
+        }));
+    }
+
+    /// The converse, and the load-bearing privacy invariant: a permissive
+    /// administrative policy is *not* consent. An admin who allows telemetry
+    /// has not decided on the user's behalf.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_false_when_policy_allows_but_consent_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = TelemetryTestEnv::new(tmp.path());
+        env.set_policy_value(3);
+
+        assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
+        assert!(!is_enabled(&TelemetryConfig {
+            enabled: Some(true)
+        }));
+    }
+
+    /// Explicit user denial must beat every policy state — including a
+    /// permissive one. Completes the consent × policy matrix.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_false_when_consent_denied_under_every_policy() {
+        for policy_value in [None, Some(0u32), Some(1), Some(3)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = TelemetryTestEnv::new(tmp.path());
+            consent::set_consent(false, "cli").unwrap();
+            if let Some(value) = policy_value {
+                env.set_policy_value(value);
+            }
+
+            assert!(
+                !is_enabled(&TelemetryConfig {
+                    enabled: Some(true)
+                }),
+                "denied consent must win over explicit enable under policy {policy_value:?}"
+            );
+        }
+    }
+
+    /// The policy is a ceiling, never a grant: no policy value may enable
+    /// telemetry for a user who has never recorded a decision. `Denied` is
+    /// covered above; this covers the fresh-machine `Undetermined` case, which
+    /// is the one a permissive policy could plausibly be mistaken for a grant.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_false_when_consent_undetermined_under_every_policy() {
+        for policy_value in [None, Some(0u32), Some(1), Some(3)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = TelemetryTestEnv::new(tmp.path());
+            if let Some(value) = policy_value {
+                env.set_policy_value(value);
+            }
+
+            assert_eq!(consent::get_consent(), consent::ConsentState::Undetermined);
+            assert!(
+                !is_enabled(&TelemetryConfig {
+                    enabled: Some(true)
+                }),
+                "undetermined consent must block an explicit enable under policy {policy_value:?}"
+            );
+        }
     }
 
     #[test]
     fn is_enabled_explicit_false() {
+        // The kill switch wins even when consent has been granted.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
+        #[cfg(target_os = "windows")]
+        consent::set_consent(true, "cli").unwrap();
         let config = TelemetryConfig {
             enabled: Some(false),
         };
@@ -678,8 +856,28 @@ mod tests {
 
     #[test]
     fn is_enabled_default_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
         let config = TelemetryConfig::default();
         assert!(!is_enabled(&config));
+    }
+
+    /// The load-bearing half of "omitted = off". Without granting consent
+    /// first this test would pass for the wrong reason — a fresh store is
+    /// `Undetermined`, which disables telemetry on its own — and would keep
+    /// passing if omission silently started meaning "defer to consent".
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_false_when_enabled_omitted_despite_consent_and_permissive_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = TelemetryTestEnv::new(tmp.path());
+        consent::set_consent(true, "cli").unwrap();
+        env.set_policy_value(3);
+
+        assert_eq!(consent::get_consent(), consent::ConsentState::Granted);
+        assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
+        // Every other gate is open; only the omitted opt-in keeps it off.
+        assert!(!is_enabled(&TelemetryConfig { enabled: None }));
     }
 
     #[test]
@@ -718,7 +916,7 @@ mod tests {
     fn emit_panic_active_captures_execution_and_error() {
         // Drive the real emit glue (globals read → active guard → paired write)
         // with the provider forced active and the capture sink installed, then
-        // assert the exact MXC.Execution + MXC.Error records a panic produces.
+        // assert the exact Execution + Error records a panic produces.
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
@@ -730,7 +928,7 @@ mod tests {
         emit_panic();
 
         let execs = events::test_sink::take_executions();
-        assert_eq!(execs.len(), 1, "panic emits exactly one MXC.Execution");
+        assert_eq!(execs.len(), 1, "panic emits exactly one Execution");
         let exec = &execs[0];
         assert_eq!(exec.backend, "isolation_session");
         assert_eq!(exec.exit_code, PANIC_EXIT_CODE);
@@ -740,7 +938,7 @@ mod tests {
         assert_eq!(exec.correlation_vector, "iso:wxc-abcd");
 
         let errors = events::test_sink::take_errors();
-        assert_eq!(errors.len(), 1, "panic emits exactly one MXC.Error");
+        assert_eq!(errors.len(), 1, "panic emits exactly one Error");
         let error = &errors[0];
         assert_eq!(error.backend, "isolation_session");
         assert_eq!(error.error_type, FailureReason::InternalError);
@@ -800,12 +998,12 @@ mod tests {
         assert_eq!(
             events::test_sink::take_executions().len(),
             1,
-            "second emit must not add an MXC.Execution"
+            "second emit must not add an Execution"
         );
         assert_eq!(
             events::test_sink::take_errors().len(),
             1,
-            "second emit must not add an MXC.Error"
+            "second emit must not add an Error"
         );
 
         reset_for_test();
@@ -816,7 +1014,7 @@ mod tests {
         // The exactly-once slot (`HAS_EMITTED`) is concurrency-critical: the
         // out-of-band panic/cancellation paths race the main completion emit,
         // and the guard is what keeps a single dispatch from producing
-        // duplicate MXC.Execution records. Lock the global state, reset to a
+        // duplicate Execution records. Lock the global state, reset to a
         // known baseline, and assert claim-once semantics end-to-end.
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
@@ -985,7 +1183,7 @@ mod tests {
             panic.execution.failure_reason,
             Some(FailureReason::InternalError)
         );
-        // The MXC.Error carries the same reason/exit code as the execution event.
+        // The Error carries the same reason/exit code as the execution event.
         assert_eq!(panic.error, FailureReason::InternalError);
         assert_eq!(panic.exit_code, PANIC_EXIT_CODE);
 
@@ -1053,7 +1251,7 @@ mod tests {
             assert!(zero_plan.error.is_none());
 
             // Non-zero guest exit → failure with the propagated exit code, but
-            // NO MXC.Error (a faithfully-propagated script exit, not an MXC
+            // NO Error (a faithfully-propagated script exit, not an MXC
             // failure).
             let nonzero = Ok(DispatchOutcome::ExecCompleted { exit_code: 42 });
             let nonzero_plan = plan_state_aware(ctx, &nonzero, 3);
@@ -1064,7 +1262,7 @@ mod tests {
             assert!(nonzero_plan.execution.failure_reason.is_none());
             assert!(nonzero_plan.error.is_none());
 
-            // MxcError → failure / exit 1 / classified MXC.Error.
+            // MxcError → failure / exit 1 / classified Error.
             let err = Err(MxcError::backend_unavailable("no host"));
             let err_plan = plan_state_aware(ctx, &err, 5);
             assert_eq!(err_plan.execution.phase, phase);
@@ -1133,7 +1331,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
 
-        // Provision-style success envelope → one MXC.Execution, no MXC.Error.
+        // Provision-style success envelope → one Execution, no Error.
         let envelope = Ok(DispatchOutcome::Envelope(serde_json::json!({})));
         emit_state_aware(
             true,

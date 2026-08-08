@@ -703,8 +703,9 @@ pub struct ExperimentalConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
-    /// Explicit telemetry override.
-    /// `Some(true)` = force on, `Some(false)` = force off, `None` = disabled (default off).
+    /// Explicit telemetry opt-in for this invocation.
+    /// `Some(true)` = opt in (still subject to consent and policy),
+    /// `Some(false)` = force off, `None` = off.
     pub enabled: Option<bool>,
 }
 

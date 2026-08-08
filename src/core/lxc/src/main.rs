@@ -73,6 +73,54 @@ struct Cli {
     /// the new bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
+
+    /// Report the persisted telemetry consent state and exit. MXC only
+    /// ever collects telemetry on Windows, so on Linux this always
+    /// reports "not-applicable" — there is no consent to grant or
+    /// revoke here. See docs/telemetry/telemetry-consent-design.md.
+    #[arg(long = "telemetry-consent-status")]
+    telemetry_consent_status: bool,
+
+    /// Not supported on Linux; always fails. Present for CLI-surface
+    /// parity with wxc-exec.exe.
+    #[arg(long = "telemetry-consent-grant")]
+    telemetry_consent_grant: bool,
+
+    /// Not supported on Linux; always fails. Present for CLI-surface
+    /// parity with wxc-exec.exe.
+    #[arg(long = "telemetry-consent-revoke")]
+    telemetry_consent_revoke: bool,
+
+    /// Unused on Linux; accepted only for CLI-surface parity.
+    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
+    telemetry_consent_source: Option<String>,
+}
+
+/// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
+/// mirrors. On Linux, `wxc_common::telemetry::consent` always reports
+/// `NotApplicable` and rejects writes, so `--telemetry-consent-grant`/
+/// `-revoke` fail loudly here instead of pretending to record a decision
+/// MXC can never act on (MXC must never gather telemetry off Windows).
+/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
+/// this fast path can't drift from `wxc-exec`/`mxc-exec-mac`. The shared
+/// handler returns the outcome as data; terminating the process is this
+/// binary's job, not the foundation crate's.
+fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
+    let Some(outcome) =
+        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
+            status: cli.telemetry_consent_status,
+            grant: cli.telemetry_consent_grant,
+            revoke: cli.telemetry_consent_revoke,
+            source: cli.telemetry_consent_source.as_deref(),
+        })
+    else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -113,6 +161,19 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
+    let cli = Cli::parse();
+
+    // --telemetry-consent-{status,grant,revoke}: report/administer the
+    // (always not-applicable on Linux) consent state and exit. Runs BEFORE
+    // signal_cleanup::install() (unlike a prior version of this function):
+    // this is a read-only/local-file fast path that never spawns a
+    // container, so it must not be gated on — or fail because of — signal
+    // handler installation, matching `wxc-exec`/`mxc-exec-mac`, where the
+    // consent fast path also runs unconditionally before any other setup.
+    if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
+
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
     // running, or restores the original signal mask and returns Err. We
@@ -122,8 +183,6 @@ fn main() {
         eprintln!("Error: failed to install signal cleanup handler: {}", e);
         process::exit(1);
     }
-
-    let cli = Cli::parse();
 
     // --setup-hyperlight: eagerly warm up the snapshot and exit. Runs
     // before config parsing so the user doesn't need a JSON file on
