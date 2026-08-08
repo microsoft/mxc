@@ -413,7 +413,8 @@ export interface LxcConfig {
  */
 export interface SeatbeltConfig {
   /**
-   * Optional override of the generated TinyScheme sandbox profile.
+   * Dev/debug-only override of the generated TinyScheme sandbox profile.
+   * Release builds reject configs that set this field.
    */
   profileOverride?: string;
   /**
