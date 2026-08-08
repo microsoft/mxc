@@ -88,7 +88,7 @@ $wxcExe = Resolve-Path $WxcExePath
 
 # -- Verify MicroVM binaries --------------------------------------------------
 
-$requiredBinaries = @("nanvixd.exe", "kernel.elf", "python3.12", "nanvix_rootfs.img")
+$requiredBinaries = @("nanvixd.exe", "nanvix_rootfs.img", "python3.initrd", "bin\kernel.elf")
 $binDir = Split-Path $wxcExe
 $missing = $requiredBinaries | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
 
