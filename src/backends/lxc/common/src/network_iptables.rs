@@ -194,9 +194,10 @@ const CHAIN_HASH_BYTES: usize = 10;
 const CHAIN_SLUG_LEN: usize = 7;
 
 /// RFC 4648 base32 alphabet, lowercased. Base32 packs 5 bits per character
-/// against hex's 4, so the 16-character hash field carries 80 bits where hex
-/// would carry 64. Hex would need 20 characters for the same 80 bits, which
-/// the 28-byte ceiling leaves no room for.
+/// against hex's 4, so 80 bits needs 16 characters here where hex would need
+/// 20. `MXC-`, the slug, and the slug's separator take 12 of the 28 bytes,
+/// leaving exactly 16 for the hash, so hex could not carry 80 bits without
+/// giving up the slug entirely.
 const BASE32_LOWER: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 /// Encode bytes as lowercase base32 without padding.

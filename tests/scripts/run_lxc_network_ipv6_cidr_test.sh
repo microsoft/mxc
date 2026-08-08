@@ -74,11 +74,18 @@ mxc_chains() {
 # Compared against a snapshot taken before the run, so chains left behind by an
 # earlier failed run are not blamed on this one.
 assert_no_new_mxc_chains() {
-    local tool="$1" before="$2" leaked="" chain
+    local tool="$1" before="$2" after="" leaked="" chain
+    # Captured before iterating rather than piped in from a process
+    # substitution, whose exit status is not the loop's. A failed enumeration
+    # would otherwise read as zero chains and pass this assertion while
+    # verifying nothing.
+    if ! after="$(mxc_chains "$tool")"; then
+        fail "could not enumerate $tool chains, so cleanup was not verified."
+    fi
     while IFS= read -r chain; do
         [ -n "$chain" ] || continue
         grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
-    done < <(mxc_chains "$tool")
+    done <<<"$after"
     if [ -n "$leaked" ]; then
         fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
     fi
