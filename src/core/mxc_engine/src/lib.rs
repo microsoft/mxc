@@ -45,7 +45,7 @@ pub use policy::{
     user_profile_policy, Containment, FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
     WslcSection,
 };
-pub use probe::{available_backends, AvailableBackend};
+pub use probe::{available_backends, AvailableBackend, BackendCapability};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
 pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};

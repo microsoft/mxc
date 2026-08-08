@@ -500,6 +500,34 @@ impl BaseContainerRunner {
         })
     }
 
+    /// Whether this host can create a PSEC environment and start a Learning Mode trace.
+    ///
+    /// The successful probe session is dropped immediately, which closes and discards the trace.
+    pub fn is_capture_denials_usable() -> bool {
+        static USABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *USABLE.get_or_init(|| {
+            if !Self::is_process_security_environment_usable() {
+                return false;
+            }
+
+            let request = ExecutionRequest {
+                schema_version: "0.8.0-alpha".to_string(),
+                ..Default::default()
+            };
+            let specification = Self::build_process_security_environment_spec(&request);
+            SecurityEnvironmentApi::load()
+                .and_then(|security_environment_api| {
+                    CaptureSession::begin(
+                        security_environment_api,
+                        LearningModeApi::load()?,
+                        &specification,
+                        PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                    )
+                })
+                .is_ok()
+        })
+    }
+
     /// Whether the transitional SBOX BaseContainer contract is usable.
     fn is_legacy_base_container_usable() -> bool {
         #[cfg(test)]
