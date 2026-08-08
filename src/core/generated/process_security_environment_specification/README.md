@@ -12,10 +12,9 @@ by the FlatBuffers compiler (`flatc`).
 
 ## Provenance
 
-The vendored schema originates from the internal Microsoft Windows OS repository
-and is not publicly redistributable. Authoritative provenance — the source
-pull request, the schema SHA-256, and the exact `flatc` version used — is
-recorded in
+The vendored schema originates from the Microsoft Windows OS repository.
+Authoritative provenance — the validated Windows build, schema SHA-256, and
+exact `flatc` version used — is recorded in
 [`external/windows-sdk/ProcessSecurityEnvironment.provenance.toml`](../../../../external/windows-sdk/ProcessSecurityEnvironment.provenance.toml).
 That file is the single source of truth consumed by both the regeneration
 script and the CI drift gate.
