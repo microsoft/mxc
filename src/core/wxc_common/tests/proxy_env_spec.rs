@@ -5,8 +5,16 @@
 //! behavior it protects, in the sense of Khorikov's "observable behavior is
 //! relative to a named client and its goals":
 //!
-//! (a) LXC backend  -- calls `apply_proxy_env`, uses the returned bool to
-//!     decide whether to pass `--clear-env` to `lxc-attach`.
+//! (a) LXC backend (PLANNED integration, not yet wired) -- will call
+//!     `apply_proxy_env` and use the returned bool to decide whether to pass
+//!     `--clear-env` to `lxc-attach`. Today `attach_run` derives `--clear-env`
+//!     solely from `env` being non-empty (`lxc_bindings.rs:90`). The empty-env
+//!     case is where the helper contract and current behavior diverge:
+//!     `apply_proxy_env` returns `true` even for an empty env so the host
+//!     environment cannot leak, whereas current code emits no `--clear-env`
+//!     then. Wiring this in must update `lxc_bindings.rs` and the test at
+//!     `lxc_bindings.rs:743` that pins the current empty-env rule. These tests
+//!     validate the helper contract, not existing LXC behavior.
 //! (b) Bubblewrap backend -- calls `is_managed_proxy_key`, iterates
 //!     `PROXY_SET_KEYS`.
 //! (c) WSLc backend -- calls `apply_cooperative_proxy_env`, merges the result
