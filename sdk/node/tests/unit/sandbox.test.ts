@@ -5,6 +5,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
+import {
+  _resetPlatformSupportCache,
+  _setBwrapVersionRunner,
+  _setLxcAvailabilityProbe,
+} from '../../src/platform.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { platformSkip } from './test-helpers.js';
 
@@ -1279,6 +1284,31 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       () => resolveExecutableAndArgs(makeConfig('bogus_backend'), { executablePath: fakeExe }),
       { message: /not available on this platform/ },
     );
+  });
+
+  it('includes the selected Linux backend failure reason', function (this: { skip: (reason?: string) => void }) {
+    if (process.platform !== 'linux') {
+      this.skip('per-backend availability reasons are Linux-only');
+      return;
+    }
+    try {
+      _setLxcAvailabilityProbe(() => true);
+      _setBwrapVersionRunner(() => ({
+        kind: 'failed',
+        status: null,
+        detail: 'timed out after 5000ms',
+      }));
+      _resetPlatformSupportCache();
+
+      assert.throws(
+        () => resolveExecutableAndArgs(makeConfig('bubblewrap'), { executablePath: fakeExe }),
+        { message: /timed out after 5000ms/ },
+      );
+    } finally {
+      _setLxcAvailabilityProbe(null);
+      _setBwrapVersionRunner(null);
+      _resetPlatformSupportCache();
+    }
   });
 
   it('should still require experimental mode for experimental backends like wslc', () => {

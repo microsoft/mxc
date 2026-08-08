@@ -593,6 +593,12 @@ export interface PlatformSupport {
   /** Available sandboxing methods on this platform */
   availableMethods: ContainmentBackend[];
   /**
+   * Why individual Linux backends are unavailable, whether or not another
+   * backend keeps Linux supported. Omitted on other platforms and when no
+   * Linux backend failures were observed.
+   */
+  unavailableReasons?: Partial<Record<ContainmentBackend, string>>;
+  /**
    * Tier that would be selected for an empty policy on this system.
    * Omitted on non-Windows platforms or when the probe fails.
    */

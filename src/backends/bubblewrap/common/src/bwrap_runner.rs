@@ -169,7 +169,27 @@ impl BubblewrapScriptRunner {
         &self,
         request: &ExecutionRequest,
     ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse> {
+        // Execution validation deliberately bypasses the advisory success
+        // cache: a prior platform-support query must not approve a different
+        // executable after `PATH` or its contents change.
+        self.validate_prepared_with_probe(request, bwrap_version::probe_bwrap_uncached)
+    }
+
+    /// `validate_prepared` with an injectable environment probe.
+    ///
+    /// Tests use this to assert that user-input validation runs *before* the
+    /// environmental `bwrap` probe, and to drive every probe failure without
+    /// depending on what the host happens to have installed.
+    fn validate_prepared_with_probe<F>(
+        &self,
+        request: &ExecutionRequest,
+        probe: F,
+    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse>
+    where
+        F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
+    {
         validate_network_policy_support(request, self.network_policy_support())?;
+
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
@@ -298,7 +318,7 @@ impl BubblewrapScriptRunner {
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
-        if let Err(err) = bwrap_version::probe_bwrap() {
+        if let Err(err) = probe() {
             return Err(ScriptResponse::error(&err.to_string()));
         }
         if proxy_only || firewall_enforced {
@@ -1373,7 +1393,9 @@ mod tests {
         req.testing_features_enabled = false;
 
         let runner = BubblewrapScriptRunner::new();
-        assert!(runner.validate(&req).is_ok());
+        assert!(runner
+            .validate_prepared_with_probe(&req, || Ok(bwrap_version::MIN_BWRAP_VERSION))
+            .is_ok());
     }
 
     /// Proxy-only mode rewrites the endpoint to slirp's gateway and opens
@@ -1907,7 +1929,11 @@ mod tests {
         req.script_code = String::new();
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
+        let err = runner
+            .validate_prepared_with_probe(&req, || {
+                panic!("environment probe must not run for invalid input")
+            })
+            .unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
     }
 
@@ -1950,6 +1976,28 @@ mod tests {
             "the rejection leaked the password it was rejecting: {}",
             err.error_message
         );
+    }
+
+    #[test]
+    fn validate_surfaces_every_environment_probe_failure() {
+        let request = base_request();
+        let failures = [
+            bwrap_version::BwrapUnavailable::NotFound,
+            bwrap_version::BwrapUnavailable::ProbeFailed {
+                status: Some(126),
+                detail: "permission denied".to_string(),
+            },
+            bwrap_version::BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
+            bwrap_version::BwrapUnavailable::TooOld(bwrap_version::BwrapVersion::new(0, 4, 1)),
+        ];
+
+        for failure in failures {
+            let expected = failure.to_string();
+            let error = BubblewrapScriptRunner::new()
+                .validate_prepared_with_probe(&request, || Err(failure))
+                .unwrap_err();
+            assert_eq!(error.error_message, expected);
+        }
     }
 
     /// A denied symlink pointing at a **directory** is rewritten to its canonical
