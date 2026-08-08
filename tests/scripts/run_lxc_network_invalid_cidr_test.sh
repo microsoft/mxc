@@ -28,7 +28,6 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 CONFIG="$REPO_DIR/tests/configs/lxc_network_invalid_cidr.json"
-CHAIN_NAME="MXC-CLI-LXC-Network-Inva"
 INVALID_HOSTS=(
     "140.82.112.0/33"
     "2606:50c0::/129"
@@ -40,16 +39,37 @@ fail() {
     exit 1
 }
 
-assert_firewall_chain_cleaned_up() {
-    if iptables -S "$CHAIN_NAME" >/dev/null 2>&1; then
-        fail "iptables chain '$CHAIN_NAME' was left behind after lxc-exec completed."
-    fi
-    if ip6tables -S "$CHAIN_NAME" >/dev/null 2>&1; then
-        fail "ip6tables chain '$CHAIN_NAME' was left behind after lxc-exec completed."
+# List the MXC-owned chains a tool currently holds. The chain name is derived
+# from a digest of the container name, so a hard-coded literal rots the moment
+# that derivation changes, and a cleanup assertion naming a chain that can no
+# longer exist passes while testing nothing. Matching the MXC- prefix stays
+# correct across naming changes.
+mxc_chains() {
+    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXC-.*\)$/\1/p' | sort
+}
+
+# Compared against a snapshot taken before the run, so chains left behind by an
+# earlier failed run are not blamed on this one.
+assert_no_new_mxc_chains() {
+    local tool="$1" before="$2" leaked="" chain
+    while IFS= read -r chain; do
+        [ -n "$chain" ] || continue
+        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
+    done < <(mxc_chains "$tool")
+    if [ -n "$leaked" ]; then
+        fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
     fi
 }
 
+assert_firewall_chain_cleaned_up() {
+    assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+    assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
+}
+
 echo "Running LXC invalid CIDR network filtering test..."
+
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 
 # The process may fail because the default policy blocks egress; this test is
 # only asserting firewall validation and setup behavior.

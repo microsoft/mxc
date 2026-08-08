@@ -584,3 +584,78 @@ fn names_differing_only_in_case_receive_distinct_chains() {
         seen.len()
     );
 }
+
+/// Cross-version stability anchors: known-answer vectors computed independently
+/// from the written specification with CPython's `hashlib` and `base64`, never
+/// from the crate under test.  They pin the exact `container name -> chain name`
+/// mapping so that a future refactor cannot silently change it.
+///
+/// The operational stakes are concrete.  A container's firewall rules live in a
+/// chain whose name is derived here.  If a newer build computed a different name
+/// for the same container, teardown would look for a chain that does not exist,
+/// the old chain would be orphaned, and its rules would leak -- accumulating
+/// stale firewall state that no code path can ever remove.  These anchors exist
+/// so that mapping stays byte-for-byte stable across builds and Rust versions.
+///
+/// Every expected value below was copied verbatim from the Python oracle's
+/// output; none was produced by running the implementation.
+#[test]
+fn known_answer_vectors_pin_the_exact_chain_mapping() {
+    let cases = [
+        ("webserver", "MXC-webserv-dildp42ed3lx5j3l"),
+        ("db", "MXC-db-ppocluljj34yi6bk"),
+        (
+            "container-name-that-is-long-1",
+            "MXC-contain-giziq3v7bty6quci",
+        ),
+        ("....", "MXC-36ruo2cgzyy236fr"),
+        ("\u{4e2d}\u{6587}\u{540d}\u{5b57}", "MXC-47jr3vcteduliieg"),
+        ("\u{5bb9}\u{5668}-1", "MXC--1-5k7ay4bkqwi2dacc"),
+        ("", "MXC-4oymiquy7qobjgx3"),
+        ("a.b.c.d.e.f.g.h", "MXC-abcdefg-cmn37eyc2xbh76ua"),
+        ("abcdefghijklmnop", "MXC-abcdefg-6oo2y3f2xjjv4lba"),
+        ("web", "MXC-web-jnpfp5xlf5blsa43"),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(
+            chain_name_for(input),
+            expected,
+            "known-answer vector drifted for input {input:?}"
+        );
+        assert!(
+            expected.len() <= CHAIN_NAME_MAX_LEN,
+            "vector {expected:?} exceeds the {CHAIN_NAME_MAX_LEN}-byte ceiling"
+        );
+    }
+}
+
+/// Pins the reversal pair to literal digests.  `abcdefg` and `gfedcba` share no
+/// property the rest of the suite asserts -- both are 7-char slugs, both are
+/// distinct from each other, both are the right length -- because string
+/// reversal is a bijection that preserves distinctness, injectivity, length,
+/// and alphabet coverage.  A mutant that reverses the container name before
+/// hashing therefore survives every property test; only pinning the literal
+/// hash over the *original* byte order can distinguish the correct function
+/// from the name-reversing mutant.
+#[test]
+fn reversal_pair_is_pinned_to_literal_digests_to_kill_a_name_reversing_mutation() {
+    assert_eq!(chain_name_for("abcdefg"), "MXC-abcdefg-punfiet3eisqf5nx");
+    assert_eq!(chain_name_for("gfedcba"), "MXC-gfedcba-3gb4yrzhxoudzuga");
+}
+
+/// Pins the case pair to literal digests.  `container-A` and `container-a`
+/// share the 7-char slug `contain`, so if the digest were taken over a
+/// lowercased name the two would collapse onto one chain -- a real collision
+/// between distinct containers.  Pinning both literals proves the hash is taken
+/// over the original, case-preserving bytes.
+#[test]
+fn case_pair_is_pinned_to_literal_digests_to_prove_case_preserving_hashing() {
+    assert_eq!(
+        chain_name_for("container-A"),
+        "MXC-contain-yxnu4zopsc3bor72"
+    );
+    assert_eq!(
+        chain_name_for("container-a"),
+        "MXC-contain-tygguspady7fdgsp"
+    );
+}

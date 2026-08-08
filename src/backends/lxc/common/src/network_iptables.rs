@@ -194,7 +194,9 @@ const CHAIN_HASH_BYTES: usize = 10;
 const CHAIN_SLUG_LEN: usize = 7;
 
 /// RFC 4648 base32 alphabet, lowercased. Base32 packs 5 bits per character
-/// against hex's 4, which buys four extra hash bits inside the 28-byte ceiling.
+/// against hex's 4, so the 16-character hash field carries 80 bits where hex
+/// would carry 64. Hex would need 20 characters for the same 80 bits, which
+/// the 28-byte ceiling leaves no room for.
 const BASE32_LOWER: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 /// Encode bytes as lowercase base32 without padding.
@@ -227,6 +229,10 @@ fn base32_lower(bytes: &[u8]) -> String {
 /// contains no characters a slug may keep. The result is always ASCII, always
 /// at most [`CHAIN_NAME_MAX_LEN`] bytes, and always the same for the same
 /// input.
+///
+/// The slug keeps the first [`CHAIN_SLUG_LEN`] ASCII alphanumeric, `-`, or `_`
+/// characters of the container name, in order, discarding everything else. It
+/// is a debugging hint only.
 ///
 /// The hash is taken over the *original* container name, so container names
 /// that differ only in characters the slug drops, or only past the slug's

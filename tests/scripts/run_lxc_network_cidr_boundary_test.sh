@@ -36,7 +36,6 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 CONFIG="$REPO_DIR/tests/configs/lxc_network_cidr_boundary.json"
-CHAIN_NAME="MXC-CLI-LXC-Network-CIDR"
 EXPECTED_ALLOWED_HOSTS=(
     "0.0.0.0/0"
     "::/0"
@@ -69,12 +68,46 @@ assert_programmed_rule() {
     fi
 }
 
-assert_firewall_chain_cleaned_up() {
-    if iptables -S "$CHAIN_NAME" >/dev/null 2>&1; then
-        fail "iptables chain '$CHAIN_NAME' was left behind after lxc-exec completed."
+# List the MXC-owned chains a tool currently holds. The chain name is derived
+# from a digest of the container name, so a hard-coded literal rots the moment
+# that derivation changes, and a cleanup assertion naming a chain that can no
+# longer exist passes while testing nothing. Matching the MXC- prefix stays
+# correct across naming changes.
+mxc_chains() {
+    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXC-.*\)$/\1/p' | sort
+}
+
+# Compared against a snapshot taken before the run, so chains left behind by an
+# earlier failed run are not blamed on this one.
+assert_no_new_mxc_chains() {
+    local tool="$1" before="$2" leaked="" chain
+    while IFS= read -r chain; do
+        [ -n "$chain" ] || continue
+        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
+    done < <(mxc_chains "$tool")
+    if [ -n "$leaked" ]; then
+        fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
     fi
-    if ip6tables -S "$CHAIN_NAME" >/dev/null 2>&1; then
-        fail "ip6tables chain '$CHAIN_NAME' was left behind after lxc-exec completed."
+}
+
+assert_firewall_chain_cleaned_up() {
+    assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+    assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
+}
+
+# The chain name is a digest of the container name, so it is read back from this
+# run's own debug output rather than hard-coded. Its shape and length ceiling are
+# asserted independently, so a malformed name still fails here.
+derive_chain_name() {
+    CHAIN_NAME="$(sed -n 's/^.*Programmed [a-z0-9]* rule: -A \([^ ]*\) .*$/\1/p' <<<"$OUTPUT" | head -n 1)"
+    if [ -z "$CHAIN_NAME" ]; then
+        fail "no programmed rule was logged, so the chain name could not be determined."
+    fi
+    if ! grep -Eq '^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$' <<<"$CHAIN_NAME"; then
+        fail "chain name '$CHAIN_NAME' does not match the documented MXC-<slug>-<hash> shape."
+    fi
+    if [ "${#CHAIN_NAME}" -gt 28 ]; then
+        fail "chain name '$CHAIN_NAME' exceeds the 28-character iptables ceiling."
     fi
 }
 
@@ -137,11 +170,16 @@ ALL_CONFIG_HOSTS=("${CONFIG_ALLOWED_HOSTS[@]}" "${CONFIG_BLOCKED_HOSTS[@]}")
 
 echo "Running LXC CIDR boundary network filtering test..."
 
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
+
 set +e
 OUTPUT=$("$LXC_EXEC" --debug "$CONFIG" 2>&1)
 STATUS=$?
 set -e
 echo "$OUTPUT"
+
+derive_chain_name
 
 # The container command is a local success command (see the fixture), so a
 # non-zero status reflects a firewall-setup failure on boundary-valid prefixes
