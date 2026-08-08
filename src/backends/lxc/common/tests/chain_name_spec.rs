@@ -64,6 +64,43 @@ fn assert_invariants(input: &str, chain: &str) {
     }
 }
 
+// Hand-rolled recognizer for the exact shape the four bash integration scripts
+// assert against: `^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$`.  Written without a
+// regex dependency so the black-box suite stays dependency-free.  The 16-char
+// base32 hash is a fixed-width suffix, so the separator (when a slug is present)
+// is always the byte immediately before it, which makes the parse unambiguous
+// even though `-` is legal inside the slug.
+fn matches_documented_shape(chain: &str) -> bool {
+    if !chain.is_ascii() {
+        return false;
+    }
+    let Some(rest) = chain.strip_prefix("MXC-") else {
+        return false;
+    };
+    if rest.len() < 16 {
+        return false;
+    }
+    let (head, hash) = rest.split_at(rest.len() - 16);
+    let hash_ok = hash.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'));
+    if !hash_ok {
+        return false;
+    }
+    if head.is_empty() {
+        // Slug-less form: `MXC-<hash>`.
+        return true;
+    }
+    // Slug form: `MXC-<slug>-<hash>`; strip the mandatory separator, then check
+    // the slug is 1..=7 characters drawn from the documented slug alphabet.
+    let Some(slug) = head.strip_suffix('-') else {
+        return false;
+    };
+    if slug.is_empty() || slug.len() > 7 {
+        return false;
+    }
+    slug.bytes()
+        .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
 #[test]
 fn multibyte_names_never_exceed_the_byte_ceiling() {
     for input in multibyte_inputs() {
@@ -658,4 +695,85 @@ fn case_pair_is_pinned_to_literal_digests_to_prove_case_preserving_hashing() {
         chain_name_for("container-a"),
         "MXC-contain-tygguspady7fdgsp"
     );
+}
+
+// Gap: the contract lists `_` alongside alphanumerics and `-` as a character
+// the slug keeps, but no existing test drives an underscore into the slug --
+// every known-answer vector and slug assertion uses only letters, digits, and
+// `-`.  A mutant that dropped `_` from the slug alphabet would pass the whole
+// prior suite.  `a_b_c_d_e` has sluggable characters a, _, b, _, c, _, d in
+// order, so the first CHAIN_SLUG_LEN=7 of them are the slug "a_b_c_d".
+#[test]
+fn slug_keeps_underscores() {
+    let input = "a_b_c_d_e";
+    let chain = chain_name_for(input);
+    assert!(
+        chain.starts_with("MXC-a_b_c_d-"),
+        "underscores must be kept in the slug for {input:?}: {chain:?}"
+    );
+    assert_invariants(input, &chain);
+}
+
+// Gap: the contract says the slug "keeps" the ASCII characters "in order,
+// discarding everything else", and only the hash is documented as lowercased
+// (BASE32_LOWER); the shape the integration scripts assert allows `[A-Za-z]` in
+// the slug.  So an uppercase ASCII letter must survive verbatim into the slug.
+// No prior test pins this -- the case-variance tests are all driven by the hash
+// over original bytes, so a mutant that lowercased the slug would pass them.
+// `ABCdef` keeps its first six sluggable characters verbatim.
+#[test]
+fn slug_preserves_ascii_letter_case() {
+    let input = "ABCdef";
+    let chain = chain_name_for(input);
+    assert!(
+        chain.starts_with("MXC-ABCdef-"),
+        "slug must preserve letter case for {input:?}: {chain:?}"
+    );
+    assert_invariants(input, &chain);
+}
+
+// Gap: the documented slug group is `{1,7}` characters, and the slug-less form
+// (`MXC-<hash>`) and the 7-char maximum are both pinned, but the lower boundary
+// -- a single sluggable character producing a one-character slug plus separator
+// -- is not.  This distinguishes "one sluggable char" from the slug-less path.
+#[test]
+fn single_sluggable_char_yields_a_one_char_slug() {
+    // '.' is dropped, leaving exactly one sluggable character.
+    let input = "a...";
+    let chain = chain_name_for(input);
+    assert!(
+        chain.starts_with("MXC-a-"),
+        "a single sluggable char must yield a 1-char slug for {input:?}: {chain:?}"
+    );
+    // MXC-(4) + slug(1) + -(1) + hash(16) = 22 bytes.
+    assert_eq!(
+        chain.len(),
+        22,
+        "one-char-slug name should be 22 bytes for {input:?}: {chain:?}"
+    );
+    assert_invariants(input, &chain);
+}
+
+// Gap: four bash integration scripts read the chain name back out of debug logs
+// and assert it against the literal shape `^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$`,
+// so that regex is itself a client-visible contract (unit-testing-what-to-test
+// §3: observable behavior is relative to a named client and its goals -- here
+// client (c), the scripts).  The prior suite checks fragments of the shape
+// separately (prefix, ASCII, safe charset, hash alphabet, length) but never the
+// exact composed shape those scripts depend on.  This pins it end to end across
+// both documented forms and every character class, including the underscore,
+// uppercase, one-char-slug, and slug-less cases the fragment tests miss.
+#[test]
+fn every_output_matches_the_documented_integration_script_shape() {
+    let mut inputs = representative_inputs();
+    for extra in ["a_b_c_d_e", "ABCdef", "a...", "Web_Server-1", "_", "-", "A"] {
+        inputs.push(extra.to_string());
+    }
+    for input in &inputs {
+        let chain = chain_name_for(input);
+        assert!(
+            matches_documented_shape(&chain),
+            "output {chain:?} does not match ^MXC-([A-Za-z0-9_-]{{1,7}}-)?[a-z2-7]{{16}}$ for input {input:?}"
+        );
+    }
 }
