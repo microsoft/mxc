@@ -131,7 +131,10 @@ fn build_request_rejects_empty_version() {
     };
 
     let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
-    assert_eq!(err.code, mxc_sdk::ErrorCode::MalformedRequest);
+    // A missing version is a version problem, not a generic malformed request:
+    // `version` selects which config fields are legal, so it reports the same
+    // typed code as any other version failure.
+    assert_eq!(err.code, mxc_sdk::ErrorCode::VersionIncompatible);
 }
 
 #[test]

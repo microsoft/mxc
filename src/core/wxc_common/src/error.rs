@@ -3,10 +3,19 @@
 
 use thiserror::Error;
 
+use crate::version_availability::VersionIncompatibility;
+
 #[derive(Debug, Error)]
 pub enum WxcError {
     #[error("Configuration parse error: {0}")]
     ConfigParse(String),
+
+    /// Unsupported schema version, or a field used outside its availability range.
+    ///
+    /// Distinct from [`WxcError::ConfigParse`] so the field name and bounds
+    /// survive to the wire envelope instead of being flattened into a string.
+    #[error("{0}")]
+    VersionIncompatible(Box<VersionIncompatibility>),
 
     #[error("Validation error: {0}")]
     Validation(String),
@@ -39,6 +48,26 @@ pub enum WxcError {
 impl From<serde_json::Error> for WxcError {
     fn from(err: serde_json::Error) -> Self {
         WxcError::ConfigParse(err.to_string())
+    }
+}
+
+impl From<VersionIncompatibility> for WxcError {
+    fn from(err: VersionIncompatibility) -> Self {
+        WxcError::VersionIncompatible(Box::new(err))
+    }
+}
+
+impl WxcError {
+    /// The typed wire error this maps to. Every parse-time failure except a
+    /// version incompatibility is a malformed request.
+    pub fn to_mxc_error(&self) -> crate::mxc_error::MxcError {
+        match self {
+            WxcError::VersionIncompatible(details) => {
+                crate::mxc_error::MxcError::version_incompatible(details.message.clone())
+                    .with_details(details.details())
+            }
+            other => crate::mxc_error::MxcError::malformed_request(other.to_string()),
+        }
     }
 }
 

@@ -9,6 +9,7 @@ members = [
     "core/mxc_engine",
     "core/mxc_pty",
     "core/mxc_build_common",
+    "core/mxc_version_derive",
     "host/plm",
     "core/generated/base_container_specification",
     "core/generated/process_security_environment_specification",
@@ -106,7 +107,11 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 quick-xml = "0.41"
+proc-macro2 = "1"
+quote = "1"
+syn = "2"
 wxc_common = { path = "core/wxc_common" }
+mxc_version_derive = { path = "core/mxc_version_derive" }
 mxc_engine = { path = "core/mxc_engine" }
 mxc-sdk = { path = "core/mxc-sdk" }
 appcontainer_common = { path = "backends/appcontainer/common" }

@@ -55,6 +55,7 @@ fn state_aware_unknown_containment_emits_error_envelope_on_stdout() {
     // a state-aware request — exercises the parser-level rejection branch of
     // the wire-format error contract.
     let request = json!({
+        "version": "0.6.0-alpha",
         "containment": "totally_made_up",
         "phase": "provision"
     });
@@ -82,6 +83,7 @@ fn state_aware_recognized_but_non_state_aware_backend_emits_unsupported_phase() 
     // I-commits land state-aware impls — the assertion will keep working
     // because `wslc` will remain a non-state-aware backend.
     let request = json!({
+        "version": "0.6.0-alpha",
         "containment": "wslc",
         "phase": "provision"
     });

@@ -30,6 +30,10 @@ pub enum MxcErrorCode {
     AlreadyStopped,
     PolicyValidation,
     BackendError,
+    /// The config declared a schema version that is unsupported, or used a field
+    /// outside the version window it is valid in. Structured `details` name the
+    /// field and its bounds — see `wxc_common::version_availability`.
+    VersionIncompatible,
 }
 
 impl MxcErrorCode {
@@ -47,6 +51,7 @@ impl MxcErrorCode {
             Self::AlreadyStopped => "already_stopped",
             Self::PolicyValidation => "policy_validation",
             Self::BackendError => "backend_error",
+            Self::VersionIncompatible => "version_incompatible",
         }
     }
 }
@@ -131,6 +136,9 @@ impl MxcError {
     pub fn backend_error(message: impl Into<String>) -> Self {
         Self::new(MxcErrorCode::BackendError, message)
     }
+    pub fn version_incompatible(message: impl Into<String>) -> Self {
+        Self::new(MxcErrorCode::VersionIncompatible, message)
+    }
 }
 
 /// Wire shape of the `error` arm. `code` is a closed `MxcErrorCode` that
@@ -183,6 +191,7 @@ mod tests {
             (MxcErrorCode::AlreadyStopped, "already_stopped"),
             (MxcErrorCode::PolicyValidation, "policy_validation"),
             (MxcErrorCode::BackendError, "backend_error"),
+            (MxcErrorCode::VersionIncompatible, "version_incompatible"),
         ];
         for (code, wire) in cases {
             assert_eq!(code.as_str(), wire);
@@ -234,6 +243,10 @@ mod tests {
         assert_eq!(
             MxcError::backend_error("x").code,
             MxcErrorCode::BackendError
+        );
+        assert_eq!(
+            MxcError::version_incompatible("x").code,
+            MxcErrorCode::VersionIncompatible
         );
     }
 

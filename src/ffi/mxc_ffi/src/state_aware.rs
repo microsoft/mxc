@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn non_dry_run_exec_is_rejected() {
         let mut out = call(
-            r#"{"phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#,
+            r#"{"version":"0.6.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#,
             false,
         );
         assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST);
@@ -257,7 +257,7 @@ mod tests {
         // (A real isolation_session provision is avoided: on a capable host it
         // would actually provision a sandbox. See the mxc-sdk state_aware test.)
         let mut out = call(
-            r#"{"phase":"start","sandboxId":"nosuchbackend:abc123"}"#,
+            r#"{"version":"0.6.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#,
             false,
         );
         assert_eq!(out.status, crate::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
@@ -278,7 +278,10 @@ mod tests {
 
     #[test]
     fn null_out_reports_null_argument() {
-        let j = CString::new(r#"{"phase":"provision","containment":"isolation_session"}"#).unwrap();
+        let j = CString::new(
+            r#"{"version":"0.6.0-alpha","phase":"provision","containment":"isolation_session"}"#,
+        )
+        .unwrap();
         // SAFETY: valid string, deliberately-null out.
         let status = unsafe { mxc_state_aware(j.as_ptr(), 0, ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
@@ -286,7 +289,8 @@ mod tests {
 
     #[test]
     fn exec_null_out_handle_is_null_argument() {
-        let j = CString::new(r#"{"phase":"exec","sandboxId":"x:y"}"#).unwrap();
+        let j =
+            CString::new(r#"{"version":"0.6.0-alpha","phase":"exec","sandboxId":"x:y"}"#).unwrap();
         // SAFETY: valid string, deliberately-null out_handle.
         let status = unsafe { mxc_state_aware_exec(j.as_ptr(), ptr::null_mut(), ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
@@ -294,7 +298,10 @@ mod tests {
 
     #[test]
     fn exec_non_exec_phase_reports_error_and_null_handle() {
-        let j = CString::new(r#"{"phase":"provision","containment":"isolation_session"}"#).unwrap();
+        let j = CString::new(
+            r#"{"version":"0.6.0-alpha","phase":"provision","containment":"isolation_session"}"#,
+        )
+        .unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err: *mut c_char = ptr::null_mut();
         // SAFETY: valid string and out pointers.

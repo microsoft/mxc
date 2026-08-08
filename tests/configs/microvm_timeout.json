@@ -1,4 +1,5 @@
 {
+    "version": "0.8.0-alpha",
     "_comment": "Timeout test. Note: MicroVM adds a 60s boot grace to the 5s script timeout, so actual wall time is ~65s.",
     "process": {
         "commandLine": "import time; time.sleep(120); print('should not reach here')",

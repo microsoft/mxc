@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use serde::{de::DeserializeOwned, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer};
 use serde_json::{error::Category, Value};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
@@ -323,13 +323,11 @@ where
     Ok(value)
 }
 
-pub(crate) fn from_value<T>(value: Value) -> Result<T, ConfigDeserializeError>
-where
-    T: DeserializeOwned,
-{
-    deserialize_with_path(value)
-}
-
+/// Deserialise from a borrowed [`Value`].
+///
+/// There is deliberately no owned `from_value` counterpart: the version gate
+/// needs the document *after* the typed pass, so every caller keeps ownership of
+/// the value and lends it here.
 pub(crate) fn from_value_ref<'de, T>(value: &'de Value) -> Result<T, ConfigDeserializeError>
 where
     T: Deserialize<'de>,
@@ -474,9 +472,9 @@ mod tests {
     }
 
     #[test]
-    fn from_value_reports_the_typed_error_path() {
+    fn from_value_ref_reports_the_typed_error_path() {
         let value = serde_json::json!({"inner": {"count": "many"}});
-        let error = from_value::<Outer>(value).unwrap_err();
+        let error = from_value_ref::<Outer>(&value).unwrap_err();
 
         assert_eq!(error.path.as_deref(), Some("inner.count"));
         assert!(error.to_string().contains("expected u16"));

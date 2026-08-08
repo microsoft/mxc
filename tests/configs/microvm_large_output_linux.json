@@ -1,4 +1,5 @@
 {
+    "version": "0.8.0-alpha",
     "process": {
         "commandLine": "for i in range(1000):\n    print(f'line {i}: ' + 'x' * 80)",
         "timeout": 30000

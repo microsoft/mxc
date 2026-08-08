@@ -15,7 +15,7 @@
 // of the accepted instance set.
 //
 // There is deliberately no per-field escape hatch. A field may not simply
-// disappear: the supported-version window is what allows surface to end, so
+// disappear: the supported-availability range is what allows surface to end, so
 // until a change moves that window the only correct answer is to keep accepting
 // what the base accepted.
 //
@@ -95,7 +95,7 @@ if (findings.length > 0) {
       `${base.commit.slice(0, 8)}${moved}:`,
     ...findings,
     `Configs declaring an already-supported version must keep parsing. Add ` +
-      `surface instead of removing it, or move the supported-version window ` +
+      `surface instead of removing it, or move the supported-availability range ` +
       `in the same change.`,
   ]);
 }
