@@ -493,35 +493,36 @@
         "os": "windows-25h2",
         "backends": [
           "process-t3",
-          "microvm",
-          "hyperlight"
+          "microvm"
         ]
       },
       {
         "os": "windows-24h2",
         "backends": [
-          "process-t3"
+          "process-t3",
+          "microvm"
         ]
       },
       {
         "os": "windows-23h2",
         "backends": [
-          "process-t3"
+          "process-t3",
+          "microvm"
         ]
       },
       {
         "os": "ubuntu-26.04",
         "backends": [
           "bubblewrap",
-          "lxc"
+          "lxc",
+          "hyperlight"
         ]
       },
       {
         "os": "ubuntu-24.04",
         "backends": [
           "bubblewrap",
-          "lxc",
-          "microvm"
+          "lxc"
         ]
       },
       {
