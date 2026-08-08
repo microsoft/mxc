@@ -50,5 +50,11 @@ jobs:
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js
 
+      # Ahead of corpus validation: a pull request that removes a field also
+      # migrates the corpus, so validation passes and the removal is what needs
+      # reporting.
+      - name: Check the dev schema makes no breaking change
+        run: node scripts/versioning/check-dev-schema-compat.js
+
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js
