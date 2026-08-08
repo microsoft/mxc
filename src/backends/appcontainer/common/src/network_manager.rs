@@ -239,7 +239,7 @@ impl NetworkManager {
         if plan.rules_will_be_installed {
             logger.log_line("Applying network firewall rules...");
         }
-        (plan.default_policy, plan.firewall_mode_selected)
+        (plan.default_policy, plan.rules_will_be_installed)
     }
 
     /// Number of firewall rules currently created by this manager.
@@ -776,7 +776,7 @@ mod tests {
             let (default_policy, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
             let plan = NetworkManager::describe_policy(&policy);
             assert_eq!(default_policy, plan.default_policy, "policy: {policy:?}");
-            assert_eq!(use_fw, plan.firewall_mode_selected, "policy: {policy:?}");
+            assert_eq!(use_fw, plan.rules_will_be_installed, "policy: {policy:?}");
             // The operator-visible line must track "rules will actually be
             // installed", not "firewall mode was selected".
             assert_eq!(
@@ -807,7 +807,7 @@ mod tests {
 
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         let (_, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
-        assert!(use_fw, "the caller did select firewall enforcement");
+        assert!(!use_fw, "there are no firewall rules to install");
         assert!(
             !logger
                 .get_buffer()
