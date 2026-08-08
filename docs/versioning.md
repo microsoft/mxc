@@ -469,8 +469,8 @@ what the user should do (upgrade OS, enable feature, change the config).
 
 ## Trust model and the outer clamp
 
-MXC's authorization model and the (optional) unbypassable upper bound on what a
-config can relax.
+MXC's authorization model and the platform-dependent external bounds that can
+constrain what a config relaxes.
 
 ### Authorization model: one principal, secure-and-loud defaults
 
@@ -487,8 +487,7 @@ authorization for boundary-relaxing fields.
 > passing it in. See [the outer clamp](#the-outer-clamp-optional-platform-asymmetric)
 > for the mechanism that would enforce a ceiling independently of the config.
 
-Given that precondition, safety rests on three in-repo mechanisms, all
-implemented:
+Given that precondition, safety rests on three in-repo mechanisms:
 
 1. **Secure defaults.** Every boundary defaults closed: `network.defaultPolicy`
    is `block`, `ui.disable` is `true`, clipboard/injection off, etc. (see
@@ -496,10 +495,15 @@ implemented:
    is a tight sandbox.
 2. **Explicit + loud relaxation.** Fields that open a network, UI, capability,
    or Seatbelt boundary beyond their secure default are logged at parse time as
-   `SECURITY: boundary relaxed: …`, so those relaxations are never silent — they
-   are auditable in the diagnostic log. Filesystem path grants and the Seatbelt
-   pty baseline are deliberately out of this audit's scope, being the request's
-   primary purpose rather than a relaxation.
+   `SECURITY: boundary relaxed: …`, making them auditable in the diagnostic log.
+   Filesystem path grants and the Seatbelt pty baseline are deliberately out of
+   this audit's scope, being the request's primary purpose rather than a
+   relaxation. One known gap is `network.blockedHosts`: Hyperlight and NanVix
+   currently interpret a non-empty blocklist as allow-all-except even when
+   `network.defaultPolicy=block`, while the generic audit assumes blocklists only
+   subtract connectivity and does not log them. The backend fixes are tracked in
+   [#786](https://github.com/microsoft/mxc/issues/786) and
+   [#787](https://github.com/microsoft/mxc/issues/787).
 3. **Catastrophic capabilities are removed from shipped builds.** A capability
    that would defeat the sandbox wholesale rather than merely widen it —
    currently `seatbelt.profileOverride`, which replaces the entire generated
@@ -518,7 +522,7 @@ exceed it. Whether such a clamp can be made truly unbypassable is
 | Platform | Clamp mechanism | Unbypassable? | Status |
 |---|---|---|---|
 | Windows — BaseContainer tier | OS sandbox broker enforces the policy inside `Experimental_CreateProcessInSandbox` | Yes — the broker is the kernel-side authority | OS-infra (outside this repo) |
-| Windows — AppContainer fallback tiers (BFS / DACL) | AppContainer + `bfscfg.exe` BFS or host-side DACL ACEs; used when the BaseContainer API is absent | Partial — enforcement is partly host-side, not a single kernel broker | Existing backend behavior, but **not present in a stock build**: BFS requires the non-default `tier2_bfs` feature plus `bfscfg.exe` on the host, and the DACL path requires explicit config opt-in |
+| Windows — AppContainer fallback tiers (BFS / DACL) | AppContainer + `bfscfg.exe` BFS or host-side DACL ACEs; used when the BaseContainer API is absent | Partial — enforcement is partly host-side, not a single kernel broker | Existing backend behavior: BFS is absent from a stock build and requires the non-default `tier2_bfs` feature plus `bfscfg.exe`; the DACL path is the default stock fallback, enabled unless `fallback.allowDaclMutation=false` |
 | Linux (LXC) | Host LSM (AppArmor / SELinux) profile + root-owned policy file | Yes, with a host LSM; otherwise advisory | OS-infra / host config |
 | Linux (Bubblewrap) | LSM, or compile-time capability removal | Partial — bwrap is unprivileged by design | OS-infra / build |
 | macOS (Seatbelt) | Root-owned policy file + codesign / SIP | Yes, with SIP + signed binary; otherwise advisory | OS-infra (outside this repo) |
