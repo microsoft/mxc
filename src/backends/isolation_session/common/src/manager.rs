@@ -6,6 +6,8 @@
 //! plus the `share_folders` non-lifecycle op. `create_process` also drives
 //! the ConPTY relay setup + shutdown ladder against the local console.
 
+use wxc_common::audit::{AuditEvent, AuditEventName, KillMethod};
+use wxc_common::logger::Logger;
 use wxc_common::models::IsolationSessionConfigurationId;
 use wxc_common::process_util::OwnedHandle;
 
@@ -285,6 +287,7 @@ impl IsolationSessionManager {
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
+        logger: Option<&mut Logger>,
     ) -> Result<i32, IsolationSessionError> {
         let proc_options = build_iso_process_options(options)?;
 
@@ -506,7 +509,9 @@ impl IsolationSessionManager {
             .WaitForExit(options.timeout_ms)
             .map_err(|e| lifecycle_err(format!("WaitForExit failed: {}", e)))?;
 
-        let exit_code = wait_with_graceful_shutdown(&process)?;
+        let identity = self.provision_id.to_string_lossy();
+        let exit_code =
+            wait_with_graceful_shutdown(&process, options.timeout_ms, &identity, logger)?;
 
         // Signal the stdin relay to exit. Effective for waitable (console)
         // handles; for pipe handles the bounded wait below expires and we
@@ -597,7 +602,12 @@ impl IsolationSessionManager {
 /// than to fire blind. Per-tier subsequent queries fall back to
 /// `STILL_ACTIVE` so a transient read failure does not short-circuit the
 /// escalation.
-fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, IsolationSessionError> {
+fn wait_with_graceful_shutdown(
+    process: &IsoSessionProcess,
+    timeout_ms: u32,
+    identity: &str,
+    mut logger: Option<&mut Logger>,
+) -> Result<i32, IsolationSessionError> {
     // `STILL_ACTIVE` (0x103) is exposed by the `windows` crate as
     // `STATUS_PENDING: NTSTATUS` — same numeric value, different name.
     use windows::Win32::Foundation::STATUS_PENDING;
@@ -606,7 +616,35 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
         .ExitCode()
         .map_err(|e| lifecycle_err(format!("get ExitCode failed: {}", e)))?;
     if exit_code != STILL_ACTIVE {
+        // Normal pre-timeout completion. Emit `mxc.ProcessExited` so a
+        // clean run has a terminal audit record. Deliberately NOT emitted
+        // on the graceful-shutdown tiers below — those already emitted
+        // `ProcessTimedOut` and possibly `ProcessKillFailed`, and the run
+        // is not a normal exit.
+        if let Some(logger) = logger.as_mut() {
+            let record = AuditEvent::new(AuditEventName::ProcessExited)
+                .str("backend", "isolation_session")
+                .str(
+                    "identity",
+                    &wxc_common::policy_identity::redact_identity(identity),
+                )
+                .u64("pid", process.ProcessId().unwrap_or_default() as u64)
+                .i64("exit_code", exit_code as i64);
+            logger.log_audit_event(&record);
+        }
         return Ok(exit_code);
+    }
+
+    if let Some(logger) = logger.as_mut() {
+        let record = AuditEvent::new(AuditEventName::ProcessTimedOut)
+            .str("backend", "isolation_session")
+            .str(
+                "identity",
+                &wxc_common::policy_identity::redact_identity(identity),
+            )
+            .u64("pid", process.ProcessId().unwrap_or_default() as u64)
+            .u64("timeout_ms", timeout_ms as u64);
+        logger.log_audit_event(&record);
     }
 
     let _ = process.CloseStandardInput();
@@ -623,7 +661,20 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
         return Ok(exit_code);
     }
 
-    let _ = process.Terminate();
+    if let Err(error) = process.Terminate() {
+        if let Some(logger) = logger.as_mut() {
+            let record = AuditEvent::new(AuditEventName::ProcessKillFailed)
+                .str("backend", "isolation_session")
+                .str(
+                    "identity",
+                    &wxc_common::policy_identity::redact_identity(identity),
+                )
+                .u64("pid", process.ProcessId().unwrap_or_default() as u64)
+                .str("kill_method", KillMethod::TerminateProcess.as_str())
+                .i64("error_code", error.code().0 as i64);
+            logger.log_audit_event(&record);
+        }
+    }
     let _ = process.WaitForExit(0);
     Ok(process.ExitCode().unwrap_or(-1))
 }

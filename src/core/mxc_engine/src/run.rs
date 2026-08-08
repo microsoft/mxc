@@ -85,7 +85,41 @@ pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
+    log_policy_hash(request, logger);
     resolve_runner_inner(request, logger).map_err(Error::from)
+}
+
+/// Record `mxc.PolicyHash`: the canonical identity of the effective policy this
+/// run is about to be launched under, plus the config *schema* version.
+///
+/// Emitted from [`resolve_runner`] — the single funnel every run-to-completion
+/// launch passes through, and the first point at which every policy-affecting
+/// mutation (CLI command override, `--audit` permissive-learning-mode
+/// injection, capability injection) has already been applied. A hash taken
+/// earlier would not describe what actually ran.
+///
+/// `config_schema_version` is deliberately named for the *schema*: it does not
+/// change when the policy changes, so it must never be read as a policy
+/// version.
+pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
+    use wxc_common::audit::{AuditEvent, AuditEventName};
+
+    // Computing the hash serialises the whole effective request, canonicalises
+    // it, and runs SHA-256 over the result. That is far too much work to do on
+    // every launch only for `log_audit_event` to discard it, so check for a sink
+    // before building anything.
+    if !logger.has_diagnostic_sink() {
+        return;
+    }
+
+    let record = AuditEvent::new(AuditEventName::PolicyHash)
+        .str("backend", request.containment.wire_name())
+        .str(
+            "policy_hash",
+            &wxc_common::policy_identity::policy_hash(request),
+        )
+        .str("config_schema_version", &request.schema_version);
+    logger.log_audit_event(&record);
 }
 
 /// Resolve `request`'s backend and run it to completion.
@@ -130,6 +164,7 @@ fn resolve_runner_inner(
                         "selected isolation tier: {}",
                         dispatched.tier.as_str()
                     );
+                    dispatched.log_enforcement_degraded(logger);
                     let (runner, dacl_manager) = dispatched.into_runner_and_guard();
                     Ok(ResolvedRunner {
                         runner,
@@ -416,5 +451,27 @@ mod tests {
         assert!(warning.contains("idleTimeoutMs"));
         assert!(warning.contains("daemonPipeName"));
         assert!(warning.contains("fresh VM"));
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::log_policy_hash;
+    use std::fs;
+    use wxc_common::logger::{Logger, Mode};
+    use wxc_common::models::ExecutionRequest;
+
+    #[test]
+    fn policy_hash_reaches_the_diagnostic_sink() {
+        let path = std::env::temp_dir().join(format!("mxc-policy-hash-{}.log", std::process::id()));
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.enable_file_sink(&path).expect("file sink");
+
+        log_policy_hash(&ExecutionRequest::default(), &mut logger);
+
+        let contents = fs::read_to_string(&path).expect("read audit log");
+        assert!(contents.contains(r#""event":"mxc.PolicyHash""#));
+        assert!(contents.contains(r#""policy_hash":"sha256:"#));
+        let _ = fs::remove_file(path);
     }
 }

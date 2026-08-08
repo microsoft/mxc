@@ -14,11 +14,14 @@ All layers stream into a single `mxc-diagnostic-console.exe` window in real time
 ## Quick Start
 
 ```powershell
-# Terminal 1: start the diagnostic console (run as admin for ETW)
+# Terminal 1: choose one token and start the diagnostic console
+$env:MXC_DIAG_PIPE_TOKEN = [guid]::NewGuid().ToString("N")
+$env:MXC_DIAG_PIPE_TOKEN
 mxc-diagnostic-console.exe
 
-# Terminal 2: enable diagnostics and run
+# Terminal 2: use the same token, enable diagnostics, and run
 $env:MXC_DIAG_CONSOLE = "1"
+$env:MXC_DIAG_PIPE_TOKEN = "<the same token as Terminal 1>"
 wxc-exec.exe --experimental my-config.json
 ```
 
@@ -26,7 +29,9 @@ wxc-exec.exe --experimental my-config.json
 
 | Method | Setting | Description |
 |--------|---------|-------------|
+| CLI flag | `--log-file <path>` | Write diagnostics and structured audit records to a file without starting the named-pipe console |
 | Env var | `MXC_DIAG_CONSOLE=1` | Enable diagnostic pipe output and auto-inject `learningModeLogging` capability |
+| Env var | `MXC_DIAG_PIPE_TOKEN=<random token>` | Select the per-session diagnostic pipe; use the same high-entropy token for the console and `wxc-exec` |
 
 ## What Gets Logged
 
@@ -34,6 +39,27 @@ wxc-exec.exe --experimental my-config.json
 - Sandbox spec details (size, UI flags, capabilities, filesystem/network policy)
 - Process lifecycle (command line, identity, child PID, exit code, elapsed time)
 - Section markers for key execution stages
+- **Structured audit records** — one JSON object per line, prefixed `{"event":"mxc.`
+
+### Structured audit records
+
+Alongside the human-readable prose above, both sinks carry machine-readable
+audit records: process exit / timeout / kill outcome, enforcement-tier
+degradation, policy hash, network policy applied, sandbox teardown, config
+rejection, and the sandbox identity join key.
+
+They are written **only** to the sinks described here — a `--log-file` path or
+the `MXC_DIAG_CONSOLE` pipe — never to stdout, so they cannot pollute an SDK
+caller's captured output. With neither sink configured, nothing is emitted and
+no record is even built.
+
+These are **local diagnostics, not ETW telemetry**: no provider, no consent gate,
+nothing uploaded. See
+[`docs/telemetry/telemetry.md` § Local audit log records](telemetry/telemetry.md#local-audit-log-records)
+for the JSON-lines format, the full record inventory with fields, the content
+rules (bounded vocabularies, config field *paths* but never values, no raw user
+identifiers),
+and a parsing recipe.
 
 ## Diagnostic Console
 
@@ -94,4 +120,16 @@ messages work without elevation.
 
 ## Scope
 
-Diagnostic logging currently covers the **BaseContainer runner only**.
+The **prose** diagnostic logging described above currently covers the
+**BaseContainer runner only**.
+
+The **structured audit records** have a different (and also partial) scope: they
+are emitted from the Windows ProcessContainer runners (BaseContainer and both
+AppContainer tiers) and from `wxc-exec`'s config-rejection and state-aware
+dispatch paths. `mxc.PolicyHash` is cross-platform (it is emitted by the shared
+engine), but the lifecycle records are **not**: `lxc-exec` (LXC, Bubblewrap) and
+`mxc-exec-mac` (Seatbelt) emit no `mxc.ProcessExited`, `mxc.SandboxTornDown`,
+`mxc.ConfigRejected`, or `mxc.SandboxIdentity`. That is a known gap, not a
+statement that those backends are uninteresting — the originating requirement was
+Windows-only. Do not read a missing record on Linux or macOS as "the event did not
+happen".

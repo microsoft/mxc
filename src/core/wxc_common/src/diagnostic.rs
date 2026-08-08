@@ -15,20 +15,45 @@ use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKE
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const ENV_CONSOLE: &str = "MXC_DIAG_CONSOLE";
+const ENV_PIPE_TOKEN: &str = "MXC_DIAG_PIPE_TOKEN";
 const PIPE_NAME_PREFIX: &str = r"\\.\pipe\mxc-diagnostics";
 
-/// Build the diagnostic pipe name for the current user: `\\.\pipe\mxc-diagnostics-{SID}`.
-///
-/// Falls back to the bare prefix if the SID cannot be determined.
+/// Build the per-user, per-session diagnostic pipe name.
 pub fn diagnostic_pipe_name() -> String {
-    match get_current_user_sid() {
-        Some(sid) => format!("{PIPE_NAME_PREFIX}-{sid}"),
-        None => PIPE_NAME_PREFIX.to_string(),
+    let suffix = diagnostic_pipe_token()
+        .map(|token| format!("-{token}"))
+        .unwrap_or_default();
+    match current_user_sid() {
+        Some(sid) => format!("{PIPE_NAME_PREFIX}-{sid}{suffix}"),
+        None => format!("{PIPE_NAME_PREFIX}{suffix}"),
     }
 }
 
+/// Return the caller-provided per-session pipe token when it has sufficient
+/// entropy for a pipe name.
+pub fn diagnostic_pipe_token() -> Option<String> {
+    let token = env::var(ENV_PIPE_TOKEN).ok()?;
+    if !is_valid_pipe_token(&token) {
+        return None;
+    }
+    Some(token)
+}
+
+fn is_valid_pipe_token(token: &str) -> bool {
+    token.len() >= 32
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        && token
+            .bytes()
+            .filter(|byte| *byte != b'-')
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            >= 4
+}
+
 /// Retrieve the SID string for the current process token's user.
-fn get_current_user_sid() -> Option<String> {
+pub fn current_user_sid() -> Option<String> {
     use crate::string_util::sid_to_string;
     use windows::Win32::Foundation::HANDLE;
 
@@ -134,6 +159,14 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
             .push_str(&format!("... ({total_len} chars total)"));
     }
 
+    // Never persist Entra credentials or account identifiers in diagnostics.
+    if let Some(isolation_session) = redacted.experimental.isolation_session.as_mut() {
+        if let Some(user) = isolation_session.user.as_mut() {
+            user.upn = "<redacted>".to_string();
+            user.wam_token = "<redacted>".to_string();
+        }
+    }
+
     // Serialize the redacted request.
     let json = serde_json::to_string_pretty(&redacted)
         .unwrap_or_else(|e| format!("{{\"error\": \"failed to serialize request: {e}\"}}"));
@@ -145,7 +178,7 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
             .network_proxy
             .address
             .as_ref()
-            .map(|a| a.to_url())
+            .map(|a| crate::proxy_env::redact_proxy_url(&a.to_url()))
             .unwrap_or_else(|| "<builtin test server, not yet resolved>".to_string());
         format!(
             "\n[network_proxy: enabled, builtin_test_server={}, address={}]",
@@ -156,6 +189,84 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
     };
 
     format!("{json}{proxy_info}")
+}
+
+/// Parse caller-supplied raw config JSON and redact secret-bearing fields
+/// (same closed set of markers as [`crate::config_deserialize`]'s error-path
+/// redaction, e.g. `token`, `secret`, and the whole `user` credential bundle
+/// used by `experimental.isolationSession.user.{upn,wamToken}`) before it is
+/// safe to write to a diagnostic sink.
+///
+/// This must run *before* any policy validation: an `IsolationSession`
+/// one-shot request's credential bundle is only rejected by the runner after
+/// the request has already been parsed and logged, so the raw text emitted
+/// here cannot rely on downstream validation having stripped it first.
+///
+/// If the text fails to parse as JSON, a placeholder is returned instead of
+/// the raw text, since malformed input cannot be proven free of embedded
+/// credentials.
+pub fn redact_raw_config_json(raw: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(mut value) => {
+            redact_secret_fields(&mut value);
+            serde_json::to_string_pretty(&value)
+                .unwrap_or_else(|_| "<unable to re-serialize redacted config>".to_string())
+        }
+        Err(_) => "<unparsable JSON config, omitted from diagnostics>".to_string(),
+    }
+}
+
+/// Recursively blank JSON object values whose key is secret-bearing (see
+/// [`crate::config_deserialize::is_secret_path_field`]). Over-redaction fails
+/// safe: e.g. blanking the whole `user` object (rather than only `upn`/
+/// `wamToken` within it) never leaks a credential.
+fn redact_secret_fields(value: &mut serde_json::Value) {
+    redact_secret_fields_at_path(value, &[]);
+}
+
+fn redact_secret_fields_at_path(value: &mut serde_json::Value, path: &[String]) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                let key_lower = key.to_ascii_lowercase();
+                if crate::config_deserialize::is_secret_path_field(&key_lower) {
+                    *entry = serde_json::Value::String("<redacted>".to_string());
+                } else if key_lower == "env" {
+                    redact_environment_values(entry);
+                } else if key_lower == "url" && path.iter().any(|parent| parent == "proxy") {
+                    if let serde_json::Value::String(url) = entry {
+                        *url = crate::proxy_env::redact_proxy_url(url);
+                    }
+                } else {
+                    let mut child_path = path.to_vec();
+                    child_path.push(key_lower);
+                    redact_secret_fields_at_path(entry, &child_path);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_secret_fields_at_path(item, path);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_environment_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let serde_json::Value::String(entry) = item {
+                    if let Some(separator) = entry.find('=') {
+                        entry.truncate(separator);
+                        entry.push_str("=<redacted>");
+                    }
+                }
+            }
+        }
+        other => redact_secret_fields_at_path(other, &[]),
+    }
 }
 
 /// Get the parent process name and PID (e.g. `"node.exe:67890"`).
@@ -308,8 +419,92 @@ mod tests {
     }
 
     #[test]
+    fn redacted_request_hides_isolation_session_credentials() {
+        let mut request = ExecutionRequest::default();
+        request.experimental.isolation_session = Some(crate::models::IsolationSessionConfig {
+            user: Some(crate::models::IsolationSessionUser {
+                upn: "user@example.com".to_string(),
+                wam_token: "super-secret-bearer-token".to_string(),
+            }),
+            ..Default::default()
+        });
+
+        let json = redacted_request_json(&request);
+        assert!(!json.contains("user@example.com"));
+        assert!(!json.contains("super-secret-bearer-token"));
+        assert_eq!(json.matches("<redacted>").count(), 2);
+    }
+
+    #[test]
+    fn redact_raw_config_json_hides_isolation_session_user_bundle() {
+        let raw = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "isolation_session",
+            "experimental": {
+                "isolationSession": {
+                    "user": {"upn": "alice@contoso.com", "wamToken": "super-secret-bearer-token"}
+                }
+            }
+        }"#;
+        let redacted = redact_raw_config_json(raw);
+        assert!(!redacted.contains("alice@contoso.com"));
+        assert!(!redacted.contains("super-secret-bearer-token"));
+        assert!(redacted.contains("<redacted>"));
+        // Non-secret fields survive untouched.
+        assert!(redacted.contains("echo hi"));
+        assert!(redacted.contains("isolation_session"));
+    }
+
+    #[test]
+    fn redact_raw_config_json_hides_bare_token_and_secret_fields() {
+        let raw = r#"{"apiKey": "abc123", "clientSecret": "xyz", "commandLine": "run"}"#;
+        let redacted = redact_raw_config_json(raw);
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("xyz"));
+        assert!(redacted.contains("run"));
+    }
+
+    #[test]
+    fn redact_raw_config_json_hides_environment_values_and_proxy_userinfo() {
+        let raw = r#"{
+            "process": {
+                "env": ["API_KEY=hunter2", "PATH=C:\\Windows"]
+            },
+            "network": {
+                "proxy": {
+                    "url": "http://user:password@proxy.example:8080"
+                }
+            }
+        }"#;
+        let redacted = redact_raw_config_json(raw);
+        assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("C:\\Windows"));
+        assert!(redacted.contains("API_KEY=<redacted>"));
+        assert!(redacted.contains("http://***@proxy.example:8080"));
+        assert!(!redacted.contains("user:password"));
+    }
+
+    #[test]
+    fn redact_raw_config_json_falls_back_on_malformed_json() {
+        let redacted = redact_raw_config_json("{ not valid json");
+        assert_eq!(
+            redacted,
+            "<unparsable JSON config, omitted from diagnostics>"
+        );
+    }
+
+    #[test]
     fn env_bool_parses_correctly() {
         // env_bool on non-existent var returns None
         assert!(env_bool("MXC_TEST_NONEXISTENT_VAR_12345").is_none());
+    }
+
+    #[test]
+    fn pipe_tokens_require_length_and_safe_characters() {
+        assert!(is_valid_pipe_token("0123456789abcdef0123456789abcdef"));
+        assert!(is_valid_pipe_token("0123456789abcdef0123456789ab-cdef"));
+        assert!(!is_valid_pipe_token("0123456789abcdef"));
+        assert!(!is_valid_pipe_token("0123456789abcdef0123456789abcde!"));
+        assert!(!is_valid_pipe_token("--------------------------------"));
     }
 }

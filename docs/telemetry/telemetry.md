@@ -4,6 +4,12 @@ MXC uses the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate
 (published by Microsoft) for TraceLogging ETW telemetry. No C++ shim, WIL, or
 FFI is required.
 
+> **Not to be confused with the local audit log.** MXC also writes structured
+> **local diagnostic audit records** that are *not* ETW, *not* uploaded, and
+> *not* consent-gated. They are a separate mechanism with a separate sink; see
+> [Local audit log records](#local-audit-log-records) below. Nothing in that
+> section touches the `Microsoft.MXC` provider described here.
+
 ## Overview
 
 ```
@@ -46,6 +52,8 @@ Rust constants and `write_event!` struct fields.
 
 The remaining gap (activity tracking) is not needed for current events.
 If needed later, it can be added incrementally.
+
+
 
 ## Common Event Fields (Part C)
 
@@ -231,6 +239,248 @@ free-form text.
 | Linux | No-op — all telemetry functions return immediately |
 | macOS | No-op — all telemetry functions return immediately |
 
+---
+
+## Local audit log records
+
+Separate from the ETW telemetry above, MXC emits **structured local diagnostic
+audit records**: one JSON object per line, written only to the auxiliary
+diagnostic sinks. They exist so facts MXC already knows — a process exit code, a
+tier fallback, a teardown result, a rejected config — are *machine-readable*
+instead of being discarded or rendered only as prose.
+
+**These are not ETW events.** No provider, no keyword, no privacy tag, no
+correlation vector, and no consent gate. Nothing leaves the host.
+
+### Enabling them
+
+A record is written when — and only when — a diagnostic sink is attached. There
+is no additional flag:
+
+```powershell
+# File sink: every audit record lands here alongside the normal diagnostics.
+wxc-exec.exe --log-file .\mxc-audit.log .\config.json
+
+# Named-pipe sink (Windows): use the same high-entropy token in both processes.
+$env:MXC_DIAG_PIPE_TOKEN = [guid]::NewGuid().ToString('N')
+$env:MXC_DIAG_PIPE_TOKEN
+# Terminal 1: start the console with the shared token.
+mxc-diagnostic-console.exe
+
+# Terminal 2: enable the pipe sink for wxc-exec with the same token.
+$env:MXC_DIAG_PIPE_TOKEN = '<the same token>'
+$env:MXC_DIAG_CONSOLE = '1'
+wxc-exec.exe .\config.json
+```
+
+With neither configured, the emit call is a cheap no-op.
+
+Records deliberately do **not** reach the primary console/buffer sink — that
+channel is the SDK caller's captured stdout / debug buffer, and writing to it
+would change the observable output of every existing consumer. The diagnostic
+logger routes them only to the explicitly configured auxiliary sinks.
+
+### Format
+
+```
+{"event":"mxc.ProcessExited","backend":"processcontainer","identity":"sandbox-a3f1c8e40029bd17","tier":"base-container","pid":1234,"exit_code":0}
+```
+
+As it appears in a `--log-file` (the existing `[<unix-seconds>] ` stamp is
+prepended by the file sink):
+
+```
+[1785549205] {"event":"mxc.ProcessExited","backend":"processcontainer",…}
+```
+
+The following invariants are enforced by MXC:
+
+1. **`event` is always the first key**, so a consumer can classify a line with a
+   prefix match (`{"event":"mxc.`) before parsing it.
+2. **Field order is the call site's declaration order** — deterministic per
+   record.
+3. **Values are strings, integers, or booleans only.** No nested objects, no
+   arrays; a set-valued field is a comma-joined bounded string plus an explicit
+   `_count` companion.
+4. **String values are `serde_json`-escaped**, so an embedded quote, backslash,
+   or newline can never break the one-record-per-line invariant.
+5. **Event names come from the closed `AuditEventName` enum** — a typo is a
+   compile error, not a silently unmatched record.
+
+Parsing is therefore just `ConvertFrom-Json` / `jq`:
+
+```powershell
+Get-Content .\mxc-audit.log |
+  ForEach-Object { if ($_ -match '^\[\d+\]\s(\{.*\})$') { $Matches[1] } } |
+  ConvertFrom-Json |
+  Where-Object { $_.event -like 'mxc.*' } |
+  Format-Table event, backend, identity, tier
+```
+
+### Content rules
+
+The same bounded-vocabulary discipline as the ETW events applies, and for the
+same reason: a diagnostic log file is routinely attached to a bug report or
+collected by a fleet log agent.
+
+* **No free-form text.** Reasons, statuses, and methods are closed enums with an
+  `as_str()`; error detail is reduced to a numeric code.
+* **No config values, no filesystem paths, no command lines.** Config field
+  *paths* (`process.commandLine`) are permitted — they are bounded and already
+  public in the schema. Field *values* are not.
+* **No raw user identities.** Identity-bearing sandbox records use a constant
+  redaction marker instead of a user identifier. A truncated SHA-256 is not used:
+  a low-entropy identity could be recovered by dictionary attack. The cost is
+  that these sandboxes have no MXC-side join key in the local log.
+* **No caller-supplied identifiers verbatim.** A sandbox identity derived from
+  configuration (the AppContainer profile name is the caller's `containerId`)
+  is retained only when it matches one of the closed set of shapes MXC itself
+  mints — the literal default `CLI`, `sandbox-<16 hex>`, or the state-aware
+  `iso:<token>` / `wsb:<token>` ids (≤64 chars, opaque token characters only).
+  Any other `containerId` the caller chose is replaced with `redacted`,
+  regardless of how opaque it looks — character/length checks alone cannot
+  prove a value wasn't caller-chosen.
+* **Counts, not names, for network rules.** Rule names can contain host and
+  process identifiers, so only counts are recorded.
+
+### Record inventory
+
+Fields are record-specific. Process-boundary records include `backend`,
+`identity`, `tier` (for `process_container`), and `pid`. Early records emitted
+before a sandbox exists carry only the fields shown in the table below; in
+particular, `mxc.PolicyHash` has `backend`, `policy_hash`, and
+`config_schema_version`, `mxc.EnforcementDegraded` has `backend` and `tier`,
+and `mxc.ConfigRejected` has `backend` plus its rejection fields.
+
+| Record | When | Fields beyond the common ones |
+|---|---|---|
+| `mxc.PolicyHash` | Every launch, after the effective request is resolved | `backend`, `policy_hash`, `config_schema_version` |
+| `mxc.SandboxIdentity` | After a successful state-aware phase | `backend`, `identity`, `phase` |
+| `mxc.EnforcementDegraded` | ProcessContainer dispatch resolved below the preferred tier | `backend`, `tier`, `needs_dacl_augmentation`, `effective_enforcement_level`, `degradation_reasons`, `degradation_reason_count` |
+| `mxc.NetworkPolicyApplied` | After network policy setup, on success **and** failure | `backend`, `identity`, `tier` (no `pid` yet), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
+| `mxc.ProcessExited` | Sandboxed process exited on its own | `exit_code` |
+| `mxc.ProcessTimedOut` | `scriptTimeout` breached | `timeout_ms` |
+| `mxc.ProcessKillFailed` | A kill/terminate call failed (**failure only**) | `kill_method`, `error_code` |
+| `mxc.SandboxTornDown` | Per-run resources released, once per handle | `backend`, `identity`, `tier`, `pid`, `status`, `firewall_rules_removed`, `firewall_removal_ok`, `bfs_removed`, `proxy_stopped`, `preserve_policy`, `container_released`, `skip_reason` |
+| `mxc.ConfigRejected` | A request was refused before it could run | `backend`, `reason`, `offending_field`, `phase` |
+
+Notes on the ones that are easy to misread:
+
+* **`mxc.EnforcementDegraded` is absent on a clean run.** It fires only when
+  selected enforcement is below the preferred level, additional host setup was
+  needed, or a bounded reason was recorded. The effective level is a closed MXC
+  vocabulary describing the enforcement mechanism selected by MXC; it is not an
+  assertion about an independent OS telemetry field. The streaming path emits
+  the record *before* the spawn, so it exists even when the spawn then fails.
+* **`mxc.ProcessKillFailed` is not automatically a defect.** Termination can
+  race with normal process exit. The record is captured but never propagated —
+  the kill path stays best-effort and non-fatal.
+* **`mxc.SandboxTornDown` reports unavailable cleanup honestly.** If a cleanup
+  operation is not implemented for a backend, the record reports that fact
+  rather than claiming a cleanup that did not happen.
+* **`mxc.PolicyHash` covers the *policy*, not the command.** See below.
+
+### The policy hash
+
+MXC produces `sha256:<64 hex>` over an explicit **allow-list** projection of the
+effective request, canonicalised (object keys sorted at every depth, array order
+preserved). It is computed after every policy-affecting mutation, so it
+describes what actually ran, not what was requested.
+
+An allow-list is deliberate: a field added to the model later is excluded until
+someone opts it in, which fails safe rather than accidentally hashing a secret.
+To stop that from rotting into a silent coverage gap, the projection
+**exhaustively destructures** `ExecutionRequest` and `ExperimentalConfig` — adding
+a field to either is a compile error until it is classified.
+
+Excluded, and why:
+
+| Excluded | Reason |
+|---|---|
+| `script_code` | The command line is *what runs*, not the policy it runs under; it routinely embeds credentials. |
+| `env` | Environment variables are the classic secret carrier. |
+| `experimental.telemetry`, `experimental.test` | No enforcement effect. |
+| `experimental.*.user` | Carries identity credentials. Stripped recursively; the rest of the isolation-session section *is* hashed. |
+| proxy `original_url` | Can embed `user:password@`. The host and port *are* hashed. |
+| `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+
+The rest of `experimental` **is** hashed — `windows_sandbox`, `wslc`, and
+`isolation_session` carry those backends' entire enforcement policy, so omitting
+them would make two materially different policies hash identically.
+
+`config_schema_version` is named for the *schema*: it does not change when the
+policy changes and must never be read as a policy version.
+
+**Residual disclosure property (accepted).** The hash is deterministic and
+unkeyed, so it is a confirmation oracle for the fields it covers: a reader who
+already knows every hashed field but one can brute-force the remaining one. In
+practice that means testing a guess at a single `readwritePaths` entry while
+already knowing the container id, working directory, timeout, capability list,
+and every other path exactly. This is accepted because the alternative (a keyed
+digest) needs a machine-local secret whose storage and rotation are out of scope
+for a local log, and because the genuinely sensitive inputs — command line,
+environment, tokens, proxy userinfo — are excluded from the hash entirely, so no
+oracle exists for them at any difficulty. **Do not add a low-entropy secret to
+the projection without switching to a keyed construction first.**
+
+### Platform scope
+
+The records are **not** uniformly available across platforms, and a missing
+record must not be read as "the event did not happen":
+
+| Record | Windows ProcessContainer | Windows state-aware | Linux (LXC / Bubblewrap) | macOS (Seatbelt) |
+|---|---|---|---|---|
+| `mxc.PolicyHash` | ✅ | ✅ | ✅ | ✅ |
+| `mxc.SandboxIdentity` | — | ✅ | — | — |
+| `mxc.ConfigRejected` | ✅ (`wxc-exec`) | ✅ | — | — |
+| `mxc.EnforcementDegraded` | ✅ | — | n/a (no tier model) | n/a |
+| `mxc.NetworkPolicyApplied` | ✅ (T2/T3) | — | — | — |
+| `mxc.ProcessExited` / `TimedOut` / `KillFailed` | ✅ (including isolation-session one-shot) | — | — | — |
+| `mxc.SandboxTornDown` | ✅ | — | — | — |
+
+The shared audit types compile identically on all three platforms; the gap is
+that the *emission sites* were added only to the
+Windows runners and the `wxc-exec` binary, because the originating requirement
+was Windows-only. Extending them to `lxc-exec` and `mxc-exec-mac` is tracked
+follow-up work, not a design decision that Linux and macOS do not need an audit
+trail.
+
+The isolation-session `ProcessTimedOut` and `ProcessKillFailed` records are
+emitted by the one-shot runner, where `wxc-exec` supplies the local diagnostic
+logger to the backend. The state-aware backend trait does not currently carry a
+logger into its `exec` method, so state-aware isolation-session exec remains
+unrecorded by these MXC-local process-boundary events.
+
+
+
+| Requirement | Existing OS coverage | MXC local coverage | Join/correlation notes |
+|---|---|---|---|
+| M-ETW-1 process outcome | Existing OS process-lifecycle records cover normal exit. The OS does not provide a verified timeout or kill-failure record for this requirement. | `mxc.ProcessTimedOut` and `mxc.ProcessKillFailed` cover the one-shot MXC boundary; state-aware exec is not currently logger-backed. | Join the OS lifecycle identity to the MXC sandbox identity where available; use the process ID for process records. |
+| M-ETW-2 enforcement degradation | Not applicable to this backend: `isolation_session` has no MXC process-container tier/fallback model. | `mxc.EnforcementDegraded` covers process-container tier selection and includes `effective_enforcement_level`. | No isolation-session tier join is expected. |
+| M-ETW-3 policy hash | No policy hash field is emitted by the isolation-session OS provider. | `mxc.PolicyHash` records the effective MXC policy locally, excluding secrets and command content. | Correlate by the invocation/lifecycle context; the hash is an MXC record, not an OS field. |
+| M-ETW-4 network policy | Not applicable today: MXC rejects isolation-session network and proxy policy before OS provisioning. | `mxc.NetworkPolicyApplied` covers supported process-container network setup only. | This row changes only if the separate M1 network-proxy requirement is implemented. |
+| M-ETW-5 teardown | Existing OS lifecycle and security records cover OS cleanup. | `mxc.SandboxTornDown` covers supported process-container cleanup; isolation-session phase outcomes remain in the existing lifecycle records. | Join by the lifecycle identity where available; OS cleanup may outlive the MXC process boundary. |
+| M-ETW-6 provider selection and correlation | `mxc.ConfigRejected` records MXC-owned rejection reason, field, and phase locally. | MXC validation commonly occurs before the OS call, so no OS rejection event should be expected for those records. |
+| M-ETW-7 configuration rejection | Existing OS records do not expose the MXC parser's bounded field path and rejection category. | `mxc.ConfigRejected` records the bounded reason, offending field, backend, and phase. | The human-readable error remains on the existing operator-facing channel; the audit record contains no rich error text. |
+
+This table documents coverage and correlation; it does not convert the local
+audit records into OS telemetry. OS event names and capture procedures vary by
+OS build and are outside this local audit format.
+
+### Stability contract
+
+The `event` name is the anchor. If a record's field set has to change
+incompatibly, mint a new record name rather than redefining an existing one.
+New record names and new fields are additive; a consumer that filters on
+`{"event":"mxc.` sees only what it recognises.
+
+The shared record format is cross-platform, so Windows, Linux, and macOS
+compile and test the same serialization code.
+See [Platform scope](#platform-scope) for which *emission sites* exist where —
+that is where the real asymmetry lives.
+
+---
+
 ## Private GUID Substitution (Internal Builds)
 
 MXC supports an optional Microsoft telemetry group GUID for internal builds.
@@ -264,7 +514,7 @@ with another team's GUID.
 Internal Microsoft builds set `MXC_TELEMETRY_PROVIDER_GROUP_GUID` to the real
 Microsoft telemetry group GUID before `cargo build` on Windows, so events route
 through the telemetry pipeline. Community forks that lack access to the private
-GUID do not set this variable — the provider is registered without a group GUID
+GUID do not set this variable - the provider is registered without a group GUID
 (plain ETW only).
 
 > **Follow-up:** The provider group GUID is now provided by a secret variable
@@ -290,18 +540,18 @@ cargo build -p mxc_telemetry
 
 | Item | Public? | Why |
 |------|---------|-----|
-| Provider name `"Microsoft.MXC"` | ✅ | Standard ETW naming |
-| Provider GUID `{7f10def4-a258-5fea-510e-2c3bb976687f}` | ✅ | Derived from the name; identifies the provider, harmless |
-| `build.rs` env var mechanism | ✅ | Mechanism is public |
-| `MXC_TELEMETRY_PROVIDER_GROUP_GUID` env var name | ✅ | Key is public; value is private |
-| Actual Microsoft telemetry group GUID | ❌ | Private — set in CI only |
+| Provider name `"Microsoft.MXC"` | Yes | Standard ETW naming |
+| Provider GUID `{7f10def4-a258-5fea-510e-2c3bb976687f}` | Yes | Derived from the name; identifies the provider, harmless |
+| `build.rs` env var mechanism | Yes | Mechanism is public |
+| `MXC_TELEMETRY_PROVIDER_GROUP_GUID` env var name | Yes | Key is public; value is private |
+| Actual Microsoft telemetry group GUID | No | Private - set in CI only |
 
 ## SDK License Override (EULA for npm Package)
 
 The public GitHub repo ships `sdk/node/LICENSE.md` as a plain MIT license. For
-internal npm publishes, a separate EULA containing a **Section 2 — DATA**
+internal npm publishes, a separate EULA containing a **Section 2 - DATA**
 clause (covering telemetry disclosure, opt-out, and GDPR) will be updated at
-pack/publish time. 
+pack/publish time.
 
 ### How it works
 
@@ -312,11 +562,11 @@ pack/publish time.
    will otherwise remain MIT licensed.
 
 2. A license-override script (added in a follow-up build-integration PR) runs:
-   ├── MXC_LICENSE_OVERRIDE is set:
-   │   ├── Back up sdk/node/LICENSE.md → sdk/node/LICENSE.md.public
-   │   └── Copy new EULA over sdk/node/LICENSE.md
-   └── MXC_LICENSE_OVERRIDE is NOT set:
-       └── Restore sdk/node/LICENSE.md from .public backup (if exists)
+   MXC_LICENSE_OVERRIDE is set:
+   - Back up sdk/node/LICENSE.md -> sdk/node/LICENSE.md.public
+   - Copy new EULA over sdk/node/LICENSE.md
+   MXC_LICENSE_OVERRIDE is NOT set:
+   - Restore sdk/node/LICENSE.md from .public backup (if exists)
 
 3. npm pack / npm publish picks up the new EULA as the LICENSE.md
    in the published package (sdk/node/package.json "files" includes LICENSE.md).

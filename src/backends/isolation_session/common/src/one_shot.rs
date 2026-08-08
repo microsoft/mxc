@@ -105,7 +105,7 @@ impl ScriptRunner for IsolationSessionRunner {
             return e.into();
         }
 
-        let exit_code = match manager.create_process(&options) {
+        let exit_code = match manager.create_process(&options, Some(logger)) {
             Ok(code) => code,
             Err(e) => {
                 let _ = manager.stop_session();
