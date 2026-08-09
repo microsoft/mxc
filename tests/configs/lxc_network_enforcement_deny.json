@@ -1,0 +1,21 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Net-Deny",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"wget -qO- --timeout=8 https://api.github.com/zen >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": [],
+    "blockedHosts": []
+  }
+}
