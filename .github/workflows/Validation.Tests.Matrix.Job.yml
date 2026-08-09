@@ -92,6 +92,12 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-whp.ps1
 
+      - name: Probe WHP capabilities
+        if: matrix.command == 'microvm'
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./scripts/ci/probe-whp-capabilities.ps1
+
       - name: Probe nanvixd directly
         if: matrix.command == 'microvm'
         timeout-minutes: 5

@@ -507,30 +507,6 @@
         "backends": [
           "microvm"
         ]
-      },
-      {
-        "os": "ubuntu-26.04",
-        "backends": [
-          "lxc"
-        ]
-      },
-      {
-        "os": "ubuntu-24.04",
-        "backends": [
-          "lxc"
-        ]
-      },
-      {
-        "os": "rhel-10",
-        "backends": [
-          "lxc"
-        ]
-      },
-      {
-        "os": "debian-13",
-        "backends": [
-          "lxc"
-        ]
       }
     ]
   }
