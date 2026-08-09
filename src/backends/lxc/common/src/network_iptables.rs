@@ -1049,12 +1049,26 @@ impl NetworkIptablesManager {
                 ));
             }
         } else {
-            // Without a veth interface, we cannot safely scope rules to the container.
-            // Refuse to apply host-wide rules to avoid affecting all host traffic.
-            logger.log_line(
-                "Warning: No veth interface set for container. \
-                 Cannot scope iptables rules. Skipping FORWARD hook.",
-            );
+            // Without a veth interface there is nothing to hook the chain to,
+            // and an unhooked chain is never traversed: FORWARD only reaches it
+            // via `-i <veth>`. Reporting success here would hand the caller a
+            // fully populated deny-all chain that filters nothing, which is
+            // strictly worse than no firewall at all because it looks enforced.
+            //
+            // The alternative -- installing the rules host-wide so they do take
+            // effect -- is not acceptable either: unscoped they would apply to
+            // every container and to the host's own traffic.
+            //
+            // So the only honest outcome is to fail. `apply_firewall_rules_inner`
+            // rolls back the chains recorded in `created`, and `lxc_runner`
+            // destroys the container rather than starting a workload that
+            // believes it is confined.
+            return Err(format!(
+                "No veth interface for container; cannot scope iptables rules to chain {}. \
+                 The chain would never be reached from FORWARD, so the network policy would \
+                 not be enforced. Refusing to report success for an unenforceable policy.",
+                self.chain_name
+            ));
         }
 
         Ok(())
@@ -1228,6 +1242,15 @@ impl Drop for NetworkIptablesManager {
 /// because `cargo test` runs tests in parallel -- a process-global fake would
 /// have to be serialized behind a lock and would let one test observe
 /// another's commands.
+/// Spec for the fail-closed behavior when rules cannot be scoped to the
+/// container. Attached as a child module rather than a `tests/` integration
+/// test because the `test_firewall` seam below is `#[cfg(test)]`, which an
+/// integration test -- a separate crate -- can never see. Kept in its own file
+/// so this one does not grow further.
+#[cfg(test)]
+#[path = "network_iptables_veth_spec.rs"]
+mod veth_spec;
+
 #[cfg(test)]
 mod test_firewall {
     use std::cell::RefCell;
