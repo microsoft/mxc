@@ -626,17 +626,24 @@ impl NetworkIptablesManager {
     /// Build the allow/deny rule args for a container policy.
     ///
     /// Test-only shim over the shipping path [`Self::build_policy_rules_logged`]
-    /// so the rulegen spec assertions — including the allow-before-block
-    /// ordering that is a tracked security-semantics contract (AB#62830341) —
-    /// bind to the code that actually runs, not to a duplicate iteration. The
+    /// so the rulegen spec assertions — including the deny-before-allow
+    /// ordering that is a security-semantics contract (AB#62830341) — bind to
+    /// the code that actually runs, not to a duplicate iteration. The
     /// unresolved-host warning is irrelevant to rule generation, so it is
     /// discarded to a buffer logger. Production must never call this: it takes
     /// no logger and would resolve entries a second time relative to the
     /// warning pass.
+    ///
+    /// This shim panics on the unresolvable-block-entry error so that the many
+    /// rulegen assertions over well-formed policies keep a plain return type. A
+    /// test that exercises the error path must call
+    /// [`Self::build_policy_rules_logged`] directly and inspect the `Result`.
     #[cfg(test)]
     fn build_policy_rule_args(chain_name: &str, policy: &ContainerPolicy) -> FirewallRuleArgs {
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-        Self::build_policy_rules_logged(chain_name, policy, &mut logger)
+        Self::build_policy_rules_logged(chain_name, policy, &mut logger).expect(
+            "test policy should not pair an accepting default with an unresolvable block entry",
+        )
     }
 
     /// Resolve every allow/block entry exactly once and build the rule args
@@ -650,32 +657,63 @@ impl NetworkIptablesManager {
     /// expires between the calls — so the rule installed would not match the
     /// rule that was validated and logged.
     ///
-    /// NOTE — interim ordering (tracked by AB#62830341): rules are emitted in
-    /// allow-list then block-list order, and iptables/ip6tables apply
-    /// first-match-wins within the chain. This model-1 change therefore does
-    /// **not** yet implement deny-precedence: a destination present in both
-    /// the allow and block lists is ACCEPTed. Reconciling this to the GA
-    /// "deny-wins" ordering is owned by net-model-2 (AB#62830341); until then
-    /// callers must not assume deny-precedence.
+    /// Deny-precedence (AB#62830341): block-list rules are emitted before
+    /// allow-list rules, and iptables/ip6tables apply first-match-wins within
+    /// the chain, so a destination present in both lists is DROPped. Emission
+    /// order is the entire precedence mechanism — there is no separate
+    /// resolution pass — so swapping these two iterators silently reverses the
+    /// security semantics of every policy whose lists overlap.
+    ///
+    /// A block entry that resolves to nothing programs no rule. That is a
+    /// containment failure only when something else would then permit the
+    /// destination, so the response depends on the default policy. Under
+    /// [`NetworkPolicy::Allow`] the chain ends in ACCEPT and the unwritten deny
+    /// rule was the only thing that would have stopped the traffic, so the
+    /// apply fails closed with an error rather than reporting success over a
+    /// policy it did not enforce. Under [`NetworkPolicy::Block`] the closing
+    /// DROP already denies every destination the allow list did not name, so an
+    /// unresolvable block entry is redundant rather than missing — the ordinary
+    /// case being a blocklist naming a host that does not exist at all — and a
+    /// warning is the proportionate response.
+    ///
+    /// Residual gap, deliberately not closed here: under [`NetworkPolicy::Block`]
+    /// a sufficiently broad allow entry can still cover a destination whose deny
+    /// rule went unwritten. Detecting that needs the address the entry failed to
+    /// resolve to, so no predicate over the policy text can be complete, and a
+    /// partial check would imply a guarantee this code cannot make.
+    ///
+    /// An unresolvable allow entry is always a warning: it withholds traffic
+    /// that was meant to be permitted, which costs availability and cannot
+    /// widen what the container can reach.
     fn build_policy_rules_logged(
         chain_name: &str,
         policy: &ContainerPolicy,
         logger: &mut Logger,
-    ) -> FirewallRuleArgs {
+    ) -> Result<FirewallRuleArgs, String> {
+        let default_permits = matches!(policy.default_network_policy, NetworkPolicy::Allow);
         let mut args = FirewallRuleArgs::default();
         let entries = policy
-            .allowed_hosts
+            .blocked_hosts
             .iter()
-            .map(|host| (host, RuleAction::Allow))
+            .map(|host| (host, RuleAction::Deny))
             .chain(
                 policy
-                    .blocked_hosts
+                    .allowed_hosts
                     .iter()
-                    .map(|host| (host, RuleAction::Deny)),
+                    .map(|host| (host, RuleAction::Allow)),
             );
         for (host, action) in entries {
             let destinations = Self::resolve_host(host);
             if destinations.is_empty() {
+                if default_permits && matches!(action, RuleAction::Deny) {
+                    return Err(format!(
+                        "blocked host '{}' resolved to no address, so no rule can be \
+                         programmed to deny it, and the default network policy accepts \
+                         what no rule matches; refusing to apply a policy that would \
+                         leave it reachable",
+                        host
+                    ));
+                }
                 logger.log_line(&format!("Warning: could not resolve host '{}'", host));
             }
             let rule_args =
@@ -694,7 +732,7 @@ impl NetworkIptablesManager {
             }
             args.extend(rule_args);
         }
-        args
+        Ok(args)
     }
 
     /// Run an iptables command and return success/failure.
@@ -1135,8 +1173,11 @@ impl NetworkIptablesManager {
         // Resolve every allow/block entry exactly once and reuse that single
         // resolution for both the unresolved-host warning and rule
         // construction, so the rule installed matches the entry that was
-        // validated and logged.
-        let policy_rules = Self::build_policy_rules_logged(&self.chain_name, policy, logger);
+        // validated and logged. A block entry that resolves to nothing is an
+        // error here rather than a warning, and propagating it aborts the
+        // apply so the caller rolls back the chains created above instead of
+        // leaving a chain that is missing one of its deny rules.
+        let policy_rules = Self::build_policy_rules_logged(&self.chain_name, policy, logger)?;
         Self::run_iptables_rule_args(&policy_rules.ipv4, logger)?;
         if ipv6_enabled {
             Self::run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
@@ -1499,6 +1540,13 @@ mod veth_spec;
 #[cfg(test)]
 #[path = "network_iptables_forward_hook_spec.rs"]
 mod forward_hook_spec;
+
+/// Black-box specification for deny-precedence ordering and the fail-closed
+/// response to an unresolvable block entry, kept in its own file for the same
+/// reason as `veth_spec`.
+#[cfg(test)]
+#[path = "network_iptables_deny_precedence_spec.rs"]
+mod deny_precedence_spec;
 
 #[cfg(test)]
 mod test_firewall {
@@ -2188,20 +2236,34 @@ mod tests {
 
         let args = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
-        assert_eq!(
-            args.ipv4,
-            vec![
-                strings(&["-A", "MXC-test", "-d", "140.82.112.0/20", "-j", "ACCEPT"]),
-                strings(&["-A", "MXC-test", "-d", "10.0.0.0/8", "-j", "DROP"]),
-            ]
-        );
-        assert_eq!(
-            args.ipv6,
-            vec![
-                strings(&["-A", "MXC-test", "-d", "2606:50c0::/32", "-j", "ACCEPT"]),
-                strings(&["-A", "MXC-test", "-d", "2001:db8::/32", "-j", "DROP"]),
-            ]
-        );
+        // Membership rather than sequence: this test owns the family split, and
+        // the order the two lists are emitted in is the deny-precedence
+        // contract, asserted by the deny_precedence_spec module.
+        let expected_v4 = vec![
+            strings(&["-A", "MXC-test", "-d", "140.82.112.0/20", "-j", "ACCEPT"]),
+            strings(&["-A", "MXC-test", "-d", "10.0.0.0/8", "-j", "DROP"]),
+        ];
+        let expected_v6 = vec![
+            strings(&["-A", "MXC-test", "-d", "2606:50c0::/32", "-j", "ACCEPT"]),
+            strings(&["-A", "MXC-test", "-d", "2001:db8::/32", "-j", "DROP"]),
+        ];
+
+        assert_eq!(args.ipv4.len(), expected_v4.len());
+        for rule in &expected_v4 {
+            assert!(
+                args.ipv4.contains(rule),
+                "IPv4 rules should contain {rule:?}; actual: {:?}",
+                args.ipv4
+            );
+        }
+        assert_eq!(args.ipv6.len(), expected_v6.len());
+        for rule in &expected_v6 {
+            assert!(
+                args.ipv6.contains(rule),
+                "IPv6 rules should contain {rule:?}; actual: {:?}",
+                args.ipv6
+            );
+        }
     }
 
     #[test]
@@ -2743,52 +2805,6 @@ mod tests {
                 "IPv6 destination {destination} must not appear in IPv4 rules; actual: {rules:?}"
             );
         }
-    }
-
-    #[test]
-    fn allow_list_rules_are_emitted_before_block_list_rules_for_same_ipv4_destination() {
-        let destination = "203.0.113.44";
-        let policy = policy_with_hosts(&[destination], &[destination]);
-        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-order-v4", &policy);
-        let rendered: Vec<String> = rules.ipv4.iter().map(|rule| joined(rule)).collect();
-
-        let accept_index = rendered
-            .iter()
-            .position(|rule| rule.contains(destination) && rule.contains("-j ACCEPT"))
-            .expect("IPv4 ACCEPT rule for duplicate destination should exist");
-        let drop_index = rendered
-            .iter()
-            .position(|rule| rule.contains(destination) && rule.contains("-j DROP"))
-            .expect("IPv4 DROP rule for duplicate destination should exist");
-
-        // SPEC_BRIEF §3 pins this interim AB#62830341 behavior until deny-precedence lands.
-        assert!(
-            accept_index < drop_index,
-            "IPv4 duplicate {destination} should ACCEPT before DROP; actual order: {rendered:?}"
-        );
-    }
-
-    #[test]
-    fn allow_list_rules_are_emitted_before_block_list_rules_for_same_ipv6_destination() {
-        let destination = "2001:db8::44";
-        let policy = policy_with_hosts(&[destination], &[destination]);
-        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-order-v6", &policy);
-        let rendered: Vec<String> = rules.ipv6.iter().map(|rule| joined(rule)).collect();
-
-        let accept_index = rendered
-            .iter()
-            .position(|rule| rule.contains(destination) && rule.contains("-j ACCEPT"))
-            .expect("IPv6 ACCEPT rule for duplicate destination should exist");
-        let drop_index = rendered
-            .iter()
-            .position(|rule| rule.contains(destination) && rule.contains("-j DROP"))
-            .expect("IPv6 DROP rule for duplicate destination should exist");
-
-        // SPEC_BRIEF §3 says allow-before-block ordering applies to both iptables buckets.
-        assert!(
-            accept_index < drop_index,
-            "IPv6 duplicate {destination} should ACCEPT before DROP; actual order: {rendered:?}"
-        );
     }
 
     #[test]
