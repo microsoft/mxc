@@ -403,9 +403,17 @@ impl ProxyAddress {
     /// Returns the pin required for a sandbox to resolve this proxy's hostname
     /// to `ip`, or `None` when no pin is needed or possible.
     ///
-    /// `None` is returned when the address is already an IP literal, since
-    /// there is nothing to resolve, and when it is empty. Callers treat `None`
+    /// `None` is returned when the address is empty, and when it is an IP
+    /// literal, since there is then nothing to resolve. Callers treat `None`
     /// as "no hosts entry required", not as an error.
+    ///
+    /// The address is unbracketed before that classification so a bracketed
+    /// IPv6 literal is recognized as a literal rather than mistaken for a
+    /// hostname: `IpAddr::from_str` rejects brackets, so `[::1]` would
+    /// otherwise be pinned as though it were a name.
+    ///
+    /// `ip` is recorded bare for the same reason [`ProxyHostPin::hosts_line`]
+    /// writes it bare -- a hosts file takes an unbracketed IPv6 literal.
     ///
     /// The URL is deliberately left untouched. See [`ProxyHostPin`] for why
     /// rewriting the host to `ip` instead would break TLS.
@@ -422,12 +430,12 @@ impl ProxyAddress {
     }
 
     /// Wraps `host` in `[` `]` when it is a bare IPv6 literal, so it is valid
-    /// as a URL host component. Any other host, including one that is already
-    /// bracketed, is returned unchanged.
+    /// as a URL host component.
+    ///
+    /// An already-bracketed literal needs no special case. `IpAddr::from_str`
+    /// does not accept brackets, so a bracketed host fails to parse and falls
+    /// through unchanged rather than being bracketed twice.
     fn bracket_if_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
-        if host.starts_with('[') {
-            return std::borrow::Cow::Borrowed(host);
-        }
         match host.parse::<std::net::IpAddr>() {
             Ok(std::net::IpAddr::V6(_)) => std::borrow::Cow::Owned(format!("[{host}]")),
             _ => std::borrow::Cow::Borrowed(host),
