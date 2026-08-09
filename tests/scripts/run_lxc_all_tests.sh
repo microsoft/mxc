@@ -67,6 +67,7 @@ run_test "LXC Network Invalid CIDR" "$SCRIPT_DIR/run_lxc_network_invalid_cidr_te
 run_test "LXC Network Dual-Stack Hostname" "$SCRIPT_DIR/run_lxc_network_dualstack_test.sh"
 run_test "LXC Network CIDR Boundary" "$SCRIPT_DIR/run_lxc_network_cidr_boundary_test.sh"
 run_test "LXC Network Enforcement" "$SCRIPT_DIR/run_lxc_network_enforcement_test.sh"
+run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precedence_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 
