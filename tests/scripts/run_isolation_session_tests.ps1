@@ -18,6 +18,12 @@
     the test configs, and this script to the host, then run it directly in
     cmd.exe or PowerShell on that host.
 
+    Assumes the system drive is C:. The scratch directories this script
+    creates and the paths hardcoded in the test configs must name the same
+    location, so the two sides have to change together — making only this
+    script `$env:SystemDrive`-aware would point it at a directory the configs
+    never reference.
+
     Automated configs (asserted by this script):
       - isolation_session_hello.json --env vars + working dir + agent name
       - isolation_session_exit42.json --exit code propagation
@@ -306,6 +312,10 @@ function Run-IsolationSessionTest {
 
 Write-Host "--- Tests ---" -ForegroundColor Cyan
 # Setup for isolation_session_hello.json: cwd must exist before agent start.
+# Removed first — the same idiom the concurrent dirs below use — because a run
+# that dies before the scratch cleanup leaves this behind, and a stale directory
+# must not outlive the run that created it.
+Remove-Item -Recurse -Force 'C:\mxc_workdir_test' -ErrorAction SilentlyContinue
 New-Item -Path 'C:\mxc_workdir_test' -ItemType Directory -Force | Out-Null
 $HostWhoami = (& whoami).Trim()
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
@@ -415,8 +425,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to grant Authenticated Users write access to ${concurrentLogDir}: $aclOutput"
 }
 
-# wxc-exec stdout/stderr capture dir (preserved across runs for inspection;
-# cleaned at the start of each run).
+# wxc-exec stdout/stderr capture dir. Cleared at the start of every run, and
+# removed again at the end of a green one; a failing run leaves it for inspection.
 $concurrentTempRoot = Join-Path $env:TEMP 'mxc_concurrent_oneshot'
 Remove-Item -Recurse -Force $concurrentTempRoot -ErrorAction SilentlyContinue
 New-Item -Path $concurrentTempRoot -ItemType Directory -Force | Out-Null
@@ -490,6 +500,14 @@ function Wait-AgentLogStart {
 }
 
 $pA = $null; $pB = $null; $pC = $null
+
+# Scratch directories this script creates that must not outlive the run.
+# Removal of each is attempted quietly, since an already-absent directory is the
+# normal case, then asserted — a directory held by a scanner or blocked by an
+# ACL would otherwise survive a green run, which is the state this cleanup
+# exists to prevent. Declared here so the cleanup in the finally below and the
+# post-summary cleanup both record into it.
+$scratchLeft = @()
 
 try {
     Write-Host "  starting A (15 still-alive iters), B (5), C (30) with log-file barriers..." -ForegroundColor Gray
@@ -591,11 +609,10 @@ try {
             try { $p.Kill() } catch { }
         }
     }
-    # Clean up the shared agent log dir; the wxc-exec stdout/stderr
-    # capture dir is preserved for post-run inspection (next run's
-    # start-of-test cleanup will replace it).
+    # Clean up the shared agent log dir. The wxc-exec stdout/stderr capture
+    # dir is handled after the summary, where the pass/fail outcome is known.
     Remove-Item -Recurse -Force $concurrentLogDir -ErrorAction SilentlyContinue
-    Write-Host "  (concurrent stdout/stderr preserved at: $concurrentTempRoot)" -ForegroundColor DarkGray
+    if (Test-Path $concurrentLogDir) { $scratchLeft += $concurrentLogDir }
 }
 
 
@@ -609,6 +626,30 @@ $failed = @($results | Where-Object { -not $_.Pass -and -not $_.Skipped }).Count
 $skipped = @($results | Where-Object { $_.Skipped }).Count
 $total = $results.Count
 $executed = $passed + $failed
+
+# Scratch cleanup. Neither directory below is a product artifact, so neither
+# should outlive the run.
+#
+# `C:\mxc_workdir_test` only ever serves as the agent process's working
+# directory, so it is always empty and always safe to remove.
+#
+# The concurrent capture dir holds each agent's wxc-exec stdout/stderr, which is
+# worth keeping when something failed and is litter when nothing did — and it
+# sits under the invoking user's %TEMP%, where it would accumulate unnoticed.
+#
+# Leftovers are counted separately from the test tally so the summary keeps
+# reporting test outcomes rather than housekeeping.
+Remove-Item -Recurse -Force 'C:\mxc_workdir_test' -ErrorAction SilentlyContinue
+if (Test-Path 'C:\mxc_workdir_test') { $scratchLeft += 'C:\mxc_workdir_test' }
+if ($failed -eq 0) {
+    Remove-Item -Recurse -Force $concurrentTempRoot -ErrorAction SilentlyContinue
+    if (Test-Path $concurrentTempRoot) { $scratchLeft += $concurrentTempRoot }
+} else {
+    Write-Host "  (concurrent stdout/stderr preserved at: $concurrentTempRoot)" -ForegroundColor DarkGray
+}
+foreach ($leftover in $scratchLeft) {
+    Write-Host "FAILED: could not remove scratch directory $leftover" -ForegroundColor Red
+}
 
 Write-Host "`n==========================" -ForegroundColor Cyan
 # A suite that collected tests but executed none of them is not a pass:
@@ -634,4 +675,4 @@ if ($failed -eq 0) {
     }
 }
 
-exit $(if ($failed -gt 0) { 1 } else { 0 })
+exit $(if ($failed -gt 0 -or $scratchLeft.Count -gt 0) { 1 } else { 0 })
