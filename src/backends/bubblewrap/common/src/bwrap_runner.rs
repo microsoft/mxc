@@ -206,6 +206,12 @@ impl BubblewrapScriptRunner {
                 "Bubblewrap: applying iptables rules for host-level network filtering"
             );
             let mut mgr = NetworkIptablesManager::new(&container_name);
+            // Unprivileged bwrap has no veth to scope a chain to (see
+            // `local_network_diagnostic` in bwrap_command.rs), so a missing one
+            // here is structural rather than a failed lookup. Without this the
+            // manager's fail-fast path would refuse to start every Bubblewrap
+            // sandbox that asks for firewall mode.
+            mgr.allow_missing_veth_interface();
             match mgr.apply_firewall_rules(&request.policy, logger) {
                 Ok(true) => {}
                 Ok(false) => {

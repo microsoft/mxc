@@ -195,6 +195,9 @@ pub struct NetworkIptablesManager {
     rules_applied: bool,
     /// The container's veth interface name on the host.
     veth_interface: Option<String>,
+    /// Whether a caller that never supplies a veth is expected rather than
+    /// broken. Defaults to `false`, so a missing veth fails fast.
+    veth_scoping_optional: bool,
     /// Chains and FORWARD hooks this manager successfully created, so teardown
     /// and rollback remove only resources this attempt actually installed.
     created: CreatedResources,
@@ -214,6 +217,7 @@ impl NetworkIptablesManager {
             chain_name: format!("MXC-{}", sanitized),
             rules_applied: false,
             veth_interface: None,
+            veth_scoping_optional: false,
             created: CreatedResources::default(),
         }
     }
@@ -258,6 +262,24 @@ impl NetworkIptablesManager {
     /// Set the veth interface name for the container.
     pub fn set_veth_interface(&mut self, iface: &str) {
         self.veth_interface = Some(iface.to_string());
+    }
+
+    /// Declare that this caller has no veth to scope the chain to, so a missing
+    /// one is a structural fact rather than a failed lookup.
+    ///
+    /// LXC always names a veth once the container is running, so a manager that
+    /// reaches rule installation without one has lost the interface it needed
+    /// and must fail fast. Unprivileged Bubblewrap has no veth at all — the
+    /// sandbox either shares the host network namespace or gets a private one,
+    /// and neither yields a host-side interface to match on. Failing there would
+    /// refuse to start every Bubblewrap sandbox that asks for firewall mode.
+    ///
+    /// Callers that set this get the pre-existing behavior: the chain is built,
+    /// the FORWARD hook is skipped, and the skip is logged. The policy is
+    /// therefore **not** enforced, which is why this is opt-in and loud rather
+    /// than the default.
+    pub fn allow_missing_veth_interface(&mut self) {
+        self.veth_scoping_optional = true;
     }
 
     /// Build one FORWARD hook rule matching the veth as the input interface.
@@ -1311,12 +1333,25 @@ impl NetworkIptablesManager {
             // rolls back the chains recorded in `created`, and `lxc_runner`
             // destroys the container rather than starting a workload that
             // believes it is confined.
-            return Err(format!(
-                "No veth interface for container; cannot scope iptables rules to chain {}. \
-                 The chain would never be reached from FORWARD, so the network policy would \
-                 not be enforced. Refusing to report success for an unenforceable policy.",
-                self.chain_name
-            ));
+            //
+            // A caller that has declared it never had a veth to begin with is
+            // the one exception. For it a missing veth is not a lost lookup, so
+            // failing would only refuse to start a sandbox that was never going
+            // to be scopable. It keeps the pre-existing skip, which leaves the
+            // policy unenforced -- see `allow_missing_veth_interface`.
+            if !self.veth_scoping_optional {
+                return Err(format!(
+                    "No veth interface for container; cannot scope iptables rules to chain {}. \
+                     The chain would never be reached from FORWARD, so the network policy would \
+                     not be enforced. Refusing to report success for an unenforceable policy.",
+                    self.chain_name
+                ));
+            }
+
+            logger.log_line(
+                "Warning: No veth interface set for container. \
+                 Cannot scope iptables rules. Skipping FORWARD hook.",
+            );
         }
 
         Ok(())
@@ -1672,6 +1707,73 @@ mod tests {
     use std::io::{Error, ErrorKind};
     use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode};
+
+    /// Build a policy requesting the given enforcement mode, leaving every
+    /// other field at its default.
+    fn policy_requesting_mode(mode: NetworkEnforcementMode) -> ContainerPolicy {
+        ContainerPolicy {
+            network_enforcement_mode: mode,
+            ..Default::default()
+        }
+    }
+
+    // Bubblewrap has no veth at all, so the fail-closed path that protects LXC
+    // would refuse to start every Bubblewrap sandbox asking for firewall mode.
+    // A caller that declares the absence up front must still get its chain
+    // built. `Firewall` and `Both` are covered separately so a fix scoped to
+    // one enforcement mode cannot pass the pair.
+    #[test]
+    fn a_caller_that_declared_it_has_no_veth_is_not_refused_in_firewall_mode() {
+        let _fake = super::test_firewall::install();
+        let mut manager = NetworkIptablesManager::new("bwrap-noveth");
+        manager.allow_missing_veth_interface();
+        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
+
+        assert!(
+            result.is_ok(),
+            "a caller that declared it has no veth must not be failed closed, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn a_caller_that_declared_it_has_no_veth_is_not_refused_in_both_mode() {
+        let _fake = super::test_firewall::install();
+        let mut manager = NetworkIptablesManager::new("bwrap-noveth-both");
+        manager.allow_missing_veth_interface();
+        let policy = policy_requesting_mode(NetworkEnforcementMode::Both);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
+
+        assert!(
+            result.is_ok(),
+            "a caller that declared it has no veth must not be failed closed, got {:?}",
+            result
+        );
+    }
+
+    // The declaration is opt-in precisely because it leaves the policy
+    // unenforced. A manager that never made it must keep failing closed, so
+    // the two behaviors cannot quietly collapse into one.
+    #[test]
+    fn a_manager_that_never_declared_a_missing_veth_still_fails_closed() {
+        let _fake = super::test_firewall::install();
+        let mut manager = NetworkIptablesManager::new("lxc-lost-veth");
+        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
+
+        assert!(
+            result.is_err(),
+            "a manager with no veth and no declaration must fail closed, got {:?}",
+            result
+        );
+    }
 
     #[test]
     fn an_empty_ownership_record_is_recognized_as_nothing_to_tear_down() {
