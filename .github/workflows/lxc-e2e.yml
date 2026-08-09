@@ -1,0 +1,99 @@
+name: LXC E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lxc-e2e:
+    name: LXC-Exec Container and Network Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        run: rustup update stable
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+
+      - name: Install LXC and firewall tooling
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
+
+      # A bridged veth only reaches the FORWARD chain while br_netfilter is
+      # delivering bridged packets to iptables. Without it the firewall rules
+      # install cleanly and never fire, so the network policy tests would pass
+      # against a firewall that filters nothing.
+      - name: Enable bridge netfilter
+        run: |
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+
+      - name: Report the environment these tests depend on
+        run: |
+          echo "--- kernel ---"
+          uname -a
+          echo "--- lxc ---"
+          lxc-create --version || echo "MISSING lxc-create"
+          echo "--- iptables ---"
+          sudo iptables --version || echo "MISSING iptables"
+          sudo ip6tables --version || echo "MISSING ip6tables"
+          echo "--- bridge netfilter ---"
+          cat /proc/sys/net/bridge/bridge-nf-call-iptables || echo "MISSING bridge-nf-call-iptables"
+          cat /proc/sys/net/bridge/bridge-nf-call-ip6tables || echo "MISSING bridge-nf-call-ip6tables"
+          echo "--- host ipv6 ---"
+          cat /proc/net/if_inet6 || echo "no /proc/net/if_inet6 (IPv6 disabled)"
+
+      - name: Build lxc-exec
+        working-directory: src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo build --release -p lxc --bin lxc-exec
+
+      # MXC_LXC_TESTS_REQUIRE_EXECUTION turns an honest skip into a failure.
+      # On a developer box a missing ip6tables is a reason to run what you can.
+      # Here the runner is provisioned specifically to execute this suite, so a
+      # skip means a prerequisite disappeared and the gate would go green while
+      # testing nothing.
+      - name: Run LXC E2E suite
+        env:
+          MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
+        run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION bash tests/scripts/run_lxc_all_tests.sh
+
+      - name: Show leftover firewall state on failure
+        if: failure()
+        run: |
+          echo "--- FORWARD chain ---"
+          sudo iptables -S FORWARD || true
+          sudo ip6tables -S FORWARD || true
+          echo "--- MXC chains ---"
+          sudo iptables -S | grep -E '^-N MXC-' || echo "none"
+          sudo ip6tables -S | grep -E '^-N MXC-' || echo "none"
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lxc-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log

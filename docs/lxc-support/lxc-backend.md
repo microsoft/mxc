@@ -116,9 +116,49 @@ Network policies are enforced with parallel `iptables` and `ip6tables` chains sc
 | `defaultPolicy: "block"` | Final DROP rule in the container chain |
 | `defaultPolicy: "allow"` | Final ACCEPT rule in the container chain |
 | `allowedHosts` | ACCEPT rules for IP literals, CIDR blocks, or resolved hostnames |
-| `blockedHosts` | DROP rules for IP literals, CIDR blocks, or resolved hostnames |
+| `blockedHosts` | DROP rules for IP literals, CIDR blocks, or resolved hostnames, emitted *before* the ACCEPT rules |
 
-`allowedHosts` and `blockedHosts` entries may be bare IPv4/IPv6 literals, IPv4/IPv6 CIDR blocks, or hostnames. Hostnames are resolved to both A and AAAA records; IPv4 destinations are applied to the `iptables` chain and IPv6 destinations are applied to the `ip6tables` chain. Entries whose CIDR prefix is out of range for its family (or otherwise malformed) are reported as unresolved and skipped, leaving the rest of the policy in force. Host-list rules match all ports and protocols; port- and protocol-specific egress rules are not supported.
+**A deny wins over an overlapping allow.** `iptables` evaluates a chain top to
+bottom and stops at the first match, so precedence is decided purely by
+emission order. All `blockedHosts` rules are emitted ahead of all
+`allowedHosts` rules, which means a destination named by both lists is dropped.
+Without that ordering an allow entry broad enough to cover a blocked
+destination — `0.0.0.0/0`, or a CIDR containing the blocked address — silently
+defeats the block, and the resulting chain looks fully populated while
+filtering nothing.
+
+Two limits on that guarantee are worth stating plainly, because "deny always
+wins" is not true without them:
+
+- **DNS is exempt.** The base chain accepts UDP and TCP destination port 53
+  unconditionally and is installed ahead of the generated policy rules, so
+  port-53 traffic to a blocked destination is accepted before its DROP rule is
+  reached. Narrowing that rule needs to know which resolver addresses are
+  legitimate, and no schema field carries them today.
+- **A hostname in both lists is resolved twice.** Each list entry is resolved
+  independently, so a name behind round-robin DNS can return one address for
+  the `blockedHosts` entry and a different one for the `allowedHosts` entry.
+  The guarantee holds for *addresses*, not for names. Use literal IPs or CIDRs
+  when a destination must be denied deterministically.
+
+`allowedHosts` and `blockedHosts` entries may be bare IPv4/IPv6 literals, IPv4/IPv6 CIDR blocks, or hostnames. Hostnames are resolved to both A and AAAA records; IPv4 destinations are applied to the `iptables` chain and IPv6 destinations are applied to the `ip6tables` chain. Host-list rules match all ports and protocols; port- and protocol-specific egress rules are not supported.
+
+An entry that resolves to nothing — an unknown hostname, or a CIDR prefix out
+of range for its family — cannot be turned into a rule. What that costs
+depends on the entry and on `defaultPolicy`:
+
+| Entry | `defaultPolicy` | Behavior |
+|-------|-----------------|----------|
+| `allowedHosts` | either | Reported as unresolved and skipped. Failing to write an ACCEPT rule can only make the policy more restrictive |
+| `blockedHosts` | `block` | Reported as unresolved and skipped. The closing DROP already denies the destination, so the unwritten rule was redundant |
+| `blockedHosts` | `allow` | **Fails firewall setup.** The chain ends in ACCEPT, so the unwritten DROP was the only thing that would have denied that destination, and skipping it silently converts a deny into an allow |
+
+One gap remains open and is not detected: under `defaultPolicy: "block"`, an
+`allowedHosts` entry broad enough to cover a destination whose `blockedHosts`
+rule went unwritten still reaches that destination. Detecting it would require
+the address the failed entry was *meant* to resolve to, which is by definition
+unavailable, so no check over the policy text can be complete — and a partial
+check would imply a guarantee this code cannot make.
 
 Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
 
@@ -130,7 +170,40 @@ Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6t
 
 Host IPv6 activity is read from `/proc/net/if_inet6`: a non-loopback interface with an IPv6 address counts as active, while loopback-only `::1` on `lo` (present even on IPv4-only hosts) does not. If that file cannot be read at all — as opposed to being absent, which means IPv6 is disabled — the state is treated as *unknown* rather than as a confirmed "IPv6 is off", so an unreadable IPv6 state fails closed instead of leaving IPv6 unfiltered.
 
-The chains are hooked into `FORWARD` for container egress by matching the host-side veth as the input interface. If MXC cannot discover the container veth, it skips the `FORWARD` hook with a warning rather than applying host-wide rules.
+The chains are hooked into `FORWARD` for container egress with **up to two
+rules per family**, because the input interface `FORWARD` sees depends on how
+the veth is attached:
+
+| Attachment | Rule that matches |
+|------------|-------------------|
+| veth routed directly by the host | `-i <veth>` |
+| veth enslaved to a bridge (the default LXC topology) | `-m physdev --physdev-in <veth>` |
+
+The two are mutually exclusive for any given packet, so nothing is counted
+twice. Installing only `-i <veth>` is what previously let a fully populated
+deny-all chain sit in the ruleset filtering nothing on the default bridged
+topology.
+
+The `physdev` rule is required only on a bridged veth. On a directly routed
+veth a host whose kernel lacks the `physdev` match logs a warning and
+continues with the interface rule alone, which is the rule that matches there;
+on a bridged veth the same failure is fatal, because `physdev` is the only
+rule that could ever match.
+
+A bridged veth additionally requires `br_netfilter` to be delivering bridged
+packets to iptables. With `/proc/sys/net/bridge/bridge-nf-call-iptables` absent
+or `0`, both hook rules install cleanly and neither ever fires. MXC reads that
+file and **fails firewall setup** rather than reporting success for a chain
+that could never be reached. When the IPv6 chain is programmed,
+`/proc/sys/net/bridge/bridge-nf-call-ip6tables` is checked separately and to
+the same standard.
+
+If MXC cannot discover the container veth at all, firewall setup **fails** and
+the partially created chains are rolled back. An unhooked chain is never
+traversed, so reporting success would hand the caller a deny-all chain that
+filters nothing — strictly worse than no firewall, because it looks enforced.
+Installing the rules host-wide instead is not an option either: unscoped, they
+would apply to every container and to the host's own traffic.
 
 Firewall state is torn down automatically with best-effort removal of the `FORWARD` hooks and both per-container chains; there is no network-policy opt-out field. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains.
 
