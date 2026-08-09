@@ -81,6 +81,22 @@ fi
 if [ "$PASSED" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
     echo "WARNING: no tests actually executed; every test was skipped."
 fi
+# Strict mode, for continuous integration. A developer box legitimately lacks
+# ip6tables or LXC and should be able to run what it can, so a skip is only a
+# warning there. On a runner provisioned to execute this suite, a skip means a
+# prerequisite silently disappeared, and the gate would then go green while
+# testing nothing -- which is the precise way an unenforced firewall shipped.
+if [ "${MXC_LXC_TESTS_REQUIRE_EXECUTION:-0}" != "0" ]; then
+    if [ "$PASSED" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
+        echo "ERROR: strict mode: no test executed. Refusing to report success."
+        exit 1
+    fi
+    if [ "$SKIPPED" -gt 0 ]; then
+        echo "ERROR: strict mode: $SKIPPED test(s) skipped a prerequisite that this"
+        echo "environment is supposed to provide. Refusing to report success."
+        exit 1
+    fi
+fi
 if [ $FAILED -gt 0 ]; then
     echo -e "Failures:$FAILURES"
     exit 1
