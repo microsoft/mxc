@@ -30,7 +30,8 @@
 param(
     [switch]$Release,
     [string]$BinDir,
-    [string]$ConfigDir
+    [string]$ConfigDir,
+    [string]$LogDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,6 +47,14 @@ if (-not $BinDir) {
 
 if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "tests\configs"
+}
+
+# Default to RUNNER_TEMP so CI's existing log upload picks the files up.
+if (-not $LogDir -and $env:RUNNER_TEMP) {
+    $LogDir = Join-Path $env:RUNNER_TEMP "mxc-microvm-logs"
+}
+if ($LogDir -and -not (Test-Path $LogDir)) {
+    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 }
 
 $WxcExePath = Join-Path $BinDir "wxc-exec.exe"
@@ -88,7 +97,14 @@ $wxcExe = Resolve-Path $WxcExePath
 
 # -- Verify MicroVM binaries --------------------------------------------------
 
-$requiredBinaries = @("nanvixd.exe", "nanvix_rootfs.img", "python3.initrd", "bin\kernel.elf")
+$requiredBinaries = @(
+    "nanvixd.exe",
+    "nanvix_rootfs.img",
+    "python3.initrd",
+    "bin\kernel.elf",
+    "snapshots\kernel.vmem",
+    "snapshots\kernel.whp.cbor"
+)
 $binDir = Split-Path $wxcExe
 $missing = $requiredBinaries | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
 
@@ -132,8 +148,16 @@ foreach ($test in $tests) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
+    # The failure tail below only keeps the last few lines, which for a boot
+    # timeout are the error envelope rather than the boot itself. Keep the full
+    # --debug log so CI can show where a VM actually stalled.
+    $logArgs = @()
+    if ($LogDir) {
+        $logFile = Join-Path $LogDir "microvm-$([System.IO.Path]::GetFileNameWithoutExtension($test.Config)).log"
+        $logArgs = @("--log-file", $logFile)
+    }
     $process = Start-Process -FilePath $wxcExe `
-        -ArgumentList "--debug", "--experimental", $configPath `
+        -ArgumentList (@("--debug", "--experimental") + $logArgs + @($configPath)) `
         -PassThru -Wait `
         -RedirectStandardOutput $stdoutFile `
         -RedirectStandardError $stderrFile
@@ -153,8 +177,10 @@ foreach ($test in $tests) {
         $reason = "expected exit=$expectedExit, got exit=$actualExit"
     }
 
-    # Check stdout content if OutputContains is specified
-    if ($pass -and $test.OutputContains) {
+    # Check stdout content if OutputContains is specified. Not every test
+    # defines the key, and StrictMode makes a missing hashtable key throw, so
+    # test for its presence rather than accessing it directly.
+    if ($pass -and $test.ContainsKey('OutputContains')) {
         $combined = "$stdout`n$stderr"
         if ($combined -notmatch [regex]::Escape($test.OutputContains)) {
             $pass = $false

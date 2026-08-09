@@ -51,6 +51,40 @@ jobs:
       - name: Prepare backend prerequisites
         if: matrix.command == 'microvm'
         shell: pwsh
+        run: |
+          $binDir = Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin'
+
+          # NanVix boots a VM from these images on every invocation; Defender
+          # scanning them can push boot past its timeout.
+          Add-MpPreference -ExclusionPath $binDir
+          Write-Host "Added Defender exclusion for $binDir"
+
+          # Mirrors the verification in microvm-e2e.yml.
+          $required = @(
+            "wxc-exec.exe",
+            "nanvixd.exe",
+            "nanvix_rootfs.img",
+            "python3.initrd",
+            "bin\kernel.elf",
+            "snapshots\kernel.vmem",
+            "snapshots\kernel.whp.cbor"
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+          if ($missing) {
+            Write-Host "::error::Missing binaries: $($missing -join ', ')"
+            exit 1
+          }
+          $leaves = $required | ForEach-Object { Split-Path $_ -Leaf }
+          Get-ChildItem $binDir -Include $leaves -Recurse | Format-Table FullName, Length
+
+      - name: Diagnose hypervisor environment
+        if: matrix.command == 'microvm'
+        shell: pwsh
+        run: ./scripts/ci/diagnose-whp.ps1
+
+      - name: Check Windows Hypervisor Platform
+        if: matrix.command == 'microvm'
+        shell: pwsh
         run: ./scripts/ci/check-whp.ps1
 
       - name: Prepare Process Container host
@@ -86,6 +120,7 @@ jobs:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/mxc-ci.log
+            ${{ runner.temp }}/mxc-microvm-logs
             ${{ runner.temp }}/mxc-wpc-tests/logs
             ${{ runner.temp }}/WinProcessContainer-Tests.results.*
             ${{ runner.temp }}/mxc_concurrent_oneshot
