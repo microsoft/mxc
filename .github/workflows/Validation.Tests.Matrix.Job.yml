@@ -77,17 +77,6 @@ jobs:
           $leaves = $required | ForEach-Object { Split-Path $_ -Leaf }
           Get-ChildItem $binDir -Include $leaves -Recurse | Format-Table FullName, Length
 
-          # EXPERIMENT: the artifact's WHP snapshots were generated on the build
-          # machine, and a snapshot is only valid for the host that produced it
-          # (see nanvix/build_common: prefetched snapshots are untrusted).
-          # Point NANVIX_HOME at an empty directory so the runner regenerates a
-          # snapshot on this host via cold boot instead of restoring a foreign
-          # one. If MicroVM then passes, the imported snapshot is the problem.
-          $nanvixHome = Join-Path $env:RUNNER_TEMP 'nanvix-home'
-          New-Item -ItemType Directory -Force -Path $nanvixHome | Out-Null
-          "NANVIX_HOME=$nanvixHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Set NANVIX_HOME=$nanvixHome (forces host-local snapshot generation)"
-
           # Capture nanvixd's own stderr/tracing; without this the runner
           # silences it, which is why a hung boot produced no diagnostics.
           "MXC_NANVIX_TRACE=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -103,6 +92,14 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-whp.ps1
 
+      - name: Probe nanvixd directly
+        if: matrix.command == 'microvm'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          ./scripts/ci/probe-nanvixd.ps1 `
+            -BinDir (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin')
+
       - name: Prepare Process Container host
         if: matrix.backend == 'process-t3'
         shell: pwsh
@@ -114,6 +111,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run backend tests
+        # A backend that hangs (rather than failing) would otherwise burn the
+        # full job timeout. Fail fast enough to keep the log useful.
+        timeout-minutes: 30
         shell: pwsh
         run: |
           $arguments = @{
