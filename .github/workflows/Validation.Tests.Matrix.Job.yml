@@ -77,6 +77,22 @@ jobs:
           $leaves = $required | ForEach-Object { Split-Path $_ -Leaf }
           Get-ChildItem $binDir -Include $leaves -Recurse | Format-Table FullName, Length
 
+          # EXPERIMENT: the artifact's WHP snapshots were generated on the build
+          # machine, and a snapshot is only valid for the host that produced it
+          # (see nanvix/build_common: prefetched snapshots are untrusted).
+          # Point NANVIX_HOME at an empty directory so the runner regenerates a
+          # snapshot on this host via cold boot instead of restoring a foreign
+          # one. If MicroVM then passes, the imported snapshot is the problem.
+          $nanvixHome = Join-Path $env:RUNNER_TEMP 'nanvix-home'
+          New-Item -ItemType Directory -Force -Path $nanvixHome | Out-Null
+          "NANVIX_HOME=$nanvixHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Set NANVIX_HOME=$nanvixHome (forces host-local snapshot generation)"
+
+          # Capture nanvixd's own stderr/tracing; without this the runner
+          # silences it, which is why a hung boot produced no diagnostics.
+          "MXC_NANVIX_TRACE=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Set MXC_NANVIX_TRACE=1 (captures nanvixd tracing)"
+
       - name: Diagnose hypervisor environment
         if: matrix.command == 'microvm'
         shell: pwsh
