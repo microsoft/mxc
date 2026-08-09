@@ -43,12 +43,16 @@ use crate::daemon_protocol::{
 };
 use crate::daemon_record::{live_daemon, DaemonRecord, TransitionLock};
 
-/// Max wait to acquire the daemon spawn/teardown transition lock.
-const SPAWN_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Max wait for a freshly spawned (or concurrently starting) daemon to publish a
 /// `ready` record.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Max wait to acquire the daemon spawn/teardown transition lock. Must exceed
+/// [`READY_TIMEOUT`]: the lock holder retains it for the whole readiness wait, so
+/// a second client has to be willing to wait at least that long — otherwise it
+/// would give up while the first daemon is still validly starting and report a
+/// spurious failure.
+const SPAWN_LOCK_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// Poll cadence while waiting for the `ready` record.
 const READY_POLL: Duration = Duration::from_millis(100);

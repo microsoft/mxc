@@ -43,7 +43,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{PortMapping, ScriptResponse};
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
-use crate::policy_mapping::{self, VolumeMount};
+use crate::policy_mapping::VolumeMount;
 use crate::wsl_container_runner::{wslc_prerequisite_error, WSLContainerRunner};
 use crate::wslc_bindings::*;
 
@@ -65,6 +65,32 @@ pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResp
 // ---------------------------------------------------------------------------
 // Process I/O capture plumbing
 // ---------------------------------------------------------------------------
+//
+// # IoContext reference lifecycle (why a kill deliberately leaks)
+//
+// The SDK's stdout/stderr/exit callbacks each receive a raw `*IoContext`. We
+// hand the SDK one `Arc<IoContext>` reference (`Arc::into_raw`) and keep an
+// independent `Arc` inside `ProcessSettings`, so the context outlives every
+// callback. Reclaiming the SDK's reference safely hinges on exactly one rule:
+// **it is freed only from `exit_callback`, and the SDK guarantees no callback
+// fires after exit.** That yields three reachable end-states:
+//
+//   build settings ──fail before create──▶ SdkIoRef::drop frees the ref
+//        │                                  (no process exists to call back)
+//        ▼
+//   process created ──▶ mark_process_created() disarms SdkIoRef
+//        │
+//        ├── process exits ──▶ exit_callback fires ──▶ frees the SDK ref
+//        │
+//        └── process killed, exit_callback never fires ──▶ ref is LEAKED
+//            on purpose: freeing it while the SDK might still call back would
+//            be use-after-free. A confirmed-unkillable container is quarantined
+//            (see `exec_in_container` / session_manager), bounding the leak to
+//            that one compromised sandbox.
+//
+// So `SdkIoRef` guards the pre-adoption window (frees on early failure), and
+// after adoption ownership passes to `exit_callback`; the kill path trades a
+// bounded, one-time leak for memory safety.
 
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are
 /// `pub(crate)` so the one-shot runner's wait/collect helpers can read the
@@ -73,6 +99,33 @@ pub struct IoContext {
     pub(crate) stdout: Arc<Mutex<Vec<u8>>>,
     pub(crate) stderr: Arc<Mutex<Vec<u8>>>,
     pub(crate) exited: Arc<(Mutex<bool>, Condvar)>,
+}
+
+/// Per-stream cap on captured stdout/stderr, in bytes. The WSLc SDK streams
+/// output from untrusted in-container code straight into these buffers; without
+/// a ceiling one exec could grow them without bound and OOM the persistent
+/// daemon, taking down every sandbox it owns. When a stream reaches the cap the
+/// tail is dropped and a one-time truncation marker is appended.
+const MAX_CAPTURED_STREAM_BYTES: usize = 8 * 1024 * 1024;
+
+/// Appended once to a captured stream when it first hits the cap, so a consumer
+/// can tell the output was truncated rather than genuinely ending there.
+const STREAM_TRUNCATION_MARKER: &[u8] = b"\n[output truncated: stream exceeded capture cap]\n";
+
+/// Append `bytes` to a captured stream buffer, enforcing
+/// [`MAX_CAPTURED_STREAM_BYTES`]. Once the cap is reached the buffer stops
+/// growing; the marker is appended exactly once, on the call that crosses it.
+fn append_capped(buf: &mut Vec<u8>, bytes: &[u8]) {
+    if buf.len() >= MAX_CAPTURED_STREAM_BYTES {
+        return;
+    }
+    let remaining = MAX_CAPTURED_STREAM_BYTES - buf.len();
+    if bytes.len() <= remaining {
+        buf.extend_from_slice(bytes);
+    } else {
+        buf.extend_from_slice(&bytes[..remaining]);
+        buf.extend_from_slice(STREAM_TRUNCATION_MARKER);
+    }
 }
 
 /// Callback invoked by the WSLc SDK for stdout/stderr data.
@@ -97,11 +150,11 @@ unsafe extern "C" fn io_callback(
     match io_handle {
         WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDOUT => {
             let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
-            buf.extend_from_slice(bytes);
+            append_capped(&mut buf, bytes);
         }
         WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDERR => {
             let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
-            buf.extend_from_slice(bytes);
+            append_capped(&mut buf, bytes);
         }
         _ => {}
     }
@@ -145,6 +198,10 @@ pub struct ProcessSettings {
     // `mark_process_created` once a process is created, after which
     // `exit_callback` (or a deliberate leak on kill) owns reclamation.
     sdk_io_ref: SdkIoRef,
+    // Backing buffers the SDK stored raw pointers into (it does not copy them)
+    // and dereferences at `WslcCreateContainerProcess` time. They must outlive
+    // the create call, so the struct owns them; the `_` prefix marks them as
+    // held purely to anchor those lifetimes, never read directly.
     _sh: Vec<u8>,
     _dash_c: Vec<u8>,
     _script_cstr: Vec<u8>,
@@ -189,7 +246,7 @@ impl Drop for SdkIoRef {
 impl ProcessSettings {
     /// Build process settings that run `script_code` under `/bin/sh -c`, with
     /// the given `env` (already proxy-adjusted by the caller) and
-    /// `working_directory` (a Windows path mapped to its container path; empty =
+    /// `working_directory` (an absolute in-container path, e.g. `/work`; empty =
     /// container default). Registers stdout/stderr/exit capture callbacks.
     ///
     /// # Safety
@@ -298,23 +355,26 @@ impl ProcessSettings {
             }
         }
 
-        // Working directory (mapped Windows -> container path; skip if unmapped).
+        // Working directory (an absolute in-container path, e.g. `/work`; empty =
+        // container default). It is passed straight to the SDK; a non-absolute
+        // value is rejected rather than silently ignored.
         let mut cwd_cstr: Option<Vec<u8>> = None;
         if !working_directory.is_empty() {
-            if let Some(container_cwd) =
-                policy_mapping::windows_path_to_container_path(working_directory)
-            {
-                let c = format!("{}\0", container_cwd).into_bytes();
-                let hr = sdk.WslcSetProcessSettingsWorkingDirectory(&mut raw, c.as_ptr() as PCSTR);
-                if hr != S_OK {
-                    return Err(sdk_error(
-                        "WslcSetProcessSettingsWorkingDirectory failed",
-                        hr,
-                        "",
-                    ));
-                }
-                cwd_cstr = Some(c);
+            if !working_directory.starts_with('/') {
+                return Err(ScriptResponse::error(&format!(
+                    "working_directory must be an absolute in-container path (got {working_directory:?})"
+                )));
             }
+            let c = format!("{}\0", working_directory).into_bytes();
+            let hr = sdk.WslcSetProcessSettingsWorkingDirectory(&mut raw, c.as_ptr() as PCSTR);
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetProcessSettingsWorkingDirectory failed",
+                    hr,
+                    "",
+                ));
+            }
+            cwd_cstr = Some(c);
         }
 
         Ok(ProcessSettings {
@@ -764,6 +824,11 @@ pub unsafe fn start_daemon_container(
 pub struct ExecOutcome {
     pub exit_code: i32,
     pub timed_out: bool,
+    /// Set when the process could not be positively confirmed to have ended:
+    /// no exit event and no exit callback, or a timeout `SIGKILL` that did not
+    /// land. The container is then in an unknown state and the caller must
+    /// quarantine it rather than reuse it for a later exec.
+    pub terminated_unconfirmed: bool,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
@@ -814,13 +879,26 @@ pub unsafe fn exec_in_container(
     }
 
     let wait_ms = if timeout_ms > 0 { timeout_ms } else { u32::MAX };
+
+    // Positive-confirmation tracking. Reporting a clean exit requires proof the
+    // process actually ended — either the exit event signalling or the SDK's
+    // exit callback firing. Without either, `WslcGetProcessExitCode` returns
+    // `STILL_ACTIVE` for a process that is very much still running, so it must
+    // never be reported as an exit code.
     let mut timed_out = false;
+    let mut exit_signalled = false;
+    // Set when the process cannot be confirmed terminated (no exit proof, or a
+    // timeout SIGKILL that did not land); the container is then compromised.
+    let mut terminated_unconfirmed = false;
+
     if !exit_event.is_null() {
         let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
             windows::Win32::Foundation::HANDLE(exit_event),
             wait_ms,
         );
-        if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
+        if wait_result == windows::Win32::Foundation::WAIT_OBJECT_0 {
+            exit_signalled = true;
+        } else if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
             timed_out = true;
             let _ = writeln!(
                 logger,
@@ -833,14 +911,30 @@ pub unsafe fn exec_in_container(
             if kill_hr != S_OK {
                 let _ = writeln!(
                     logger,
-                    "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr={kill_hr:?}); process may still be running"
+                    "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
+                     process may still be running",
+                    kill_hr as u32
                 );
             }
+        } else {
+            // WAIT_FAILED / WAIT_ABANDONED / anything else: the wait told us
+            // nothing about the process, so it cannot be claimed exited or
+            // killed. Treat the container as compromised.
+            let last_error = windows::Win32::Foundation::GetLastError();
+            let _ = writeln!(
+                logger,
+                "[WSLC][daemon] Warning: waiting on the exec exit event failed: \
+                 WaitForSingleObject returned 0x{:08X} (GetLastError 0x{:08X}); \
+                 container state is unknown",
+                wait_result.0, last_error.0
+            );
+            terminated_unconfirmed = true;
         }
     }
 
-    // Wait for the exit callback to fire — guarantees all I/O is flushed.
-    {
+    // Wait for the exit callback — the only proof the process is actually gone
+    // and that all captured I/O has been flushed.
+    let wait_for_exit_callback = || {
         let (lock, cvar) = &*process_settings.io_ctx().exited;
         let mut exited = lock.lock().unwrap_or_else(|e| e.into_inner());
         if !*exited {
@@ -848,14 +942,23 @@ pub unsafe fn exec_in_container(
                 .wait_timeout(exited, Duration::from_secs(30))
                 .unwrap_or_else(|e| e.into_inner());
             exited = result.0;
-            if !*exited {
-                let _ = writeln!(
-                    logger,
-                    "[WSLC][daemon] Warning: exit callback did not fire within 30s"
-                );
-            }
         }
-        drop(exited);
+        *exited
+    };
+
+    let mut confirmed = wait_for_exit_callback();
+    if timed_out && !confirmed {
+        // The SIGKILL was only a request and plainly has not landed yet; give
+        // the callback one more bounded chance before declaring the outcome
+        // unconfirmed.
+        confirmed = wait_for_exit_callback();
+        if !confirmed {
+            let _ = writeln!(
+                logger,
+                "[WSLC][daemon] Warning: exit callback did not fire after the timeout SIGKILL; \
+                 process may still be running"
+            );
+        }
     }
 
     let mut exit_code: i32 = -1;
@@ -877,19 +980,38 @@ pub unsafe fn exec_in_container(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
+    // Resolve the reported outcome from positive evidence only.
     if timed_out {
-        let _ = writeln!(logger, "[WSLC][daemon] Process killed after timeout");
-    } else {
+        if confirmed {
+            let _ = writeln!(logger, "[WSLC][daemon] Process killed after timeout");
+        } else {
+            terminated_unconfirmed = true;
+        }
+    } else if exit_signalled || confirmed {
         let _ = writeln!(
             logger,
             "[WSLC][daemon] Process exited with code {}",
             exit_code
         );
+    } else {
+        // Neither timed out nor confirmed exited: nothing proves the process
+        // ended, so its exit code is meaningless.
+        let _ = writeln!(
+            logger,
+            "[WSLC][daemon] Warning: exec never reported an exit (no exit event, no exit \
+             callback); container state is unknown"
+        );
+        terminated_unconfirmed = true;
     }
 
     Ok(ExecOutcome {
-        exit_code: if timed_out { -1 } else { exit_code },
+        exit_code: if timed_out || terminated_unconfirmed {
+            -1
+        } else {
+            exit_code
+        },
         timed_out,
+        terminated_unconfirmed,
         stdout,
         stderr,
     })

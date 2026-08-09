@@ -20,28 +20,55 @@
 //!    in-flight requests past the idle timeout, shut down.
 //! 5. On exit, remove the record.
 
+#[cfg(windows)]
 mod control_server;
+#[cfg(windows)]
 mod session_manager;
 
+#[cfg(windows)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(windows)]
 use std::sync::Arc;
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use anyhow::{Context, Result};
+#[cfg(windows)]
 use tokio::sync::Notify;
 
+#[cfg(windows)]
 use wslc_common::daemon_protocol::PROTOCOL_VERSION;
+#[cfg(windows)]
 use wslc_common::daemon_record::{
     mint_pipe_name, process_creation_time, remove_daemon_record, secure_record_root,
-    write_daemon_record, DaemonRecord, RECORD_SCHEMA_VERSION,
+    write_daemon_record, DaemonRecord, TransitionLock, RECORD_SCHEMA_VERSION,
 };
 
 /// How long the live-container count must stay at zero before the daemon exits.
+#[cfg(windows)]
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Poll cadence for the idle watchdog.
+#[cfg(windows)]
 const IDLE_POLL: Duration = Duration::from_secs(15);
 
+/// Bound on how long shutdown waits for the transition lock before tearing down
+/// without it, so a phase process holding the lock cannot hang daemon exit.
+#[cfg(windows)]
+const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+// The daemon owns the WSLc SDK's live session/container handles, which only
+// exist on Windows. The Windows-only dependencies are target-gated in
+// Cargo.toml so non-Windows workspace commands (`cargo build/test --workspace`)
+// still resolve and compile this crate down to the stub below.
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("wxc-wslc-daemon is Windows-only.");
+    std::process::exit(64);
+}
+
+#[cfg(windows)]
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -50,6 +77,7 @@ fn main() -> Result<()> {
     runtime.block_on(run())
 }
 
+#[cfg(windows)]
 async fn run() -> Result<()> {
     secure_record_root().context("secure state-aware record root")?;
 
@@ -97,16 +125,28 @@ async fn run() -> Result<()> {
         shutdown.clone(),
     ));
 
-    // Wait for the control server to finish (it stops when `shutdown` fires).
+    // Wait for the control server to finish: it stops accepting when `shutdown`
+    // fires and then drains its in-flight handlers, so once this returns no
+    // handler is still using the session.
     let server_result = server.await;
 
-    // Ensure the watchdog and worker are torn down.
-    shutdown.notify_waiters();
+    // Stop the idle watchdog (it may still be sleeping between polls).
     watchdog.abort();
-    let _ = session.shutdown().await;
 
-    // Best-effort record cleanup so a later client does not find a stale record.
-    let _ = remove_daemon_record();
+    // Teardown order matters. Take the transition lock so a concurrent phase
+    // process's spawn/discovery serialises against us, then remove the discovery
+    // record BEFORE releasing the session — a client must never find a `ready`
+    // record for a daemon whose session is being torn down; with the record
+    // gone it spawns a fresh daemon once we release the lock. If the lock cannot
+    // be taken promptly (a phase process holds it mid-spawn), proceed anyway:
+    // record removal and session release are still correct on their own.
+    {
+        let _lock = TransitionLock::acquire(SHUTDOWN_LOCK_TIMEOUT)
+            .map_err(|e| eprintln!("[wslc-daemon] shutdown: {e:#}; proceeding without the lock"))
+            .ok();
+        let _ = remove_daemon_record();
+        let _ = session.shutdown().await;
+    }
 
     server_result
         .context("control server task panicked")?
@@ -115,6 +155,7 @@ async fn run() -> Result<()> {
 
 /// Poll the live-container count; once it has been zero for `IDLE_TIMEOUT` with
 /// no in-flight requests, notify shutdown.
+#[cfg(windows)]
 async fn idle_watchdog(
     session: session_manager::SessionHandle,
     active_clients: Arc<AtomicUsize>,

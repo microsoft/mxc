@@ -9,6 +9,8 @@ name = "wxc-wslc-daemon"
 path = "src/main.rs"
 
 [dependencies]
+
+[target.'cfg(windows)'.dependencies]
 wxc_common = { workspace = true }
 wslc_common = { workspace = true }
 windows = { workspace = true }
@@ -18,7 +20,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 
-[dev-dependencies]
+[target.'cfg(windows)'.dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

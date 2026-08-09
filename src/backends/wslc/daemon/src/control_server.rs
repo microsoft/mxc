@@ -19,13 +19,16 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
+use tokio::task::JoinSet;
+use tokio::time::timeout;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::{
@@ -43,6 +46,20 @@ use wslc_common::daemon_protocol::{
 
 use crate::session_manager::SessionHandle;
 
+/// Upper bound on concurrently-serviced client connections. At capacity the
+/// accept loop applies backpressure (a new connection waits for a slot) instead
+/// of spawning an unbounded number of handler tasks.
+const MAX_CONCURRENT_CLIENTS: usize = 128;
+
+/// Deadline for a freshly-connected client to send its first (request) frame. A
+/// client that connects and then stalls must not pin a handler task — and a
+/// concurrency slot — indefinitely.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on how long shutdown waits for in-flight handlers to finish before
+/// abandoning them, so a wedged handler cannot block daemon exit forever.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Bind the first pipe instance and build the owner-only security descriptor.
 ///
 /// Called synchronously before the daemon record is published so a client never
@@ -58,7 +75,9 @@ pub fn bind(pipe_name: &str) -> Result<(OwnerOnlySecurity, NamedPipeServer)> {
 /// Keeps one un-connected server instance listening; when it connects, hand it
 /// to a task and create the next instance so the next client is never refused.
 /// `active_clients` tracks in-flight requests so the idle watchdog does not tear
-/// the daemon down mid-request.
+/// the daemon down mid-request. Concurrency is bounded by a semaphore, and on
+/// shutdown all in-flight handlers are drained before returning so the caller
+/// can release the WSLc session without racing a live handler.
 pub async fn run(
     session: SessionHandle,
     pipe_name: String,
@@ -68,6 +87,8 @@ pub async fn run(
     shutdown: Arc<Notify>,
 ) -> Result<()> {
     let mut server = first_instance;
+    let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let mut clients: JoinSet<()> = JoinSet::new();
 
     loop {
         tokio::select! {
@@ -80,19 +101,45 @@ pub async fn run(
                 let connected = server;
                 // Create the next instance before servicing this one.
                 server = create_secured_instance(&pipe_name, &security, false)?;
+
+                // Bound concurrency: acquire a slot before spawning. At capacity
+                // this awaits a free slot (backpressure) rather than spawning an
+                // unbounded task. The semaphore is never closed, so acquire
+                // cannot fail.
+                let permit = Semaphore::acquire_owned(limiter.clone())
+                    .await
+                    .expect("client semaphore is never closed");
+
                 let session = session.clone();
                 let active = active_clients.clone();
                 active.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(async move {
+                clients.spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_client(connected, session).await {
                         eprintln!("[wslc-daemon] client connection error: {e:#}");
                     }
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
+            // Reap finished handlers so the JoinSet does not accumulate.
+            Some(_) = clients.join_next() => {}
             _ = shutdown.notified() => break,
         }
     }
+
+    // Drain in-flight handlers so the caller never releases the session/worker
+    // while a handler is still using it. Abandon anything past the deadline so a
+    // wedged handler cannot block daemon exit forever.
+    if timeout(DRAIN_TIMEOUT, async {
+        while clients.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        eprintln!("[wslc-daemon] drain timed out; abandoning in-flight client handlers");
+        clients.shutdown().await;
+    }
+
     Ok(())
 }
 
@@ -213,7 +260,11 @@ fn current_user_sid_string() -> Result<String> {
 
 /// Service exactly one request on a freshly-connected pipe instance.
 async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Result<()> {
-    let request: DaemonRequest = read_frame(&mut pipe).await?;
+    // Bound the wait for the request frame so a client that connects and then
+    // stalls cannot pin this handler (and its concurrency slot) indefinitely.
+    let request: DaemonRequest = timeout(FIRST_FRAME_TIMEOUT, read_frame(&mut pipe))
+        .await
+        .context("timed out waiting for the client's first frame")??;
     match request {
         DaemonRequest::Ping => {
             write_frame(&mut pipe, &DaemonResponse::Pong).await?;

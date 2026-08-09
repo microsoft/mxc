@@ -72,6 +72,12 @@ impl DaemonRecord {
 // Record root + path derivation
 // ---------------------------------------------------------------------------
 
+/// Environment variable that overrides [`state_aware_root`] at runtime. Set by
+/// cross-process integration tests — and inherited by the daemon they spawn —
+/// to isolate the discovery record from a developer's real per-user daemon.
+/// Unset in production.
+pub const STATE_ROOT_ENV_VAR: &str = "MXC_WSLC_STATE_ROOT";
+
 /// Root directory for state-aware WSLc records. `temp_dir()` is per-user on
 /// Windows (`%TEMP%`), giving the per-user isolation the design requires.
 pub fn state_aware_root() -> PathBuf {
@@ -79,6 +85,14 @@ pub fn state_aware_root() -> PathBuf {
     {
         if let Some(p) = test_root::get() {
             return p;
+        }
+    }
+    // Runtime override, honored by both the phase process and the daemon it
+    // spawns (which inherits the environment). Lets cross-process integration
+    // tests point discovery at a throwaway root. Unset in production.
+    if let Some(dir) = std::env::var_os(STATE_ROOT_ENV_VAR) {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
         }
     }
     std::env::temp_dir().join("mxc-wslc").join("state-aware")

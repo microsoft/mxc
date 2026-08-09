@@ -335,6 +335,25 @@ impl Worker {
         }
         .map_err(sr_err)?;
 
+        if outcome.terminated_unconfirmed {
+            // The process could not be confirmed dead, so the container may
+            // still be running untrusted work and must not be reused for a
+            // later exec. Quarantine it: best-effort delete, then drop the
+            // handle so a subsequent exec fails with "unknown sandbox".
+            if let Some(sdk) = self.sdk.as_ref() {
+                // SAFETY: `sdk` is valid and `container` is a live handle.
+                let _ = unsafe {
+                    container_steps::delete_daemon_container(sdk, container, &mut self.logger)
+                };
+            }
+            self.containers.remove(&config.sandbox_id);
+            anyhow::bail!(
+                "exec on sandbox {} could not be confirmed terminated; the container was \
+                 quarantined",
+                config.sandbox_id
+            );
+        }
+
         if outcome.timed_out {
             anyhow::bail!("exec timed out after {}ms", config.timeout_ms);
         }

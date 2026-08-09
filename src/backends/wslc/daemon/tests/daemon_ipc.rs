@@ -10,9 +10,11 @@
 //! Windows host. The full lifecycle test is `#[ignore]`d because it boots a WSL2
 //! utility VM.
 //!
-//! NOTE: both tests spawn a daemon that publishes the single global daemon
-//! record, so running the ignored test alongside the default test requires
-//! `--test-threads=1` to avoid the two daemons clobbering each other's record.
+//! NOTE: each spawned daemon uses an isolated, throwaway record root (via
+//! `MXC_WSLC_STATE_ROOT`) so it never touches a developer's real per-user
+//! daemon. The override is process-wide, so running the ignored test alongside
+//! the default one still requires `--test-threads=1` so the two harnesses do
+//! not clobber each other's `MXC_WSLC_STATE_ROOT`.
 
 #![cfg(windows)]
 
@@ -20,26 +22,36 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use wslc_common::daemon_client::DaemonClient;
-use wslc_common::daemon_record::{read_daemon_record, remove_daemon_record};
+use wslc_common::daemon_record::{read_daemon_record, STATE_ROOT_ENV_VAR};
 
-/// Owns a spawned daemon process and guarantees teardown (kill + record cleanup)
-/// even if a test assertion panics.
+/// Owns a spawned daemon process and guarantees teardown (kill + isolated
+/// record cleanup) even if a test assertion panics.
 struct DaemonProcess {
     child: Child,
+    // Drops after `child` (declaration order), removing the isolated record
+    // tree only once the daemon that writes into it has been killed.
+    _root: tempfile::TempDir,
 }
 
 impl DaemonProcess {
     /// Spawn the daemon binary and wait until it publishes a `ready` record that
     /// names this process, so a subsequent [`DaemonClient::connect`] fast-paths.
     fn spawn_ready() -> Self {
+        // Isolate discovery from the developer's real per-user daemon: point the
+        // record root at a throwaway dir, set both in-process (for the in-proc
+        // `read_daemon_record` / `DaemonClient` below) and on the spawned daemon.
+        let root = tempfile::tempdir().expect("create temp state root");
+        std::env::set_var(STATE_ROOT_ENV_VAR, root.path());
+
         let exe = env!("CARGO_BIN_EXE_wxc-wslc-daemon");
         let child = Command::new(exe)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
+            .env(STATE_ROOT_ENV_VAR, root.path())
             .spawn()
             .expect("spawn wxc-wslc-daemon");
-        let this = Self { child };
+        let this = Self { child, _root: root };
 
         let pid = this.child.id();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -62,9 +74,9 @@ impl Drop for DaemonProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // The daemon was killed before it could clean up; drop the stale record
-        // so it does not confuse a later run.
-        let _ = remove_daemon_record();
+        // `_root` (a TempDir) removes the isolated record tree on drop; clear the
+        // override so a later test in this binary falls back to the default root.
+        std::env::remove_var(STATE_ROOT_ENV_VAR);
     }
 }
 

@@ -81,6 +81,7 @@ jobs:
             src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe
+            src/target/${{ matrix.target }}/release/wxc-wslc-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/wslcsdk.dll
