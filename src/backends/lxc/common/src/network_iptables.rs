@@ -1764,6 +1764,20 @@ mod tests {
         );
     }
 
+    // The accessor is what the Bubblewrap suite asserts on, so it has to be
+    // able to say "no". An accessor stuck at true would let that suite pass
+    // even if the declaration were never made.
+    #[test]
+    fn a_fresh_manager_has_not_declared_a_missing_veth_as_expected() {
+        let manager = NetworkIptablesManager::new("fresh");
+
+        assert!(
+            !manager.veth_scoping_is_optional(),
+            "a manager that was never told otherwise must report that a missing \
+             veth is not expected"
+        );
+    }
+
     // The declaration is opt-in precisely because it leaves the policy
     // unenforced. A manager that never made it must keep failing closed, so
     // the two behaviors cannot quietly collapse into one.
