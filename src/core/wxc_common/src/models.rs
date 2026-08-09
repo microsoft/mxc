@@ -315,6 +315,39 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     }
 }
 
+/// A hostname-to-IP mapping that makes a sandbox resolve the proxy to exactly
+/// the address the firewall authorized.
+///
+/// This exists instead of rewriting the proxy URL's host to the resolved IP.
+/// Rewriting the host breaks TLS for an `https://`-scheme proxy: the client
+/// then contacts an IP literal, so SNI and certificate validation fail unless
+/// the proxy certificate carries an IP SAN. Pinning the name resolution
+/// instead keeps the hostname in the URL, so TLS identity is preserved, while
+/// still guaranteeing the sandbox and the firewall agree on one endpoint.
+///
+/// Without a pin the sandbox re-resolves the hostname itself, and under
+/// round-robin or split-horizon DNS it can select an address the firewall
+/// never allowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyHostPin {
+    /// The proxy hostname as it appears in the URL handed to the sandbox.
+    pub hostname: String,
+    /// The address the host resolved that hostname to, and the only address
+    /// the firewall authorizes for it.
+    pub ip: String,
+}
+
+impl ProxyHostPin {
+    /// Render this pin as a `/etc/hosts` line.
+    ///
+    /// The address is written bare. A hosts file takes an unbracketed IPv6
+    /// literal, unlike a URL host component, so this must not reuse the
+    /// bracketing applied by [`ProxyAddress::to_url`].
+    pub fn hosts_line(&self) -> String {
+        format!("{} {}", self.ip, self.hostname)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProxyAddress {
     pub address: String,
@@ -350,12 +383,62 @@ impl ProxyAddress {
     }
 
     /// Returns the proxy URL. Uses the original URL if one was provided,
-    /// otherwise constructs `http://127.0.0.1:{port}` for localhost proxies.
+    /// otherwise constructs one from this address and port.
+    ///
+    /// The constructed form names [`Self::address`] rather than assuming
+    /// loopback. A proxy bound to a non-loopback address is reachable through
+    /// [`ProxyAddress::new`], and reporting `127.0.0.1` for it would hand the
+    /// sandbox a different endpoint from the one the firewall authorized.
     pub fn to_url(&self) -> String {
         if let Some(url) = &self.original_url {
             return url.clone();
         }
-        format!("http://127.0.0.1:{}", self.port)
+        format!(
+            "http://{}:{}",
+            Self::bracket_if_ipv6(&self.address),
+            self.port
+        )
+    }
+
+    /// Returns the pin required for a sandbox to resolve this proxy's hostname
+    /// to `ip`, or `None` when no pin is needed or possible.
+    ///
+    /// `None` is returned when the address is already an IP literal, since
+    /// there is nothing to resolve, and when it is empty. Callers treat `None`
+    /// as "no hosts entry required", not as an error.
+    ///
+    /// The URL is deliberately left untouched. See [`ProxyHostPin`] for why
+    /// rewriting the host to `ip` instead would break TLS.
+    pub fn host_pin(&self, ip: &str) -> Option<ProxyHostPin> {
+        let hostname = Self::unbracket(&self.address);
+        if hostname.is_empty() || hostname.parse::<std::net::IpAddr>().is_ok() {
+            return None;
+        }
+
+        Some(ProxyHostPin {
+            hostname: hostname.to_string(),
+            ip: Self::unbracket(ip).to_string(),
+        })
+    }
+
+    /// Wraps `host` in `[` `]` when it is a bare IPv6 literal, so it is valid
+    /// as a URL host component. Any other host, including one that is already
+    /// bracketed, is returned unchanged.
+    fn bracket_if_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
+        if host.starts_with('[') {
+            return std::borrow::Cow::Borrowed(host);
+        }
+        match host.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V6(_)) => std::borrow::Cow::Owned(format!("[{host}]")),
+            _ => std::borrow::Cow::Borrowed(host),
+        }
+    }
+
+    /// Strips one pair of surrounding `[` `]` from a bracketed IPv6 literal.
+    fn unbracket(host: &str) -> &str {
+        host.strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or(host)
     }
 }
 
