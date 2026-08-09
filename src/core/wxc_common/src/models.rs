@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+
+use crate::error::WxcError;
 
 /// Selects which containment backend to use for script execution.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -328,21 +331,38 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
 /// Without a pin the sandbox re-resolves the hostname itself, and under
 /// round-robin or split-horizon DNS it can select an address the firewall
 /// never allowed.
+///
+/// The fields are private and the address is an [`IpAddr`], so a pin that does
+/// not denote exactly one mapping cannot be constructed. This matters because
+/// [`Self::hosts_line`] is written to a hosts file: a newline or space in
+/// either field would inject additional entries, letting an attacker redirect
+/// names the policy never mentioned. Construct one with
+/// [`ProxyAddress::host_pin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyHostPin {
-    /// The proxy hostname as it appears in the URL handed to the sandbox.
-    pub hostname: String,
-    /// The address the host resolved that hostname to, and the only address
-    /// the firewall authorizes for it.
-    pub ip: String,
+    hostname: String,
+    ip: IpAddr,
 }
 
 impl ProxyHostPin {
+    /// The proxy hostname as it appears in the URL handed to the sandbox.
+    pub fn hostname(&self) -> &str {
+        &self.hostname
+    }
+
+    /// The address the hostname is pinned to, and the only address the
+    /// firewall authorizes for it.
+    pub fn ip(&self) -> IpAddr {
+        self.ip
+    }
+
     /// Render this pin as a `/etc/hosts` line.
     ///
     /// The address is written bare. A hosts file takes an unbracketed IPv6
-    /// literal, unlike a URL host component, so this must not reuse the
-    /// bracketing applied by [`ProxyAddress::to_url`].
+    /// literal, unlike a URL host component, and [`IpAddr`]'s `Display` is
+    /// already that bare form -- so the difference from
+    /// [`ProxyAddress::to_url`], which brackets, is structural rather than a
+    /// convention a caller could forget.
     pub fn hosts_line(&self) -> String {
         format!("{} {}", self.ip, self.hostname)
     }
@@ -401,32 +421,62 @@ impl ProxyAddress {
     }
 
     /// Returns the pin required for a sandbox to resolve this proxy's hostname
-    /// to `ip`, or `None` when no pin is needed or possible.
+    /// to `ip`.
     ///
-    /// `None` is returned when the address is empty, and when it is an IP
-    /// literal, since there is then nothing to resolve. Callers treat `None`
-    /// as "no hosts entry required", not as an error.
+    /// `Ok(None)` means no pin is needed: the address is already an IP
+    /// literal, so there is nothing to resolve and nothing a sandbox could
+    /// resolve differently.
     ///
-    /// The address is unbracketed before that classification so a bracketed
-    /// IPv6 literal is recognized as a literal rather than mistaken for a
-    /// hostname: `IpAddr::from_str` rejects brackets, so `[::1]` would
-    /// otherwise be pinned as though it were a name.
+    /// `Err` means a pin is needed but cannot be produced, because the address
+    /// is empty or contains characters that are not valid in a hostname. This
+    /// is deliberately an error rather than `None`. Returning `None` would tell
+    /// the caller "no hosts entry required", so a malformed address would
+    /// silently skip the pin and let the sandbox re-resolve the name freely --
+    /// failing open, which is the defect review objected to elsewhere in this
+    /// work. A proxy whose endpoint cannot be pinned must not run.
     ///
-    /// `ip` is recorded bare for the same reason [`ProxyHostPin::hosts_line`]
-    /// writes it bare -- a hosts file takes an unbracketed IPv6 literal.
+    /// Taking an [`IpAddr`] rather than a string means the caller has already
+    /// resolved the name, and makes an unparseable address unrepresentable
+    /// here.
     ///
     /// The URL is deliberately left untouched. See [`ProxyHostPin`] for why
     /// rewriting the host to `ip` instead would break TLS.
-    pub fn host_pin(&self, ip: &str) -> Option<ProxyHostPin> {
+    pub fn host_pin(&self, ip: IpAddr) -> Result<Option<ProxyHostPin>, WxcError> {
         let hostname = Self::unbracket(&self.address);
-        if hostname.is_empty() || hostname.parse::<std::net::IpAddr>().is_ok() {
-            return None;
+
+        // An IP literal needs no pin. Unbracket first so a bracketed IPv6
+        // literal is recognized as a literal rather than mistaken for a
+        // hostname: `IpAddr::from_str` rejects brackets, so `[::1]` would
+        // otherwise be pinned as though it were a name.
+        if hostname.parse::<IpAddr>().is_ok() {
+            return Ok(None);
         }
 
-        Some(ProxyHostPin {
+        if !Self::is_pinnable_hostname(hostname) {
+            return Err(WxcError::NetworkProxy(format!(
+                "proxy address {:?} cannot be pinned to {}: not a valid hostname",
+                self.address, ip
+            )));
+        }
+
+        Ok(Some(ProxyHostPin {
             hostname: hostname.to_string(),
-            ip: Self::unbracket(ip).to_string(),
-        })
+            ip,
+        }))
+    }
+
+    /// Whether `host` is safe to write as the name column of a hosts file
+    /// entry.
+    ///
+    /// Rejects the empty string and anything outside the letter, digit, `-`,
+    /// and `.` set. That set excludes whitespace and newlines, which is the
+    /// property that matters: either would end the record and inject a second,
+    /// unauthorized mapping.
+    fn is_pinnable_hostname(host: &str) -> bool {
+        !host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
     }
 
     /// Wraps `host` in `[` `]` when it is a bare IPv6 literal, so it is valid
@@ -436,8 +486,8 @@ impl ProxyAddress {
     /// does not accept brackets, so a bracketed host fails to parse and falls
     /// through unchanged rather than being bracketed twice.
     fn bracket_if_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
-        match host.parse::<std::net::IpAddr>() {
-            Ok(std::net::IpAddr::V6(_)) => std::borrow::Cow::Owned(format!("[{host}]")),
+        match host.parse::<IpAddr>() {
+            Ok(IpAddr::V6(_)) => std::borrow::Cow::Owned(format!("[{host}]")),
             _ => std::borrow::Cow::Borrowed(host),
         }
     }
