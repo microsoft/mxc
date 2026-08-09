@@ -8,6 +8,7 @@
 //! interface.
 
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
+use std::path::Path;
 use std::process::Command;
 
 use wxc_common::logger::Logger;
@@ -18,6 +19,16 @@ enum IpFamily {
     V4,
     V6,
 }
+
+/// Where the kernel reports per-interface attributes. Injectable in tests via
+/// the `_in` form of the lookup below.
+const SYSFS_NET_ROOT: &str = "/sys/class/net";
+
+/// Toggles that decide whether bridged packets are handed to iptables and
+/// ip6tables at all. A bridged container's chain is unreachable unless the
+/// matching one reads `1`.
+const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
+const BRIDGE_NF_CALL_IP6TABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-ip6tables";
 
 /// Whether a host-list entry produces an ACCEPT or a DROP rule. Local to this
 /// backend: it distinguishes `allowedHosts` from `blockedHosts` and is not a
@@ -68,6 +79,8 @@ pub(crate) struct CreatedResources {
     v6_chain: bool,
     v4_hook: bool,
     v6_hook: bool,
+    v4_physdev_hook: bool,
+    v6_physdev_hook: bool,
 }
 
 /// Flush and delete the chain, reporting whether it is still owned afterward.
@@ -106,7 +119,12 @@ impl CreatedResources {
     /// compiled on every target so Windows and macOS CI still type-check it.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn is_empty(&self) -> bool {
-        !self.v4_chain && !self.v6_chain && !self.v4_hook && !self.v6_hook
+        !self.v4_chain
+            && !self.v6_chain
+            && !self.v4_hook
+            && !self.v6_hook
+            && !self.v4_physdev_hook
+            && !self.v6_physdev_hook
     }
 
     /// Test-only constructor so `signal_cleanup`'s tests can build a
@@ -120,6 +138,8 @@ impl CreatedResources {
             v6_chain,
             v4_hook,
             v6_hook,
+            v4_physdev_hook: false,
+            v6_physdev_hook: false,
         }
     }
 }
@@ -238,6 +258,126 @@ impl NetworkIptablesManager {
     /// Set the veth interface name for the container.
     pub fn set_veth_interface(&mut self, iface: &str) {
         self.veth_interface = Some(iface.to_string());
+    }
+
+    /// Build one FORWARD hook rule matching the veth as the input interface.
+    ///
+    /// `op` is `-I` to install or `-D` to remove. Both come from this one
+    /// builder so a delete can never drift from the insert it has to match:
+    /// iptables deletes by full rule specification, and a spec that differs by
+    /// even one match leaves the hook in place.
+    fn build_forward_hook_iface_rule_args(op: &str, iface: &str, chain_name: &str) -> Vec<String> {
+        vec![
+            op.to_string(),
+            "FORWARD".to_string(),
+            "-i".to_string(),
+            iface.to_string(),
+            "-j".to_string(),
+            chain_name.to_string(),
+        ]
+    }
+
+    /// Build one FORWARD hook rule matching the veth as the *bridge port* the
+    /// packet entered on.
+    ///
+    /// This is the rule that does the work whenever the container is attached
+    /// to a bridge, which is the default LXC topology (`lxc.net.0.link` set to
+    /// `lxcbr0`). A packet leaving such a container is bridged onto `lxcbr0`
+    /// and then routed off it, so by the time FORWARD sees the packet its
+    /// input interface is the bridge and not the veth -- an `-i <veth>` rule
+    /// matches nothing at all. Measured on a live container: with both rules
+    /// present in FORWARD and the same traffic flowing, the `--physdev-in`
+    /// rule counted 11 packets while the `-i` rule counted zero.
+    ///
+    /// `--physdev-in` still names one specific bridge port, so the chain stays
+    /// scoped to a single container. Matching the bridge itself would apply
+    /// one container's policy to every container sharing it.
+    fn build_forward_hook_physdev_rule_args(
+        op: &str,
+        iface: &str,
+        chain_name: &str,
+    ) -> Vec<String> {
+        vec![
+            op.to_string(),
+            "FORWARD".to_string(),
+            "-m".to_string(),
+            "physdev".to_string(),
+            "--physdev-in".to_string(),
+            iface.to_string(),
+            "-j".to_string(),
+            chain_name.to_string(),
+        ]
+    }
+
+    /// Whether `iface` is enslaved to a bridge, looked up under an injectable
+    /// sysfs root so this is testable without a live interface.
+    ///
+    /// The kernel exposes `master` only for an enslaved interface, so its mere
+    /// presence is the answer.
+    fn veth_is_bridge_enslaved_in(sysfs_net_root: &Path, iface: &str) -> bool {
+        sysfs_net_root.join(iface).join("master").exists()
+    }
+
+    /// Whether bridged traffic is delivered to iptables at all, read from an
+    /// injectable path.
+    ///
+    /// The file exists only when `br_netfilter` is loaded, and a value of `1`
+    /// is what makes `--physdev-in` able to match. Absent or `0`, a bridged
+    /// container's packets bypass these chains entirely.
+    fn bridge_netfilter_active_at(path: &Path) -> bool {
+        std::fs::read_to_string(path)
+            .map(|contents| contents.trim() == "1")
+            .unwrap_or(false)
+    }
+
+    /// Production wrapper over [`Self::veth_is_bridge_enslaved_in`].
+    fn veth_is_bridge_enslaved(iface: &str) -> bool {
+        Self::veth_is_bridge_enslaved_in(Path::new(SYSFS_NET_ROOT), iface)
+    }
+
+    /// Production wrapper over [`Self::bridge_netfilter_active_at`].
+    fn bridge_netfilter_active(path: &str) -> bool {
+        Self::bridge_netfilter_active_at(Path::new(path))
+    }
+
+    /// Install the `--physdev-in` FORWARD hook for one family.
+    ///
+    /// Whether a failure here is fatal depends entirely on the topology, so
+    /// the decision lives in one place rather than being duplicated per
+    /// family. On a bridged veth this rule is the only one that can ever
+    /// match, so failing to install it means the policy is not enforced and
+    /// the caller must not be told otherwise. On a directly routed veth the
+    /// `-i` rule already carries the traffic and this one is redundant, so a
+    /// host whose kernel lacks the `physdev` match is still correctly
+    /// filtered and only warrants a warning.
+    fn install_physdev_hook(
+        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
+        iface: &str,
+        chain_name: &str,
+        bridged: bool,
+        tool: &str,
+        logger: &mut Logger,
+    ) -> Result<bool, String> {
+        let rule = Self::build_forward_hook_physdev_rule_args("-I", iface, chain_name);
+        match run(&[rule], logger) {
+            Ok(()) => Ok(true),
+            Err(err) if bridged => Err(format!(
+                "Failed to install the physdev FORWARD hook on bridged veth {} for chain {} \
+                 ({}): {}. That rule is the only one a bridged container's packets can match, \
+                 so the policy would not be enforced. Refusing to report success for an \
+                 unenforceable policy.",
+                iface, chain_name, tool, err
+            )),
+            Err(err) => {
+                logger.log_line(&format!(
+                    "Warning: could not install the physdev FORWARD hook on {} for chain {} \
+                     ({}): {}. The veth is not bridged, so the interface hook already carries \
+                     this container's traffic.",
+                    iface, chain_name, tool, err
+                ));
+                Ok(false)
+            }
+        }
     }
 
     /// Resolve a destination string to IPv4 and IPv6 firewall destinations.
@@ -1022,36 +1162,103 @@ impl NetworkIptablesManager {
         }
 
         // Hook the chains into FORWARD for the container's egress traffic.
-        // Packets originating in the container arrive at the host on the
-        // host-side veth, so they match FORWARD by input interface (`-i`);
-        // `-o` would instead match traffic flowing toward the container.
+        //
+        // Two rules per family, because the input interface FORWARD sees
+        // depends on how the veth is attached. A veth routed directly by the
+        // host arrives as `-i <veth>`. A veth enslaved to a bridge -- the
+        // default LXC topology -- arrives as `-i <bridge>`, and only
+        // `--physdev-in <veth>` still identifies the container. Installing
+        // only the first is what let a fully populated deny-all chain sit in
+        // the ruleset filtering nothing.
+        //
+        // The two are mutually exclusive for any given packet, so no packet is
+        // counted twice. `-o` would instead match traffic flowing toward the
+        // container.
         if let Some(ref iface) = self.veth_interface {
-            Self::run_iptables(
-                &["-I", "FORWARD", "-i", iface, "-j", &self.chain_name],
+            let bridged = Self::veth_is_bridge_enslaved(iface);
+            let chain_name = self.chain_name.clone();
+
+            // On a bridged veth the physdev rule is the only one that can
+            // match, and it can only match while br_netfilter is delivering
+            // bridged packets to iptables. Without that, both rules install
+            // cleanly and neither ever fires, which is the exact failure this
+            // change exists to remove: a chain that looks enforced and is not.
+            if bridged && !Self::bridge_netfilter_active(BRIDGE_NF_CALL_IPTABLES) {
+                return Err(format!(
+                    "Container veth {} is enslaved to a bridge but bridged packets are not \
+                     delivered to iptables ({} is absent or 0), so chain {} could never be \
+                     reached from FORWARD. Refusing to report success for an unenforceable \
+                     policy.",
+                    iface, BRIDGE_NF_CALL_IPTABLES, chain_name
+                ));
+            }
+
+            Self::run_iptables_rule_args(
+                &[Self::build_forward_hook_iface_rule_args(
+                    "-I",
+                    iface,
+                    &chain_name,
+                )],
                 logger,
             )?;
             created.v4_hook = true;
             Self::publish_created(created);
+
+            created.v4_physdev_hook = Self::install_physdev_hook(
+                Self::run_iptables_rule_args,
+                iface,
+                &chain_name,
+                bridged,
+                "iptables",
+                logger,
+            )?;
+            Self::publish_created(created);
             logger.log_line(&format!(
                 "FORWARD hook installed on {} for chain {} (iptables).",
-                iface, self.chain_name
+                iface, chain_name
             ));
             if ipv6_enabled {
-                Self::run_ip6tables(
-                    &["-I", "FORWARD", "-i", iface, "-j", &self.chain_name],
+                if bridged && !Self::bridge_netfilter_active(BRIDGE_NF_CALL_IP6TABLES) {
+                    return Err(format!(
+                        "Container veth {} is enslaved to a bridge but bridged packets are not \
+                         delivered to ip6tables ({} is absent or 0), so chain {} could never be \
+                         reached from FORWARD for IPv6. Refusing to report success for an \
+                         unenforceable policy.",
+                        iface, BRIDGE_NF_CALL_IP6TABLES, chain_name
+                    ));
+                }
+
+                Self::run_ip6tables_rule_args(
+                    &[Self::build_forward_hook_iface_rule_args(
+                        "-I",
+                        iface,
+                        &chain_name,
+                    )],
                     logger,
                 )?;
                 created.v6_hook = true;
                 Self::publish_created(created);
+
+                created.v6_physdev_hook = Self::install_physdev_hook(
+                    Self::run_ip6tables_rule_args,
+                    iface,
+                    &chain_name,
+                    bridged,
+                    "ip6tables",
+                    logger,
+                )?;
+                Self::publish_created(created);
+
                 logger.log_line(&format!(
                     "FORWARD hook installed on {} for chain {} (ip6tables).",
-                    iface, self.chain_name
+                    iface, chain_name
                 ));
             }
         } else {
             // Without a veth interface there is nothing to hook the chain to,
-            // and an unhooked chain is never traversed: FORWARD only reaches it
-            // via `-i <veth>`. Reporting success here would hand the caller a
+            // and an unhooked chain is never traversed: FORWARD reaches it only
+            // via a rule naming the veth, whether as the input interface or as
+            // the bridge port. Reporting success here would hand the caller a
             // fully populated deny-all chain that filters nothing, which is
             // strictly worse than no firewall at all because it looks enforced.
             //
@@ -1106,32 +1313,68 @@ impl NetworkIptablesManager {
     ) -> CreatedResources {
         let mut residual = *created;
 
-        // Remove from FORWARD only for families this attempt hooked. Must
-        // match the `-i` direction used at insertion so the delete finds the
-        // rule; a `-o` delete would leak the FORWARD hook.
+        // Remove from FORWARD only for families this attempt hooked, and only
+        // the hook forms it actually installed. Both specs come from the same
+        // builders used at insertion, because iptables deletes by full rule
+        // specification: a spec that differs by even one match -- `-o` instead
+        // of `-i`, or the interface rule standing in for the physdev one --
+        // finds nothing and leaks the hook.
         if let Some(iface) = veth_interface {
             if created.v4_hook
-                && Self::run_iptables(&["-D", "FORWARD", "-i", iface, "-j", chain_name], logger)
-                    .is_ok()
+                && Self::run_iptables_rule_args(
+                    &[Self::build_forward_hook_iface_rule_args(
+                        "-D", iface, chain_name,
+                    )],
+                    logger,
+                )
+                .is_ok()
             {
                 residual.v4_hook = false;
             }
+            if created.v4_physdev_hook
+                && Self::run_iptables_rule_args(
+                    &[Self::build_forward_hook_physdev_rule_args(
+                        "-D", iface, chain_name,
+                    )],
+                    logger,
+                )
+                .is_ok()
+            {
+                residual.v4_physdev_hook = false;
+            }
             if created.v6_hook
-                && Self::run_ip6tables(&["-D", "FORWARD", "-i", iface, "-j", chain_name], logger)
-                    .is_ok()
+                && Self::run_ip6tables_rule_args(
+                    &[Self::build_forward_hook_iface_rule_args(
+                        "-D", iface, chain_name,
+                    )],
+                    logger,
+                )
+                .is_ok()
             {
                 residual.v6_hook = false;
+            }
+            if created.v6_physdev_hook
+                && Self::run_ip6tables_rule_args(
+                    &[Self::build_forward_hook_physdev_rule_args(
+                        "-D", iface, chain_name,
+                    )],
+                    logger,
+                )
+                .is_ok()
+            {
+                residual.v6_physdev_hook = false;
             }
         }
 
         // Flush and delete only the chains this attempt created, and only once
-        // that family's FORWARD hook is confirmed gone. `-X` is the command
-        // that actually relinquishes the chain, so ownership is only cleared
-        // when it succeeds. The gate is per family because the two chains live
-        // in different tables and are referenced independently.
+        // every FORWARD hook for that family is confirmed gone. `-X` is the
+        // command that actually relinquishes the chain, so ownership is only
+        // cleared when it succeeds. Either surviving hook still references the
+        // chain, so both gate the delete. The gate is per family because the
+        // two chains live in different tables and are referenced independently.
         residual.v4_chain = teardown_chain(
             created.v4_chain,
-            residual.v4_hook,
+            residual.v4_hook || residual.v4_physdev_hook,
             logger,
             |logger| {
                 let _ = Self::run_iptables(&["-F", chain_name], logger);
@@ -1140,7 +1383,7 @@ impl NetworkIptablesManager {
         );
         residual.v6_chain = teardown_chain(
             created.v6_chain,
-            residual.v6_hook,
+            residual.v6_hook || residual.v6_physdev_hook,
             logger,
             |logger| {
                 let _ = Self::run_ip6tables(&["-F", chain_name], logger);
@@ -1250,6 +1493,12 @@ impl Drop for NetworkIptablesManager {
 #[cfg(test)]
 #[path = "network_iptables_veth_spec.rs"]
 mod veth_spec;
+
+/// Black-box specification for the FORWARD hook wiring, kept in its own file
+/// for the same reason as `veth_spec`.
+#[cfg(test)]
+#[path = "network_iptables_forward_hook_spec.rs"]
+mod forward_hook_spec;
 
 #[cfg(test)]
 mod test_firewall {
