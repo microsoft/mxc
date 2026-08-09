@@ -62,6 +62,23 @@ pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResp
     ScriptResponse::error(&msg)
 }
 
+/// NUL-terminate `value` for a C string the WSLc SDK will read, rejecting an
+/// interior NUL instead of letting the SDK silently observe a truncated value.
+///
+/// The daemon protocol accepts arbitrary JSON strings, so a command, env entry,
+/// image, or container path can contain `\u{0}`. Rust keeps such a string whole,
+/// but the SDK stops at the first NUL — so validation/logging and execution
+/// would disagree about what actually ran. Reject at the marshalling boundary.
+fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
+    std::ffi::CString::new(value)
+        .map(|c| c.into_bytes_with_nul())
+        .map_err(|_| {
+            ScriptResponse::error(&format!(
+                "{field} contains an interior NUL byte, which is not a valid C string"
+            ))
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Process I/O capture plumbing
 // ---------------------------------------------------------------------------
@@ -323,7 +340,7 @@ impl ProcessSettings {
         // script heaps; all are owned by the returned struct.
         let sh = b"/bin/sh\0".to_vec();
         let dash_c = b"-c\0".to_vec();
-        let script_cstr = format!("{}\0", script_code).into_bytes();
+        let script_cstr = cstr_bytes("command", script_code)?;
         let argv: Vec<PCSTR> = vec![
             sh.as_ptr() as PCSTR,
             dash_c.as_ptr() as PCSTR,
@@ -341,8 +358,8 @@ impl ProcessSettings {
         if !env.is_empty() {
             env_cstrings = env
                 .iter()
-                .map(|e| format!("{}\0", e).into_bytes())
-                .collect();
+                .map(|e| cstr_bytes("environment variable", e))
+                .collect::<Result<Vec<_>, _>>()?;
             env_ptrs = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr =
                 sdk.WslcSetProcessSettingsEnvVariables(&mut raw, env_ptrs.as_ptr(), env_ptrs.len());
@@ -365,7 +382,7 @@ impl ProcessSettings {
                     "working_directory must be an absolute in-container path (got {working_directory:?})"
                 )));
             }
-            let c = format!("{}\0", working_directory).into_bytes();
+            let c = cstr_bytes("working_directory", working_directory)?;
             let hr = sdk.WslcSetProcessSettingsWorkingDirectory(&mut raw, c.as_ptr() as PCSTR);
             if hr != S_OK {
                 return Err(sdk_error(
@@ -452,7 +469,7 @@ impl ContainerSettings {
         flags: WslcContainerFlags,
         logger: &mut Logger,
     ) -> Result<Self, ScriptResponse> {
-        let image_cstr = format!("{}\0", image).into_bytes();
+        let image_cstr = cstr_bytes("image", image)?;
         let mut raw = std::mem::zeroed::<WslcContainerSettings>();
         let hr = sdk.WslcInitContainerSettings(image_cstr.as_ptr() as PCSTR, &mut raw);
         if hr != S_OK {
@@ -503,10 +520,10 @@ impl ContainerSettings {
             .iter()
             .map(|m| {
                 let win: Vec<u16> = to_wide(&m.windows_path);
-                let ctr: Vec<u8> = format!("{}\0", m.container_path).into_bytes();
-                (win, ctr)
+                let ctr: Vec<u8> = cstr_bytes("mount container_path", &m.container_path)?;
+                Ok((win, ctr))
             })
-            .collect();
+            .collect::<Result<Vec<_>, ScriptResponse>>()?;
 
         let mut volumes: Vec<WslcContainerVolume> = Vec::new();
         if !mounts.is_empty() {
@@ -1063,4 +1080,33 @@ pub unsafe fn delete_daemon_container(
     }
     let _ = writeln!(logger, "[WSLC][daemon] Container deleted");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cstr_bytes_nul_terminates_a_plain_value() {
+        let bytes = cstr_bytes("command", "echo hi").expect("plain value is a valid C string");
+        assert_eq!(bytes, b"echo hi\0");
+    }
+
+    #[test]
+    fn cstr_bytes_accepts_empty() {
+        let bytes = cstr_bytes("working_directory", "").expect("empty value is a valid C string");
+        assert_eq!(bytes, b"\0");
+    }
+
+    #[test]
+    fn cstr_bytes_rejects_interior_nul() {
+        let err = cstr_bytes("command", "echo\0rm -rf /")
+            .expect_err("an interior NUL must be rejected, not silently truncated");
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("command"), "error names the field: {msg}");
+        assert!(
+            msg.contains("interior NUL"),
+            "error explains the cause: {msg}"
+        );
+    }
 }

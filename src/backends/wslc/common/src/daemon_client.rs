@@ -80,10 +80,20 @@ pub struct ExecResult {
 }
 
 /// A connected handle to the live daemon. Cheap to hold: it caches only the
-/// resolved pipe name and opens a fresh pipe connection per request (one request
-/// per connection, matching the server).
+/// resolved pipe name plus the daemon's trusted identity (PID + creation time
+/// from the discovery record), and opens a fresh pipe connection per request
+/// (one request per connection, matching the server).
 pub struct DaemonClient {
     pipe_name: String,
+    /// PID of the daemon process this client trusts, from the discovery record.
+    /// Every opened pipe is authenticated against this so a hostile same-user
+    /// pipe squatter cannot impersonate the daemon.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    server_pid: u32,
+    /// Creation time of `server_pid` from the record, to defeat PID reuse: the
+    /// connected server must be the exact process the record identified.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    server_pid_creation_time: u64,
 }
 
 impl DaemonClient {
@@ -137,6 +147,8 @@ impl DaemonClient {
     fn from_record(record: &DaemonRecord) -> Self {
         Self {
             pipe_name: record.pipe_name.clone(),
+            server_pid: record.pid,
+            server_pid_creation_time: record.pid_creation_time,
         }
     }
 
@@ -215,15 +227,18 @@ impl DaemonClient {
 
     /// Open a fresh synchronous connection to the daemon pipe, retrying past the
     /// brief windows where every instance is momentarily busy or being recreated.
+    ///
+    /// SECURITY: the handle is opened with `SECURITY_SQOS_PRESENT |
+    /// SECURITY_IDENTIFICATION` so a pipe server can only *identify* this
+    /// (possibly elevated) phase process, never impersonate it; and once
+    /// connected the server's PID/creation time is authenticated against the
+    /// trusted discovery record before any request is sent, so a hostile
+    /// same-user pipe squatter cannot pose as the daemon.
     fn open_pipe(&self) -> Result<File> {
         let deadline = Instant::now() + OPEN_TIMEOUT;
-        loop {
-            match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.pipe_name)
-            {
-                Ok(file) => return Ok(file),
+        let file = loop {
+            match open_pipe_handle(&self.pipe_name) {
+                Ok(file) => break file,
                 Err(e) => {
                     let retryable = matches!(
                         e.raw_os_error(),
@@ -236,8 +251,84 @@ impl DaemonClient {
                     return Err(e).with_context(|| format!("open daemon pipe {}", self.pipe_name));
                 }
             }
+        };
+        self.verify_server_identity(&file)?;
+        Ok(file)
+    }
+
+    /// Authenticate the connected pipe server against the trusted discovery
+    /// record. A mismatch means something other than the recorded daemon is
+    /// answering on this pipe name — refuse to send it anything.
+    #[cfg(windows)]
+    fn verify_server_identity(&self, pipe: &File) -> Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+
+        let handle = HANDLE(pipe.as_raw_handle());
+        let mut server_pid: u32 = 0;
+        // SAFETY: `handle` is a live pipe handle owned by `pipe`; `server_pid`
+        // is a valid out pointer.
+        unsafe { GetNamedPipeServerProcessId(handle, &mut server_pid) }
+            .map_err(|e| anyhow::anyhow!("GetNamedPipeServerProcessId failed: {e}"))?;
+
+        if server_pid != self.server_pid {
+            bail!(
+                "refusing to talk to daemon pipe {}: connected server pid {} does not match the \
+                 trusted discovery record pid {} (possible pipe-squatting attempt)",
+                self.pipe_name,
+                server_pid,
+                self.server_pid
+            );
+        }
+        // Defeat PID reuse: the server must be the exact process the record
+        // identified, not a new process that recycled the PID.
+        match crate::daemon_record::process_creation_time(server_pid) {
+            Some(ct) if ct == self.server_pid_creation_time => Ok(()),
+            Some(ct) => bail!(
+                "refusing to talk to daemon pipe {}: server pid {} creation time {} does not \
+                 match the trusted record {} (pid reuse or spoofed server)",
+                self.pipe_name,
+                server_pid,
+                ct,
+                self.server_pid_creation_time
+            ),
+            None => bail!(
+                "refusing to talk to daemon pipe {}: could not read the creation time of server \
+                 pid {} to authenticate it",
+                self.pipe_name,
+                server_pid
+            ),
         }
     }
+
+    /// Non-Windows stub: there is no daemon (and no named-pipe transport) off
+    /// Windows, so nothing to authenticate.
+    #[cfg(not(windows))]
+    fn verify_server_identity(&self, _pipe: &File) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Open the daemon pipe as an ordinary synchronous file handle.
+///
+/// On Windows the handle carries `SECURITY_SQOS_PRESENT |
+/// SECURITY_IDENTIFICATION` so the pipe server is capped at the Identification
+/// impersonation level and cannot act as this process.
+fn open_pipe_handle(pipe_name: &str) -> std::io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Security quality-of-service flags for CreateFile: present bit plus the
+        // Identification level (SecurityIdentification == 1, shifted into the
+        // high word).
+        const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+        const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+        opts.custom_flags(SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION);
+    }
+    opts.open(pipe_name)
 }
 
 /// The live daemon iff it is ready and speaks this build's protocol version.
@@ -366,5 +457,24 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("Busy"));
         assert!(text.contains("single-flight slot held"));
+    }
+
+    #[test]
+    fn from_record_captures_server_identity() {
+        use crate::daemon_record::RECORD_SCHEMA_VERSION;
+        let record = DaemonRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            pid: 4321,
+            pid_creation_time: 0xABCD,
+            pipe_name: r"\\.\pipe\mxc-wslc-test".to_string(),
+            ready: true,
+            protocol_version: PROTOCOL_VERSION,
+        };
+        let client = DaemonClient::from_record(&record);
+        // The pipe server is authenticated against this identity in open_pipe;
+        // losing it would silently disable the anti-squatting check.
+        assert_eq!(client.pipe_name, record.pipe_name);
+        assert_eq!(client.server_pid, 4321);
+        assert_eq!(client.server_pid_creation_time, 0xABCD);
     }
 }

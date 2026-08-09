@@ -155,6 +155,14 @@ async fn run() -> Result<()> {
 
 /// Poll the live-container count; once it has been zero for `IDLE_TIMEOUT` with
 /// no in-flight requests, notify shutdown.
+///
+/// The signal is delivered with [`Notify::notify_one`], not `notify_waiters`:
+/// the control server only awaits `shutdown.notified()` inside its `select!`, so
+/// a wakeup raised while it is executing another branch (accepting or spawning a
+/// handler) would be dropped by `notify_waiters` (it retains no permit when no
+/// task is parked). `notify_one` stores a permit, so the server's next
+/// `notified()` completes regardless of when the signal was raised — the
+/// watchdog can then return without leaving the daemon alive forever.
 #[cfg(windows)]
 async fn idle_watchdog(
     session: session_manager::SessionHandle,
@@ -170,16 +178,41 @@ async fn idle_watchdog(
             Ok(0) if active_clients.load(Ordering::SeqCst) == 0 => {
                 idle_for += IDLE_POLL;
                 if idle_for >= IDLE_TIMEOUT {
-                    shutdown.notify_waiters();
+                    shutdown.notify_one();
                     return;
                 }
             }
             Ok(_) => idle_for = Duration::ZERO,
             Err(_) => {
                 // Worker gone: nothing left to serve.
-                shutdown.notify_waiters();
+                shutdown.notify_one();
                 return;
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+
+    /// Regression for the lost idle-shutdown wakeup: the watchdog may fire while
+    /// the control server is executing a non-`notified()` `select!` branch. With
+    /// `notify_one` the signal is retained as a permit, so the server's *next*
+    /// `notified()` still completes. (`notify_waiters` would drop it here and
+    /// hang the daemon alive forever.)
+    #[tokio::test]
+    async fn notify_one_is_observed_when_raised_before_the_waiter_parks() {
+        let shutdown = Notify::new();
+
+        // Signal raised while no task is parked (server busy elsewhere).
+        shutdown.notify_one();
+
+        // The server later reaches its `notified()`; it must complete promptly.
+        tokio::time::timeout(Duration::from_secs(5), shutdown.notified())
+            .await
+            .expect("a permit raised before the waiter parked must not be lost");
     }
 }

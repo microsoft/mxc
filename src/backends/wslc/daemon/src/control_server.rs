@@ -60,6 +60,14 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 /// abandoning them, so a wedged handler cannot block daemon exit forever.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Bounded-backoff retry budget for recreating a control-pipe instance after a
+/// transient create failure (handle/resource exhaustion). A single transient
+/// hiccup must not tear the daemon — and every live sandbox — down; only a
+/// failure that persists past the whole budget is treated as fatal.
+const INSTANCE_RETRY_ATTEMPTS: u32 = 5;
+const INSTANCE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+const INSTANCE_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(500);
+
 /// Bind the first pipe instance and build the owner-only security descriptor.
 ///
 /// Called synchronously before the daemon record is published so a client never
@@ -90,36 +98,52 @@ pub async fn run(
     let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
     let mut clients: JoinSet<()> = JoinSet::new();
 
+    // A create-instance failure that persists past its retry budget is fatal:
+    // we can no longer listen for new clients. Record it, break, then drain and
+    // surface it after in-flight handlers finish — never mid-loop, so an already
+    // accepted client is not abandoned.
+    let mut fatal: Option<anyhow::Error> = None;
+
     loop {
         tokio::select! {
             connect = server.connect() => {
                 if let Err(e) = connect {
                     eprintln!("[wslc-daemon] pipe connect error: {e}");
-                    server = create_secured_instance(&pipe_name, &security, false)?;
+                    match create_secured_instance_retry(&pipe_name, &security).await {
+                        Ok(next) => server = next,
+                        Err(e) => {
+                            fatal = Some(e.context("recreate control pipe after connect error"));
+                            break;
+                        }
+                    }
                     continue;
                 }
                 let connected = server;
-                // Create the next instance before servicing this one.
-                server = create_secured_instance(&pipe_name, &security, false)?;
+                // Recreate the next listening instance before servicing this one
+                // so the next client is not refused. Transient failures are
+                // retried with bounded backoff rather than tearing the whole
+                // daemon down on a single accept-capacity hiccup.
+                let next = create_secured_instance_retry(&pipe_name, &security).await;
 
-                // Bound concurrency: acquire a slot before spawning. At capacity
-                // this awaits a free slot (backpressure) rather than spawning an
-                // unbounded task. The semaphore is never closed, so acquire
-                // cannot fail.
-                let permit = Semaphore::acquire_owned(limiter.clone())
-                    .await
-                    .expect("client semaphore is never closed");
+                // Service the accepted client regardless of whether we managed to
+                // recreate the next instance, so a fatal recreate failure below
+                // does not abandon a connection we already accepted.
+                spawn_client_handler(
+                    &mut clients,
+                    &limiter,
+                    &session,
+                    &active_clients,
+                    connected,
+                )
+                .await;
 
-                let session = session.clone();
-                let active = active_clients.clone();
-                active.fetch_add(1, Ordering::SeqCst);
-                clients.spawn(async move {
-                    let _permit = permit;
-                    if let Err(e) = handle_client(connected, session).await {
-                        eprintln!("[wslc-daemon] client connection error: {e:#}");
+                match next {
+                    Ok(n) => server = n,
+                    Err(e) => {
+                        fatal = Some(e.context("recreate control pipe instance"));
+                        break;
                     }
-                    active.fetch_sub(1, Ordering::SeqCst);
-                });
+                }
             }
             // Reap finished handlers so the JoinSet does not accumulate.
             Some(_) = clients.join_next() => {}
@@ -140,7 +164,65 @@ pub async fn run(
         clients.shutdown().await;
     }
 
-    Ok(())
+    match fatal {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Acquire a concurrency slot (backpressure at capacity) and spawn a task to
+/// service one accepted client connection, tracking it in `active_clients` for
+/// the idle watchdog.
+async fn spawn_client_handler(
+    clients: &mut JoinSet<()>,
+    limiter: &Arc<Semaphore>,
+    session: &SessionHandle,
+    active_clients: &Arc<AtomicUsize>,
+    connected: NamedPipeServer,
+) {
+    // Bound concurrency: acquire a slot before spawning. At capacity this awaits
+    // a free slot (backpressure) rather than spawning an unbounded task. The
+    // semaphore is never closed, so acquire cannot fail.
+    let permit = Semaphore::acquire_owned(limiter.clone())
+        .await
+        .expect("client semaphore is never closed");
+
+    let session = session.clone();
+    let active = active_clients.clone();
+    active.fetch_add(1, Ordering::SeqCst);
+    clients.spawn(async move {
+        let _permit = permit;
+        if let Err(e) = handle_client(connected, session).await {
+            eprintln!("[wslc-daemon] client connection error: {e:#}");
+        }
+        active.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
+/// Recreate a listening pipe instance, retrying transient failures with bounded
+/// backoff so one accept-capacity/handle-exhaustion hiccup does not tear the
+/// daemon — and every live sandbox — down. Only a failure that persists past the
+/// whole budget is returned as an error.
+async fn create_secured_instance_retry(
+    pipe_name: &str,
+    security: &OwnerOnlySecurity,
+) -> Result<NamedPipeServer> {
+    let mut backoff = INSTANCE_RETRY_BACKOFF;
+    for attempt in 1..=INSTANCE_RETRY_ATTEMPTS {
+        match create_secured_instance(pipe_name, security, false) {
+            Ok(server) => return Ok(server),
+            Err(e) if attempt < INSTANCE_RETRY_ATTEMPTS => {
+                eprintln!(
+                    "[wslc-daemon] pipe instance create failed \
+                     (attempt {attempt}/{INSTANCE_RETRY_ATTEMPTS}): {e:#}; retrying in {backoff:?}"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(INSTANCE_RETRY_MAX_BACKOFF);
+            }
+            Err(e) => return Err(e).context("pipe instance create exhausted retries"),
+        }
+    }
+    unreachable!("the loop returns on the final attempt")
 }
 
 /// Create one named-pipe server instance carrying the owner-only DACL.
@@ -172,6 +254,13 @@ pub(crate) struct OwnerOnlySecurity {
 // SAFETY: `psd` is a self-contained LocalAlloc'd security descriptor with no
 // thread affinity; ownership can move across threads freely.
 unsafe impl Send for OwnerOnlySecurity {}
+
+// SAFETY: the descriptor is immutable after construction — `attributes()` only
+// copies the pointer into a `SECURITY_ATTRIBUTES` and the OS reads (never
+// mutates) it, and the sole `LocalFree` happens in `Drop` on the owning thread.
+// Shared `&OwnerOnlySecurity` access across threads (e.g. held across an await
+// in the accept loop) is therefore race-free.
+unsafe impl Sync for OwnerOnlySecurity {}
 
 impl OwnerOnlySecurity {
     fn new() -> Result<Self> {
