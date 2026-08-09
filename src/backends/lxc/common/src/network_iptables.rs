@@ -227,6 +227,14 @@ impl NetworkIptablesManager {
         self.rules_applied
     }
 
+    /// Whether this manager has been told a missing veth is expected.
+    ///
+    /// Lets a backend that structurally has no veth assert it made the
+    /// declaration without standing up a real firewall.
+    pub fn veth_scoping_is_optional(&self) -> bool {
+        self.veth_scoping_optional
+    }
+
     /// Discover the host-side veth interface name for a running container.
     /// Parses the `Link:` line from `lxc-info -n <name>` output.
     /// Returns the veth interface name (e.g., "vethXXXXXX") if found.

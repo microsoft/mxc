@@ -205,13 +205,7 @@ impl BubblewrapScriptRunner {
                 logger,
                 "Bubblewrap: applying iptables rules for host-level network filtering"
             );
-            let mut mgr = NetworkIptablesManager::new(&container_name);
-            // Unprivileged bwrap has no veth to scope a chain to (see
-            // `local_network_diagnostic` in bwrap_command.rs), so a missing one
-            // here is structural rather than a failed lookup. Without this the
-            // manager's fail-fast path would refuse to start every Bubblewrap
-            // sandbox that asks for firewall mode.
-            mgr.allow_missing_veth_interface();
+            let mut mgr = build_firewall_manager(&container_name);
             match mgr.apply_firewall_rules(&request.policy, logger) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -501,6 +495,23 @@ fn needs_iptables_rules(request: &ExecutionRequest) -> bool {
     uses_firewall && has_host_rules
 }
 
+/// Build the iptables manager for a Bubblewrap sandbox.
+///
+/// Unprivileged bwrap has no veth to scope a chain to: the sandbox either
+/// shares the host network namespace or gets a private one, and neither yields
+/// a host-side interface to match on (see `local_network_diagnostic` in
+/// `bwrap_command`). A missing veth is therefore structural here, not a failed
+/// lookup, so the manager is told not to fail closed on it. Without that, every
+/// Bubblewrap sandbox requesting firewall enforcement would refuse to start.
+///
+/// This lives in its own function so the declaration is covered by a test;
+/// inlined at the call site, deleting it broke nothing that any test could see.
+fn build_firewall_manager(container_name: &str) -> NetworkIptablesManager {
+    let mut mgr = NetworkIptablesManager::new(container_name);
+    mgr.allow_missing_veth_interface();
+    mgr
+}
+
 /// Best-effort iptables cleanup. Called on both success and error paths.
 fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut Logger) {
     if let Some(ref mut mgr) = manager {
@@ -644,6 +655,21 @@ mod tests {
             script_code: "echo hi".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_firewall_manager_tolerates_the_veth_bubblewrap_never_has() {
+        // bwrap never calls set_veth_interface, so the shared manager's
+        // fail-closed path would refuse every firewall-mode sandbox at startup.
+        // The manager this backend builds must therefore have declared the
+        // absence up front.
+        let mgr = build_firewall_manager("bwrap-cov");
+
+        assert!(
+            mgr.veth_scoping_is_optional(),
+            "Bubblewrap has no veth, so the manager it builds must declare that a \
+             missing one is expected -- otherwise firewall-mode sandboxes cannot start"
+        );
     }
 
     #[test]
