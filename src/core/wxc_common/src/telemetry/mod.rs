@@ -24,7 +24,11 @@ use crate::models::{ContainmentBackend, FailurePhase, ScriptResponse, TelemetryC
 use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
-pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
+pub use events::{
+    log_config_rejected, log_enforcement_degraded, log_error, log_execution,
+    log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
+    ExecutionEvent, FailureReason, ProcessEventData, ProcessEventKind, TelemetryContext,
+};
 
 /// Conventional process exit code for a Rust panic/abort. Used as the reported
 /// `exit_code` on crash telemetry, since the panicking process has not (and
@@ -182,6 +186,11 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 /// will clean up the provider registration at process termination.
 pub fn shutdown() {
     mxc_telemetry::shutdown();
+}
+
+/// Returns whether the process-scoped Windows ETW provider is registered.
+pub fn is_active() -> bool {
+    mxc_telemetry::is_active()
 }
 
 /// Classify a failed execution into a bounded [`FailureReason`].

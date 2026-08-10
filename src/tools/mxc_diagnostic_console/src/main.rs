@@ -9,7 +9,8 @@
 //! Usage:
 //!   mxc-diagnostic-console.exe
 //!
-//! Then run `wxc-exec.exe` with `MXC_DIAG_CONSOLE=1` (or registry key).
+//! Set the same high-entropy `MXC_DIAG_PIPE_TOKEN` for the console and
+//! `wxc-exec.exe`, then enable `MXC_DIAG_CONSOLE=1` (or the registry key).
 
 mod etw;
 
@@ -22,10 +23,12 @@ use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 use windows::Win32::Security::{
-    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
-    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_ELEVATION, TOKEN_QUERY,
+    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAG_FIRST_PIPE_INSTANCE;
 use windows::Win32::System::Pipes::{
@@ -182,6 +185,13 @@ fn main() {
     };
 
     // Compute the per-user pipe name (includes current user's SID).
+    if wxc_common::diagnostic::diagnostic_pipe_token().is_none() {
+        eprintln!(
+            "[error] Set MXC_DIAG_PIPE_TOKEN to a high-entropy token in the \
+             environment shared with wxc-exec before starting the diagnostic console."
+        );
+        std::process::exit(1);
+    }
     let pipe_name = wxc_common::diagnostic::diagnostic_pipe_name();
 
     // Enable ANSI escape codes on Windows console.
@@ -361,19 +371,23 @@ fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> 
     let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 
-    // Create a security descriptor with a NULL DACL (allows all access).
-    // This is required so that medium/low integrity clients (e.g. sandboxed processes)
-    // can connect to the pipe when the server is running elevated.
-    let mut sd = SECURITY_DESCRIPTOR::default();
-    let psd = PSECURITY_DESCRIPTOR(std::ptr::addr_of_mut!(sd).cast());
-    // SAFETY: `psd` points to a valid stack-allocated SECURITY_DESCRIPTOR;
-    // revision 1 is the only valid value. SetSecurityDescriptorDacl with None
-    // sets a NULL DACL (allow all).
+    let sid = wxc_common::diagnostic::current_user_sid()
+        .ok_or_else(|| "could not determine current user SID".to_string())?;
+    let sddl = format!("D:(A;;GA;;;{sid})S:(ML;;NW;;;LW)");
+    let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut psd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the SDDL buffer is null terminated and remains alive for the call.
     unsafe {
-        InitializeSecurityDescriptor(psd, 1)
-            .map_err(|e| format!("InitializeSecurityDescriptor: {e}"))?;
-        SetSecurityDescriptorDacl(psd, true, None, false)
-            .map_err(|e| format!("SetSecurityDescriptorDacl: {e}"))?;
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl_wide.as_ptr()),
+            SDDL_REVISION_1,
+            &mut psd,
+            None,
+        )
+        .map_err(|e| format!("ConvertStringSecurityDescriptorToSecurityDescriptorW: {e}"))?;
+    }
+    if psd.0.is_null() {
+        return Err("security descriptor conversion returned NULL".to_string());
     }
 
     let sa = SECURITY_ATTRIBUTES {
@@ -403,16 +417,36 @@ fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> 
         )
     };
 
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(format!(
+    let result = if handle == INVALID_HANDLE_VALUE {
+        Err(format!(
             "CreateNamedPipeW failed: {}",
             std::io::Error::last_os_error()
-        ));
+        ))
+    } else {
+        Ok(handle)
+    };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(psd.0)));
     }
 
-    Ok(handle)
+    result
 }
 
+/// Render a message so it is safe to write to the diagnostic console TTY.
+///
+/// Two orthogonal concerns are handled:
+///
+/// 1. **Control-character hardening.** Anything below `0x20` other than `\t`
+///    or `\n` is escaped, so a rogue client cannot inject terminal escape
+///    sequences (cursor moves, colour changes, title updates) into the shared
+///    console.
+/// 2. **Lossless rendering of high Unicode.** Non-ASCII characters go through
+///    [`char::escape_default`], which emits `\u{NNNN}` for anything outside
+///    the printable ASCII range. The previous implementation masked the
+///    Unicode scalar with `& 0xff` and rendered `\xNN`, which collided for
+///    every pair of characters whose scalars agreed in the low byte (e.g.
+///    `\u{0100}` and `\u{0200}` both rendered as `\x00`).
+///
 /// Get the client process ID from a connected pipe handle.
 fn get_client_pid(pipe: HANDLE) -> Option<u32> {
     let mut pid: u32 = 0;
@@ -492,9 +526,13 @@ fn client_reader(pipe: HANDLE, pid: u32, tx: mpsc::Sender<DisplayEvent>) {
 
 /// Parse a JSON log message envelope and extract the text.
 ///
-/// Expected format: `{"msg": "the log text"}`
+/// Expected formats are `{"msg": "the log text"}` and
+/// `{"kind":"audit","record":{...}}`.
 fn parse_log_message(json: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if v.get("kind").and_then(|k| k.as_str()) == Some("audit") {
+        return v.get("record").map(ToString::to_string);
+    }
     v.get("msg").and_then(|m| m.as_str()).map(|s| s.to_string())
 }
 

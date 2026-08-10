@@ -249,6 +249,198 @@ mod provider {
             str8("__TlgCV__", correlation_vector),
         );
     }
+
+    fn common_params(state: &ProviderState) -> (&str, &str, bool, bool) {
+        (&state.version, &state.channel, cfg!(debug_assertions), true)
+    }
+
+    pub fn log_process_exited(identity: &str, process_id: u32, exit_code: i32) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ProcessExited",
+            level(Informational),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            u32("mxc.process_id", &process_id),
+            i32("mxc.exit_code", &exit_code),
+        );
+    }
+
+    pub fn log_process_timed_out(identity: &str, process_id: u32, timeout_ms: u64) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ProcessTimedOut",
+            level(Warning),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            u32("mxc.process_id", &process_id),
+            u64("mxc.timeout_ms", &timeout_ms),
+        );
+    }
+
+    pub fn log_process_kill_failed(identity: &str, process_id: u32, error_type: &str) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ProcessKillFailed",
+            level(Error),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            u32("mxc.process_id", &process_id),
+            str8("mxc.error_type", error_type),
+        );
+    }
+
+    pub fn log_enforcement_degraded(
+        identity: &str,
+        tier: &str,
+        needs_dacl_augmentation: bool,
+        degradation_reasons: &str,
+        effective_enforcement_level: &str,
+    ) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.EnforcementDegraded",
+            level(Warning),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.tier", tier),
+            bool8("mxc.needs_dacl_augmentation", &needs_dacl_augmentation),
+            str8("mxc.degradation_reasons", degradation_reasons),
+            str8("mxc.effective_enforcement_level", effective_enforcement_level),
+        );
+    }
+
+    pub fn log_policy_hash(identity: &str, policy_hash: &str, config_schema_version: &str) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.PolicyHash",
+            level(Informational),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.policy_hash", policy_hash),
+            str8("mxc.config_schema_version", config_schema_version),
+        );
+    }
+
+    pub fn log_network_policy_applied(
+        identity: &str,
+        enforcement_mode: &str,
+        default_policy: &str,
+        proxy_port: u64,
+    ) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.SandboxNetworkPolicyApplied",
+            level(Informational),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.enforcement_mode", enforcement_mode),
+            str8("mxc.default_policy", default_policy),
+            u64("mxc.proxy_port", &proxy_port),
+        );
+    }
+
+    pub fn log_sandbox_torn_down(identity: &str, status: &str, released_resources: &str) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.SandboxTornDown",
+            level(Informational),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.identity", identity),
+            str8("mxc.status", status),
+            str8("mxc.released_resources", released_resources),
+        );
+    }
+
+    pub fn log_config_rejected(
+        correlation_id: &str,
+        backend: &str,
+        reason: &str,
+        offending_field: &str,
+    ) {
+        let Some(state) = STATE.get() else { return };
+        let (version, channel, debugging, app_session) = common_params(state);
+        tracelogging::write_event!(
+            MXC_PROVIDER,
+            "MXC.ConfigRejected",
+            level(Warning),
+            keyword(MICROSOFT_KEYWORD_MEASURES),
+            u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
+            struct("COMMON_MXC_PARAMS", {
+                str8("Version", version),
+                str8("Channel", channel),
+                bool8("IsDebugging", &debugging),
+                bool8("UTCReplace_AppSessionGuid", &app_session),
+            }),
+            str8("mxc.correlation_id", correlation_id),
+            str8("mxc.backend", backend),
+            str8("mxc.reason", reason),
+            str8("mxc.offending_field", offending_field),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +476,34 @@ mod provider {
         _exit_code: i32,
         _phase: &str,
         _correlation_vector: &str,
+    ) {
+    }
+
+    pub fn log_process_exited(_identity: &str, _process_id: u32, _exit_code: i32) {}
+    pub fn log_process_timed_out(_identity: &str, _process_id: u32, _timeout_ms: u64) {}
+    pub fn log_process_kill_failed(_identity: &str, _process_id: u32, _error_type: &str) {}
+    pub fn log_enforcement_degraded(
+        _identity: &str,
+        _tier: &str,
+        _needs_dacl_augmentation: bool,
+        _degradation_reasons: &str,
+        _effective_enforcement_level: &str,
+    ) {
+    }
+    pub fn log_policy_hash(_identity: &str, _policy_hash: &str, _config_schema_version: &str) {}
+    pub fn log_network_policy_applied(
+        _identity: &str,
+        _enforcement_mode: &str,
+        _default_policy: &str,
+        _proxy_port: u64,
+    ) {
+    }
+    pub fn log_sandbox_torn_down(_identity: &str, _status: &str, _released_resources: &str) {}
+    pub fn log_config_rejected(
+        _correlation_id: &str,
+        _backend: &str,
+        _reason: &str,
+        _offending_field: &str,
     ) {
     }
 }

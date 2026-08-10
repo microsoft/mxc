@@ -42,6 +42,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::fallback_detector::IsolationTier;
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
@@ -62,13 +63,17 @@ use sandbox_spec::base_container_layout::{
     FilterAction as SboxFilterAction, IntegrityLevel, NetworkPolicy as FbsNetworkPolicy,
     NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
 };
+use wxc_common::audit::{
+    sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
+    TeardownStatus,
+};
 use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    CaptureDenialsOutput, ContainerPolicy, ExecutionRequest, FailurePhase, NetworkEnforcementMode,
-    NetworkPolicy, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsOutput, ContainerPolicy, ContainmentBackend, ExecutionRequest, FailurePhase,
+    NetworkEnforcementMode, NetworkPolicy, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -1989,6 +1994,56 @@ impl BaseContainerRunner {
             ResumeThread(pi.hThread);
         }
 
+        // Record the network policy that the accepted sandbox spec carries.
+        // Emitted here (not at spec-build time) because only a successful create
+        // proves the OS accepted the policy — an earlier record would claim
+        // enforcement for a launch that never happened.
+        wxc_common::telemetry::log_network_policy_applied(
+            sanitize_identity(&identity),
+            request.policy.network_enforcement_mode.as_str(),
+            request.policy.default_network_policy.as_str(),
+            request
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|a| a.port as u64)
+                .unwrap_or(0),
+        );
+        if logger.has_diagnostic_sink() {
+            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
+                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+                .str("identity", sanitize_identity(&identity))
+                .str("tier", IsolationTier::BaseContainer.as_str())
+                .str(
+                    "enforcement_mode",
+                    request.policy.network_enforcement_mode.as_str(),
+                )
+                .str(
+                    "default_policy",
+                    request.policy.default_network_policy.as_str(),
+                )
+                .u64(
+                    "proxy_port",
+                    request
+                        .policy
+                        .network_proxy
+                        .address
+                        .as_ref()
+                        .map(|a| a.port as u64)
+                        .unwrap_or(0),
+                )
+                // Tier 1 installs no INetFwPolicy2 rules: the network policy
+                // travels inside the sandbox spec and the OS enforces it. The
+                // explicit zero/false keep the record shape identical to the
+                // AppContainer tiers' so one parser handles both, with `tier`
+                // as the discriminator.
+                .u64("firewall_rules_created", 0)
+                .bool("firewall_applied", false)
+                .str("status", OperationStatus::Success.as_str());
+            logger.log_audit_event(&record);
+        }
+
         // Hand ownership to the caller via `BaseChild`, which performs
         // sandbox/proxy teardown after the child exits. `job` is always present
         // here (we failed closed above); the `Option` and the root-only fallback
@@ -2007,6 +2062,7 @@ impl BaseContainerRunner {
             identity,
             sid_string,
             proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
+            preserve_policy: request.lifecycle.preserve_policy,
             capture_session,
             security_environment,
             capture_etl_path,
@@ -2037,6 +2093,9 @@ struct BaseChild {
     identity: String,
     sid_string: String,
     proxy_coordinator: ProxyCoordinator,
+    /// `lifecycle.preservePolicy`, carried so the teardown record can report it
+    /// rather than inferring it from `destroy_on_exit` (a different field).
+    preserve_policy: bool,
     /// Live learning-mode capture session (`Some` only when `captureDenials`
     /// is configured and the OS API is available). Sealed in `run_teardown`
     /// after the child exits.
@@ -2168,7 +2227,9 @@ impl SandboxBackend for BaseContainerRunner {
         // the binary's own std handles / console (a TTY when the binary has one).
         let capture = stdio == StdioMode::Pipes;
         let child = self.spawn_base(request, logger, capture)?;
-        Ok(Box::new(BaseContainerSandboxProcess::from_child(child)))
+        Ok(Box::new(BaseContainerSandboxProcess::from_child(
+            child, logger,
+        )))
     }
 
     fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
@@ -2199,6 +2260,10 @@ struct BaseContainerSandboxProcess {
     stderr_canceller: Option<PipeReadCanceller>,
     timeout_ms: u32,
     destroy_on_exit: bool,
+    /// `lifecycle.preservePolicy` — a request to leave enforcement in place
+    /// after the run. Distinct from `destroy_on_exit`; carried so the teardown
+    /// record reports it truthfully instead of inferring it.
+    preserve_policy: bool,
     proxy_enabled: bool,
     identity: String,
     sid_string: String,
@@ -2206,6 +2271,7 @@ struct BaseContainerSandboxProcess {
     /// Cached teardown outcome so repeated terminal waits cannot hide a
     /// capture failure after the session has been consumed.
     teardown_result: Option<Result<(), String>>,
+    kill_requested: bool,
     /// Live learning-mode capture session, moved from the `BaseChild`. Sealed
     /// in `run_teardown` once the child has exited and been reaped.
     capture_session: Option<Box<dyn CaptureSessionOps>>,
@@ -2215,6 +2281,10 @@ struct BaseContainerSandboxProcess {
     capture_etl_path: Option<PathBuf>,
     /// Resolved JSON denials deliverable path.
     capture_output_path: Option<PathBuf>,
+    /// Detached clone of the caller's diagnostic sinks, so audit records emitted
+    /// from `wait()` / `Drop` (neither of which receives a `Logger`) are
+    /// actually observable. See [`Logger::clone_diagnostic_sink`].
+    audit_logger: Logger,
     /// Exit code of the child, recorded by `wait` before teardown so the
     /// denials summary can carry it. `None` on the `Drop`/early-exit path.
     last_exit_code: Option<i32>,
@@ -2229,7 +2299,7 @@ struct BaseContainerSandboxProcess {
 unsafe impl Send for BaseContainerSandboxProcess {}
 
 impl BaseContainerSandboxProcess {
-    fn from_child(mut child: BaseChild) -> Self {
+    fn from_child(mut child: BaseChild, logger: &Logger) -> Self {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
         let stdin = child.stdin_write.take().map(PipeWriter::new);
@@ -2249,18 +2319,40 @@ impl BaseContainerSandboxProcess {
             stderr_canceller,
             timeout_ms: child.timeout_ms,
             destroy_on_exit: child.destroy_on_exit,
+            preserve_policy: child.preserve_policy,
             proxy_enabled: child.proxy_enabled,
-            identity: std::mem::take(&mut child.identity),
+            // On this tier MXC mints the identity itself (`sandbox-<16 hex>`)
+            // when `destroy_on_exit` is set, but otherwise it is the caller's
+            // `containerId` — a config value. Sanitize either way.
+            identity: sanitize_identity(&std::mem::take(&mut child.identity)).to_string(),
             sid_string: std::mem::take(&mut child.sid_string),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
             teardown_result: None,
+            kill_requested: false,
             capture_session: child.capture_session.take(),
             security_environment: child.security_environment.take(),
             capture_etl_path: child.capture_etl_path.take(),
             capture_output_path: child.capture_output_path.take(),
+            audit_logger: logger.clone_diagnostic_sink(),
             last_exit_code: None,
             output_metadata: None,
         }
+    }
+
+    /// Start an audit record pre-populated with this handle's attribution
+    /// (backend, identity, tier, pid) so no call site can forget one of them.
+    fn audit(&self, name: AuditEventName) -> AuditEvent {
+        AuditEvent::new(name)
+            .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+            .str("identity", &self.identity)
+            .str("tier", IsolationTier::BaseContainer.as_str())
+            .u64("pid", self.pid as u64)
+    }
+
+    /// Whether an audit record built here would reach a sink. Checked before
+    /// building one so a run with no diagnostic sink pays nothing.
+    fn audit_enabled(&self) -> bool {
+        self.audit_logger.has_diagnostic_sink()
     }
 
     fn run_teardown(&mut self) -> std::io::Result<()> {
@@ -2325,20 +2417,84 @@ impl BaseContainerSandboxProcess {
             );
             sandbox_tracking::unregister_ctrl_c_cleanup();
         }
-        self.proxy_coordinator.stop(&mut logger);
+        let proxy_stopped = self.proxy_coordinator.stop(&mut logger);
         let result = capture_result
             .map(|_| ())
             .map_err(|error| error.to_string());
+        self.log_teardown(&result, proxy_stopped);
         self.teardown_result = Some(result.clone());
         result.map_err(std::io::Error::other)
     }
 
+    /// Record `mxc.SandboxTornDown` for this handle.
+    ///
+    /// **This deliberately reports the Tier 1 cleanup stub honestly.**
+    /// `run_sandbox_cleanup` is a documented no-op — it ignores `identity`,
+    /// `sid_string`, and `proxy_enabled` because child-process tracking is not
+    /// implemented — and the OS does not release per-sandbox state either. So
+    /// the record reports `container_released = false` and a `skipped` status,
+    /// turning a silent product gap into an auditable one. Claiming a green
+    /// teardown here would be worse than emitting nothing.
+    fn log_teardown(&mut self, capture_result: &Result<(), String>, proxy_stopped: bool) {
+        if !self.audit_enabled() && !wxc_common::telemetry::is_active() {
+            return;
+        }
+        let (status, skip_reason) = base_container_teardown_status(
+            capture_result.is_err(),
+            self.destroy_on_exit,
+            self.preserve_policy,
+        );
+        wxc_common::telemetry::log_sandbox_torn_down(
+            sanitize_identity(&self.identity),
+            status.as_str(),
+            &format!(
+                "firewall_rules_removed=0,bfs_removed=false,proxy_stopped={},container_released=false",
+                proxy_stopped
+            ),
+        );
+        if !self.audit_enabled() {
+            return;
+        }
+        let mut record = self
+            .audit(AuditEventName::SandboxTornDown)
+            .str("status", status.as_str())
+            // Tier 1 installs no MXC firewall rules at all: the enforcement is
+            // the OS sandbox plus the cooperative proxy. Explicit zeros make
+            // that an auditable positive fact rather than an absence.
+            .u64("firewall_rules_removed", 0)
+            .bool("firewall_removal_ok", true)
+            .bool("bfs_removed", false)
+            .bool("proxy_stopped", proxy_stopped)
+            .bool("preserve_policy", self.preserve_policy)
+            .bool("container_released", false);
+        if let Some(reason) = skip_reason {
+            record = record.str("skip_reason", reason.as_str());
+        }
+        self.audit_logger.log_audit_event(&record);
+    }
+
     fn kill_process_tree(&mut self) -> std::io::Result<()> {
-        if let Some(job) = &self.job {
-            job.terminate(u32::MAX);
+        let outcome = if let Some(job) = &self.job {
+            job.terminate(u32::MAX)
+                .map_err(|e| (KillMethod::TerminateJobObject, e))
         } else {
-            unsafe {
-                let _ = TerminateProcess(self.process.get(), u32::MAX);
+            // SAFETY: `self.process` is a valid, owned process handle.
+            unsafe { TerminateProcess(self.process.get(), u32::MAX) }
+                .map_err(|e| (KillMethod::TerminateProcess, e))
+        };
+        if let Err((method, error)) = outcome {
+            wxc_common::telemetry::log_process_event(
+                wxc_common::telemetry::ProcessEventKind::KillFailed,
+                sanitize_identity(&self.identity),
+                self.pid,
+                wxc_common::telemetry::ProcessEventData::KillFailure(method.as_str()),
+            );
+            if self.audit_enabled() {
+                let record = self
+                    .audit(AuditEventName::ProcessKillFailed)
+                    .str("kill_method", method.as_str())
+                    .i64("error_code", error.code().0 as i64);
+                self.audit_logger.log_audit_event(&record);
             }
         }
         Ok(())
@@ -2494,6 +2650,42 @@ fn insert_run_id_into_stem(path: &Path, run_id: &str) -> PathBuf {
     }
 }
 
+/// Decide the audit `status` / `skip_reason` for a BaseContainer teardown.
+///
+/// Pure so the mapping is unit-testable without launching a sandbox. The order
+/// of the arms is the contract:
+///
+/// 1. a failed denial-capture finalisation is a real failure and outranks
+///    everything else;
+/// 2. `preserve_policy` is an explicit request to leave enforcement in place, so
+///    it is `skipped` — matching the AppContainer tiers, which report the same
+///    thing for the same request;
+/// 3. `destroy_on_exit` asks for per-sandbox cleanup that `run_sandbox_cleanup`
+///    does not actually implement, so it is `skipped` with the honest reason
+///    rather than a green `success`;
+/// 4. otherwise nothing was left behind that the caller did not ask for.
+fn base_container_teardown_status(
+    capture_failed: bool,
+    destroy_on_exit: bool,
+    preserve_policy: bool,
+) -> (TeardownStatus, Option<TeardownSkipReason>) {
+    if capture_failed {
+        (TeardownStatus::Failure, None)
+    } else if preserve_policy {
+        (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::PreservePolicy),
+        )
+    } else if destroy_on_exit {
+        (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::CleanupNotImplemented),
+        )
+    } else {
+        (TeardownStatus::Success, None)
+    }
+}
+
 impl SandboxProcess for BaseContainerSandboxProcess {
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
@@ -2541,6 +2733,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
+        self.kill_requested = true;
         // Tree-kill via the job object when the child was successfully assigned
         // to one; otherwise fall back to terminating the root process.
         self.kill_process_tree()
@@ -2563,13 +2756,42 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
-                    Ok(code as i32)
+                    let exit_code = code as i32;
+                    if !self.kill_requested {
+                        wxc_common::telemetry::log_process_event(
+                            wxc_common::telemetry::ProcessEventKind::Exited,
+                            sanitize_identity(&self.identity),
+                            self.pid,
+                            wxc_common::telemetry::ProcessEventData::ExitCode(exit_code),
+                        );
+                    }
+                    if self.audit_enabled() && !self.kill_requested {
+                        let record = self
+                            .audit(AuditEventName::ProcessExited)
+                            .i64("exit_code", exit_code as i64);
+                        self.audit_logger.log_audit_event(&record);
+                    }
+                    Ok(exit_code)
                 }
             }
-            WAIT_TIMEOUT => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("script timed out after {}ms", self.timeout_ms),
-            )),
+            WAIT_TIMEOUT => {
+                wxc_common::telemetry::log_process_event(
+                    wxc_common::telemetry::ProcessEventKind::TimedOut,
+                    sanitize_identity(&self.identity),
+                    self.pid,
+                    wxc_common::telemetry::ProcessEventData::TimeoutMs(self.timeout_ms as u64),
+                );
+                if self.audit_enabled() {
+                    let record = self
+                        .audit(AuditEventName::ProcessTimedOut)
+                        .u64("timeout_ms", self.timeout_ms as u64);
+                    self.audit_logger.log_audit_event(&record);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("script timed out after {}ms", self.timeout_ms),
+                ))
+            }
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
@@ -2688,6 +2910,47 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
     use wxc_common::ui_policy::EffectiveUiRestrictions;
+
+    /// Tier 1's `run_sandbox_cleanup` is a documented no-op, so a run that asked
+    /// for `destroy_on_exit` must be reported as `skipped` with the honest
+    /// reason — not as a green `success` that claims a cleanup which did not
+    /// happen.
+    #[test]
+    fn teardown_status_reports_the_tier1_cleanup_stub_honestly() {
+        let (status, reason) = base_container_teardown_status(false, true, false);
+        assert_eq!(status, TeardownStatus::Skipped);
+        assert_eq!(reason, Some(TeardownSkipReason::CleanupNotImplemented));
+    }
+
+    /// `preserve_policy` must produce the same `skipped` / `preserve_policy`
+    /// answer as the AppContainer tiers — the two runners previously disagreed,
+    /// with BaseContainer reporting a bare `success` for the same request.
+    #[test]
+    fn teardown_status_matches_appcontainer_for_preserve_policy() {
+        let (status, reason) = base_container_teardown_status(false, true, true);
+        assert_eq!(status, TeardownStatus::Skipped);
+        assert_eq!(reason, Some(TeardownSkipReason::PreservePolicy));
+    }
+
+    /// A failed denial-capture finalisation is a real failure and outranks every
+    /// skip reason.
+    #[test]
+    fn teardown_status_reports_capture_failure_as_failure() {
+        for (destroy, preserve) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(
+                base_container_teardown_status(true, destroy, preserve),
+                (TeardownStatus::Failure, None)
+            );
+        }
+    }
+
+    #[test]
+    fn teardown_status_is_success_when_nothing_was_requested() {
+        assert_eq!(
+            base_container_teardown_status(false, false, false),
+            (TeardownStatus::Success, None)
+        );
+    }
 
     struct FakeCaptureSession {
         finish_error: Option<(&'static str, i32)>,

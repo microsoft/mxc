@@ -6,6 +6,8 @@
 //! `create_process` also drives the ConPTY relay setup + shutdown ladder
 //! against the local console.
 
+use wxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
+use wxc_common::logger::Logger;
 use wxc_common::process_util::OwnedHandle;
 
 use isolation_session_bindings::bindings::{
@@ -205,6 +207,7 @@ impl IsolationSessionManager {
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
+        logger: Option<&mut Logger>,
     ) -> Result<i32, IsolationSessionError> {
         let proc_options = build_iso_process_options(options)?;
 
@@ -420,7 +423,9 @@ impl IsolationSessionManager {
             .WaitForExit(options.timeout_ms)
             .map_err(|e| transport_err(op::RUN_PROCESS, "WaitForExit failed", &e))?;
 
-        let exit_code = wait_with_graceful_shutdown(&process)?;
+        let identity = self.agent_user_name.to_string();
+        let exit_code =
+            wait_with_graceful_shutdown(&process, options.timeout_ms, &identity, logger)?;
 
         // Signal the stdin relay to exit. Effective for waitable (console)
         // handles; for pipe handles the bounded wait below expires and we
@@ -478,6 +483,85 @@ impl IsolationSessionManager {
     }
 }
 
+/// Which lifecycle release steps a teardown pass actually attempted, and
+/// whether each landed.
+///
+/// The isolation-session backend releases a *container* (the session plus the
+/// agent user backing it), never firewall rules — the OS API exposes no network
+/// primitive at all. So this carries the backend's own release facts rather
+/// than the AppContainer tiers' firewall counters; `tier` is likewise absent
+/// because this backend has no fallback ladder.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TeardownOutcome {
+    /// `stop_session` was attempted, and whether it succeeded.
+    pub session_stopped: Option<bool>,
+    /// `deprovision_agent_user` was attempted, and whether it succeeded.
+    pub agent_user_deprovisioned: Option<bool>,
+}
+
+impl TeardownOutcome {
+    /// `failure` if any attempted step failed, `skipped` if nothing was
+    /// attempted at all, `success` otherwise.
+    fn status(&self) -> TeardownStatus {
+        let steps = [self.session_stopped, self.agent_user_deprovisioned];
+        if steps.contains(&Some(false)) {
+            TeardownStatus::Failure
+        } else if steps.iter().all(|s| s.is_none()) {
+            TeardownStatus::Skipped
+        } else {
+            TeardownStatus::Success
+        }
+    }
+}
+
+/// Emit `mxc.SandboxTornDown` for an isolation-session teardown pass.
+///
+/// Shared by the one-shot runner (which tears the whole lifecycle down in one
+/// pass) and the state-aware `stop` / `deprovision` phases (which each release
+/// their own slice), so both surfaces produce the same record shape and a
+/// cleanup failure is distinguishable from a success on either.
+///
+/// `phase` names which lifecycle surface produced the record, because a
+/// state-aware `stop` legitimately releases the session without releasing the
+/// container, and a consumer must be able to tell that apart from a one-shot
+/// pass that failed to deprovision.
+pub fn log_sandbox_torn_down(
+    logger: &mut Logger,
+    identity: &str,
+    phase: &str,
+    outcome: TeardownOutcome,
+) {
+    if !logger.has_diagnostic_sink() && !wxc_common::telemetry::is_active() {
+        return;
+    }
+    wxc_common::telemetry::log_sandbox_torn_down(
+        &wxc_common::policy_identity::redact_identity(identity),
+        outcome.status().as_str(),
+        &format!(
+            "session_stopped={},agent_user_deprovisioned={}",
+            outcome.session_stopped == Some(true),
+            outcome.agent_user_deprovisioned == Some(true),
+        ),
+    );
+    if !logger.has_diagnostic_sink() {
+        return;
+    }
+    let record = AuditEvent::new(AuditEventName::SandboxTornDown)
+        .str("backend", "isolation_session")
+        .str(
+            "identity",
+            &wxc_common::policy_identity::redact_identity(identity),
+        )
+        .str("phase", phase)
+        .str("status", outcome.status().as_str())
+        .bool("session_stopped", outcome.session_stopped == Some(true))
+        .bool(
+            "agent_user_deprovisioned",
+            outcome.agent_user_deprovisioned == Some(true),
+        );
+    logger.log_audit_event(&record);
+}
+
 /// Three-tier graceful shutdown for an `IsoSessionProcess` that's still
 /// running after `WaitForExit(timeout_ms)` returns. Tier 1: close stdin —
 /// many REPLs exit on EOF alone. Tier 2: `SendCtrlClose` — ConPTY-only;
@@ -490,7 +574,12 @@ impl IsolationSessionManager {
 /// than to fire blind. Per-tier subsequent queries fall back to
 /// `STILL_ACTIVE` so a transient read failure does not short-circuit the
 /// escalation.
-fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, IsolationSessionError> {
+fn wait_with_graceful_shutdown(
+    process: &IsoSessionProcess,
+    timeout_ms: u32,
+    identity: &str,
+    mut logger: Option<&mut Logger>,
+) -> Result<i32, IsolationSessionError> {
     // `STILL_ACTIVE` (0x103) is exposed by the `windows` crate as
     // `STATUS_PENDING: NTSTATUS` — same numeric value, different name.
     use windows::Win32::Foundation::STATUS_PENDING;
@@ -498,8 +587,52 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
     let mut exit_code = process
         .ExitCode()
         .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))?;
+    // The current IsolationSession process contract does not expose a process
+    // identifier. Keep the required telemetry/audit field with zero as the
+    // conventional unavailable-PID sentinel rather than inventing an ID.
+    let pid = 0;
     if exit_code != STILL_ACTIVE {
+        // Normal pre-timeout completion. Emit `mxc.ProcessExited` so a
+        // clean run has a terminal audit record. Deliberately NOT emitted
+        // on the graceful-shutdown tiers below — those already emitted
+        // `ProcessTimedOut` and possibly `ProcessKillFailed`, and the run
+        // is not a normal exit.
+        wxc_common::telemetry::log_process_event(
+            wxc_common::telemetry::ProcessEventKind::Exited,
+            &wxc_common::policy_identity::redact_identity(identity),
+            pid,
+            wxc_common::telemetry::ProcessEventData::ExitCode(exit_code),
+        );
+        if let Some(logger) = logger.as_mut() {
+            let record = AuditEvent::new(AuditEventName::ProcessExited)
+                .str("backend", "isolation_session")
+                .str(
+                    "identity",
+                    &wxc_common::policy_identity::redact_identity(identity),
+                )
+                .u64("pid", pid as u64)
+                .i64("exit_code", exit_code as i64);
+            logger.log_audit_event(&record);
+        }
         return Ok(exit_code);
+    }
+
+    wxc_common::telemetry::log_process_event(
+        wxc_common::telemetry::ProcessEventKind::TimedOut,
+        &wxc_common::policy_identity::redact_identity(identity),
+        pid,
+        wxc_common::telemetry::ProcessEventData::TimeoutMs(timeout_ms as u64),
+    );
+    if let Some(logger) = logger.as_mut() {
+        let record = AuditEvent::new(AuditEventName::ProcessTimedOut)
+            .str("backend", "isolation_session")
+            .str(
+                "identity",
+                &wxc_common::policy_identity::redact_identity(identity),
+            )
+            .u64("pid", pid as u64)
+            .u64("timeout_ms", timeout_ms as u64);
+        logger.log_audit_event(&record);
     }
 
     let _ = process.CloseStandardInput();
@@ -516,7 +649,26 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
         return Ok(exit_code);
     }
 
-    let _ = process.Terminate();
+    if let Err(error) = process.Terminate() {
+        wxc_common::telemetry::log_process_event(
+            wxc_common::telemetry::ProcessEventKind::KillFailed,
+            &wxc_common::policy_identity::redact_identity(identity),
+            pid,
+            wxc_common::telemetry::ProcessEventData::KillFailure("terminate_process"),
+        );
+        if let Some(logger) = logger.as_mut() {
+            let record = AuditEvent::new(AuditEventName::ProcessKillFailed)
+                .str("backend", "isolation_session")
+                .str(
+                    "identity",
+                    &wxc_common::policy_identity::redact_identity(identity),
+                )
+                .u64("pid", pid as u64)
+                .str("kill_method", KillMethod::TerminateProcess.as_str())
+                .i64("error_code", error.code().0 as i64);
+            logger.log_audit_event(&record);
+        }
+    }
     let _ = process.WaitForExit(0);
     Ok(process.ExitCode().unwrap_or(-1))
 }
@@ -524,6 +676,109 @@ fn wait_with_graceful_shutdown(process: &IsoSessionProcess) -> Result<i32, Isola
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M-ETW-5 acceptance: "a cleanup failure is distinguishable from success".
+    /// `TeardownOutcome::status` is the function that makes that call for this
+    /// backend, so each arm is pinned here.
+    #[test]
+    fn teardown_status_distinguishes_failure_success_and_skipped() {
+        // Nothing attempted — reporting `success` here would claim a cleanup
+        // that never ran.
+        assert_eq!(TeardownOutcome::default().status(), TeardownStatus::Skipped);
+
+        // Every attempted step succeeded.
+        assert_eq!(
+            TeardownOutcome {
+                session_stopped: Some(true),
+                agent_user_deprovisioned: Some(true),
+            }
+            .status(),
+            TeardownStatus::Success
+        );
+
+        // A partial pass that succeeded as far as it went is still a success —
+        // the per-step fields carry which steps ran.
+        assert_eq!(
+            TeardownOutcome {
+                session_stopped: Some(true),
+                ..Default::default()
+            }
+            .status(),
+            TeardownStatus::Success
+        );
+
+        // Any failed step poisons the whole record, even when other steps
+        // succeeded, so a failure can never be read as a clean teardown.
+        for outcome in [
+            TeardownOutcome {
+                session_stopped: Some(false),
+                ..Default::default()
+            },
+            TeardownOutcome {
+                session_stopped: Some(true),
+                agent_user_deprovisioned: Some(false),
+            },
+        ] {
+            assert_eq!(
+                outcome.status(),
+                TeardownStatus::Failure,
+                "a failed step must not report success: {outcome:?}"
+            );
+        }
+    }
+
+    /// The emitted record must satisfy the M-ETW-5 field contract, which is
+    /// enforced for every backend by `AuditEvent::missing_required_fields`.
+    #[test]
+    fn teardown_record_satisfies_the_requirement_contract() {
+        let outcome = TeardownOutcome {
+            session_stopped: Some(true),
+            agent_user_deprovisioned: Some(false),
+        };
+        let event = AuditEvent::new(AuditEventName::SandboxTornDown)
+            .str("backend", "isolationsession")
+            .str("identity", "iso:0123456789abcdef")
+            .str("phase", "deprovision")
+            .str("status", outcome.status().as_str())
+            .bool("agent_user_deprovisioned", false);
+        assert!(
+            event.missing_required_fields().is_empty(),
+            "missing {:?}",
+            event.missing_required_fields()
+        );
+        let line = event.to_json_line();
+        assert!(line.contains(r#""status":"failure""#), "got: {line}");
+    }
+
+    /// M-ETW-6 fallback coverage: IsolationSession uses the shared local audit
+    /// sink when no usable ETW provider exists for the API.
+    #[test]
+    fn isolation_session_teardown_is_emitted_to_the_local_audit_sink() {
+        let path = std::env::temp_dir().join(format!(
+            "mxc-isolation-session-audit-{}.log",
+            std::process::id()
+        ));
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        logger.enable_file_sink(&path).expect("file sink");
+
+        log_sandbox_torn_down(
+            &mut logger,
+            "iso:0123456789abcdef",
+            "stop",
+            TeardownOutcome {
+                session_stopped: Some(true),
+                agent_user_deprovisioned: None,
+            },
+        );
+        drop(logger);
+
+        let contents = std::fs::read_to_string(&path).expect("read audit log");
+        assert!(contents.contains(r#""event":"mxc.SandboxTornDown""#));
+        assert!(contents.contains(r#""backend":"isolation_session""#));
+        assert!(contents.contains(r#""phase":"stop""#));
+        assert!(!contents.contains(r#""container_released""#));
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn feature_unavailable_returns_clean_error() {

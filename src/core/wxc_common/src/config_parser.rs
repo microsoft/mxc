@@ -30,6 +30,8 @@ pub enum ParseError {
     Decode(WxcError),
     /// Discriminated as one-shot; conversion to `ExecutionRequest` failed.
     OneShot(WxcError),
+    /// Discriminated as one-shot, but the JSON payload was malformed.
+    OneShotMalformed(WxcError),
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
@@ -44,14 +46,16 @@ enum ErrorOutput {
 impl ParseError {
     fn output(&self) -> ErrorOutput {
         match self {
-            Self::Decode(_) | Self::OneShot(_) => ErrorOutput::Primary,
+            Self::Decode(_) | Self::OneShot(_) | Self::OneShotMalformed(_) => ErrorOutput::Primary,
             Self::StateAware(_) => ErrorOutput::DiagnosticOnly,
         }
     }
 
     fn message(&self) -> String {
         match self {
-            Self::Decode(error) | Self::OneShot(error) => error.to_string(),
+            Self::Decode(error) | Self::OneShot(error) | Self::OneShotMalformed(error) => {
+                error.to_string()
+            }
             Self::StateAware(error) => error.to_string(),
         }
     }
@@ -229,8 +233,15 @@ fn parse_mxc_request_json(
         .map(MxcRequest::StateAware)
         .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
-        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
-            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str).map_err(|error| {
+            let malformed = error.is_syntax_error();
+            let error = WxcError::ConfigParse(error.to_string());
+            if malformed {
+                ParseError::OneShotMalformed(error)
+            } else {
+                ParseError::OneShot(error)
+            }
+        })?;
         convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
@@ -1577,6 +1588,38 @@ mod tests {
         )
     }
 
+    /// M-ETW-7 acceptance, second clause: "a successful provision produces
+    /// none". The rejection record is emitted only on the error arms of the
+    /// driver's `match`es, so a config that parses cleanly must leave the
+    /// audit sink free of `mxc.ConfigRejected` — otherwise a consumer counting
+    /// rejections would see phantom failures on healthy runs.
+    #[test]
+    fn a_config_that_parses_cleanly_emits_no_rejection_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&path).expect("file sink");
+
+        let json = r#"{"process": {"commandLine": "cmd.exe /c echo hi", "cwd": "C:\\tmp"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let parsed = load_mxc_request_with_options(
+            &encoded,
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: false,
+            },
+        );
+        assert!(parsed.is_ok(), "config should parse: {:?}", parsed.err());
+        drop(logger);
+
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !contents.contains("mxc.ConfigRejected"),
+            "a successful parse must emit no rejection record, got: {contents}"
+        );
+    }
+
     #[test]
     fn allow_missing_command_lets_one_shot_skip_command_line() {
         // No process.commandLine in the policy — without the flag this would
@@ -2061,7 +2104,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -2071,7 +2114,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = load_mxc_request(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -2257,6 +2300,22 @@ mod tests {
             !message.contains("Invalid configuration at"),
             "syntax errors should not claim a policy path: {message}"
         );
+    }
+
+    #[test]
+    fn all_json_syntax_categories_are_rejected_before_request_discrimination() {
+        for json in [
+            r#"{"process":{"commandLine":"echo x"}} trailing"#,
+            r#"{"process":{"commandLine":"\q"}}"#,
+        ] {
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            let result = load_mxc_request(&encoded, &mut logger, true);
+            assert!(
+                matches!(result, Err(ParseError::Decode(_))),
+                "expected pre-discrimination decode failure for {json:?}, got {result:?}"
+            );
+        }
     }
 
     #[test]

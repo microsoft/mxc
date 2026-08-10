@@ -12,7 +12,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 
-use super::manager::IsolationSessionManager;
+use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
 use super::policy::validate_provision_policy;
 use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
@@ -84,14 +84,14 @@ impl ScriptRunner for IsolationSessionRunner {
         // keeps a freshly-minted agent user from being stranded: a separate
         // `new()` would activate the service a second time, and a failure
         // there would leave an account that can no longer be removed.
-        let manager = match IsolationSessionManager::add_user() {
+        let (identity, manager) = match IsolationSessionManager::add_user() {
             Ok((provisioned, manager)) => {
                 let _ = writeln!(
                     logger,
                     "Isolation Session: agent user = {}",
                     provisioned.agent_user_name
                 );
-                manager
+                (provisioned.agent_user_name, manager)
             }
             Err(e) => return e.into(),
         };
@@ -99,26 +99,54 @@ impl ScriptRunner for IsolationSessionRunner {
         if let Err(e) = manager.start_session() {
             // Provision succeeded; start did not. Clean up. stop_session
             // is a no-op on an unstarted session.
-            let _ = manager.stop_session();
-            let _ = manager.deprovision_agent_user();
+            let stopped = manager.stop_session().is_ok();
+            let deprovisioned = manager.deprovision_agent_user().is_ok();
+            log_sandbox_torn_down(
+                logger,
+                &identity,
+                "one_shot",
+                TeardownOutcome {
+                    session_stopped: Some(stopped),
+                    agent_user_deprovisioned: Some(deprovisioned),
+                },
+            );
             return e.into();
         }
 
-        let exit_code = match manager.create_process(&options) {
+        let exit_code = match manager.create_process(&options, Some(logger)) {
             Ok(code) => code,
             Err(e) => {
-                let _ = manager.stop_session();
-                let _ = manager.deprovision_agent_user();
+                let stopped = manager.stop_session().is_ok();
+                let deprovisioned = manager.deprovision_agent_user().is_ok();
+                log_sandbox_torn_down(
+                    logger,
+                    &identity,
+                    "one_shot",
+                    TeardownOutcome {
+                        session_stopped: Some(stopped),
+                        agent_user_deprovisioned: Some(deprovisioned),
+                    },
+                );
                 return e.into();
             }
         };
 
-        if let Err(e) = manager.stop_session() {
-            let _ = writeln!(logger, "Warning: stop_session failed: {}", e);
+        let mut outcome = TeardownOutcome::default();
+        match manager.stop_session() {
+            Ok(()) => outcome.session_stopped = Some(true),
+            Err(e) => {
+                outcome.session_stopped = Some(false);
+                let _ = writeln!(logger, "Warning: stop_session failed: {}", e);
+            }
         }
-        if let Err(e) = manager.deprovision_agent_user() {
-            let _ = writeln!(logger, "Warning: deprovision_agent_user failed: {}", e);
+        match manager.deprovision_agent_user() {
+            Ok(()) => outcome.agent_user_deprovisioned = Some(true),
+            Err(e) => {
+                outcome.agent_user_deprovisioned = Some(false);
+                let _ = writeln!(logger, "Warning: deprovision_agent_user failed: {}", e);
+            }
         }
+        log_sandbox_torn_down(logger, &identity, "one_shot", outcome);
 
         // Output already streamed live to wxc-exec's stdio via relay
         // threads in `create_process` — captured fields intentionally
