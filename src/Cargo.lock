@@ -3365,6 +3365,7 @@ dependencies = [
  "windows",
  "wslc_common",
  "wxc_common",
+ "zip",
 ]
 
 [[package]]

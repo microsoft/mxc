@@ -34,6 +34,7 @@ mxc_build_common.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 nanvix_build_common = { path = "../../backends/nanvix/build_common" }
+zip = "2"
 
 [features]
 default = []
