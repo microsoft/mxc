@@ -1257,7 +1257,7 @@ fn convert_wire_config(
                 .address
                 .as_ref()
                 .map(|address| address.to_url())
-                .is_some_and(|url| crate::proxy_env::redact_proxy_url(&url) != url)
+                .is_some_and(|url| crate::proxy_env::proxy_url_has_credentials(&url))
         {
             // Built from the redacted form so the rejection cannot become the
             // leak it is rejecting.

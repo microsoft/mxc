@@ -131,6 +131,39 @@ impl LxcScriptRunner {
         }
 
         let container_name = self.resolve_container_name();
+        // Refuse a credential-bearing proxy URL here as well as at parse time.
+        // The parser guard only covers requests it built; `ExecutionRequest`
+        // and `ProxyAddress::from_url` are public, so a caller can hand this
+        // runner a policy the parser never saw. Below, `apply_proxy_env` sets
+        // HTTP(S)_PROXY to `to_url()`, which returns the original URL verbatim,
+        // and `build_attach_args_with_env_control` turns every environment
+        // entry into a `--set-var=KEY=VALUE` argument of the `lxc-attach`
+        // process this backend spawns (lxc_bindings.rs). A process's argv is
+        // readable through /proc/<pid>/cmdline by any local user for the
+        // lifetime of the command. The check sits ahead of container creation
+        // and firewall programming so a rejected request leaves no state
+        // behind.
+        if let Some(url) = request
+            .policy
+            .network_proxy
+            .address
+            .as_ref()
+            .map(|address| address.to_url())
+        {
+            if wxc_common::proxy_env::proxy_url_has_credentials(&url) {
+                // Built from the redacted form so the rejection cannot become
+                // the leak it is rejecting.
+                return ScriptResponse::error(&format!(
+                    "LXC: network.proxy.url must not carry credentials ('{}'). LXC passes the \
+                     proxy URL to lxc-attach as a --set-var command-line argument, and process \
+                     arguments are world-readable through /proc/<pid>/cmdline, so the password \
+                     would be visible to every local user while the command runs. Use a proxy \
+                     that does not require inline credentials, or supply them to the proxy \
+                     itself rather than through the URL.",
+                    wxc_common::proxy_env::redact_proxy_url(&url)
+                ));
+            }
+        }
         // Make the name visible to the signal-cleanup watchdog so a fatal
         // signal during create/start/attach still tears the container down —
         // but only when the caller actually wants the container destroyed at
@@ -633,5 +666,121 @@ mod tests {
                 "no file-reading command may run after the target is truncated; got: {command}"
             );
         }
+    }
+
+    // The parser rejects a credential-bearing proxy URL, but `ExecutionRequest`
+    // and `ProxyAddress::from_url` are public: a caller can build a request the
+    // parser never saw and hand it straight to this runner.  These tests take
+    // that path deliberately -- no parser anywhere in them -- because a guard
+    // that only exists on the parse path does not protect the process spawn.
+    use wxc_common::models::{ProxyAddress, ProxyConfig};
+
+    fn request_with_proxy_url(url: &str) -> ExecutionRequest {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::from_url(
+                url,
+                "proxy.example.com".to_string(),
+                8080,
+            )),
+            builtin_test_server: false,
+        };
+        request
+    }
+
+    fn runner_for_guard_tests() -> LxcScriptRunner {
+        let config = LxcConfig {
+            distribution: "alpine".to_string(),
+            release: "3.23".to_string(),
+        };
+        LxcScriptRunner::new(&config, "mxc-guard-test", &LifecycleConfig::default())
+    }
+
+    #[test]
+    fn a_directly_built_request_with_proxy_credentials_is_refused() {
+        let runner = runner_for_guard_tests();
+        let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let response = runner.run_internal(&request, &mut logger);
+
+        assert!(
+            response
+                .error_message
+                .contains("must not carry credentials"),
+            "the runner must refuse a credential-bearing proxy URL even when the parser \
+             never saw the request, got: {}",
+            response.error_message
+        );
+    }
+
+    // The rejection is built from the redacted URL so the guard cannot become
+    // the leak it exists to prevent -- the message travels to logs and to the
+    // caller.
+    #[test]
+    fn the_runner_refusal_does_not_echo_the_password() {
+        let runner = runner_for_guard_tests();
+        let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let response = runner.run_internal(&request, &mut logger);
+
+        assert!(
+            !response.error_message.contains("hunter2"),
+            "the password leaked into the refusal: {}",
+            response.error_message
+        );
+        assert!(
+            !response.error_message.contains("alice:hunter2"),
+            "the userinfo leaked into the refusal: {}",
+            response.error_message
+        );
+        assert!(
+            !logger.get_buffer().contains("hunter2"),
+            "the password leaked into the log buffer"
+        );
+    }
+
+    // Anti-vacuity: without this, a guard that refused every proxy would pass
+    // both tests above while breaking every legitimate proxy configuration.
+    // The run cannot succeed here (there is no live container), so the
+    // assertion is that it does not fail *for this reason*.
+    #[test]
+    fn a_credential_free_proxy_url_is_not_refused_by_the_credential_guard() {
+        let runner = runner_for_guard_tests();
+        let request = request_with_proxy_url("http://proxy.example.com:8080");
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let response = runner.run_internal(&request, &mut logger);
+
+        assert!(
+            !response
+                .error_message
+                .contains("must not carry credentials"),
+            "a proxy URL without userinfo must clear the credential guard, got: {}",
+            response.error_message
+        );
+    }
+
+    // The guard runs ahead of container creation and firewall programming, so a
+    // rejected request leaves nothing to clean up.  A container name in the log
+    // would mean the runner had already started announcing work it must not do.
+    #[test]
+    fn the_credential_refusal_happens_before_any_container_work() {
+        let runner = runner_for_guard_tests();
+        let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        let _ = runner.run_internal(&request, &mut logger);
+
+        let log = logger.get_buffer();
+        assert!(
+            !log.contains("Container name:"),
+            "the guard must return before the runner starts container work, log was: {log}"
+        );
+        assert!(
+            !log.contains("Creating LXC container"),
+            "the guard must return before container creation, log was: {log}"
+        );
     }
 }

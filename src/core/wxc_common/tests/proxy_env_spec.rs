@@ -24,8 +24,8 @@
 
 use wxc_common::models::{ProxyAddress, ProxyConfig};
 use wxc_common::proxy_env::{
-    apply_cooperative_proxy_env, apply_proxy_env, is_managed_proxy_key, redact_proxy_url,
-    PROXY_ENV_KEYS, PROXY_NEUTRALIZE_KEYS, PROXY_SET_KEYS,
+    apply_cooperative_proxy_env, apply_proxy_env, is_managed_proxy_key, proxy_url_has_credentials,
+    redact_proxy_url, PROXY_ENV_KEYS, PROXY_NEUTRALIZE_KEYS, PROXY_SET_KEYS,
 };
 
 const PROXY_URL: &str = "http://127.0.0.1:8080";
@@ -430,4 +430,76 @@ fn redact_proxy_url_ignores_at_sign_in_path() {
     let redacted = redact_proxy_url(input);
 
     assert_eq!(redacted, input);
+}
+
+// proxy_url_has_credentials
+// -------------------------
+// Protects client (d): this predicate is what a backend consults before it
+// puts a proxy URL somewhere the URL cannot be taken back out of -- process
+// argv, in the LXC case.  A false negative is a leaked password, so each shape
+// below is asserted directly rather than inferred from the redaction helper.
+
+// The shape the guard exists for: userinfo carrying a password.
+#[test]
+fn a_url_with_user_and_password_carries_credentials() {
+    assert!(proxy_url_has_credentials(
+        "http://alice:hunter2@proxy.example.com:8080"
+    ));
+}
+
+// A bare username is still userinfo.  It names a principal, and the guard's
+// contract is about userinfo, not about whether a password happens to follow.
+#[test]
+fn a_url_with_a_bare_username_carries_credentials() {
+    assert!(proxy_url_has_credentials(
+        "http://alice@proxy.example.com:8080"
+    ));
+}
+
+// The complement, and the anti-vacuity partner for every assertion above: an
+// ordinary proxy URL must pass, or the guard would refuse all proxies and the
+// positive cases would prove nothing.
+#[test]
+fn an_ordinary_proxy_url_carries_no_credentials() {
+    assert!(!proxy_url_has_credentials("http://127.0.0.1:8080"));
+    assert!(!proxy_url_has_credentials(
+        "https://proxy.example.com:3128/"
+    ));
+}
+
+// A naive `contains('@')` would report credentials for a URL whose only '@' is
+// in the path, refusing a legitimate proxy.
+#[test]
+fn an_at_sign_in_the_path_is_not_credentials() {
+    assert!(!proxy_url_has_credentials(
+        "http://127.0.0.1:8080/path@segment"
+    ));
+    assert!(!proxy_url_has_credentials("http://127.0.0.1:8080/?q=a@b"));
+    assert!(!proxy_url_has_credentials("http://127.0.0.1:8080/#a@b"));
+}
+
+// The case that rules out defining this predicate as "redaction changes the
+// string": userinfo that is already the redaction marker redacts to itself, so
+// a comparison-based implementation reports a credential-bearing URL as clean.
+#[test]
+fn userinfo_that_looks_like_the_redaction_marker_still_carries_credentials() {
+    let url = "http://***@proxy.example.com:8080";
+
+    assert_eq!(
+        redact_proxy_url(url),
+        url,
+        "precondition: redaction leaves this URL unchanged"
+    );
+    assert!(
+        proxy_url_has_credentials(url),
+        "the predicate must not be defined as `redact_proxy_url(url) != url`"
+    );
+}
+
+// A string with no scheme separator has no authority to parse, so there is no
+// userinfo to find and the guard must not refuse it on a spurious match.
+#[test]
+fn a_url_without_a_scheme_carries_no_credentials() {
+    assert!(!proxy_url_has_credentials("proxy.example.com:8080"));
+    assert!(!proxy_url_has_credentials("not-a-url@at-all"));
 }

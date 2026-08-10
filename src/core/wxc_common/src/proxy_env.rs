@@ -101,6 +101,26 @@ pub fn redact_proxy_url(url: &str) -> String {
     }
 }
 
+/// Whether a proxy URL carries `user:pass@` userinfo.
+///
+/// This is the single definition of "carries credentials", so a backend that
+/// must refuse such a URL and the config parser that rejects it up front
+/// cannot drift apart.
+///
+/// It deliberately does not ask whether [`redact_proxy_url`] changes the
+/// string. That answers a different question — how to render a URL safely —
+/// and returns the input unchanged when the userinfo is already the literal
+/// redaction marker, which would report a credential-bearing URL as clean.
+pub fn proxy_url_has_credentials(url: &str) -> bool {
+    let Some((_scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    // Stop at the first path, query, or fragment delimiter: an `@` after that
+    // point belongs to the path, not to userinfo.
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    rest[..auth_end].contains('@')
+}
+
 /// Build the effective environment for a sandbox whose egress is routed
 /// through a cooperative proxy at `proxy_url`.
 ///
