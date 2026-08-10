@@ -76,7 +76,7 @@ fn refusal_error_names_the_unenforced_chain() {
         .apply_firewall_rules(&policy, &mut logger)
         .expect_err("Firewall mode with no veth interface set must fail closed");
 
-    let chain = "MXC-acme-web";
+    let chain = manager.chain_name();
     assert!(
         err.contains(chain),
         "error must name the chain left unenforced ({chain}), got: {err}"
@@ -135,7 +135,7 @@ fn apply_tears_down_the_chain_it_created_when_it_fails_closed() {
     );
 
     let issued = fake.issued();
-    let chain = "MXC-ctrl-teardown";
+    let chain = manager.chain_name();
     let creation_index = issued
         .iter()
         .position(|cmd| cmd.iter().any(|a| a == "-N") && cmd.iter().any(|a| a == chain))

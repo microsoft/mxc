@@ -134,10 +134,10 @@ fn an_applied_proxy_chain_ends_in_drop_under_an_allow_default() {
     let mut policy = policy_with_proxy("10.9.8.7", 3128);
     policy.default_network_policy = NetworkPolicy::Allow;
 
-    let (_manager, issued, result) = apply_and_collect("proxy-allow-default", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-allow-default", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    let rules = appended_rules(&issued, "iptables", "MXC-proxy-allow-default");
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
     let last = rules.last().expect("the chain must have at least one rule");
     assert_eq!(
         action_of(last),
@@ -157,10 +157,10 @@ fn an_applied_proxy_chain_ends_in_drop_under_an_allow_default() {
 fn the_proxy_accept_names_the_proxy_address_port_and_protocol() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
-    let (_manager, issued, result) = apply_and_collect("proxy-shape", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-shape", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    let rules = appended_rules(&issued, "iptables", "MXC-proxy-shape");
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
     let accepts: Vec<&&Vec<String>> = rules
         .iter()
         .filter(|rule| action_of(rule) == Some("ACCEPT"))
@@ -192,10 +192,10 @@ fn the_proxy_accept_names_the_proxy_address_port_and_protocol() {
 fn the_proxy_accept_is_appended_before_the_closing_drop() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
-    let (_manager, issued, result) = apply_and_collect("proxy-order", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-order", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    let rules = appended_rules(&issued, "iptables", "MXC-proxy-order");
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
     let actions: Vec<Option<&str>> = rules.iter().map(|rule| action_of(rule)).collect();
 
     assert_eq!(
@@ -238,10 +238,18 @@ fn every_resolved_proxy_address_is_opened() {
 fn proxy_mode_opens_no_dns_port() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
-    let (_manager, issued, result) = apply_and_collect("proxy-nodns", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-nodns", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    for rule in appended_rules(&issued, "iptables", "MXC-proxy-nodns") {
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
+    // Without this the test passes vacuously: a chain name that matches
+    // nothing yields an empty list, and the loop below asserts nothing.
+    assert!(
+        !rules.is_empty(),
+        "the proxied chain must have been programmed at all; issued: {issued:?}"
+    );
+
+    for rule in rules {
         assert!(
             !has_pair(rule, "--dport", "53"),
             "a proxied chain must not open DNS; actual: {rule:?}"
@@ -256,10 +264,16 @@ fn proxy_mode_opens_no_dns_port() {
 fn proxy_mode_emits_no_base_exemptions() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
-    let (_manager, issued, result) = apply_and_collect("proxy-nobase", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-nobase", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    for rule in appended_rules(&issued, "iptables", "MXC-proxy-nobase") {
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
+    assert!(
+        !rules.is_empty(),
+        "the proxied chain must have been programmed at all; issued: {issued:?}"
+    );
+
+    for rule in rules {
         assert!(
             !has_pair(rule, "-i", "lo"),
             "a proxied chain must not carry the loopback exemption; actual: {rule:?}"
@@ -280,10 +294,16 @@ fn proxy_mode_programs_neither_the_allow_list_nor_the_block_list() {
     policy.allowed_hosts = vec!["10.1.1.1".to_string()];
     policy.blocked_hosts = vec!["10.2.2.2".to_string()];
 
-    let (_manager, issued, result) = apply_and_collect("proxy-nolists", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-nolists", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    for rule in appended_rules(&issued, "iptables", "MXC-proxy-nolists") {
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
+    assert!(
+        !rules.is_empty(),
+        "the proxied chain must have been programmed at all; issued: {issued:?}"
+    );
+
+    for rule in rules {
         assert!(
             !has_pair(rule, "-d", "10.1.1.1") && !has_pair(rule, "-d", "10.2.2.2"),
             "a proxied chain must ignore the host lists; actual: {rule:?}"
@@ -298,10 +318,10 @@ fn proxy_mode_programs_neither_the_allow_list_nor_the_block_list() {
 fn the_ipv6_chain_carries_only_its_closing_drop_in_proxy_mode() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
-    let (_manager, issued, result) = apply_and_collect("proxy-v6", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-v6", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    let rules = appended_rules(&issued, "ip6tables", "MXC-proxy-v6");
+    let rules = appended_rules(&issued, "ip6tables", manager.chain_name());
     let actions: Vec<Option<&str>> = rules.iter().map(|rule| action_of(rule)).collect();
 
     assert_eq!(
@@ -322,10 +342,10 @@ fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
         ..Default::default()
     };
 
-    let (_manager, issued, result) = apply_and_collect("proxy-control", &policy);
+    let (manager, issued, result) = apply_and_collect("proxy-control", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
-    let rules = appended_rules(&issued, "iptables", "MXC-proxy-control");
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
     assert!(
         rules.iter().any(|rule| has_pair(rule, "-i", "lo")),
         "a non-proxied chain must still carry the loopback exemption; actual: {rules:?}"
