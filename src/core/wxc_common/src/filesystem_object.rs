@@ -100,8 +100,8 @@ enum PathResolution {
 pub enum ExistingObjectComparison {
     /// Both paths resolved to the same object.
     Same,
-    /// At least one path is absent and neither is unknown, or both resolved to
-    /// different objects.
+    /// At least one path is absent (on Windows, with neither path unknown), or
+    /// both resolved to different objects.
     Different,
     /// At least one existing or potentially existing path could not be examined.
     Unknown,
@@ -127,19 +127,6 @@ fn resolve_object(path: &Path) -> PathResolution {
         // untraversable parent, ESTALE/ETIMEDOUT from a dead mount, ...) means we
         // could not examine the path.
         Err(e) => match e.raw_os_error() {
-            Some(libc::ENOENT) | Some(libc::ENOTDIR) => classify_not_found_leaf_unix(path),
-            _ => PathResolution::Unknown,
-        },
-    }
-}
-
-#[cfg(unix)]
-fn classify_not_found_leaf_unix(path: &Path) -> PathResolution {
-    match std::fs::symlink_metadata(path) {
-        // The leaf exists without following links, so the failed target lookup
-        // may be a dangling symlink. Its aliasing cannot be ruled out.
-        Ok(_) => PathResolution::Unknown,
-        Err(error) => match error.raw_os_error() {
             Some(libc::ENOENT) | Some(libc::ENOTDIR) => PathResolution::Absent,
             _ => PathResolution::Unknown,
         },
@@ -256,11 +243,16 @@ pub fn compare_existing_filesystem_objects(a: &Path, b: &Path) -> ExistingObject
         (PathResolution::Object(a), PathResolution::Object(b)) if a == b => {
             ExistingObjectComparison::Same
         }
+        #[cfg(windows)]
         (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
             ExistingObjectComparison::Unknown
         }
         (PathResolution::Absent, _) | (_, PathResolution::Absent) => {
             ExistingObjectComparison::Different
+        }
+        #[cfg(not(windows))]
+        (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
+            ExistingObjectComparison::Unknown
         }
         (PathResolution::Object(_), PathResolution::Object(_)) => {
             ExistingObjectComparison::Different
@@ -597,21 +589,6 @@ mod tests {
             }
             panic!("failed to create dangling symlink: {error}");
         }
-
-        assert!(matches!(resolve_object(&link), PathResolution::Unknown));
-        assert_eq!(
-            compare_existing_filesystem_objects(&link, &target),
-            ExistingObjectComparison::Unknown
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dangling_symlink_is_unknown_even_when_target_is_absent_unix() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("missing-target");
-        let link = dir.path().join("dangling-link");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
 
         assert!(matches!(resolve_object(&link), PathResolution::Unknown));
         assert_eq!(
