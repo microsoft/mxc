@@ -129,7 +129,7 @@ $inboxAvailable = $inboxDll -and $inboxRegistered
 
 $runtimeDir = $env:MXC_ISOSESSION_RUNTIME_DIR
 if ([string]::IsNullOrWhiteSpace($runtimeDir) -or -not [System.IO.Path]::IsPathRooted($runtimeDir.Trim())) {
-    $runtimeDir = 'C:\Program Files\Microsoft\Agentic Runtime\2608'
+    $runtimeDir = 'C:\Program Files\Microsoft\Agentic Runtime\2026.08'
 } else {
     $runtimeDir = $runtimeDir.Trim()
 }
