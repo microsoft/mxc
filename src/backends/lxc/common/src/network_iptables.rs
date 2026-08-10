@@ -521,6 +521,21 @@ impl NetworkIptablesManager {
         }
     }
 
+    /// Whether a programmed destination accepts every address in its family.
+    ///
+    /// Only a prefix length of zero qualifies. That is the one case where an
+    /// allow rule can be shown, without knowing the address, to cover a
+    /// blocked host that failed to resolve -- which is what makes it a hard
+    /// error rather than a warning in [`Self::build_policy_rules_logged`]. A
+    /// bare literal or any longer prefix names a bounded set, so it carries no
+    /// such proof.
+    fn covers_every_address(destination: &str) -> bool {
+        destination
+            .split_once('/')
+            .and_then(|(_, prefix)| prefix.trim().parse::<u8>().ok())
+            .is_some_and(|prefix| prefix == 0)
+    }
+
     /// Resolve a destination string to IPv4 and IPv6 firewall destinations.
     ///
     /// Bare IPv4/IPv6 literals are retained in their matching family. CIDR
@@ -1005,12 +1020,17 @@ impl NetworkIptablesManager {
     /// That reasoning holds only while the closing DROP is what the traffic
     /// actually reaches. An allow rule is evaluated first, and since
     /// `resolve_host` passes CIDRs through unchanged, one entry can legally
-    /// cover the whole address space. So under [`NetworkPolicy::Block`] the
-    /// combination of an unresolvable deny and any programmed allow fails
-    /// closed as well. Deciding it does not require the address the deny failed
-    /// to resolve to: precisely because that address is unknown, no allow can
-    /// be shown to miss it, and a deny that cannot be shown to win does not
-    /// win.
+    /// cover the whole address space. A `/0` allow therefore accepts whatever
+    /// the unresolvable deny would have named, whatever that turns out to be,
+    /// so under [`NetworkPolicy::Block`] that combination fails closed too.
+    ///
+    /// Allows narrower than `/0` stay a warning. They name a bounded set the
+    /// operator vouched for, the closing DROP still denies everything outside
+    /// it, and nothing available here shows the missing deny falls inside it.
+    /// Failing those as well would reject the ordinary policy described above
+    /// — an allowlist beside a blocked host that no longer exists — and the
+    /// cheapest way to satisfy such an error is to delete the blocklist entry,
+    /// which leaves the deployment less protected than the warning did.
     ///
     /// An unresolvable allow entry is always a warning: it withholds traffic
     /// that was meant to be permitted, which costs availability and cannot
@@ -1023,7 +1043,7 @@ impl NetworkIptablesManager {
         let default_permits = matches!(policy.default_network_policy, NetworkPolicy::Allow);
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
-        let mut programmed_an_allow = false;
+        let mut catch_all_allows: Vec<&str> = Vec::new();
         let entries = policy
             .blocked_hosts
             .iter()
@@ -1050,8 +1070,14 @@ impl NetworkIptablesManager {
                     unresolved_denies.push(host);
                 }
                 logger.log_line(&format!("Warning: could not resolve host '{}'", host));
-            } else if matches!(action, RuleAction::Allow) {
-                programmed_an_allow = true;
+            } else if matches!(action, RuleAction::Allow)
+                && destinations
+                    .ipv4
+                    .iter()
+                    .chain(destinations.ipv6.iter())
+                    .any(|dest| Self::covers_every_address(dest))
+            {
+                catch_all_allows.push(host);
             }
             let rule_args =
                 Self::build_resolved_destination_rule_args(chain_name, &destinations, &action);
@@ -1069,24 +1095,38 @@ impl NetworkIptablesManager {
             }
             args.extend(rule_args);
         }
-        // Under a denying default an unresolvable deny was tolerated on the
+        // Under a denying default an unresolvable deny is tolerable on the
         // grounds that the chain's closing DROP covers whatever the missing
-        // rule would have covered. That holds only while nothing can ACCEPT
-        // first. A programmed allow -- and `resolve_host` passes CIDRs through
-        // untouched, so `0.0.0.0/0` is a legal one -- emits its ACCEPT ahead of
-        // that DROP. Because the deny never resolved, its addresses are
-        // unknown, so no allow can be shown to miss them; the very destination
-        // the operator named is then accepted by a rule they wrote for an
-        // unrelated purpose. Deny-wins cannot be established, so fail closed.
-        if !unresolved_denies.is_empty() && programmed_an_allow {
+        // rule would have covered. That holds only while no ACCEPT can match
+        // first. `resolve_host` passes validated CIDRs through untouched, so
+        // `0.0.0.0/0` is a legal allow entry, and it accepts every address --
+        // including whatever the blocked host would have resolved to. There
+        // the deny is *provably* defeated, and no evidence could rescue it,
+        // so fail closed.
+        //
+        // A narrower allow is left as a warning on purpose. Its destinations
+        // are a finite set the operator named and vouched for, the closing
+        // DROP still covers everything outside that set, and nothing here can
+        // show the missing deny falls inside it. Rejecting that case too
+        // would make an ordinary policy -- an allowlist plus a blocked host
+        // that no longer exists -- a hard failure, and the cheapest way out
+        // of it is to delete the blocklist entry. Trading a recorded warning
+        // for a silently shortened blocklist is a worse security outcome than
+        // the residual risk it removes.
+        if !unresolved_denies.is_empty() && !catch_all_allows.is_empty() {
             return Err(format!(
                 "blocked host(s) {} resolved to no address, so no rule can be programmed \
-                 to deny them, and this policy also programs an allow rule that is \
-                 evaluated before the chain's closing DROP; because the blocked host has \
-                 no known address, that allow cannot be shown not to cover it, and deny \
-                 precedence cannot be guaranteed. Fix or remove the unresolvable blocked \
-                 host, or remove the allowed hosts",
+                 to deny them, while allowed host(s) {} accept every address and are \
+                 evaluated before the chain's closing DROP; whatever the blocked host \
+                 resolves to for the container is therefore accepted, so deny precedence \
+                 cannot hold. Fix or remove the unresolvable blocked host, or narrow the \
+                 catch-all allow",
                 unresolved_denies
+                    .iter()
+                    .map(|h| format!("'{}'", h))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                catch_all_allows
                     .iter()
                     .map(|h| format!("'{}'", h))
                     .collect::<Vec<_>>()
@@ -3198,9 +3238,10 @@ mod tests {
     const UNRESOLVABLE_HOST: &str = "blocked.invalid";
 
     #[test]
-    fn an_unresolvable_deny_under_a_blocking_default_is_fatal_when_an_allow_is_programmed() {
-        // The allow is evaluated before the chain's closing DROP, and the deny
-        // has no known address, so nothing establishes deny precedence.
+    fn an_unresolvable_deny_under_a_blocking_default_is_fatal_beside_a_catch_all_allow() {
+        // The allow is evaluated before the chain's closing DROP and accepts
+        // every address, so it accepts the blocked host whatever it resolves
+        // to for the container.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["0.0.0.0/0"], &[UNRESOLVABLE_HOST])
@@ -3208,7 +3249,7 @@ mod tests {
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
         let err = NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
-            .expect_err("a broad allow must not be able to accept an unresolvable deny");
+            .expect_err("a catch-all allow must not be able to accept an unresolvable deny");
 
         assert!(
             err.contains(UNRESOLVABLE_HOST) && err.contains("deny precedence"),
@@ -3217,9 +3258,25 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_allow_is_equally_fatal_because_the_deny_address_is_unknown() {
-        // The check cannot depend on how broad the allow looks: the deny never
-        // resolved, so a narrow allow cannot be shown to miss it either.
+    fn an_ipv6_catch_all_allow_also_arms_the_deny_precedence_failure() {
+        // The proof is per family and neither family may be overlooked, so a
+        // v4-only check would leave the identical v6 hole open.
+        let policy = ContainerPolicy {
+            default_network_policy: NetworkPolicy::Block,
+            ..policy_with_hosts(&["::/0"], &[UNRESOLVABLE_HOST])
+        };
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+
+        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
+            .expect_err("a v6 catch-all allow accepts the unresolved deny just as a v4 one does");
+    }
+
+    #[test]
+    fn an_unresolvable_deny_beside_a_bounded_allow_stays_a_warning() {
+        // An allowlist next to a blocked host that no longer exists is the
+        // ordinary case. The allow names one address, the closing DROP still
+        // covers every other, and nothing shows the missing deny is that
+        // address -- so this must not become a hard failure.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["192.0.2.10"], &[UNRESOLVABLE_HOST])
@@ -3227,7 +3284,22 @@ mod tests {
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
-            .expect_err("a narrow allow cannot be proven disjoint from an unresolved deny");
+            .expect("a bounded allow leaves the closing DROP covering the unresolved deny");
+    }
+
+    #[test]
+    fn a_bounded_cidr_allow_is_not_mistaken_for_a_catch_all() {
+        // Guards the prefix length specifically: a check that only looked for
+        // a '/' would reject every CIDR allow, and one that only compared the
+        // address would reject `0.0.0.0/8`.
+        let policy = ContainerPolicy {
+            default_network_policy: NetworkPolicy::Block,
+            ..policy_with_hosts(&["192.0.2.0/24"], &[UNRESOLVABLE_HOST])
+        };
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+
+        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
+            .expect("a /24 allow covers a bounded set, so it proves nothing about the deny");
     }
 
     #[test]
