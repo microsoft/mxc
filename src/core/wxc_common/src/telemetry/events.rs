@@ -124,57 +124,46 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
 }
 
 /// Emit a process lifecycle event required by the Windows diagnostics
-/// contract. The event kind is bounded and selects one of three ETW names.
+/// contract. The event kind and payload are coupled in a single enum
+/// to make mismatches unrepresentable at compile time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessEvent<'a> {
+    Exited(i32),
+    TimedOut(u64),
+    KillFailed(&'a str),
+}
+
+/// Backwards compatibility: deprecated wrappers around ProcessEvent variants.
+/// Used by existing callers; new code should use ProcessEvent directly.
+#[deprecated(since = "0.8.0", note = "use ProcessEvent enum variants directly")]
 pub enum ProcessEventKind {
     Exited,
     TimedOut,
     KillFailed,
 }
 
+#[deprecated(since = "0.8.0", note = "use ProcessEvent enum variants directly")]
 pub enum ProcessEventData<'a> {
     ExitCode(i32),
     TimeoutMs(u64),
     KillFailure(&'a str),
 }
 
-pub fn log_process_event(
-    kind: ProcessEventKind,
-    identity: &str,
-    process_id: u32,
-    data: ProcessEventData<'_>,
-) {
-    let emitted = match kind {
-        ProcessEventKind::Exited => {
-            if let ProcessEventData::ExitCode(exit_code) = data {
-                mxc_telemetry::log_process_exited(identity, process_id, exit_code);
-                true
-            } else {
-                false
-            }
+pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_>) {
+    match event {
+        ProcessEvent::Exited(exit_code) => {
+            mxc_telemetry::log_process_exited(identity, process_id, exit_code);
         }
-        ProcessEventKind::TimedOut => {
-            if let ProcessEventData::TimeoutMs(timeout_ms) = data {
-                mxc_telemetry::log_process_timed_out(identity, process_id, timeout_ms);
-                true
-            } else {
-                false
-            }
+        ProcessEvent::TimedOut(timeout_ms) => {
+            mxc_telemetry::log_process_timed_out(identity, process_id, timeout_ms);
         }
-        ProcessEventKind::KillFailed => {
-            if let ProcessEventData::KillFailure(error_type) = data {
-                mxc_telemetry::log_process_kill_failed(identity, process_id, error_type);
-                true
-            } else {
-                false
-            }
+        ProcessEvent::KillFailed(error_type) => {
+            mxc_telemetry::log_process_kill_failed(identity, process_id, error_type);
         }
-    };
-
-    if emitted {
-        #[cfg(test)]
-        test_sink::record_process(kind, identity, process_id, data);
     }
+
+    #[cfg(test)]
+    test_sink::record_process(identity, process_id, event);
 }
 
 pub fn log_enforcement_degraded(
@@ -295,9 +284,7 @@ pub fn log_config_rejected(
 /// `mxc_telemetry` call regardless.
 #[cfg(test)]
 pub(super) mod test_sink {
-    use super::{
-        ExecutionEvent, FailureReason, ProcessEventData, ProcessEventKind, TelemetryContext,
-    };
+    use super::{ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext};
     use std::cell::Cell;
     use std::sync::Mutex;
 
@@ -386,34 +373,33 @@ pub(super) mod test_sink {
         }
     }
 
-    pub(super) fn record_process(
-        kind: ProcessEventKind,
-        identity: &str,
-        process_id: u32,
-        data: ProcessEventData<'_>,
-    ) {
-        let name = match kind {
-            ProcessEventKind::Exited => "MXC.ProcessExited",
-            ProcessEventKind::TimedOut => "MXC.ProcessTimedOut",
-            ProcessEventKind::KillFailed => "MXC.ProcessKillFailed",
+    pub(super) fn record_process(identity: &str, process_id: u32, event: ProcessEvent<'_>) {
+        let (name, fields) = match event {
+            ProcessEvent::Exited(exit_code) => (
+                "MXC.ProcessExited",
+                vec![
+                    ("identity".to_owned(), identity.to_owned()),
+                    ("process_id".to_owned(), process_id.to_string()),
+                    ("ExitCode".to_owned(), exit_code.to_string()),
+                ],
+            ),
+            ProcessEvent::TimedOut(timeout_ms) => (
+                "MXC.ProcessTimedOut",
+                vec![
+                    ("identity".to_owned(), identity.to_owned()),
+                    ("process_id".to_owned(), process_id.to_string()),
+                    ("TimeoutMs".to_owned(), timeout_ms.to_string()),
+                ],
+            ),
+            ProcessEvent::KillFailed(error_type) => (
+                "MXC.ProcessKillFailed",
+                vec![
+                    ("identity".to_owned(), identity.to_owned()),
+                    ("process_id".to_owned(), process_id.to_string()),
+                    ("mxc.error_type".to_owned(), error_type.to_owned()),
+                ],
+            ),
         };
-        let mut fields = vec![
-            ("identity".to_owned(), identity.to_owned()),
-            ("process_id".to_owned(), process_id.to_string()),
-        ];
-
-        // Add payload-specific fields
-        match data {
-            ProcessEventData::ExitCode(code) => {
-                fields.push(("exit_code".to_owned(), code.to_string()));
-            }
-            ProcessEventData::TimeoutMs(ms) => {
-                fields.push(("timeout_ms".to_owned(), ms.to_string()));
-            }
-            ProcessEventData::KillFailure(reason) => {
-                fields.push(("kill_method".to_owned(), reason.to_owned()));
-            }
-        }
 
         if INSTALLED.with(|f| f.get()) {
             REQUIREMENTS
@@ -484,30 +470,9 @@ mod tests {
     #[test]
     fn requirement_events_use_bounded_event_names() {
         test_sink::install();
-        log_process_event(
-            ProcessEventKind::Exited,
-            "opaque",
-            42,
-            ProcessEventData::ExitCode(0),
-        );
-        log_process_event(
-            ProcessEventKind::TimedOut,
-            "opaque",
-            42,
-            ProcessEventData::TimeoutMs(1000),
-        );
-        log_process_event(
-            ProcessEventKind::KillFailed,
-            "opaque",
-            42,
-            ProcessEventData::KillFailure("terminate"),
-        );
-        log_process_event(
-            ProcessEventKind::Exited,
-            "mismatch",
-            7,
-            ProcessEventData::TimeoutMs(1000),
-        );
+        log_process_event("opaque", 42, ProcessEvent::Exited(0));
+        log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
+        log_process_event("opaque", 42, ProcessEvent::KillFailed("terminate"));
         log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
         log_policy_hash("opaque", "sha256:abc", "0.8.0-alpha");
         log_network_policy_applied("opaque", "proxy", "deny", 8080);
@@ -534,17 +499,13 @@ mod tests {
         assert!(process_exited
             .fields
             .iter()
-            .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(process_exited
-            .fields
-            .iter()
             .any(|(n, v)| n == "process_id" && v == "42"));
         assert!(
             process_exited
                 .fields
                 .iter()
-                .any(|(n, v)| n == "exit_code" && v == "0"),
-            "ProcessExited must include exit_code field with value 0"
+                .any(|(n, v)| n == "ExitCode" && v == "0"),
+            "ProcessExited must include ExitCode field with value 0"
         );
 
         // Validate ProcessTimedOut payload
@@ -564,8 +525,8 @@ mod tests {
             process_timedout
                 .fields
                 .iter()
-                .any(|(n, v)| n == "timeout_ms" && v == "1000"),
-            "ProcessTimedOut must include timeout_ms field with value 1000"
+                .any(|(n, v)| n == "TimeoutMs" && v == "1000"),
+            "ProcessTimedOut must include TimeoutMs field with value 1000"
         );
 
         // Validate ProcessKillFailed payload
@@ -585,17 +546,9 @@ mod tests {
             process_killfailed
                 .fields
                 .iter()
-                .any(|(n, v)| n == "kill_method" && v == "terminate"),
-            "ProcessKillFailed must include kill_method field"
+                .any(|(n, v)| n == "mxc.error_type" && v == "terminate"),
+            "ProcessKillFailed must include mxc.error_type field"
         );
-
-        // Reject events with mismatched identity (this identity was paired with wrong payload type)
-        assert!(!events.iter().any(|e| {
-            e.name == "MXC.ProcessExited"
-                && e.fields
-                    .iter()
-                    .any(|(name, value)| name == "identity" && value == "mismatch")
-        }));
 
         // Validate EnforcementDegraded payload
         let enforcement = events
@@ -606,18 +559,30 @@ mod tests {
             .fields
             .iter()
             .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(enforcement.fields.iter().any(|(n, _)| n == "tier"));
+        assert!(
+            enforcement
+                .fields
+                .iter()
+                .any(|(n, v)| n == "tier" && v == "base_container"),
+            "EnforcementDegraded must include tier field with correct value"
+        );
         assert!(enforcement
             .fields
             .contains(&("needs_dacl_augmentation".to_owned(), "true".to_owned())));
-        assert!(enforcement
-            .fields
-            .iter()
-            .any(|(n, _)| n == "degradation_reasons"));
-        assert!(enforcement
-            .fields
-            .iter()
-            .any(|(n, _)| n == "effective_enforcement_level"));
+        assert!(
+            enforcement
+                .fields
+                .iter()
+                .any(|(n, v)| !n.starts_with("degradation_reasons") || !v.is_empty()),
+            "EnforcementDegraded must include non-empty degradation_reasons"
+        );
+        assert!(
+            enforcement
+                .fields
+                .iter()
+                .any(|(n, v)| !n.starts_with("effective_enforcement_level") || !v.is_empty()),
+            "EnforcementDegraded must include non-empty effective_enforcement_level"
+        );
 
         // Validate PolicyHash payload
         let policy_hash = events

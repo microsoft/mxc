@@ -598,10 +598,9 @@ fn wait_with_graceful_shutdown(
         // `ProcessTimedOut` and possibly `ProcessKillFailed`, and the run
         // is not a normal exit.
         wxc_common::telemetry::log_process_event(
-            wxc_common::telemetry::ProcessEventKind::Exited,
             &wxc_common::policy_identity::redact_identity(identity),
             pid,
-            wxc_common::telemetry::ProcessEventData::ExitCode(exit_code),
+            wxc_common::telemetry::ProcessEvent::Exited(exit_code),
         );
         if let Some(logger) = logger.as_mut() {
             let record = AuditEvent::new(AuditEventName::ProcessExited)
@@ -618,10 +617,9 @@ fn wait_with_graceful_shutdown(
     }
 
     wxc_common::telemetry::log_process_event(
-        wxc_common::telemetry::ProcessEventKind::TimedOut,
         &wxc_common::policy_identity::redact_identity(identity),
         pid,
-        wxc_common::telemetry::ProcessEventData::TimeoutMs(timeout_ms as u64),
+        wxc_common::telemetry::ProcessEvent::TimedOut(timeout_ms as u64),
     );
     if let Some(logger) = logger.as_mut() {
         let record = AuditEvent::new(AuditEventName::ProcessTimedOut)
@@ -651,10 +649,9 @@ fn wait_with_graceful_shutdown(
 
     if let Err(error) = process.Terminate() {
         wxc_common::telemetry::log_process_event(
-            wxc_common::telemetry::ProcessEventKind::KillFailed,
             &wxc_common::policy_identity::redact_identity(identity),
             pid,
-            wxc_common::telemetry::ProcessEventData::KillFailure("terminate_process"),
+            wxc_common::telemetry::ProcessEvent::KillFailed("terminate_process"),
         );
         if let Some(logger) = logger.as_mut() {
             let record = AuditEvent::new(AuditEventName::ProcessKillFailed)

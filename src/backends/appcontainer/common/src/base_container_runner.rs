@@ -2484,10 +2484,9 @@ impl BaseContainerSandboxProcess {
         };
         if let Err((method, error)) = outcome {
             wxc_common::telemetry::log_process_event(
-                wxc_common::telemetry::ProcessEventKind::KillFailed,
                 sanitize_identity(&self.identity),
                 self.pid,
-                wxc_common::telemetry::ProcessEventData::KillFailure(method.as_str()),
+                wxc_common::telemetry::ProcessEvent::KillFailed(method.as_str()),
             );
             if self.audit_enabled() {
                 let record = self
@@ -2759,10 +2758,9 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                     let exit_code = code as i32;
                     if !self.kill_requested {
                         wxc_common::telemetry::log_process_event(
-                            wxc_common::telemetry::ProcessEventKind::Exited,
                             sanitize_identity(&self.identity),
                             self.pid,
-                            wxc_common::telemetry::ProcessEventData::ExitCode(exit_code),
+                            wxc_common::telemetry::ProcessEvent::Exited(exit_code),
                         );
                     }
                     if self.audit_enabled() && !self.kill_requested {
@@ -2776,10 +2774,9 @@ impl SandboxProcess for BaseContainerSandboxProcess {
             }
             WAIT_TIMEOUT => {
                 wxc_common::telemetry::log_process_event(
-                    wxc_common::telemetry::ProcessEventKind::TimedOut,
                     sanitize_identity(&self.identity),
                     self.pid,
-                    wxc_common::telemetry::ProcessEventData::TimeoutMs(self.timeout_ms as u64),
+                    wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
                 );
                 if self.audit_enabled() {
                     let record = self

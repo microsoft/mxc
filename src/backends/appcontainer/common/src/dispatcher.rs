@@ -142,8 +142,8 @@ pub(crate) fn log_enforcement_degraded(
     if !logging_sinks_active(telemetry_active, diagnostic_active) {
         return;
     }
-    // Lazy-compute shared fields only when needed; telemetry is often inactive
-    // on dev/public builds and we want to avoid allocations in that path.
+    // Lazy-compute shared fields only when needed. Both telemetry and diagnostic
+    // sinks require these fields, but we skip computation when both sinks are inactive.
     let effective_level = effective_enforcement_level(tier, degradation.needs_dacl_augmentation);
     let reason_codes = fallback_detector::reason_codes(&degradation.reasons);
     if telemetry_active {
@@ -833,6 +833,8 @@ mod tests {
     #[test]
     fn telemetry_remains_eligible_without_a_diagnostic_sink() {
         assert!(logging_sinks_active(true, false));
+        assert!(logging_sinks_active(false, true));
+        assert!(logging_sinks_active(true, true));
         assert!(!logging_sinks_active(false, false));
     }
 
