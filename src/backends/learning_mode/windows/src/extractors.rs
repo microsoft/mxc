@@ -214,15 +214,42 @@ pub fn build_denial_from_access_check(
 fn is_self_access(object_name: &str, app_path: &str) -> bool {
     let object_name = strip_dos_namespace_prefix(object_name);
     let app_path = strip_dos_namespace_prefix(app_path);
-    match (
-        volume_relative_path(object_name),
-        volume_relative_path(app_path),
-    ) {
-        (Some(object_relative), Some(app_relative)) => {
-            !object_relative.is_empty() && object_relative.eq_ignore_ascii_case(app_relative)
+    match (path_namespace(object_name), path_namespace(app_path)) {
+        (Some(object_namespace), Some(app_namespace)) if object_namespace == app_namespace => {
+            object_name.eq_ignore_ascii_case(app_path)
+        }
+        (Some(_), Some(_)) => {
+            match (
+                volume_relative_path(object_name),
+                volume_relative_path(app_path),
+            ) {
+                (Some(object_relative), Some(app_relative)) => {
+                    !object_relative.is_empty()
+                        && object_relative.eq_ignore_ascii_case(app_relative)
+                }
+                _ => false,
+            }
         }
         _ => false,
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathNamespace {
+    Dos,
+    DeviceVolume,
+}
+
+fn path_namespace(path: &str) -> Option<PathNamespace> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return Some(PathNamespace::Dos);
+    }
+
+    const VOLUME_PREFIX: &str = r"\Device\HarddiskVolume";
+    path.get(..VOLUME_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(VOLUME_PREFIX))
+        .then_some(PathNamespace::DeviceVolume)
 }
 
 fn strip_dos_namespace_prefix(path: &str) -> &str {
@@ -546,6 +573,34 @@ mod tests {
             );
             assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
         }
+    }
+
+    #[test]
+    fn access_check_preserves_same_suffix_on_different_dos_drives() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""C:\Tools\app.exe""#),
+                ("AppPath", r#""D:\Tools\app.exe""#),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+    }
+
+    #[test]
+    fn access_check_preserves_same_suffix_on_different_device_volumes() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""\Device\HarddiskVolume3\Tools\app.exe""#),
+                ("AppPath", r#""\Device\HarddiskVolume4\Tools\app.exe""#),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
     }
 
     #[test]
