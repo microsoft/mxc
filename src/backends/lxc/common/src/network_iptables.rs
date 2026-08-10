@@ -57,8 +57,9 @@ impl FirewallRuleArgs {
 /// Records exactly which per-family chains and FORWARD hooks a single apply
 /// attempt created, so rollback and teardown remove only what this manager
 /// installed. Without this, a partial-failure rollback would tear down chains
-/// this attempt never created, and because chain names truncate at 20 chars a
-/// torn-down chain can belong to a different container.
+/// this attempt never created: the chain name is a pure function of the
+/// container name, so a chain already present under our name belongs to an
+/// earlier or concurrent run and is not ours to remove.
 ///
 /// Visible to the crate (with private fields) purely so `signal_cleanup` can
 /// carry the value from the runner thread to the watchdog thread. The watchdog
@@ -1152,10 +1153,11 @@ impl NetworkIptablesManager {
     /// Best-effort removal of the FORWARD hooks and per-container chains that
     /// `created` records were installed, in both tables. Only resources marked
     /// as created are touched, so a partial-failure rollback never tears down
-    /// a chain this attempt did not create — which matters because chain names
-    /// truncate at 20 characters and can collide across containers. A missing
-    /// rule/chain still makes an individual `-D`/`-F`/`-X` call a no-op, so it
-    /// doubles as the rollback path for a failed apply.
+    /// a chain this attempt did not create — which matters because the chain
+    /// name is derived solely from the container name, so every run of that
+    /// name shares it. A missing rule/chain still makes an individual
+    /// `-D`/`-F`/`-X` call a no-op, so it doubles as the rollback path for a
+    /// failed apply.
     ///
     /// Returns the **residual** set: the resources whose removal command
     /// failed and which therefore may still exist. Clearing ownership for a
@@ -1248,10 +1250,10 @@ impl NetworkIptablesManager {
     /// `created` is the ownership record the runner published as it installed
     /// each resource, carried across the thread boundary by `signal_cleanup`.
     /// Using it — rather than assuming every chain and hook exists — is what
-    /// keeps this path from flushing a *different* container's live chain:
-    /// chain names sanitize and truncate to 20 characters, so a name collision
-    /// would otherwise let a signal delivered to container A empty container
-    /// B's chain, silently failing B open.
+    /// keeps this path from flushing a live chain we do not own: the chain
+    /// name is a pure function of the container name, so a signal delivered
+    /// to one run would otherwise empty the chain belonging to a later run of
+    /// the same name, silently failing it open.
     ///
     /// The sole caller (`signal_cleanup::run_watchdog`) is Linux-only, so this
     /// is dead code elsewhere. It stays compiled on every target rather than
@@ -1655,7 +1657,8 @@ mod tests {
         assert!(!still_owned, "a chain whose -X succeeded is no longer ours");
 
         // A chain this attempt never created is not ours to touch at all --
-        // chain names truncate and can collide with a live container.
+        // the name is shared by every run of the same container name, so it
+        // may belong to a run that is still live.
         let mut logger = Logger::new(Mode::Buffer);
         let mut flushed = false;
         let still_owned = teardown_chain(false, false, &mut logger, |_| flushed = true, |_| true);
@@ -1814,7 +1817,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_name_truncation() {
+    fn chain_name_respects_the_length_ceiling() {
         let long_name = "a".repeat(50);
         let mgr = NetworkIptablesManager::new(&long_name);
         assert!(mgr.chain_name.len() <= CHAIN_NAME_MAX_LEN);
