@@ -68,6 +68,16 @@ pub fn resolve_default_lxcpath() -> String {
     resolve_lxcpath_with_env(|k| std::env::var(k).ok(), current_euid)
 }
 
+/// Test-only convenience wrapper over [`build_attach_args_with_env_control`]
+/// that hardcodes `force_clear_env = false` (the legacy behavior). Kept
+/// `#[cfg(test)]`-only because production code always calls the
+/// `_with_env_control` variant directly, so compiling this wrapper outside
+/// tests would trip the dead-code lint.
+#[cfg(test)]
+fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
+    build_attach_args_with_env_control(env, working_directory, command, false)
+}
+
 /// Build the post-binary argv for `lxc-attach` (the args that follow the
 /// `-n NAME -P lxcpath` flags already appended by `lxc_command`).
 ///
@@ -75,11 +85,20 @@ pub fn resolve_default_lxcpath() -> String {
 /// actually spawning `lxc-attach`. See [`LxcContainer::attach_run`] for
 /// the full contract.
 ///
+/// `force_clear_env` forces `--clear-env` even when `env` is empty, so a
+/// fully-scrubbed proxy env can't silently fall back to inheriting the
+/// host's variables.
+///
 /// Gated to Linux + test builds because `attach_run` is a Windows stub
 /// that never calls this helper, and the workspace clippy lane on
 /// `windows-latest` would otherwise flag it as dead code.
 #[cfg(any(target_os = "linux", test))]
-fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
+fn build_attach_args_with_env_control(
+    env: &[String],
+    working_directory: &str,
+    command: &str,
+    force_clear_env: bool,
+) -> Vec<String> {
     // Loose upper bound; realloc-avoidance hint only.
     let mut args: Vec<String> = Vec::with_capacity(env.len() + 8);
 
@@ -87,7 +106,7 @@ fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> 
     // slate, even if every entry is malformed. Matches Seatbelt exactly
     // and is the posture lxc-attach(1) recommends for sandbox callers.
     // See `attach_run` doc for the full contract.
-    if !env.is_empty() {
+    if force_clear_env || !env.is_empty() {
         args.push("--clear-env".to_string());
         for kv in env {
             // Well-formed = "KEY=VAL" with a non-empty KEY. `"=foo"` and
@@ -294,7 +313,11 @@ impl LxcContainer {
     /// and are outside this function's control.
     ///
     /// When `env` is empty, the legacy keep-env behavior is preserved so
-    /// existing call sites without explicit env are undisturbed.
+    /// existing call sites without explicit env are undisturbed unless
+    /// `force_clear_env` is true. The LXC runner uses `force_clear_env`
+    /// after proxy-env scrubbing removes every caller-supplied proxy entry;
+    /// that still must clear inherited proxy variables instead of falling
+    /// back to keep-env mode.
     ///
     /// We pass `unblock_signals = [SIGHUP, SIGTERM, SIGINT]` because
     /// [`crate::signal_cleanup::install`] blocks them in this process so
@@ -314,6 +337,7 @@ impl LxcContainer {
         command: &str,
         working_directory: &str,
         env: &[String],
+        force_clear_env: bool,
         timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
@@ -321,7 +345,12 @@ impl LxcContainer {
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd = self.lxc_command("lxc-attach");
-        cmd.args(build_attach_args(env, working_directory, command));
+        cmd.args(build_attach_args_with_env_control(
+            env,
+            working_directory,
+            command,
+            force_clear_env,
+        ));
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -348,6 +377,7 @@ impl LxcContainer {
         _command: &str,
         _working_directory: &str,
         _env: &[String],
+        _force_clear_env: bool,
         _timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
@@ -747,6 +777,12 @@ mod tests {
     }
 
     #[test]
+    fn build_attach_args_can_force_clear_env_when_env_empty() {
+        let args = build_attach_args_with_env_control(&[], "", "cmd", true);
+        assert_eq!(args, vec!["--clear-env", "--", "/bin/sh", "-c", "cmd"]);
+    }
+
+    #[test]
     fn build_attach_args_clears_env_even_when_all_entries_malformed() {
         // Caller opted into env control by populating the field. Even if
         // every entry is malformed, `--clear-env` must still fire so the
@@ -778,6 +814,103 @@ mod tests {
             clear_idx < set_idx,
             "--clear-env must precede --set-var so caller value wins, got {:?}",
             args
+        );
+    }
+
+    // ── End-to-end: proxy policy → env → attach args ─────────────────────────
+    // These tests drive apply_proxy_env then build_attach_args_with_env_control
+    // together so the observable output (the lxc-attach argv) is what is
+    // asserted, not just an intermediate bool.
+
+    #[test]
+    fn proxy_disabled_with_empty_request_env_emits_clear_env_in_attach_args() {
+        // Regression: before the fix, apply_proxy_env returned false for an
+        // empty env slice, so force_clear_env was false, env was empty, both
+        // disjuncts of `force_clear_env || !env.is_empty()` were false, and
+        // --clear-env was never added.  lxc-attach then inherited the full MXC
+        // host process environment — including HTTP_PROXY, HTTPS_PROXY, and
+        // any credentials or tokens present on CI agents.
+        use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
+        let mut env: Vec<String> = vec![];
+        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
+        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
+        assert!(
+            args.iter().any(|a| a == "--clear-env"),
+            "proxy disabled + empty env must emit --clear-env to prevent host \
+             environment leak; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn proxy_disabled_non_proxy_env_emits_clear_env_and_preserves_non_proxy_vars() {
+        // Non-proxy vars survive the scrub; --clear-env is emitted.
+        // This was already correct before the fix (non-empty env triggered
+        // --clear-env via the !env.is_empty() arm) — this test guards against
+        // regressing that direction.
+        use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
+        let mut env = vec!["PATH=/usr/bin".to_string()];
+        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
+        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
+        assert!(
+            args.iter().any(|a| a == "--clear-env"),
+            "proxy disabled + non-proxy env must emit --clear-env; got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
+            "PATH must survive the proxy scrub; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn proxy_disabled_http_proxy_env_is_removed_and_clear_env_emitted() {
+        // A caller-supplied HTTP_PROXY must be scrubbed AND --clear-env emitted
+        // so the sandbox cannot reach an egress path the policy never authorized.
+        use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
+        let mut env = vec![
+            "HTTP_PROXY=http://attacker.example:9999".to_string(),
+            "PATH=/usr/bin".to_string(),
+        ];
+        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
+        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
+        assert!(
+            args.iter().any(|a| a == "--clear-env"),
+            "proxy disabled + HTTP_PROXY must emit --clear-env; got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("attacker.example")),
+            "HTTP_PROXY value must not appear in args; got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
+            "PATH must survive the proxy scrub; got {args:?}"
+        );
+    }
+
+    #[test]
+    fn proxy_enabled_emits_clear_env_and_proxy_keys_in_attach_args() {
+        use wxc_common::{
+            models::{ProxyAddress, ProxyConfig},
+            proxy_env::apply_proxy_env,
+        };
+        let proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
+            builtin_test_server: false,
+        };
+        let mut env = vec!["PATH=/usr/bin".to_string()];
+        let force_clear = apply_proxy_env(&mut env, &proxy);
+        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
+        assert!(
+            args.iter().any(|a| a == "--clear-env"),
+            "proxy enabled must emit --clear-env; got {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("--set-var=HTTP_PROXY=http://") && a.contains(":3128")),
+            "proxy enabled must set HTTP_PROXY (with port 3128); got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
+            "PATH must survive the proxy-env merge; got {args:?}"
         );
     }
 }
