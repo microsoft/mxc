@@ -353,6 +353,61 @@ fn an_unreadable_sysfs_root_is_an_unknown_topology() {
     );
 }
 
+// The two probes in `veth_topology_in` read metadata differently on purpose,
+// and only a symlink can tell them apart. A dangling `master` still means the
+// veth is enslaved, so that probe must NOT follow the link -- following it
+// would report a bridged veth as directly routed, which is the relaxed branch.
+//
+// This is the mutation that survived the first battery. It is Unix-gated
+// because a dangling symlink is not creatable without privilege on Windows;
+// the same pattern is used by
+// `resolve_denied_host_path_fails_closed_on_dangling_symlink`.
+#[cfg(unix)]
+#[test]
+fn a_dangling_master_symlink_still_means_the_veth_is_bridged() {
+    use std::os::unix::fs::symlink;
+
+    let root = fresh_fixture_dir("dangling-master");
+    let iface_dir = root.join("veth-dangle");
+    fs::create_dir_all(&iface_dir).expect("failed to create the fake sysfs root");
+    symlink(root.join("no-such-bridge"), iface_dir.join("master"))
+        .expect("failed to create the dangling master symlink");
+
+    let result = NetworkIptablesManager::veth_topology_in(&root, "veth-dangle");
+
+    fs::remove_dir_all(&root).expect("failed to clean up the fake sysfs root");
+    assert_eq!(
+        result,
+        VethTopology::Bridged,
+        "a dangling master symlink still means enslaved; following it would \
+         report a bridged veth as directly routed"
+    );
+}
+
+// The other half of the asymmetry. `/sys/class/net/<iface>` is itself a symlink
+// into `/sys/devices`, so the interface probe MUST follow it -- a dangling one
+// proves nothing was observed, and calling that directly routed is the same
+// fail-open defect one level down.
+#[cfg(unix)]
+#[test]
+fn a_dangling_interface_symlink_is_an_unknown_topology() {
+    use std::os::unix::fs::symlink;
+
+    let root = fresh_fixture_dir("dangling-iface");
+    fs::create_dir_all(&root).expect("failed to create the fake sysfs root");
+    symlink(root.join("no-such-device"), root.join("veth-ghostlink"))
+        .expect("failed to create the dangling interface symlink");
+
+    let result = NetworkIptablesManager::veth_topology_in(&root, "veth-ghostlink");
+
+    fs::remove_dir_all(&root).expect("failed to clean up the fake sysfs root");
+    assert_eq!(
+        result,
+        VethTopology::Unknown,
+        "an interface symlink whose target does not resolve establishes nothing"
+    );
+}
+
 // The decision that actually carries the security weight: which topologies get
 // the relaxed treatment that downgrades a failed physdev hook to a warning.
 // Only a positive directly-routed finding may.
