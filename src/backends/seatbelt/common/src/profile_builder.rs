@@ -38,8 +38,8 @@ use wxc_common::models::{
 /// If `request.seatbelt.profile_override` is set, that string is returned
 /// verbatim and policy fields are ignored. This whole-profile escape hatch is
 /// **dev-only**: the branch is compiled out of release builds (and the config
-/// parser strips `profileOverride` in release anyway), so a shipped binary
-/// always builds the generated deny-default profile.
+/// parser rejects configs that set `profileOverride` in release anyway), so a
+/// shipped binary always builds the generated deny-default profile.
 ///
 /// `pub` (not `pub(crate)`) so it stays a reachable API root: `profile_builder`
 /// is compiled and unit-tested on every host, but its only in-crate caller
