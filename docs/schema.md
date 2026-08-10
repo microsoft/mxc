@@ -162,7 +162,10 @@ under `C:\data`.
 #### Upward directory traversal for Windows BaseContainer
 
 Many tools search **upward** from the working directory toward the volume root,
-looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. To avoid this error when using BaseContainer and tools with this behavior, grant them the full path from the volume root down to your target.
+looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. 
+
+When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible. 
+Avoid resolving this error by granting broad profile roots. Each 'readwritePaths' grant also exposes that directory's descendants and granting broad profile roots may result in over-permissioning.
 
 ### UI Policy
 
