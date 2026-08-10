@@ -432,6 +432,26 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
 
 // ---------- Conversion from wire model to domain model ----------
 
+/// Whether `host` is a loopback endpoint that a container cannot reach through
+/// its own network namespace: 127.0.0.0/8, ::1, or the name "localhost".
+///
+/// Accepts bracketed IPv6 literals (e.g. `[::1]`) as stored by the proxy URL
+/// parser. Used to reject loopback proxy hosts under the LXC deny-all model,
+/// where the container's loopback is not the host's.
+fn host_is_loopback(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let candidate = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    candidate
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 /// Convert a typed `wire::Proxy` block into the validated domain `ProxyConfig`.
 /// Exactly one of `builtinTestServer` / `localhost` / `url` may be set.
 fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
@@ -957,17 +977,69 @@ fn convert_wire_config(
     policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
         if let Some(proxy) = net.proxy {
+            // Capture which shorthand was used before the wire proxy is
+            // consumed — LXC can't reach a localhost/loopback proxy.
+            let proxy_used_localhost = proxy.localhost.is_some();
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
+                && containment != ContainmentBackend::Lxc
                 && containment != ContainmentBackend::Seatbelt
                 && containment != ContainmentBackend::Wslc
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', 'seatbelt', or 'wslc' containment backends";
+                           'bubblewrap', 'lxc', 'seatbelt', or 'wslc' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            if containment == ContainmentBackend::Lxc && proxy_config.builtin_test_server {
+                let msg = "LXC: network.proxy.builtinTestServer is not supported; \
+                           use network.proxy.url";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // `network.proxy.localhost` maps to 127.0.0.1, which inside an LXC
+            // network namespace is the container's own loopback rather than the
+            // host. The injected HTTP(S)_PROXY would be unreachable and the
+            // iptables proxy-allow rule would never match, so require a routable
+            // host via `network.proxy.url` instead.
+            if containment == ContainmentBackend::Lxc && proxy_used_localhost {
+                let msg = "LXC: network.proxy.localhost is not reachable from the \
+                           container network namespace (127.0.0.1 is the container \
+                           loopback); use network.proxy.url with a host routable from \
+                           inside the container";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // A `url`-form proxy whose host is a loopback literal is as
+            // unreachable from the container's network namespace as the
+            // `localhost` shorthand: 127.0.0.0/8, ::1, and the name "localhost"
+            // all name the container's own loopback, not the host. Under a
+            // deny-all-except-proxy policy the container would silently get no
+            // working proxy, so reject it at parse time with a clear error.
+            //
+            // Rejection is at parse time (not resolution time) because the three
+            // forms the reviewer flagged - http://localhost, http://127.0.0.1,
+            // and [::1] - are all literals visible here, and this matches the
+            // file's other parse-time proxy validations. A hostname that only
+            // *resolves* to loopback is not caught: that would require rejecting
+            // in pin_proxy_to_resolved_ip, which also pins `localhost` for the
+            // A-record round-trip test, so it is left as a known residual gap.
+            if containment == ContainmentBackend::Lxc {
+                if let Some(host) = proxy_config.address.as_ref().map(|addr| addr.host()) {
+                    if host_is_loopback(host) {
+                        let msg = "LXC: network.proxy.url host is a loopback address \
+                                   (127.0.0.0/8, ::1, or localhost), which names the \
+                                   container's own loopback rather than the host; use a \
+                                   proxy host routable from inside the container";
+                        logger.log_line(msg);
+                        return Err(WxcError::ConfigParse(msg.to_string()));
+                    }
+                }
             }
 
             // WSLc containers run in their own network namespace, so an
@@ -1530,6 +1602,10 @@ fn mask_state_aware_experimental<'a>(
 
     Ok(Cow::Owned(masked))
 }
+
+#[cfg(test)]
+#[path = "config_parser_loopback_spec_tests.rs"]
+mod loopback_spec_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3377,13 +3453,86 @@ mod tests {
     }
 
     #[test]
-    fn proxy_rejected_with_non_processcontainer() {
+    fn proxy_rejected_with_an_unsupported_backend() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"vm","network":{"proxy":{"localhost":8080}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("Network proxy is only supported"),
+            "expected the supported-backend gate to reject 'vm', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proxy_accepted_with_lxc() {
+        // LXC requires a routable proxy host: localhost/127.0.0.1 is the
+        // container loopback and unreachable, so use network.proxy.url.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.host(), "proxy.example.com");
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn proxy_localhost_rejected_with_lxc() {
+        // network.proxy.localhost maps to 127.0.0.1, unreachable from inside
+        // the LXC network namespace — it must be rejected at parse time.
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("network.proxy.localhost is not reachable"),
+            "expected the LXC localhost rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proxy_loopback_url_rejected_with_lxc() {
+        // The url form names the container's own loopback just as the
+        // localhost shorthand does, so it is rejected for the same reason.
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            let json = format!(
+                r#"{{"process":{{"commandLine":"x"}},"containment":"lxc","network":{{"proxy":{{"url":"{}"}}}}}}"#,
+                url
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(
+                format!("{}", err).contains("loopback address"),
+                "expected the LXC loopback-url rejection for {}, got: {}",
+                url,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejected_with_lxc() {
+        // LXC enforces a configured proxy address with iptables; it does not
+        // launch the builtin testing proxy.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(format!("{}", err).contains("builtinTestServer is not supported"));
     }
 
     #[test]
