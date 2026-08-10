@@ -456,3 +456,178 @@ fn a_bridge_netfilter_toggle_with_an_unrecognized_value_is_not_active() {
         "a toggle file containing a value other than \"1\" must not be reported as active"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Return-path rules
+//
+// The hooks above steer traffic *leaving* the container. A reply arrives in
+// the opposite direction and matches none of them, so under a DROP forward
+// policy an explicitly allowed destination is unreachable. These rules carry
+// that reply, and the contract they have to keep is narrow: accept only what
+// conntrack already knows about, name one container, and never become an
+// inbound control.
+// ---------------------------------------------------------------------------
+
+// A rule that matched only on the interface would accept inbound packets that
+// begin a new connection, which is an inbound policy decision this rule has no
+// business making. The state match is what confines it to traffic the egress
+// chain already permitted.
+#[test]
+fn return_rule_args_accept_only_established_and_related_traffic() {
+    for args in [
+        NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "veth0"),
+        NetworkIptablesManager::build_forward_return_physdev_rule_args("-I", "veth0"),
+    ] {
+        let state = args
+            .iter()
+            .position(|a| a == "--state")
+            .unwrap_or_else(|| panic!("the rule must carry a state match; got: {args:?}"));
+
+        assert_eq!(
+            args[state + 1],
+            "ESTABLISHED,RELATED",
+            "the rule must accept only traffic conntrack already knows; got: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "-m" && w[1] == "state"),
+            "the state value needs its match module loaded; got: {args:?}"
+        );
+    }
+}
+
+// The whole point is to accept the reply. Jumping to the MXC chain instead
+// would test inbound packets against rules written as `-d <destination>` for
+// egress and, under an allow default, fall through to the chain's closing
+// ACCEPT -- an inbound enforcement surface acquired by accident.
+#[test]
+fn return_rule_args_jump_straight_to_accept_and_never_to_a_chain() {
+    for args in [
+        NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "veth0"),
+        NetworkIptablesManager::build_forward_return_physdev_rule_args("-I", "veth0"),
+    ] {
+        let target = args
+            .iter()
+            .position(|a| a == "-j")
+            .unwrap_or_else(|| panic!("the rule must name a target; got: {args:?}"));
+
+        assert_eq!(
+            args[target + 1],
+            "ACCEPT",
+            "the return rule must accept directly; got: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("MXC-")),
+            "the return rule must not reference the policy chain; got: {args:?}"
+        );
+    }
+}
+
+// Matching the reply direction is the entire difference from the hooks. A rule
+// that named the container's port as *input* would duplicate the egress hook
+// and leave the reply path exactly as broken as before.
+#[test]
+fn return_rule_args_match_the_container_port_as_output() {
+    let iface = NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "veth0");
+    assert!(
+        iface.windows(2).any(|w| w[0] == "-o" && w[1] == "veth0"),
+        "the interface form must match the veth as output; got: {iface:?}"
+    );
+    assert!(
+        !iface.iter().any(|a| a == "-i"),
+        "the interface form must not match on input; got: {iface:?}"
+    );
+
+    let physdev = NetworkIptablesManager::build_forward_return_physdev_rule_args("-I", "veth0");
+    assert!(
+        physdev
+            .windows(2)
+            .any(|w| w[0] == "--physdev-out" && w[1] == "veth0"),
+        "the physdev form must match the veth as the outbound bridge port; got: {physdev:?}"
+    );
+    assert!(
+        !physdev.iter().any(|a| a == "--physdev-in"),
+        "the physdev form must not match the inbound bridge port; got: {physdev:?}"
+    );
+}
+
+// An unscoped rule would accept established traffic for every container on the
+// host, so one container's flows would be carried by another's policy.
+#[test]
+fn return_rule_args_name_the_specific_container_port() {
+    for args in [
+        NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "vethABC"),
+        NetworkIptablesManager::build_forward_return_physdev_rule_args("-I", "vethABC"),
+    ] {
+        assert!(
+            args.iter().any(|a| a == "vethABC"),
+            "the rule must name the container's port; got: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "lxcbr0"),
+            "the rule must not be scoped to the shared bridge; got: {args:?}"
+        );
+    }
+}
+
+// iptables deletes by full rule specification, so a delete that differs from
+// its insert by any match finds nothing and leaks the rule into a FORWARD
+// chain that outlives the container.
+#[test]
+fn return_rule_delete_specs_differ_from_their_inserts_only_by_the_operation() {
+    for (install, remove) in [
+        (
+            NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "veth0"),
+            NetworkIptablesManager::build_forward_return_iface_rule_args("-D", "veth0"),
+        ),
+        (
+            NetworkIptablesManager::build_forward_return_physdev_rule_args("-I", "veth0"),
+            NetworkIptablesManager::build_forward_return_physdev_rule_args("-D", "veth0"),
+        ),
+    ] {
+        assert_eq!(
+            install[0], "-I",
+            "the install must insert; got: {install:?}"
+        );
+        assert_eq!(remove[0], "-D", "the removal must delete; got: {remove:?}");
+        assert_eq!(
+            install[1..],
+            remove[1..],
+            "the delete spec must match the insert exactly apart from the operation"
+        );
+    }
+}
+
+// Both forms are installed together and deleted independently, so if they
+// produced the same specification one delete would remove the other's rule and
+// the second would silently find nothing.
+#[test]
+fn the_two_return_rule_forms_never_produce_the_same_specification() {
+    let iface = NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "veth0");
+    let physdev = NetworkIptablesManager::build_forward_return_physdev_rule_args("-I", "veth0");
+
+    assert_ne!(
+        iface, physdev,
+        "the two return forms must be distinguishable to iptables"
+    );
+}
+
+// The return rules must not be mistaken for the egress hooks: those jump to
+// the chain and match the inbound direction, and deleting one with the other's
+// specification would leave a rule behind.
+#[test]
+fn return_rules_are_distinguishable_from_the_egress_hooks() {
+    let egress = NetworkIptablesManager::build_forward_hook_iface_rule_args("-I", "veth0", "MXC-x");
+    let egress_physdev =
+        NetworkIptablesManager::build_forward_hook_physdev_rule_args("-I", "veth0", "MXC-x");
+    let ret = NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "veth0");
+    let ret_physdev = NetworkIptablesManager::build_forward_return_physdev_rule_args("-I", "veth0");
+
+    for e in [&egress, &egress_physdev] {
+        for r in [&ret, &ret_physdev] {
+            assert_ne!(
+                *e, *r,
+                "an egress hook and a return rule must never share a specification"
+            );
+        }
+    }
+}

@@ -97,6 +97,10 @@ pub(crate) struct CreatedResources {
     v6_hook: bool,
     v4_physdev_hook: bool,
     v6_physdev_hook: bool,
+    v4_return: bool,
+    v6_return: bool,
+    v4_physdev_return: bool,
+    v6_physdev_return: bool,
 }
 
 /// Flush and delete the chain, reporting whether it is still owned afterward.
@@ -141,6 +145,10 @@ impl CreatedResources {
             && !self.v6_hook
             && !self.v4_physdev_hook
             && !self.v6_physdev_hook
+            && !self.v4_return
+            && !self.v6_return
+            && !self.v4_physdev_return
+            && !self.v6_physdev_return
     }
 
     /// Test-only constructor so `signal_cleanup`'s tests can build a
@@ -156,6 +164,10 @@ impl CreatedResources {
             v6_hook,
             v4_physdev_hook: false,
             v6_physdev_hook: false,
+            v4_return: false,
+            v6_return: false,
+            v4_physdev_return: false,
+            v6_physdev_return: false,
         }
     }
 }
@@ -517,6 +529,97 @@ impl NetworkIptablesManager {
                     iface, chain_name, tool, err
                 ));
                 Ok(false)
+            }
+        }
+    }
+
+    /// Build one FORWARD rule accepting reply traffic back to the container.
+    ///
+    /// The chain hooks traffic *leaving* the container (`-i` / `--physdev-in`),
+    /// so a reply -- which arrives with the container's port as the output
+    /// interface -- matches no MXC rule and falls through to the FORWARD
+    /// policy. Where that policy is DROP, which is what Docker sets and Docker
+    /// is installed nearly everywhere, an explicitly allowed destination is
+    /// unreachable: the request goes out and the answer never comes back.
+    ///
+    /// This rule cannot widen the policy. A packet only matches
+    /// `ESTABLISHED,RELATED` if conntrack already has an entry for the flow,
+    /// and the flow can only have an entry because its outbound direction was
+    /// accepted by the chain. Inbound *new* connections match nothing here and
+    /// are left to the host policy exactly as before.
+    ///
+    /// It deliberately accepts rather than jumping to the chain, even though
+    /// the chain carries an `ESTABLISHED,RELATED` rule of its own that would
+    /// match. The chain's other rules are written against `-d <destination>`
+    /// for egress, so an inbound packet that is not established would be
+    /// tested against egress-shaped rules and, under an `allow` default, hit
+    /// the chain's closing ACCEPT. That would quietly turn this into an
+    /// inbound enforcement surface with the wrong semantics -- a separate
+    /// control, tracked separately, and not something to acquire as a side
+    /// effect of fixing the reply path.
+    fn build_forward_return_iface_rule_args(op: &str, iface: &str) -> Vec<String> {
+        vec![
+            op.to_string(),
+            "FORWARD".to_string(),
+            "-o".to_string(),
+            iface.to_string(),
+            "-m".to_string(),
+            "state".to_string(),
+            "--state".to_string(),
+            "ESTABLISHED,RELATED".to_string(),
+            "-j".to_string(),
+            "ACCEPT".to_string(),
+        ]
+    }
+
+    /// The bridge-port form of [`Self::build_forward_return_iface_rule_args`].
+    ///
+    /// Mirrors the ingress pair for the same reason it exists there: on the
+    /// default bridged topology the packet's output interface is `lxcbr0`, not
+    /// the veth, so the `-o <veth>` rule matches nothing and only
+    /// `--physdev-out` names the specific container.
+    fn build_forward_return_physdev_rule_args(op: &str, iface: &str) -> Vec<String> {
+        vec![
+            op.to_string(),
+            "FORWARD".to_string(),
+            "-m".to_string(),
+            "physdev".to_string(),
+            "--physdev-out".to_string(),
+            iface.to_string(),
+            "-m".to_string(),
+            "state".to_string(),
+            "--state".to_string(),
+            "ESTABLISHED,RELATED".to_string(),
+            "-j".to_string(),
+            "ACCEPT".to_string(),
+        ]
+    }
+
+    /// Install one return-path rule, downgrading any failure to a warning.
+    ///
+    /// Unlike the chain hooks, a missing rule here cannot fail open: the rule
+    /// only ever *accepts*, so failing to install it can leave the container
+    /// less connected but never less filtered. Refusing to run over it would
+    /// turn a connectivity limitation into an outage on hosts where the
+    /// forward policy is ACCEPT and nothing was broken to begin with.
+    fn install_return_rule(
+        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
+        rule: Vec<String>,
+        form: &str,
+        iface: &str,
+        tool: &str,
+        logger: &mut Logger,
+    ) -> bool {
+        match run(&[rule], logger) {
+            Ok(()) => true,
+            Err(err) => {
+                logger.log_line(&format!(
+                    "Warning: could not install the {} return-path rule for {} ({}): {}. \
+                     Replies to allowed outbound connections will rely on the host's FORWARD \
+                     policy, so a DROP policy would make allowed destinations unreachable.",
+                    form, iface, tool, err
+                ));
+                false
             }
         }
     }
@@ -1692,8 +1795,13 @@ impl NetworkIptablesManager {
         // the ruleset filtering nothing.
         //
         // The two are mutually exclusive for any given packet, so no packet is
-        // counted twice. `-o` would instead match traffic flowing toward the
-        // container.
+        // counted twice.
+        //
+        // `-o` matches the reply direction rather than egress, which is why it
+        // has no place in the hooks -- and why the return-path rules installed
+        // alongside them below use it instead. Those are scoped to this same
+        // block: a caller with no veth has no port to name, and an unscoped
+        // ACCEPT would carry traffic for every container on the host.
         if let Some(ref iface) = self.veth_interface {
             let bridged = Self::veth_is_bridge_enslaved(iface);
             let chain_name = self.chain_name.clone();
@@ -1735,6 +1843,30 @@ impl NetworkIptablesManager {
                 logger,
             )?;
             Self::publish_created(created);
+
+            // Claimed before insertion for the same reason the hooks are: a
+            // fatal signal between the call and the record would leave the
+            // rule installed and absent from the cleanup snapshot.
+            created.v4_return = true;
+            created.v4_physdev_return = true;
+            Self::publish_created(created);
+            created.v4_return = Self::install_return_rule(
+                Self::run_iptables_rule_args,
+                Self::build_forward_return_iface_rule_args("-I", iface),
+                "interface",
+                iface,
+                "iptables",
+                logger,
+            );
+            created.v4_physdev_return = Self::install_return_rule(
+                Self::run_iptables_rule_args,
+                Self::build_forward_return_physdev_rule_args("-I", iface),
+                "physdev",
+                iface,
+                "iptables",
+                logger,
+            );
+            Self::publish_created(created);
             logger.log_line(&format!(
                 "FORWARD hook installed on {} for chain {} (iptables).",
                 iface, chain_name
@@ -1771,6 +1903,27 @@ impl NetworkIptablesManager {
                     "ip6tables",
                     logger,
                 )?;
+                Self::publish_created(created);
+
+                created.v6_return = true;
+                created.v6_physdev_return = true;
+                Self::publish_created(created);
+                created.v6_return = Self::install_return_rule(
+                    Self::run_ip6tables_rule_args,
+                    Self::build_forward_return_iface_rule_args("-I", iface),
+                    "interface",
+                    iface,
+                    "ip6tables",
+                    logger,
+                );
+                created.v6_physdev_return = Self::install_return_rule(
+                    Self::run_ip6tables_rule_args,
+                    Self::build_forward_return_physdev_rule_args("-I", iface),
+                    "physdev",
+                    iface,
+                    "ip6tables",
+                    logger,
+                );
                 Self::publish_created(created);
 
                 logger.log_line(&format!(
@@ -1918,6 +2071,48 @@ impl NetworkIptablesManager {
                 .is_ok()
             {
                 residual.v6_physdev_hook = false;
+            }
+
+            // The return-path rules jump to ACCEPT rather than to the chain,
+            // so unlike the hooks above they hold no reference to it and do
+            // not gate the delete below. They are still this attempt's to
+            // remove: left behind, they would accept established traffic for
+            // a veth name the kernel may later hand to a different container.
+            if created.v4_return
+                && Self::run_iptables_rule_args(
+                    &[Self::build_forward_return_iface_rule_args("-D", iface)],
+                    logger,
+                )
+                .is_ok()
+            {
+                residual.v4_return = false;
+            }
+            if created.v4_physdev_return
+                && Self::run_iptables_rule_args(
+                    &[Self::build_forward_return_physdev_rule_args("-D", iface)],
+                    logger,
+                )
+                .is_ok()
+            {
+                residual.v4_physdev_return = false;
+            }
+            if created.v6_return
+                && Self::run_ip6tables_rule_args(
+                    &[Self::build_forward_return_iface_rule_args("-D", iface)],
+                    logger,
+                )
+                .is_ok()
+            {
+                residual.v6_return = false;
+            }
+            if created.v6_physdev_return
+                && Self::run_ip6tables_rule_args(
+                    &[Self::build_forward_return_physdev_rule_args("-D", iface)],
+                    logger,
+                )
+                .is_ok()
+            {
+                residual.v6_physdev_return = false;
             }
         }
 
@@ -4160,5 +4355,210 @@ mod tests {
             NetworkIptablesManager::ipv6_state_treated_as_active(HostIpv6State::Unknown),
             "Unknown must be treated as active so an unreadable IPv6 state fails closed"
         );
+    }
+    #[test]
+    fn an_ownership_record_naming_only_a_return_rule_is_not_treated_as_empty() {
+        // is_empty gates the whole teardown. A return rule missing from it
+        // would leave an ACCEPT in FORWARD naming a veth the kernel is free to
+        // reassign, so a later container would inherit it.
+        for created in [
+            CreatedResources {
+                v4_return: true,
+                ..Default::default()
+            },
+            CreatedResources {
+                v6_return: true,
+                ..Default::default()
+            },
+            CreatedResources {
+                v4_physdev_return: true,
+                ..Default::default()
+            },
+            CreatedResources {
+                v6_physdev_return: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !created.is_empty(),
+                "{created:?} names an installed rule and must not be treated as empty"
+            );
+        }
+    }
+
+    #[test]
+    fn an_apply_installs_a_return_path_rule_in_both_directions_of_the_bridge() {
+        // Without these, a reply to an allowed destination matches neither
+        // ingress hook and falls through to the host's FORWARD policy; under
+        // Docker's DROP default the allowed destination is unreachable.
+        let fake = test_firewall::install();
+        let mut manager = NetworkIptablesManager::new("return-install");
+        manager.set_veth_interface("mxcv-ret");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        manager
+            .apply_firewall_rules(&policy, &mut logger)
+            .expect("the apply must succeed against the fake");
+
+        // Pinned to the binary on purpose: the builders are family-agnostic, so
+        // an IPv4 rule and an IPv6 rule differ only by which tool issued them.
+        // An assertion that ignored the binary would be satisfied by whichever
+        // family still worked, and would pass with the other one deleted.
+        let issued = fake.issued();
+        for tool in ["iptables", "ip6tables"] {
+            for (form, expected) in [
+                (
+                    "interface",
+                    NetworkIptablesManager::build_forward_return_iface_rule_args("-I", "mxcv-ret"),
+                ),
+                (
+                    "physdev",
+                    NetworkIptablesManager::build_forward_return_physdev_rule_args(
+                        "-I", "mxcv-ret",
+                    ),
+                ),
+            ] {
+                assert!(
+                    issued
+                        .iter()
+                        .any(|cmd| cmd[0] == tool && cmd[1..] == expected[..]),
+                    "the apply must install the {form} return rule via {tool}; issued: {issued:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_teardown_removes_every_return_rule_the_apply_installed() {
+        // iptables deletes by full specification, so a return rule the teardown
+        // does not name outlives the container in the host's FORWARD chain.
+        let fake = test_firewall::install();
+        let mut manager = NetworkIptablesManager::new("return-teardown");
+        manager.set_veth_interface("mxcv-down");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut apply_logger = Logger::new(Mode::Buffer);
+        manager
+            .apply_firewall_rules(&policy, &mut apply_logger)
+            .expect("the apply must succeed against the fake");
+
+        fake.forget_issued();
+        let mut remove_logger = Logger::new(Mode::Buffer);
+        let _ = manager.remove_firewall_rules(&mut remove_logger);
+
+        // Pinned to the binary for the same reason the install test is: a
+        // family-blind assertion would let one family's delete stand in for the
+        // other's, and the missed rule would outlive the container.
+        let issued = fake.issued();
+        for tool in ["iptables", "ip6tables"] {
+            for (form, expected) in [
+                (
+                    "interface",
+                    NetworkIptablesManager::build_forward_return_iface_rule_args("-D", "mxcv-down"),
+                ),
+                (
+                    "physdev",
+                    NetworkIptablesManager::build_forward_return_physdev_rule_args(
+                        "-D",
+                        "mxcv-down",
+                    ),
+                ),
+            ] {
+                assert!(
+                    issued
+                        .iter()
+                        .any(|cmd| cmd[0] == tool && cmd[1..] == expected[..]),
+                    "the teardown must remove the {form} return rule via {tool}; issued: {issued:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_return_rule_that_could_not_be_installed_warns_instead_of_failing_the_apply() {
+        // The asymmetry that justifies this: the ingress hook is what confines
+        // traffic to the chain, so losing it fails open and must be fatal. A
+        // return rule only ever ACCEPTs, so losing it can only leave the
+        // container less connected -- never less enforced. Failing the apply
+        // there would refuse to start a container whose policy is fully
+        // installed.
+        let fake = test_firewall::install();
+        fake.fail_commands_matching("--physdev-out", "simulated missing physdev module");
+
+        let mut manager = NetworkIptablesManager::new("return-warn");
+        manager.set_veth_interface("mxcv-warn");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
+
+        assert!(
+            result.is_ok(),
+            "a failed return rule must not fail the apply, got {result:?}"
+        );
+        assert!(
+            logger.get_buffer().contains("return-path rule"),
+            "the failure must be reported, not swallowed; log: {}",
+            logger.get_buffer()
+        );
+    }
+
+    #[test]
+    fn a_caller_with_no_veth_installs_no_return_path_rule() {
+        // The return rules are only safe because they name one container's
+        // port. A caller that declared it has no veth -- Bubblewrap -- has no
+        // port to name, and a rule installed without one would accept
+        // established traffic for every container on the host.
+        let fake = test_firewall::install();
+        let mut manager = NetworkIptablesManager::new("noveth-return");
+        manager.allow_missing_veth_interface();
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        manager
+            .apply_firewall_rules(&policy, &mut logger)
+            .expect("a caller with no veth must not be refused");
+
+        let issued = fake.issued();
+        assert!(
+            !issued
+                .iter()
+                .any(|cmd| cmd.iter().any(|arg| arg == "ESTABLISHED,RELATED")
+                    && cmd.iter().any(|arg| arg == "FORWARD")),
+            "no return rule may be installed without a veth to scope it to; issued: {issued:?}"
+        );
+    }
+
+    #[test]
+    fn a_return_rule_whose_install_failed_is_not_deleted_on_teardown() {
+        // The teardown deletes by full specification and a delete that matches
+        // nothing is reported as a failure, which would keep residual ownership
+        // for a rule that never existed and make Drop retry it forever.
+        let fake = test_firewall::install();
+        fake.fail_commands_matching("--physdev-out", "simulated missing physdev module");
+
+        let mut manager = NetworkIptablesManager::new("return-nodelete");
+        manager.set_veth_interface("mxcv-nodel");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut apply_logger = Logger::new(Mode::Buffer);
+        manager
+            .apply_firewall_rules(&policy, &mut apply_logger)
+            .expect("the apply must succeed against the fake");
+
+        fake.forget_issued();
+        let mut remove_logger = Logger::new(Mode::Buffer);
+        let _ = manager.remove_firewall_rules(&mut remove_logger);
+
+        let issued = fake.issued();
+        let deleted =
+            NetworkIptablesManager::build_forward_return_physdev_rule_args("-D", "mxcv-nodel");
+        for tool in ["iptables", "ip6tables"] {
+            assert!(
+                !issued
+                    .iter()
+                    .any(|cmd| cmd[0] == tool && cmd[1..] == deleted[..]),
+                "a rule whose install failed must not be deleted by {tool}; issued: {issued:?}"
+            );
+        }
     }
 }
