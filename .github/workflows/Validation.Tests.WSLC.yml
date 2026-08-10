@@ -28,6 +28,7 @@ on:
   push:
     branches:
       - user/modanish/1es-github-runner-e2e
+      - user/emichlin/validation-infra-lite
   workflow_dispatch:
 
 permissions:
@@ -122,61 +123,61 @@ jobs:
           shutdown /r /t 15 /c "WSL2 feature finalize reboot"
           Start-Sleep -Seconds 180
 
-      # setup-rust-toolchain auto-reads rust-toolchain.toml from the repo root
-      # only. Surface src/rust-toolchain.toml there so the pinned toolchain is
-      # honored. Use PowerShell (bare client image may lack bash).
-      - name: Surface toolchain file at repo root
-        if: steps.prep.outputs.ready == 'true'
-        shell: powershell
-        run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml -Force
+      # # setup-rust-toolchain auto-reads rust-toolchain.toml from the repo root
+      # # only. Surface src/rust-toolchain.toml there so the pinned toolchain is
+      # # honored. Use PowerShell (bare client image may lack bash).
+      # - name: Surface toolchain file at repo root
+      #   if: steps.prep.outputs.ready == 'true'
+      #   shell: powershell
+      #   run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml -Force
 
-      # The bare 1ES client image has no rustup/cargo and no bash, so we can't
-      # use actions-rust-lang/setup-rust-toolchain (it runs internal bash steps
-      # and fails with "bash: command not found"). Install rustup directly in
-      # PowerShell; rust-toolchain.toml (surfaced at repo root above) pins
-      # channel 1.93, which rustup installs and selects automatically.
-      - name: Install Rust toolchain
-        if: steps.prep.outputs.ready == 'true'
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
-            Write-Host "Installing rustup..."
-            $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
-            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $init -UseBasicParsing
-            & $init -y --default-toolchain none --profile minimal
-            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed ($LASTEXITCODE)" }
-            $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
-            $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-            $env:Path = "$cargoBin;$env:Path"
-          }
-          # Install the exact channel pinned by rust-toolchain.toml (repo root),
-          # reading it from the file so there is no drift with the pin.
-          $chan = ([regex]::Match((Get-Content rust-toolchain.toml -Raw), 'channel\s*=\s*"([^"]+)"')).Groups[1].Value
-          if (-not $chan) { throw "could not parse channel from rust-toolchain.toml" }
-          Write-Host "Pinned Rust channel: $chan"
-          rustup toolchain install $chan --profile minimal
-          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install $chan failed ($LASTEXITCODE)" }
-          rustup target add --toolchain $chan x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed ($LASTEXITCODE)" }
-          rustc "+$chan" --version
-          cargo "+$chan" --version
+      # # The bare 1ES client image has no rustup/cargo and no bash, so we can't
+      # # use actions-rust-lang/setup-rust-toolchain (it runs internal bash steps
+      # # and fails with "bash: command not found"). Install rustup directly in
+      # # PowerShell; rust-toolchain.toml (surfaced at repo root above) pins
+      # # channel 1.93, which rustup installs and selects automatically.
+      # - name: Install Rust toolchain
+      #   if: steps.prep.outputs.ready == 'true'
+      #   shell: powershell
+      #   run: |
+      #     $ErrorActionPreference = 'Stop'
+      #     if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+      #       Write-Host "Installing rustup..."
+      #       $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+      #       Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $init -UseBasicParsing
+      #       & $init -y --default-toolchain none --profile minimal
+      #       if ($LASTEXITCODE -ne 0) { throw "rustup-init failed ($LASTEXITCODE)" }
+      #       $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+      #       $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      #       $env:Path = "$cargoBin;$env:Path"
+      #     }
+      #     # Install the exact channel pinned by rust-toolchain.toml (repo root),
+      #     # reading it from the file so there is no drift with the pin.
+      #     $chan = ([regex]::Match((Get-Content rust-toolchain.toml -Raw), 'channel\s*=\s*"([^"]+)"')).Groups[1].Value
+      #     if (-not $chan) { throw "could not parse channel from rust-toolchain.toml" }
+      #     Write-Host "Pinned Rust channel: $chan"
+      #     rustup toolchain install $chan --profile minimal
+      #     if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install $chan failed ($LASTEXITCODE)" }
+      #     rustup target add --toolchain $chan x86_64-pc-windows-msvc
+      #     if ($LASTEXITCODE -ne 0) { throw "rustup target add failed ($LASTEXITCODE)" }
+      #     rustc "+$chan" --version
+      #     cargo "+$chan" --version
 
-      - name: Point cargo at the MxcDependencies feed
-        if: steps.prep.outputs.ready == 'true'
-        uses: ./.github/actions/setup-cargo-feed
+      # - name: Point cargo at the MxcDependencies feed
+      #   if: steps.prep.outputs.ready == 'true'
+      #   uses: ./.github/actions/setup-cargo-feed
 
-      - uses: Swatinem/rust-cache@v2
-        if: steps.prep.outputs.ready == 'true'
-        with:
-          workspaces: src -> target
-          key: wslc-e2e-v1
+      # - uses: Swatinem/rust-cache@v2
+      #   if: steps.prep.outputs.ready == 'true'
+      #   with:
+      #     workspaces: src -> target
+      #     key: wslc-e2e-v1
 
-      - name: Build with WSLC support
-        if: steps.prep.outputs.ready == 'true'
-        working-directory: src
-        run: cargo build --release --target x86_64-pc-windows-msvc
-             --no-default-features --features wslc
+      # - name: Build with WSLC support
+      #   if: steps.prep.outputs.ready == 'true'
+      #   working-directory: src
+      #   run: cargo build --release --target x86_64-pc-windows-msvc
+      #        --no-default-features --features wslc
 
       - name: Ensure WSL2 runtime
         id: wsl

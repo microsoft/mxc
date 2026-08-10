@@ -30,8 +30,7 @@
 param(
     [switch]$Release,
     [string]$BinDir,
-    [string]$ConfigDir,
-    [string]$LogDir
+    [string]$ConfigDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,14 +46,6 @@ if (-not $BinDir) {
 
 if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "tests\configs"
-}
-
-# Default to RUNNER_TEMP so CI's existing log upload picks the files up.
-if (-not $LogDir -and $env:RUNNER_TEMP) {
-    $LogDir = Join-Path $env:RUNNER_TEMP "mxc-microvm-logs"
-}
-if ($LogDir -and -not (Test-Path $LogDir)) {
-    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 }
 
 $WxcExePath = Join-Path $BinDir "wxc-exec.exe"
@@ -148,16 +139,8 @@ foreach ($test in $tests) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
-    # The failure tail below only keeps the last few lines, which for a boot
-    # timeout are the error envelope rather than the boot itself. Keep the full
-    # --debug log so CI can show where a VM actually stalled.
-    $logArgs = @()
-    if ($LogDir) {
-        $logFile = Join-Path $LogDir "microvm-$([System.IO.Path]::GetFileNameWithoutExtension($test.Config)).log"
-        $logArgs = @("--log-file", $logFile)
-    }
     $process = Start-Process -FilePath $wxcExe `
-        -ArgumentList (@("--debug", "--experimental") + $logArgs + @($configPath)) `
+        -ArgumentList "--debug", "--experimental", $configPath `
         -PassThru -Wait `
         -RedirectStandardOutput $stdoutFile `
         -RedirectStandardError $stderrFile

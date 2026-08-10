@@ -49,73 +49,12 @@ jobs:
           path: artifacts/bin
 
       - name: Prepare backend prerequisites
-        if: matrix.command == 'microvm'
         shell: pwsh
         run: |
-          $binDir = Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin'
-
-          # NanVix boots a VM from these images on every invocation; Defender
-          # scanning them can push boot past its timeout.
-          Add-MpPreference -ExclusionPath $binDir
-          Write-Host "Added Defender exclusion for $binDir"
-
-          # Mirrors the verification in microvm-e2e.yml.
-          $required = @(
-            "wxc-exec.exe",
-            "nanvixd.exe",
-            "nanvix_rootfs.img",
-            "python3.initrd",
-            "bin\kernel.elf",
-            "snapshots\kernel.vmem",
-            "snapshots\kernel.whp.cbor"
-          )
-          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
-          if ($missing) {
-            Write-Host "::error::Missing binaries: $($missing -join ', ')"
-            exit 1
-          }
-          $leaves = $required | ForEach-Object { Split-Path $_ -Leaf }
-          Get-ChildItem $binDir -Include $leaves -Recurse | Format-Table FullName, Length
-
-          # Capture nanvixd's own stderr/tracing; without this the runner
-          # silences it, which is why a hung boot produced no diagnostics.
-          "MXC_NANVIX_TRACE=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Set MXC_NANVIX_TRACE=1 (captures nanvixd tracing)"
-
-      - name: Diagnose hypervisor environment
-        if: matrix.command == 'microvm'
-        shell: pwsh
-        run: ./scripts/ci/diagnose-whp.ps1
-
-      - name: Check Windows Hypervisor Platform
-        if: matrix.command == 'microvm'
-        shell: pwsh
-        run: ./scripts/ci/check-whp.ps1
-
-      - name: Probe WHP capabilities
-        if: matrix.command == 'microvm'
-        timeout-minutes: 5
-        shell: pwsh
-        run: ./scripts/ci/probe-whp-capabilities.ps1
-
-      - name: Probe nanvixd directly
-        if: matrix.command == 'microvm'
-        timeout-minutes: 10
-        shell: pwsh
-        run: |
-          ./scripts/ci/probe-nanvixd.ps1 `
-            -BinDir (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') `
-            -Mode both
-
-      - name: Prepare Process Container host
-        if: matrix.backend == 'process-t3'
-        shell: pwsh
-        run: |
-          $hostPrep = Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin\wxc-host-prep.exe'
-          & $hostPrep prepare-system-drive
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $hostPrep prepare-null-device --no-sacl
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/ci/prepare-windows-host.ps1 `
+            -Backend '${{ matrix.backend }}' `
+            -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') *>&1 |
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
 
       - name: Run backend tests
         # A backend that hangs (rather than failing) would otherwise burn the
@@ -134,7 +73,7 @@ jobs:
             $arguments.ExpectedTier = 'T3'
           }
           & ./tests/scripts/run_ci_backend_tests.ps1 @arguments *>&1 |
-            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log')
+            Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
 
       - name: Upload failure logs
         if: failure() || cancelled()
@@ -143,7 +82,6 @@ jobs:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/mxc-ci.log
-            ${{ runner.temp }}/mxc-microvm-logs
             ${{ runner.temp }}/mxc-wpc-tests/logs
             ${{ runner.temp }}/WinProcessContainer-Tests.results.*
             ${{ runner.temp }}/mxc_concurrent_oneshot
@@ -172,7 +110,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/ci/install-linux-backend-prereqs.sh \
+          bash scripts/ci/prepare-linux-host.sh \
             '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
             tee -a "$RUNNER_TEMP/mxc-ci.log"
 

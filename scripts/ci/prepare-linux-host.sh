@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs the host packages a Linux backend needs before its artifact-only
-# test suite runs. Distro-aware so the same matrix entry works on Ubuntu,
-# Debian, and RHEL images.
+# Prepares a Linux host for a backend's artifact-only test suite by installing
+# the packages and starting the services it needs. Distro-aware so the same
+# matrix entry works on Ubuntu, Debian, and RHEL images.
 
 usage() {
     echo "Usage: $0 <bubblewrap|lxc|microvm|hyperlight> <binary-directory>" >&2
