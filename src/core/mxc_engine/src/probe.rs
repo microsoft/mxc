@@ -70,7 +70,10 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
     #[cfg(target_os = "windows")]
     {
-        windows_backends()
+        windows_backends(
+            appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(
+            ),
+        )
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -106,14 +109,13 @@ fn linux_backends() -> Vec<AvailableBackend> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_backends() -> Vec<AvailableBackend> {
-    use appcontainer_common::base_container_runner::BaseContainerRunner;
+fn windows_backends(capture_denials_usable: bool) -> Vec<AvailableBackend> {
     use appcontainer_common::fallback_detector::is_base_container_usable;
 
     // `processcontainer` is always present and the only backend with a tier
     // ladder, so it carries its effective (highest-reachable) tier.
     let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
-    let capabilities = BaseContainerRunner::is_capture_denials_usable()
+    let capabilities = capture_denials_usable
         .then_some(BackendCapability::CaptureDenials)
         .into_iter()
         .collect();
@@ -326,20 +328,20 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_reports_capture_denials_only_when_usable() {
-        use appcontainer_common::base_container_runner::BaseContainerRunner;
-
-        let backends = available_backends();
-        let process_container = backends
-            .iter()
-            .find(|backend| backend.backend == "processcontainer")
-            .expect("processcontainer must always be reported on Windows");
-        assert_eq!(
-            process_container
-                .capabilities
-                .contains(&BackendCapability::CaptureDenials),
-            BaseContainerRunner::is_capture_denials_usable()
-        );
+    fn windows_reports_capture_denials_from_probe_result() {
+        for capture_denials_usable in [false, true] {
+            let backends = windows_backends(capture_denials_usable);
+            let process_container = backends
+                .iter()
+                .find(|backend| backend.backend == "processcontainer")
+                .expect("processcontainer must always be reported on Windows");
+            assert_eq!(
+                process_container
+                    .capabilities
+                    .contains(&BackendCapability::CaptureDenials),
+                capture_denials_usable
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
