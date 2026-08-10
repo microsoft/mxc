@@ -88,32 +88,76 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
 
 # ---------------- Backend-availability probe ----------------
 #
-# The runtime can be provided two ways (mirrors
-# backends/isolation_session/common/src/regfree.rs): inbox (IsoSessionApp.dll
-# in System32 + IsoSessionOps WinRT class registered) or coresident MSI
-# (IsoSessionApp.dll under DEFAULT_RUNTIME_DIR, or MXC_ISOSESSION_RUNTIME_DIR
-# when set to an absolute path). Accept EITHER so an MSI-only host is exercised
-# rather than skipped.
+# The runtime is bound one of two ways (mirrors the current design in
+# backends/isolation_session/common/src/regfree.rs): reg-free MSI
+# (IsoSessionApp.dll co-located next to wxc-exec.exe, reached by reg-free
+# private-CLSID activation via the fused <comClass> manifest -- the shipping
+# design; there is NO MXC-side runtime-folder env var, MXC_ISOSESSION_RUNTIME_DIR
+# was removed), or inbox (IsoSessionApp.dll in System32 + IsoSessionOps WinRT
+# class registered). The presence check is ONLY a diagnostic hint; the
+# functional probe below is authoritative.
 
+$appDllDir = Split-Path -Parent $WxcExec
+$coresidentAppDll = Test-Path (Join-Path $appDllDir 'IsoSessionApp.dll')
 $inboxDll = Test-Path 'C:\Windows\System32\IsoSessionApp.dll'
 $IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
 $inboxRegistered = Test-Path $IsoSessionOpsKey
 $inboxAvailable = $inboxDll -and $inboxRegistered
 
-$runtimeDir = $env:MXC_ISOSESSION_RUNTIME_DIR
-if ([string]::IsNullOrWhiteSpace($runtimeDir) -or -not [System.IO.Path]::IsPathRooted($runtimeDir.Trim())) {
-    $runtimeDir = 'C:\Program Files\Microsoft\Agentic Runtime\2608'
+if ($coresidentAppDll) {
+    Write-Host "Backend probe hint: reg-free IsoSessionApp.dll co-located at '$appDllDir' (fused-manifest activation expected)" -ForegroundColor DarkGray
+} elseif ($inboxAvailable) {
+    Write-Host "Backend probe hint: inbox IsoSessionApp.dll + WinRT registration present in System32" -ForegroundColor DarkGray
 } else {
-    $runtimeDir = $runtimeDir.Trim()
+    Write-Host "Backend probe hint: no co-located or inbox IsoSessionApp.dll found; relying on the functional probe to decide" -ForegroundColor DarkGray
 }
-$coresidentAvailable = Test-Path (Join-Path $runtimeDir 'IsoSessionApp.dll')
 
-if (-not ($inboxAvailable -or $coresidentAvailable)) {
-    Write-Host "SKIPPED: no IsolationSession runtime found (no inbox IsoSessionApp.dll + registration in System32, and no coresident IsoSessionApp.dll under '$runtimeDir')" -ForegroundColor Yellow
-    exit 0
+# Functional probe: a real state-aware provision request. A feature-OFF dev
+# build (backend not compiled in) yields an error with NO native HRESULT --
+# the ONLY legitimate SKIP. A real deployment failure (fused private-CLSID
+# manifest missing -> REGDB_E_CLASSNOTREG 0x80040154, or a version-pin
+# mismatch -> E_NOINTERFACE 0x80004002) carries a nativeCode and is a HARD
+# FAILURE, so the OS-side no-fallback contract is not masked as a green SKIP.
+function Invoke-ResizeSmokeProbe {
+    param([hashtable]$Request)
+    $json = $Request | ConvertTo-Json -Compress -Depth 8
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    $out = & $WxcExec --experimental --config-base64 $b64 2>&1 | Out-String
+    @{ Stdout = $out; ExitCode = $LASTEXITCODE }
 }
-if ($coresidentAvailable -and -not $inboxAvailable) {
-    Write-Host "Backend probe: using coresident runtime at '$runtimeDir' (inbox System32 activation not present)" -ForegroundColor DarkGray
+
+$probe = Invoke-ResizeSmokeProbe -Request @{ phase = 'provision'; containment = 'isolation_session' }
+$probeEnv = $null
+try { $probeEnv = $probe.Stdout | ConvertFrom-Json } catch { }
+if ($null -ne $probeEnv -and $null -ne $probeEnv.error) {
+    $errCode = [string]$probeEnv.error.code
+    $nativeCode = if ($null -ne $probeEnv.error.PSObject.Properties['nativeCode']) {
+        [string]$probeEnv.error.nativeCode
+    } else { $null }
+
+    if ([string]::IsNullOrEmpty($nativeCode) -and
+        ($errCode -eq 'unsupported_containment' -or $errCode -eq 'backend_unavailable')) {
+        Write-Host "SKIPPED: wxc-exec reports '$errCode' with no native HRESULT (built without --features isolation_session)" -ForegroundColor Yellow
+        exit 0
+    }
+
+    Write-Host "FAILED: backend probe returned a hard error -- the deployment is broken, NOT a skippable feature-off build." -ForegroundColor Red
+    Write-Host "  code       : $errCode" -ForegroundColor Red
+    if (-not [string]::IsNullOrEmpty($nativeCode)) {
+        Write-Host "  nativeCode : $nativeCode" -ForegroundColor Red
+    }
+    Write-Host "  message    : $([string]$probeEnv.error.message)" -ForegroundColor Red
+    if ($null -ne $probeEnv.error.PSObject.Properties['remediation'] -and $probeEnv.error.remediation) {
+        Write-Host "  remediation: $([string]$probeEnv.error.remediation)" -ForegroundColor Red
+    }
+    exit 1
+}
+# Healthy build: the probe provisioned a throwaway agent user -- deprovision it
+# immediately so the interactive smoke doesn't leak a local user.
+if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
+    $probeSandboxId = [string]$probeEnv.result.sandboxId
+    Write-Host "Backend probe: provisioned $probeSandboxId, deprovisioning ..." -ForegroundColor DarkGray
+    $null = Invoke-ResizeSmokeProbe -Request @{ phase = 'deprovision'; sandboxId = $probeSandboxId }
 }
 
 # ---------------- Build the encoded inner loop ----------------

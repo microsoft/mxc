@@ -107,40 +107,43 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 
 # ---------------- Backend-availability probe ----------------
 #
-# The runtime can be provided two ways (mirrors
+# The runtime is bound one of two ways (mirrors the current design in
 # backends/isolation_session/common/src/regfree.rs):
+#   * reg-free MSI (the shipping design): IsoSessionApp.dll co-located next
+#     to wxc-exec.exe, reached by reg-free private-CLSID activation via the
+#     fused <comClass> manifest. The App DLL (C++) then resolves the MSI
+#     runtime folder from HKLM InstallDir and coresident-loads the client.
+#     There is NO MXC-side runtime-folder env var (MXC_ISOSESSION_RUNTIME_DIR
+#     was removed) and NO System32 copy or WinRT registry entry required.
 #   * inbox: IsoSessionApp.dll in System32 + the IsoSessionOps WinRT class
-#     registered (default system activation); or
-#   * coresident MSI: IsoSessionApp.dll under the runtime folder
-#     (DEFAULT_RUNTIME_DIR, or MXC_ISOSESSION_RUNTIME_DIR when set to an
-#     absolute path), which wxc-exec binds by path -- no System32 copy or
-#     registry entry required.
-# Accept EITHER, then confirm functionally:
-#   3. wxc-exec responds to a state-aware request without backend_unavailable
-#      (catches feature-flag-off builds)
-# Only a total absence of runtime, or a backend_unavailable build, surfaces as
-# SKIP rather than a forest of FAILed tests. An MSI-only host is exercised, not
-# skipped.
+#     registered (default system activation on a build that ships it inbox).
+#
+# The presence checks below are ONLY a friendly diagnostic hint. The
+# FUNCTIONAL probe (a real state-aware provision request) is authoritative,
+# because on a correctly deployed reg-free host the App DLL lives next to
+# wxc-exec -- not in System32 and not under any runtime folder this script
+# can guess -- so a file-presence gate must never green-SKIP the run.
+#
+# SKIP is reserved for a genuine feature-OFF dev build (backend not compiled
+# in): the error carries no native HRESULT. A real deployment failure -- the
+# fused manifest missing (regfree_not_fused -> REGDB_E_CLASSNOTREG 0x80040154)
+# or a version-pin mismatch (E_NOINTERFACE 0x80004002) -- carries a nativeCode
+# and is a HARD FAILURE here, never a green SKIP. That is the whole point of
+# the OS-side no-fallback hard error: it must surface, not hide.
 
+$appDllDir = Split-Path -Parent $WxcExec
+$coresidentAppDll = Test-Path (Join-Path $appDllDir 'IsoSessionApp.dll')
 $inboxDll = Test-Path 'C:\Windows\System32\IsoSessionApp.dll'
 $IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
 $inboxRegistered = Test-Path $IsoSessionOpsKey
 $inboxAvailable = $inboxDll -and $inboxRegistered
 
-$runtimeDir = $env:MXC_ISOSESSION_RUNTIME_DIR
-if ([string]::IsNullOrWhiteSpace($runtimeDir) -or -not [System.IO.Path]::IsPathRooted($runtimeDir.Trim())) {
-    $runtimeDir = 'C:\Program Files\Microsoft\Agentic Runtime\2026.08'
+if ($coresidentAppDll) {
+    Write-Host "Backend probe hint: reg-free IsoSessionApp.dll co-located at '$appDllDir' (fused-manifest activation expected)" -ForegroundColor DarkGray
+} elseif ($inboxAvailable) {
+    Write-Host "Backend probe hint: inbox IsoSessionApp.dll + WinRT registration present in System32" -ForegroundColor DarkGray
 } else {
-    $runtimeDir = $runtimeDir.Trim()
-}
-$coresidentAvailable = Test-Path (Join-Path $runtimeDir 'IsoSessionApp.dll')
-
-if (-not ($inboxAvailable -or $coresidentAvailable)) {
-    Write-Host "SKIPPED: no IsolationSession runtime found (no inbox IsoSessionApp.dll + registration in System32, and no coresident IsoSessionApp.dll under '$runtimeDir')" -ForegroundColor Yellow
-    exit 0
-}
-if ($coresidentAvailable -and -not $inboxAvailable) {
-    Write-Host "Backend probe: using coresident runtime at '$runtimeDir' (inbox System32 activation not present)" -ForegroundColor DarkGray
+    Write-Host "Backend probe hint: no co-located or inbox IsoSessionApp.dll found; relying on the functional probe to decide" -ForegroundColor DarkGray
 }
 
 # Helper: send an inline state-aware request via --config-base64 and return
@@ -153,12 +156,57 @@ function Invoke-StateAwareProbe {
     @{ Stdout = $out; ExitCode = $LASTEXITCODE }
 }
 
-$probe = Invoke-StateAwareProbe -Request @{ phase = 'provision'; containment = 'isolation_session' }
+# The provision request MUST carry an explicit network policy. With the
+# isolation_session backend, an unspecified network block validates as
+# "unrestricted", which wxc-exec rejects at CONFIG VALIDATION (code
+# 'policy_validation') BEFORE any backend activation is attempted -- a
+# false hard-failure that never exercises the reg-free chain. Mirror the
+# canonical isolation_session_state_aware_provision.json: defaultPolicy
+# 'allow' + allowLocalNetwork so the probe passes validation and actually
+# provisions against the backend (the authoritative health signal).
+$probe = Invoke-StateAwareProbe -Request @{
+    phase       = 'provision'
+    containment = 'isolation_session'
+    network     = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+}
 $probeEnv = $null
 try { $probeEnv = $probe.Stdout | ConvertFrom-Json } catch { }
-if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
-    Write-Host "SKIPPED: wxc-exec reports backend_unavailable (likely built without --features isolation_session)" -ForegroundColor Yellow
-    exit 0
+if ($null -ne $probeEnv -and $null -ne $probeEnv.error) {
+    $errCode = [string]$probeEnv.error.code
+    # nativeCode (camelCase) is present ONLY when the failure came from an
+    # underlying platform API call -- i.e. activation was attempted and failed.
+    # Its presence is the bright line between "backend not compiled in" (a
+    # legitimate dev-build SKIP) and "backend compiled in but the deployment is
+    # broken" (the OS-side no-fallback HARD ERROR we must never mask).
+    $nativeCode = if ($null -ne $probeEnv.error.PSObject.Properties['nativeCode']) {
+        [string]$probeEnv.error.nativeCode
+    } else { $null }
+
+    if ([string]::IsNullOrEmpty($nativeCode) -and
+        ($errCode -eq 'unsupported_containment' -or $errCode -eq 'backend_unavailable')) {
+        # Feature-off dev build: the IsolationSession backend was not compiled
+        # in, so there is no HRESULT. This is the ONLY legitimate SKIP.
+        Write-Host "SKIPPED: wxc-exec reports '$errCode' with no native HRESULT (built without --features isolation_session)" -ForegroundColor Yellow
+        exit 0
+    }
+
+    # Anything else is a real, deployed-but-broken backend. Surface it as a
+    # HARD FAILURE so the OS-side no-fallback contract is visible:
+    #   * 0x80040154 REGDB_E_CLASSNOTREG -> fused private-CLSID manifest missing
+    #     (regfree_not_fused): wxc-exec was not built/staged with the SDK nuget's
+    #     IsoSessionApp.dll + fused <comClass> manifest.
+    #   * 0x80004002 E_NOINTERFACE      -> version-pin mismatch: rebuild the MSI
+    #     and the SDK nuget from the same OS commit.
+    Write-Host "FAILED: backend probe returned a hard error -- the deployment is broken, NOT a skippable feature-off build." -ForegroundColor Red
+    Write-Host "  code       : $errCode" -ForegroundColor Red
+    if (-not [string]::IsNullOrEmpty($nativeCode)) {
+        Write-Host "  nativeCode : $nativeCode" -ForegroundColor Red
+    }
+    Write-Host "  message    : $([string]$probeEnv.error.message)" -ForegroundColor Red
+    if ($null -ne $probeEnv.error.PSObject.Properties['remediation'] -and $probeEnv.error.remediation) {
+        Write-Host "  remediation: $([string]$probeEnv.error.remediation)" -ForegroundColor Red
+    }
+    exit 1
 }
 # On a healthy build the probe successfully provisions an agent user --
 # deprovision it immediately so the probe doesn't leak.

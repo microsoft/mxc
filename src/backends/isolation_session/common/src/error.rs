@@ -56,6 +56,13 @@ const CLASS_E_CLASSNOTAVAILABLE_HRESULT: u32 = 0x80040111;
 /// `REGDB_E_CLASSNOTREG` — the runtime class is not registered at all.
 const REGDB_E_CLASSNOTREG_HRESULT: u32 = 0x80040154;
 
+/// `E_NOINTERFACE` — the activator produced an object that does not implement
+/// the requested interface. In this backend that is the signature of a
+/// winmd/MSI version-pin mismatch: `IsoSessionApp.dll` activated, but the
+/// interface IID the Preview WinMD was built against does not match the IID
+/// the MSI-installed runtime exposes. See [`activation_error`].
+const E_NOINTERFACE_HRESULT: u32 = 0x80004002;
+
 /// Renders an HRESULT for the wire `nativeCode` field.
 fn format_native_code(code: u32) -> String {
     format!("{code:#010x}")
@@ -267,6 +274,14 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
             "the in-proc IsolationSession runtime API is not available on this OS build. Ensure \
          the OS feature gate is enabled and the platform supports isolation sessions."
                 .to_string()
+        } else if code == E_NOINTERFACE_HRESULT {
+            "the co-located IsoSessionApp.dll activated but returned an object that does not \
+         implement the expected IsolationSession interface. This is the classic winmd/MSI \
+         version-pin mismatch: the Preview WinMD wxc-exec was built against and the \
+         MSI-installed IsolationSession runtime were produced from different OS versions, so \
+         their interface IIDs differ. Rebuild the MSI and the \
+         Microsoft.Windows.AI.IsolationSession.SDK nuget from the same OS commit."
+                .to_string()
         } else {
             format!("IsolationSession runtime API activation failed: {detail}")
         };
@@ -275,6 +290,36 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
         Some(code),
         Some(message),
         None,
+    ))
+}
+
+/// The reg-free private-CLSID activator is not fused into this executable, so
+/// the version-pinned MSI-installed IsolationSession runtime cannot be bound.
+///
+/// Raised for the `None` arm of
+/// [`super::regfree::activate_via_private_clsid`] (`REGDB_E_CLASSNOTREG` from
+/// `CoCreateInstance` on the private activator CLSID). MXC deliberately does
+/// **not** fall back to the inbox `System32` runtime here — silently binding a
+/// different, unversioned binary set is exactly the failure mode this design
+/// exists to prevent — so the missing fused manifest surfaces as a hard,
+/// actionable error instead.
+pub(super) fn regfree_not_fused(operation: &str) -> IsolationSessionError {
+    IsolationSessionError::ServiceUnavailable(IsoApiFailure::new(
+        operation,
+        Some(REGDB_E_CLASSNOTREG_HRESULT),
+        Some(
+            "IsolationSession reg-free activation was not taken: the private-CLSID activator \
+             (IsoSessionApp.comClass.manifest) is not fused into this executable, so the \
+             version-pinned MSI-installed IsolationSession runtime could not be bound. MXC will \
+             not silently fall back to the inbox System32 runtime."
+                .to_string(),
+        ),
+        Some(
+            "Rebuild wxc-exec against the Microsoft.Windows.AI.IsolationSession.SDK nuget so the \
+             activation manifest is fused into the executable and IsoSessionApp.dll is \
+             co-located next to wxc-exec.exe."
+                .to_string(),
+        ),
     ))
 }
 
@@ -674,6 +719,33 @@ mod tests {
         assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
         assert_eq!(mapped.native_code(), Some("0x80004005"));
         assert!(mapped.message.contains("catastrophic failure"));
+    }
+
+    /// `E_NOINTERFACE` from activation is the winmd/MSI version-pin mismatch
+    /// signature: the mapping must name that cause rather than echo the bare
+    /// COM detail, so the message points at rebuilding both from one commit.
+    #[test]
+    fn e_nointerface_activation_names_version_pin_mismatch() {
+        let mapped = map_lifecycle_error(activation_error(E_NOINTERFACE_HRESULT, "ignored"));
+        assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(mapped.native_code(), Some("0x80004002"));
+        assert!(mapped.message.contains("version-pin mismatch"));
+        assert!(mapped.message.contains("same OS commit"));
+    }
+
+    /// The hard error raised when the reg-free activator is not fused must
+    /// carry the REGDB_E_CLASSNOTREG code, an operation, a message that refuses
+    /// the inbox fallback, and an actionable remediation.
+    #[test]
+    fn regfree_not_fused_is_a_hard_actionable_error() {
+        let mapped = map_lifecycle_error(regfree_not_fused(op::ACTIVATE));
+        assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(mapped.operation(), Some("IsoSessionOps.ActivateInstance"));
+        assert_eq!(mapped.native_code(), Some("0x80040154"));
+        assert!(mapped.message.contains("not silently fall back"));
+        assert!(mapped
+            .remediation()
+            .is_some_and(|r| r.contains("IsolationSession.SDK nuget")));
     }
 
     #[test]
