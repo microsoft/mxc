@@ -23,11 +23,15 @@
 //! ## Diagnostics
 //!
 //! By default the runner sets `RUST_LOG=off` in nanvixd's environment, which
-//! suppresses the per-run `%LOCALAPPDATA%\nanvix\logs\nanvixd_*.log` trace
-//! file and noticeably reduces warm-start latency. Set `MXC_NANVIX_TRACE=1`
-//! (or `true`/`yes`, case-insensitive) before invoking wxc-exec to let
-//! nanvixd use its own `RUST_LOG` default and to capture nanvixd's stderr
-//! for inclusion in the wxc-exec log.
+//! suppresses its trace output and noticeably reduces warm-start latency. Set
+//! `MXC_NANVIX_TRACE=1` (or `true`/`yes`, case-insensitive) before invoking
+//! wxc-exec to let nanvixd use its own `RUST_LOG` default and to capture
+//! nanvixd's stderr for inclusion in the wxc-exec log.
+//!
+//! Trace mode also passes `-log-to-stdout` to nanvixd. Without it nanvixd
+//! writes its trace to a file under `-log-dir` (default `<cwd>/logs`, i.e. the
+//! snapshot home) and the captured stderr is empty — which is exactly the
+//! wrong behavior when diagnosing a VM that never finished booting.
 //!
 //! ## Exit codes
 //!
@@ -676,6 +680,15 @@ impl NanVixScriptRunner {
 
         let mut cmd = Command::new(&paths.nanvixd);
 
+        if trace {
+            // Route nanvixd's trace to its standard streams. Its default is a
+            // log file under `-log-dir` (i.e. `<snapshot_home>/logs`), which
+            // would leave the stderr we just piped empty and give a stalled
+            // boot no visible diagnostics at all. Must precede the `--`
+            // separator, so it is added before the per-platform arguments.
+            cmd.arg("-log-to-stdout");
+        }
+
         // Host networking is opt-in. When enabled, attach the host network
         // backend; nanvixd parses this flag regardless of argument order, so
         // it is added up front for both the Windows (snapshot) and Linux
@@ -735,7 +748,7 @@ impl NanVixScriptRunner {
             .stdout(Stdio::inherit())
             .stderr(stderr);
         if !trace {
-            // Suppress nanvixd's env_logger output and per-run log file.
+            // Suppress nanvixd's trace output and per-run log file.
             cmd.env("RUST_LOG", "off");
         }
         cmd.spawn().map_err(|e| {
@@ -893,6 +906,13 @@ impl NanVixScriptRunner {
 
         if timed_out.load(Ordering::SeqCst) {
             let _ = child.kill();
+            // Emit the captured trace before returning. A timeout is the one
+            // failure mode where nanvixd never reports a reason itself, so
+            // dropping its stderr here would leave the log with nothing but
+            // "timed out" — the exact case these diagnostics exist for.
+            if !stderr_output.is_empty() {
+                let _ = writeln!(logger, "NanVix stderr:\n{}", stderr_output);
+            }
             let err = NanVixError::Timeout {
                 script_timeout_ms: script_timeout,
                 total_ms: timeout_ms,

@@ -11,11 +11,16 @@
     This probe P/Invokes WinHvPlatform.dll directly to:
 
       1. Query capabilities through WHvGetCapability.
-      2. Attempt a real WHvCreatePartition / WHvSetupPartition and delete it.
+      2. Build a complete partition (WHvCreatePartition / WHvSetupPartition /
+         WHvCreateVirtualProcessor), map a guest page, and actually execute
+         guest code on it.
 
-    Step 2 is the important one: it is the first call that genuinely exercises
-    the hypervisor, and the most likely place for a host that reports WHP as
-    "enabled" to fail or block.
+    Step 2 is the decisive one. Capability flags can look correct on a host
+    where a partition cannot be set up, and a partition can be set up on a host
+    where the hypervisor never actually executes guest instructions -- which is
+    what a VM monitor such as nanvixd needs. The guest here is a single `hlt`
+    placed at the x86 reset vector, so a healthy host reports exit reason
+    `WHvRunVpExitReasonX64Halt` and no register or paging setup is required.
 
     Run this on both a working host and a failing one and compare the output.
 
@@ -78,6 +83,42 @@ public static class Whp
         uint PropertyCode,
         IntPtr PropertyBuffer,
         uint PropertyBufferSizeInBytes);
+
+    [DllImport("WinHvPlatform.dll")]
+    public static extern int WHvCreateVirtualProcessor(
+        IntPtr Partition,
+        uint VpIndex,
+        uint Flags);
+
+    [DllImport("WinHvPlatform.dll")]
+    public static extern int WHvDeleteVirtualProcessor(
+        IntPtr Partition,
+        uint VpIndex);
+
+    [DllImport("WinHvPlatform.dll")]
+    public static extern int WHvMapGpaRange(
+        IntPtr Partition,
+        IntPtr SourceAddress,
+        ulong GuestAddress,
+        ulong SizeInBytes,
+        uint Flags);
+
+    [DllImport("WinHvPlatform.dll")]
+    public static extern int WHvRunVirtualProcessor(
+        IntPtr Partition,
+        uint VpIndex,
+        IntPtr ExitContext,
+        uint ExitContextSizeInBytes);
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr VirtualAlloc(
+        IntPtr lpAddress,
+        UIntPtr dwSize,
+        uint flAllocationType,
+        uint flProtect);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool VirtualFree(IntPtr lpAddress, UIntPtr dwSize, uint dwFreeType);
 }
 '@
 
@@ -158,39 +199,60 @@ if ($hypervisorPresent -eq 0) {
 }
 
 # The decisive test. Feature flags can look correct on a host where partition
-# creation still fails or blocks; this is the call a VM monitor makes first.
+# setup fails, and setup can succeed on a host that never executes guest code.
 Write-Host ''
-Write-Host '--- WHvCreatePartition (the call that actually exercises the hypervisor) ---'
+Write-Host '--- Partition setup and guest execution (what a VM monitor actually needs) ---'
+
+# WHV_PARTITION_PROPERTY_CODE values from WinHvPlatformDefs.h. These are easy to
+# get wrong: ProcessorCount is 0x00001fff, NOT 0x00001002 (ProcessorClFlushSize),
+# and ExtendedVmExits is 0x00000001, NOT 0x00000002 (ExceptionExitBitmap).
+# Setting the wrong code makes WHvSetupPartition fail with
+# WHV_E_INVALID_PARTITION_CONFIG (0x80370304) on a perfectly healthy host.
+$PropertyCodeExtendedVmExits = 0x00000001
+$PropertyCodeProcessorCount = 0x00001fff
+
+# WHV_RUN_VP_EXIT_REASON values worth naming in the output.
+$exitReasons = @{
+    0x00000000 = 'None'
+    0x00000001 = 'MemoryAccess'
+    0x00000002 = 'X64IoPortAccess'
+    0x00000004 = 'UnrecoverableException'
+    0x00000005 = 'InvalidVpRegisterValue'
+    0x00000006 = 'UnsupportedFeature'
+    0x00000007 = 'X64InterruptWindow'
+    0x00000008 = 'X64Halt'
+    0x00001000 = 'X64MsrAccess'
+    0x00001001 = 'X64Cpuid'
+    0x00001002 = 'Exception'
+    0x00002001 = 'Canceled'
+}
 
 $partition = [IntPtr]::Zero
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $hr = [Whp]::WHvCreatePartition([ref]$partition)
 $stopwatch.Stop()
-Write-Host ("  WHvCreatePartition   hr=0x{0:X8}  ({1} ms)" -f $hr, $stopwatch.ElapsedMilliseconds)
+Write-Host ("  WHvCreatePartition        hr=0x{0:X8}  ({1} ms)" -f $hr, $stopwatch.ElapsedMilliseconds)
 
 if ($hr -ne 0) {
     Write-Host '::warning::WHvCreatePartition failed - WHP cannot host a VM here even though the feature is enabled.'
     Write-Host ''
-    Write-Host 'RESULT: partition creation FAILED.'
+    Write-Host 'RESULT: partition creation FAILED - the hypervisor is unusable on this host.'
     exit 0
 }
 
+$guestMemory = @()
+$vpCreated = $false
 try {
-    # A partition needs both a processor count and an extended-VM-exit
-    # configuration before setup will accept it; omitting the latter yields
-    # WHV_E_INVALID_PARTITION_CONFIG (0x80370304) on an otherwise healthy host.
     $propertyBuffer = [Runtime.InteropServices.Marshal]::AllocHGlobal(8)
     try {
         [Runtime.InteropServices.Marshal]::WriteInt64($propertyBuffer, 0)
         [Runtime.InteropServices.Marshal]::WriteInt32($propertyBuffer, 1)
-        # WHvPartitionPropertyCodeProcessorCount = 0x00001002
-        $hrProp = [Whp]::WHvSetPartitionProperty($partition, 0x00001002, $propertyBuffer, 4)
-        Write-Host ("  SetProcessorCount    hr=0x{0:X8}" -f $hrProp)
+        $hrProp = [Whp]::WHvSetPartitionProperty($partition, $PropertyCodeProcessorCount, $propertyBuffer, 4)
+        Write-Host ("  SetProcessorCount(1)      hr=0x{0:X8}" -f $hrProp)
 
-        # WHvPartitionPropertyCodeExtendedVmExits = 0x00000002
         [Runtime.InteropServices.Marshal]::WriteInt64($propertyBuffer, 0)
-        $hrExits = [Whp]::WHvSetPartitionProperty($partition, 0x00000002, $propertyBuffer, 8)
-        Write-Host ("  SetExtendedVmExits   hr=0x{0:X8}" -f $hrExits)
+        $hrExits = [Whp]::WHvSetPartitionProperty($partition, $PropertyCodeExtendedVmExits, $propertyBuffer, 8)
+        Write-Host ("  SetExtendedVmExits(0)     hr=0x{0:X8}" -f $hrExits)
     } finally {
         [Runtime.InteropServices.Marshal]::FreeHGlobal($propertyBuffer)
     }
@@ -198,21 +260,113 @@ try {
     $stopwatch.Restart()
     $hrSetup = [Whp]::WHvSetupPartition($partition)
     $stopwatch.Stop()
-    Write-Host ("  WHvSetupPartition    hr=0x{0:X8}  ({1} ms)" -f $hrSetup, $stopwatch.ElapsedMilliseconds)
+    Write-Host ("  WHvSetupPartition         hr=0x{0:X8}  ({1} ms)" -f $hrSetup, $stopwatch.ElapsedMilliseconds)
+    if ($hrSetup -ne 0) {
+        Write-Host ''
+        Write-Host ('::warning::WHvSetupPartition failed with 0x{0:X8}.' -f $hrSetup)
+        Write-Host 'RESULT: partition setup FAILED - a VM monitor cannot start here.'
+        exit 0
+    }
 
-    Write-Host ''
-    if ($hrSetup -eq 0) {
-        Write-Host 'RESULT: WHP can create and set up a partition - the hypervisor is usable.'
-        Write-Host '        A VM monitor hanging here is failing for some other reason.'
-    } else {
-        # 0x80370304 here means this probe built an incomplete partition, not
-        # necessarily that the host is broken; compare against a known-good host.
-        Write-Host ("RESULT: partition setup returned 0x{0:X8}." -f $hrSetup)
-        Write-Host '        Compare this value against a host where the VM monitor works.'
+    $stopwatch.Restart()
+    $hrVp = [Whp]::WHvCreateVirtualProcessor($partition, 0, 0)
+    $stopwatch.Stop()
+    Write-Host ("  WHvCreateVirtualProcessor hr=0x{0:X8}  ({1} ms)" -f $hrVp, $stopwatch.ElapsedMilliseconds)
+    if ($hrVp -ne 0) {
+        Write-Host ''
+        Write-Host '::warning::WHvCreateVirtualProcessor failed - no vCPU can be created on this host.'
+        Write-Host 'RESULT: vCPU creation FAILED.'
+        exit 0
+    }
+    $vpCreated = $true
+
+    # Map HLT-filled pages at the addresses a fresh vCPU can start from and let
+    # the guest run. WHP resets a vCPU to real mode at CS.Base 0xF0000 /
+    # RIP 0xFFF0 (linear 0xFFFF0, page 0xFF000); the zero page is mapped too so
+    # the probe stays valid if that reset state ever changes. Either way the
+    # first instruction fetched is HLT (0xF4).
+    $pageSize = 4096
+    $MEM_COMMIT_RESERVE = 0x3000
+    $PAGE_EXECUTE_READWRITE = 0x40
+    # WHvMapGpaRangeFlagRead | Write | Execute
+    $mapFlags = 0x00000007
+    $guestPages = @(
+        @{ Name = 'reset vector'; Gpa = [uint64]0xFF000 },
+        @{ Name = 'zero page'; Gpa = [uint64]0 }
+    )
+
+    foreach ($page in $guestPages) {
+        $host_address = [Whp]::VirtualAlloc([IntPtr]::Zero, [UIntPtr]::new($pageSize), $MEM_COMMIT_RESERVE, $PAGE_EXECUTE_READWRITE)
+        if ($host_address -eq [IntPtr]::Zero) {
+            Write-Host '::warning::VirtualAlloc for guest memory failed - cannot complete the execution test.'
+            exit 0
+        }
+        $guestMemory += $host_address
+        for ($offset = 0; $offset -lt $pageSize; $offset++) {
+            [Runtime.InteropServices.Marshal]::WriteByte($host_address, $offset, 0xF4)
+        }
+
+        $hrMap = [Whp]::WHvMapGpaRange($partition, $host_address, $page.Gpa, $pageSize, $mapFlags)
+        Write-Host ("  WHvMapGpaRange {0,-11} hr=0x{1:X8}" -f $page.Name, $hrMap)
+        if ($hrMap -ne 0) {
+            Write-Host ''
+            Write-Host '::warning::WHvMapGpaRange failed - guest memory cannot be mapped on this host.'
+            Write-Host 'RESULT: guest memory mapping FAILED.'
+            exit 0
+        }
+    }
+
+    # WHV_RUN_VP_EXIT_CONTEXT is 224 bytes (x64, SDK 10.0.26100).
+    $exitContextSize = 224
+    $exitContext = [Runtime.InteropServices.Marshal]::AllocHGlobal($exitContextSize)
+    try {
+        # If the hypervisor never actually dispatches guest code this call is
+        # where a host blocks; the CI step timeout bounds it.
+        $stopwatch.Restart()
+        $hrRun = [Whp]::WHvRunVirtualProcessor($partition, 0, $exitContext, $exitContextSize)
+        $stopwatch.Stop()
+        $exitReason = [Runtime.InteropServices.Marshal]::ReadInt32($exitContext)
+        $reasonName = if ($exitReasons.ContainsKey($exitReason)) { $exitReasons[$exitReason] } else { 'Unknown' }
+        # WHV_RUN_VP_EXIT_CONTEXT layout: ExitReason(0), Reserved(4),
+        # VpContext(8) { ExecutionState, InstructionLength/Cr8, Reserved,
+        # Reserved2, Cs @16, Rip @32, Rflags @40 }, union @48. For a
+        # MemoryAccess exit the union holds WHV_MEMORY_ACCESS_CONTEXT with
+        # Gpa at offset 72.
+        $csBase = [Runtime.InteropServices.Marshal]::ReadInt64($exitContext, 16)
+        $rip = [Runtime.InteropServices.Marshal]::ReadInt64($exitContext, 32)
+        Write-Host ("  WHvRunVirtualProcessor    hr=0x{0:X8}  ({1} ms)" -f $hrRun, $stopwatch.ElapsedMilliseconds)
+        Write-Host ("  Guest exit reason         0x{0:X8} ({1})" -f $exitReason, $reasonName)
+        Write-Host ("  Guest CS.Base/RIP         0x{0:X16} / 0x{1:X16}" -f $csBase, $rip)
+        if ($exitReason -eq 0x00000001) {
+            $gpa = [Runtime.InteropServices.Marshal]::ReadInt64($exitContext, 72)
+            Write-Host ("  Faulting GPA              0x{0:X16}" -f $gpa)
+        }
+
+        Write-Host ''
+        if ($hrRun -eq 0 -and $exitReason -eq 0x00000008) {
+            Write-Host 'RESULT: WHP executed guest code and halted as expected.'
+            Write-Host '        The hypervisor is fully usable here - a VM monitor that hangs'
+            Write-Host '        or fails is doing so for a reason above WHP.'
+        } elseif ($hrRun -ne 0) {
+            Write-Host ('::warning::WHvRunVirtualProcessor failed with 0x{0:X8}.' -f $hrRun)
+            Write-Host 'RESULT: the hypervisor refused to run guest code on this host.'
+        } else {
+            Write-Host ("::warning::Guest exited for {0} instead of X64Halt." -f $reasonName)
+            Write-Host 'RESULT: guest code ran but did not reach HLT - compare against a working host.'
+        }
+    } finally {
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($exitContext)
     }
 } finally {
+    if ($vpCreated) {
+        $hrDeleteVp = [Whp]::WHvDeleteVirtualProcessor($partition, 0)
+        Write-Host ("  WHvDeleteVirtualProcessor hr=0x{0:X8}" -f $hrDeleteVp)
+    }
     $hrDelete = [Whp]::WHvDeletePartition($partition)
-    Write-Host ("  WHvDeletePartition   hr=0x{0:X8}" -f $hrDelete)
+    Write-Host ("  WHvDeletePartition        hr=0x{0:X8}" -f $hrDelete)
+    foreach ($address in $guestMemory) {
+        [void][Whp]::VirtualFree($address, [UIntPtr]::Zero, 0x8000)
+    }
 }
 
 exit 0

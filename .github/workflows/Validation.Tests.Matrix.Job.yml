@@ -100,11 +100,12 @@ jobs:
 
       - name: Probe nanvixd directly
         if: matrix.command == 'microvm'
-        timeout-minutes: 5
+        timeout-minutes: 10
         shell: pwsh
         run: |
           ./scripts/ci/probe-nanvixd.ps1 `
-            -BinDir (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin')
+            -BinDir (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') `
+            -Mode both
 
       - name: Prepare Process Container host
         if: matrix.backend == 'process-t3'
