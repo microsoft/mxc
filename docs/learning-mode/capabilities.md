@@ -39,10 +39,12 @@ it answers "what would this workload touch if nothing were blocked?" but it does
 so by **not enforcing deny-by-default** for the duration of the run.
 
 Because it relaxes containment, `permissiveLearningMode` is **security-sensitive**:
-whenever it is present, both the AppContainer and BaseContainer runners emit an
-always-visible **security warning** on the host's stderr. In-process Rust callers
-can also inspect it through `Sandbox::warnings()` or `Output::warnings`. It is a
-reserved internal capability enabled by the dedicated audit/capture entry points.
+whenever it is present, both the AppContainer and BaseContainer runners record a
+**security warning**. It is not written to the host's stderr — a library must not
+write to an embedding process's terminal behind its back — so callers read it
+back through `Sandbox::warnings()` / `Output::warnings` and surface it in their
+own UI. It is a reserved internal capability enabled by the dedicated
+audit/capture entry points.
 
 The parser rejects both learning-mode capability names in
 `processContainer.capabilities`, case-insensitively. This prevents a policy from
@@ -69,8 +71,8 @@ wxc-exec --audit --config <config>
 These entry points inject the reserved capability strings internally; users
 must not add them directly to `processContainer.capabilities`.
 When either learning-mode capability is in effect the runner emits a diagnostic
-describing the mode (informational logging for `learningModeLogging`, an
-always-visible stderr security warning for `permissiveLearningMode`).
+describing the mode (informational logging for `learningModeLogging`, a retained
+security warning for `permissiveLearningMode`, readable via `warnings()`).
 
 ## Three learning-mode flows
 

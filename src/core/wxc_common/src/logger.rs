@@ -253,20 +253,15 @@ impl Logger {
         self.diag_accumulate("\n");
     }
 
-    /// Emit a security warning through an always-visible channel and retain it
-    /// for in-process callers.
+    /// Record a security warning for in-process callers.
+    ///
+    /// Deliberately not written to stderr: a library must not write to an
+    /// embedding host's terminal behind its back. Callers read warnings back
+    /// through [`warnings`](Self::warnings) / [`take_warnings`](Self::take_warnings)
+    /// and present them however suits their UI.
     pub fn warning_line(&mut self, msg: &str) {
-        eprintln!("{msg}");
         self.warnings.push(msg.to_string());
-        if let Some(ref mut f) = self.file {
-            let secs = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let _ = writeln!(f, "[{}] {}", secs, msg);
-        }
-        self.diag_accumulate(msg);
-        self.diag_accumulate("\n");
+        self.log_diagnostic_line(msg);
     }
 
     /// Security warnings emitted during the run.
