@@ -142,6 +142,8 @@ pub(crate) fn log_enforcement_degraded(
     if !logging_sinks_active(telemetry_active, diagnostic_active) {
         return;
     }
+    // Lazy-compute shared fields only when needed; telemetry is often inactive
+    // on dev/public builds and we want to avoid allocations in that path.
     let effective_level = effective_enforcement_level(tier, degradation.needs_dacl_augmentation);
     let reason_codes = fallback_detector::reason_codes(&degradation.reasons);
     if telemetry_active {
@@ -154,7 +156,7 @@ pub(crate) fn log_enforcement_degraded(
             effective_level.as_str(),
         );
     }
-    if !logger.has_diagnostic_sink() {
+    if !diagnostic_active {
         return;
     }
     let record = AuditEvent::new(AuditEventName::EnforcementDegraded)
