@@ -20,6 +20,11 @@ use crate::lxc_bindings::LxcContainer;
 use crate::network_iptables::NetworkIptablesManager;
 use crate::signal_cleanup;
 
+/// Comment marker on every `/etc/hosts` line this runner writes, so a later
+/// run can strip its own previous entries without disturbing the
+/// distribution's.
+const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
+
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
     config: LxcConfig,
@@ -193,12 +198,13 @@ impl LxcScriptRunner {
         }
 
         // Wait for network only when the config uses network features (firewall rules
-        // or allowed/blocked hosts).
+        // or allowed/blocked hosts), or when the container must reach a proxy.
         let needs_network = matches!(
             request.policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
         ) || !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty();
+            || !request.policy.blocked_hosts.is_empty()
+            || request.policy.network_proxy.is_enabled();
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
@@ -231,6 +237,43 @@ impl LxcScriptRunner {
                     let _ = container.destroy();
                 }
                 return ScriptResponse::error(&format!("Network policy error: {}", e));
+            }
+        }
+
+        // Pin the proxy hostname to the address the firewall just authorized.
+        //
+        // A proxied chain opens no port 53, so the container has no resolver to
+        // find its proxy with, and even with one it could pick an address the
+        // chain does not allow. Failing here is fatal rather than a warning:
+        // without the pin the proxy is unreachable, so the script would run
+        // against a container that can reach nothing.
+        if let Some(pin) = fw_manager.proxy_host_pin() {
+            let command = Self::build_hosts_pin_command(&pin.hosts_line());
+            let _ = writeln!(
+                logger,
+                "Pinning proxy host {} to {} in the container's /etc/hosts.",
+                pin.hostname(),
+                pin.ip()
+            );
+            let pin_outcome = container.attach_run(&command, "/", &[], true, None);
+            let pin_error = match pin_outcome {
+                Ok((0, _, _)) => None,
+                Ok((code, _, stderr)) => Some(format!(
+                    "writing /etc/hosts exited with {}: {}",
+                    code,
+                    stderr.trim()
+                )),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(reason) = pin_error {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Failed to pin the network proxy host inside the container: {}. \
+                     The proxy would be unreachable, so the script was not run.",
+                    reason
+                ));
             }
         }
 
@@ -284,6 +327,36 @@ impl LxcScriptRunner {
 
         response
     }
+
+    /// Build the shell command that installs `hosts_line` into the
+    /// container's `/etc/hosts`.
+    ///
+    /// Idempotent: a container reused across runs (`destroy_on_exit = false`)
+    /// would otherwise accumulate entries, and the *first* match wins in a
+    /// hosts file, so a stale line would shadow the current pin. Every
+    /// previously written entry is stripped by its marker before the new one
+    /// is appended.
+    ///
+    /// The file is rewritten with `cat >` rather than `mv`, because LXC may
+    /// bind-mount `/etc/hosts`; replacing the inode would leave the container
+    /// still reading the old file. Only `grep`, `printf`, `cat`, and `rm` are
+    /// used, so this runs under BusyBox as well as coreutils.
+    ///
+    /// The line is single-quoted, which is safe by construction:
+    /// `ProxyHostPin` can only be built from a validated hostname and a parsed
+    /// [`std::net::IpAddr`], so it cannot contain a quote, a space, or a
+    /// newline.
+    fn build_hosts_pin_command(hosts_line: &str) -> String {
+        // The group's exit status is printf's, so a grep that matches nothing
+        // and exits 1 does not abort the chain.
+        format!(
+            "{{ grep -v '{marker}' /etc/hosts 2>/dev/null; \
+             printf '%s {marker}\\n' '{hosts_line}'; }} > /tmp/.mxc-hosts \
+             && cat /tmp/.mxc-hosts > /etc/hosts && rm -f /tmp/.mxc-hosts",
+            marker = HOSTS_PIN_MARKER,
+            hosts_line = hosts_line
+        )
+    }
 }
 
 impl ScriptRunner for LxcScriptRunner {
@@ -334,5 +407,68 @@ mod tests {
         let runner = LxcScriptRunner::new(&config, "", &lifecycle);
         let name = runner.resolve_container_name();
         assert!(name.starts_with("mxc-"));
+    }
+
+    // The pin is worthless if the mapping it was built from is not the one
+    // that lands in the file.
+    #[test]
+    fn the_hosts_pin_command_writes_the_requested_mapping() {
+        let command = LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com");
+
+        assert!(
+            command.contains("'10.0.0.5 proxy.example.com'"),
+            "the command must carry the mapping verbatim, got: {command}"
+        );
+        assert!(
+            command.contains("/etc/hosts"),
+            "the command must target /etc/hosts, got: {command}"
+        );
+    }
+
+    // A container reused across runs would otherwise accumulate entries, and
+    // the first match in a hosts file wins -- so a stale line would shadow the
+    // pin this run just authorized.
+    #[test]
+    fn the_hosts_pin_command_strips_its_own_previous_entries_first() {
+        let command = LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com");
+
+        assert!(
+            command.contains(&format!("grep -v '{}'", HOSTS_PIN_MARKER)),
+            "the command must remove prior pins before writing; got: {command}"
+        );
+        assert!(
+            command.matches(HOSTS_PIN_MARKER).count() >= 2,
+            "the written line must carry the marker that the strip looks for; got: {command}"
+        );
+    }
+
+    // LXC may bind-mount /etc/hosts. Replacing the inode with `mv` would leave
+    // the container reading the file it had before.
+    #[test]
+    fn the_hosts_pin_command_rewrites_the_file_in_place_rather_than_replacing_it() {
+        let command = LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com");
+
+        assert!(
+            command.contains("> /etc/hosts"),
+            "the command must redirect into the existing file, got: {command}"
+        );
+        assert!(
+            !command.contains("mv "),
+            "the command must not replace the inode, got: {command}"
+        );
+    }
+
+    // Everything the pin needs must exist in a minimal image; a container
+    // built on BusyBox has no coreutils to fall back on.
+    #[test]
+    fn the_hosts_pin_command_uses_only_busybox_available_tools() {
+        let command = LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com");
+
+        for forbidden in ["sed ", "awk ", "tee ", "sponge "] {
+            assert!(
+                !command.contains(forbidden),
+                "the command must not depend on {forbidden:?}, got: {command}"
+            );
+        }
     }
 }
