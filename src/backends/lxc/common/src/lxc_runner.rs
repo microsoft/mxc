@@ -242,10 +242,19 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let _ = writeln!(logger, "Executing script inside container...");
+        let mut exec_env = request.env.clone();
+        // Scrub every inherited proxy variable and, when the policy carries a
+        // proxy, point HTTP(S)_PROXY at it. The returned flag is what makes the
+        // scrub effective: with an empty env `lxc-attach` would otherwise fall
+        // back to keep-env mode and inherit the MXC host process environment,
+        // proxy variables and credentials included.
+        let force_clear_env =
+            wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
         let result = container.attach_run(
             &request.script_code,
             &request.working_directory,
-            &request.env,
+            &exec_env,
+            force_clear_env,
             timeout,
         );
 
