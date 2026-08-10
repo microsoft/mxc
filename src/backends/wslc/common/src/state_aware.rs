@@ -271,20 +271,25 @@ fn map_daemon_error(err: DaemonError) -> MxcError {
     }
 }
 
-/// Validate the `wslc:<id>` shape. The dispatcher already routes by prefix; this
-/// is defence in depth so a malformed id surfaces as `malformed_id` rather than
-/// a confusing daemon-side `not_provisioned`.
+/// Validate the `wslc:<32 lowercase hex>` shape. The dispatcher already routes
+/// by prefix; this is defence in depth so a malformed id surfaces as
+/// `malformed_id` rather than a confusing daemon-side `not_provisioned`. The
+/// grammar mirrors the daemon-minted id (`wslc:` + a UUID simple form).
 fn validate_sandbox_id(sandbox_id: &str) -> Result<(), MxcError> {
-    match sandbox_id.split_once(':') {
-        Some((prefix, rest))
-            if prefix == <WslcStateAwareRunner as StatefulSandboxBackend>::ID_PREFIX
-                && !rest.is_empty() =>
-        {
-            Ok(())
-        }
-        _ => Err(MxcError::malformed_id(format!(
-            "expected wslc:<id>, got {sandbox_id:?}"
-        ))),
+    let malformed = || {
+        MxcError::malformed_id(format!(
+            "expected wslc:<32 lowercase hex>, got {sandbox_id:?}"
+        ))
+    };
+    let (prefix, rest) = sandbox_id.split_once(':').ok_or_else(malformed)?;
+    let is_lower_hex = rest.len() == 32
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if prefix == <WslcStateAwareRunner as StatefulSandboxBackend>::ID_PREFIX && is_lower_hex {
+        Ok(())
+    } else {
+        Err(malformed())
     }
 }
 
@@ -351,12 +356,12 @@ mod tests {
 
     #[test]
     fn validate_sandbox_id_accepts_prefixed_id() {
-        validate_sandbox_id("wslc:abc123").unwrap();
+        validate_sandbox_id("wslc:0123456789abcdef0123456789abcdef").unwrap();
     }
 
     #[test]
     fn validate_sandbox_id_rejects_wrong_prefix() {
-        let err = validate_sandbox_id("iso:abc123").unwrap_err();
+        let err = validate_sandbox_id("iso:0123456789abcdef0123456789abcdef").unwrap_err();
         assert_eq!(err.code, wxc_common::mxc_error::MxcErrorCode::MalformedId);
     }
 
@@ -368,6 +373,24 @@ mod tests {
     #[test]
     fn validate_sandbox_id_rejects_bare_token() {
         assert!(validate_sandbox_id("abc123").is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_non_hex_tail() {
+        // Nonempty but not the 32-hex grammar: reaches the daemon today and is
+        // misreported as not_provisioned rather than malformed_id.
+        assert!(validate_sandbox_id("wslc:not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_wrong_length() {
+        assert!(validate_sandbox_id("wslc:abc123").is_err());
+        assert!(validate_sandbox_id("wslc:0123456789abcdef0123456789abcdef0").is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_uppercase_hex() {
+        assert!(validate_sandbox_id("wslc:0123456789ABCDEF0123456789abcdef").is_err());
     }
 
     #[test]

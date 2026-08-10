@@ -296,6 +296,17 @@ function Provision-Sandbox {
 
 # ---------------- Backend-availability probe ----------------
 
+# The shortened idle watchdog ($env:MXC_WSLC_DAEMON_IDLE_*) is only honored by a
+# daemon THIS harness spawns (the first phase process passes the env down). A
+# daemon that predates the harness keeps its own (default 300s) timeout, so the
+# ~50s test H idle-teardown assertion would fail deterministically against it.
+# Capture that state before the first provision (which may spawn the daemon) so
+# test H can skip the idle assertion instead of failing on a reused daemon.
+$script:PreExistingDaemon = Test-DaemonRunning
+if ($script:PreExistingDaemon) {
+    Write-Host "NOTE: a wxc-wslc-daemon predates this harness; it does not honor the shortened idle watchdog, so the idle-teardown assertion (test H) will be skipped." -ForegroundColor Yellow
+}
+
 $probe = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
 if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
@@ -903,6 +914,13 @@ try {
 # idle window. Poll until the process is gone or the deadline passes. This must
 # stay the second-to-last lifecycle -- it drives the daemon to exit.
 Run-StateAwareTest "H: daemon idles out after last deprovision" {
+    if ($script:PreExistingDaemon) {
+        # A daemon that predates the harness keeps its own (default) idle
+        # timeout, so the shortened window this assertion relies on does not
+        # apply. Skip rather than fail deterministically on a reused daemon.
+        Write-Host "  SKIP: a pre-existing daemon does not honor the shortened idle watchdog" -ForegroundColor DarkYellow
+        return
+    }
     if (-not (Test-DaemonRunning)) {
         # Already gone (e.g. torn down during an inter-lifecycle gap). That is
         # itself a valid idle-teardown observation.

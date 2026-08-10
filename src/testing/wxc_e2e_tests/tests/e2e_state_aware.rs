@@ -76,13 +76,15 @@ fn state_aware_recognized_but_non_state_aware_backend_emits_unsupported_phase() 
         return;
     }
 
-    // `wslc` is a recognised backend but does not implement the state-aware
-    // trait. The dispatcher should emit `unsupported_phase` per design §8 and
-    // §10. This is the smoke-test scenario that protects the contract once
-    // I-commits land state-aware impls — the assertion will keep working
-    // because `wslc` will remain a non-state-aware backend.
+    // `processcontainer` is a recognised backend with no state-aware impl, so
+    // the dispatcher should emit `unsupported_phase` per design §8 and §10.
+    // This is the smoke-test scenario that protects the generic fallback: the
+    // experimental state-aware backends (`windows_sandbox` / `isolation_session`
+    // / `wslc`) are gated behind `--experimental` and would surface
+    // `backend_unavailable` instead, so a non-experimental GA backend is used
+    // here to exercise the fallback.
     let request = json!({
-        "containment": "wslc",
+        "containment": "processcontainer",
         "phase": "provision"
     });
     let result = run_wxc_state_aware("state-aware non-stateful backend", &request, &[]);

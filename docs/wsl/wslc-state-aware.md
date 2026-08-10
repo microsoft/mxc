@@ -54,8 +54,8 @@ dispatcher derives the backend from the `wslc:` prefix (they do **not** repeat `
 
 | Phase | Daemon action (WSLc SDK) |
 |-------|--------------------------|
-| provision | Load SDK, `WslcCreateSession`, resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). |
-| start | Validate the container is provisioned (`WslcStartContainer` was performed at provision-time under the keepalive init). |
+| provision | Load SDK, `WslcCreateSession`, resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
+| start | `WslcStartContainer` — starts the container minted at provision-time (the keepalive init keeps it warm across later `exec` phases); marks it `started`. |
 | exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr, forward stdin, return the process exit code. A timeout SIGKILLs the **process**, not the container. |
 | stop | `WslcStopContainer`. |
 | deprovision | `WslcDeleteContainer`; release the session + SDK when the last container is gone (daemon may then exit / idle-time out). |
