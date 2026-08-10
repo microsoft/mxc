@@ -1240,6 +1240,45 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
+        // A proxy URL may carry `user:pass@` userinfo, and for LXC that value
+        // does not stay in the environment. `apply_proxy_env` sets HTTP(S)_PROXY
+        // to the URL, and `build_attach_args_with_env_control` turns every
+        // environment entry into a `--set-var=KEY=VALUE` argument of the
+        // `lxc-attach` process this backend spawns (lxc_bindings.rs). A
+        // process's argv is readable through /proc/<pid>/cmdline by any local
+        // user for the lifetime of the command, so the credentials would be
+        // exposed to the whole host -- which is precisely what
+        // `redact_proxy_url` exists to prevent in logs. lxc-attach offers no
+        // argv-free way to pass a variable, so the only honest options are to
+        // expose the secret or to refuse it. Refuse it.
+        if containment == ContainmentBackend::Lxc
+            && policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|address| address.to_url())
+                .is_some_and(|url| crate::proxy_env::redact_proxy_url(&url) != url)
+        {
+            // Built from the redacted form so the rejection cannot become the
+            // leak it is rejecting.
+            let msg = format!(
+                "LXC: network.proxy.url must not carry credentials ('{}'). LXC passes the \
+                 proxy URL to lxc-attach as a --set-var command-line argument, and process \
+                 arguments are world-readable through /proc/<pid>/cmdline, so the password \
+                 would be visible to every local user while the command runs. Use a proxy \
+                 that does not require inline credentials, or supply them to the proxy \
+                 itself rather than through the URL.",
+                policy
+                    .network_proxy
+                    .address
+                    .as_ref()
+                    .map(|address| crate::proxy_env::redact_proxy_url(&address.to_url()))
+                    .unwrap_or_default()
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+
         // External proxy (`url` / `localhost`) enforces its own policy — the
         // runner does NOT forward host lists to it. Reject configs that combine
         // an external proxy with host lists or a restrictive default, otherwise
@@ -3607,6 +3646,66 @@ mod tests {
             "expected the LXC enforcement-mode rejection, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn proxy_url_with_credentials_is_rejected_for_lxc() {
+        // LXC forwards the URL to lxc-attach as `--set-var=HTTP_PROXY=...`, and
+        // argv is world-readable via /proc/<pid>/cmdline, so accepting this
+        // would publish the password to every local user.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("must not carry credentials"),
+            "expected the LXC credential rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_lxc_credential_rejection_does_not_leak_the_password() {
+        // The error is the one place a rejected secret could still escape, so
+        // it must name the URL only in redacted form.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+        assert!(
+            !msg.contains("hunter2") && !msg.contains("alice"),
+            "credentials leaked into the rejection: {msg}"
+        );
+        assert!(
+            msg.contains("***@proxy.example.com:8080"),
+            "expected the redacted authority in the rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_credential_free_proxy_url_is_still_accepted_for_lxc() {
+        // Negative control: without this, a guard that rejected every LXC
+        // proxy URL would pass both tests above.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+    }
+
+    #[test]
+    fn an_at_sign_in_the_path_is_not_mistaken_for_credentials() {
+        // `@` after the authority is an ordinary path character. Rejecting on
+        // a bare `@` would refuse a URL that carries no secret at all.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080/route@v2"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
     }
 
     #[test]
