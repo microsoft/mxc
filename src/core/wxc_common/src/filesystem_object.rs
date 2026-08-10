@@ -100,7 +100,8 @@ enum PathResolution {
 pub enum ExistingObjectComparison {
     /// Both paths resolved to the same object.
     Same,
-    /// At least one path is absent, or both resolved to different objects.
+    /// At least one path is absent and neither is unknown, or both resolved to
+    /// different objects.
     Different,
     /// At least one existing or potentially existing path could not be examined.
     Unknown,
@@ -126,6 +127,19 @@ fn resolve_object(path: &Path) -> PathResolution {
         // untraversable parent, ESTALE/ETIMEDOUT from a dead mount, ...) means we
         // could not examine the path.
         Err(e) => match e.raw_os_error() {
+            Some(libc::ENOENT) | Some(libc::ENOTDIR) => classify_not_found_leaf_unix(path),
+            _ => PathResolution::Unknown,
+        },
+    }
+}
+
+#[cfg(unix)]
+fn classify_not_found_leaf_unix(path: &Path) -> PathResolution {
+    match std::fs::symlink_metadata(path) {
+        // The leaf exists without following links, so the failed target lookup
+        // may be a dangling symlink. Its aliasing cannot be ruled out.
+        Ok(_) => PathResolution::Unknown,
+        Err(error) => match error.raw_os_error() {
             Some(libc::ENOENT) | Some(libc::ENOTDIR) => PathResolution::Absent,
             _ => PathResolution::Unknown,
         },
@@ -176,7 +190,7 @@ fn resolve_object(path: &Path) -> PathResolution {
             // SAFETY: reads the thread-local last error set by the failed call.
             let err = unsafe { GetLastError() };
             return if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
-                PathResolution::Absent
+                classify_not_found_leaf_windows(path)
             } else {
                 PathResolution::Unknown
             };
@@ -208,6 +222,27 @@ fn resolve_object(path: &Path) -> PathResolution {
     })
 }
 
+#[cfg(windows)]
+fn classify_not_found_leaf_windows(path: &Path) -> PathResolution {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+
+    match std::fs::symlink_metadata(path) {
+        // `symlink_metadata` examines the leaf without following its reparse
+        // point. Success here means the followed open may have failed because
+        // the leaf is a dangling symlink/junction, which must fail closed.
+        Ok(_) => PathResolution::Unknown,
+        Err(error) => match error.raw_os_error() {
+            Some(code)
+                if code == ERROR_FILE_NOT_FOUND.0 as i32
+                    || code == ERROR_PATH_NOT_FOUND.0 as i32 =>
+            {
+                PathResolution::Absent
+            }
+            _ => PathResolution::Unknown,
+        },
+    }
+}
+
 #[cfg(not(any(unix, windows)))]
 fn resolve_object(_path: &Path) -> PathResolution {
     // No way to determine object identity on unsupported platforms; treat as
@@ -221,11 +256,11 @@ pub fn compare_existing_filesystem_objects(a: &Path, b: &Path) -> ExistingObject
         (PathResolution::Object(a), PathResolution::Object(b)) if a == b => {
             ExistingObjectComparison::Same
         }
-        (PathResolution::Absent, _) | (_, PathResolution::Absent) => {
-            ExistingObjectComparison::Different
-        }
         (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
             ExistingObjectComparison::Unknown
+        }
+        (PathResolution::Absent, _) | (_, PathResolution::Absent) => {
+            ExistingObjectComparison::Different
         }
         (PathResolution::Object(_), PathResolution::Object(_)) => {
             ExistingObjectComparison::Different
@@ -544,6 +579,45 @@ mod tests {
         );
         assert!(out.readonly_paths.contains(&a.to_string()));
         assert!(out.readonly_paths.contains(&b.to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_symlink_is_unknown_even_when_target_is_absent() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("missing-target");
+        let link = dir.path().join("dangling-link");
+        if let Err(error) = symlink_file(&target, &link) {
+            // Creating symlinks requires Developer Mode or SeCreateSymbolicLink
+            // privilege on some supported Windows hosts.
+            if error.raw_os_error() == Some(1314) {
+                return;
+            }
+            panic!("failed to create dangling symlink: {error}");
+        }
+
+        assert!(matches!(resolve_object(&link), PathResolution::Unknown));
+        assert_eq!(
+            compare_existing_filesystem_objects(&link, &target),
+            ExistingObjectComparison::Unknown
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_unknown_even_when_target_is_absent_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("missing-target");
+        let link = dir.path().join("dangling-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(matches!(resolve_object(&link), PathResolution::Unknown));
+        assert_eq!(
+            compare_existing_filesystem_objects(&link, &target),
+            ExistingObjectComparison::Unknown
+        );
     }
 
     #[cfg(unix)]
