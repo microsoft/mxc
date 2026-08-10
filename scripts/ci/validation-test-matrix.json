@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "platforms": [
     {
-      "id": "windows-prerelease-t1-process-container",
+      "id": "windows-prerelease-process-container",
       "displayName": "Windows Prerelease T1 Process Container",
       "family": "windows",
       "prerelease": true,
@@ -13,6 +13,7 @@
           "pool": "1es-mxc-windows-prerelease-t1-x64",
           "backends": [
             "process-t1",
+            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox",
@@ -26,6 +27,7 @@
           "pool": "",
           "backends": [
             "process-t1",
+            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox"
@@ -45,6 +47,7 @@
           "pool": "",
           "backends": [
             "process-t1",
+            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox",
@@ -58,6 +61,7 @@
           "pool": "",
           "backends": [
             "process-t1",
+            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox"
@@ -76,7 +80,12 @@
           "pool": "",
           "backends": [
             "process-t1",
-            "isolation-session"
+            "process-t3",
+            "isolation-session",
+            "wslc",
+            "windows-sandbox",
+            "microvm",
+            "hyperlight"
           ]
         },
         "arm64": {
@@ -85,7 +94,10 @@
           "pool": "",
           "backends": [
             "process-t1",
-            "isolation-session"
+            "process-t3",
+            "isolation-session",
+            "wslc",
+            "windows-sandbox"
           ]
         }
       }
@@ -368,7 +380,7 @@
         ]
       },
       {
-        "os": "windows-prerelease-a",
+        "os": "windows-prerelease-process-container",
         "backends": [
           "process-t1",
           "isolation-session",
@@ -490,9 +502,11 @@
     ],
     "enabled": [
       {
-        "os": "windows-prerelease-t1-process-container",
+        "os": "windows-prerelease-process-container",
         "backends": [
-          "process-t3"
+          "process-t1",
+          "process-t3",
+          "isolation-session"
         ]
       },
       {
