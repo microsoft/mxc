@@ -1568,6 +1568,8 @@ impl NetworkIptablesManager {
                 ));
             }
 
+            created.v4_hook = true;
+            Self::publish_created(created);
             Self::run_iptables_rule_args(
                 &[Self::build_forward_hook_iface_rule_args(
                     "-I",
@@ -1576,9 +1578,9 @@ impl NetworkIptablesManager {
                 )],
                 logger,
             )?;
-            created.v4_hook = true;
-            Self::publish_created(created);
 
+            created.v4_physdev_hook = true;
+            Self::publish_created(created);
             created.v4_physdev_hook = Self::install_physdev_hook(
                 Self::run_iptables_rule_args,
                 iface,
@@ -1603,6 +1605,8 @@ impl NetworkIptablesManager {
                     ));
                 }
 
+                created.v6_hook = true;
+                Self::publish_created(created);
                 Self::run_ip6tables_rule_args(
                     &[Self::build_forward_hook_iface_rule_args(
                         "-I",
@@ -1611,9 +1615,9 @@ impl NetworkIptablesManager {
                     )],
                     logger,
                 )?;
-                created.v6_hook = true;
-                Self::publish_created(created);
 
+                created.v6_physdev_hook = true;
+                Self::publish_created(created);
                 created.v6_physdev_hook = Self::install_physdev_hook(
                     Self::run_ip6tables_rule_args,
                     iface,
@@ -1676,6 +1680,23 @@ impl NetworkIptablesManager {
     /// at the end of a successful apply. Publishing only on success would mean
     /// a signal arriving mid-apply sees an empty set, removes nothing, and
     /// leaks the partially created chain.
+    ///
+    /// FORWARD hooks go further and are claimed *before* the `-I` runs, because
+    /// "after the command returns" still leaves a window: the kernel has the
+    /// rule, this process has not yet recorded it, and a signal landing there
+    /// leaves an installed hook absent from the snapshot. Cleanup then skips
+    /// it, and the surviving hook holds a reference that keeps the chain
+    /// undeletable. Claiming first inverts the failure into an over-claim, and
+    /// an over-claimed hook is harmless: removal is by full rule specification,
+    /// which names this attempt's own chain, so a `-D` that matches nothing is
+    /// a no-op and cannot disturb another container.
+    ///
+    /// Chains are deliberately *not* claimed ahead of their `-N`. Unlike `-I`,
+    /// which always inserts, `-N` fails when the name is already taken -- and
+    /// the pre-existing chain in that case belongs to someone else. Claiming
+    /// first would let the rollback of a failed create delete a live chain this
+    /// attempt did not install, trading a leak for the removal of another
+    /// container's enforcement.
     fn publish_created(created: &CreatedResources) {
         crate::signal_cleanup::set_active_created(*created);
     }
@@ -1912,6 +1933,9 @@ mod test_firewall {
         /// back to `fallback`.
         scripted: VecDeque<Result<(), String>>,
         fallback: Result<(), String>,
+        /// When set, any command whose argv contains the needle fails with the
+        /// paired message, regardless of `scripted`/`fallback`.
+        fail_matching: Option<(String, String)>,
     }
 
     thread_local! {
@@ -1934,6 +1958,7 @@ mod test_firewall {
                 issued: Vec::new(),
                 scripted: VecDeque::new(),
                 fallback: Ok(()),
+                fail_matching: None,
             });
         });
         FakeFirewall
@@ -1949,6 +1974,17 @@ mod test_firewall {
         /// Every command from here on fails with `stderr`.
         pub(super) fn fail_every_command(&self, stderr: &str) -> &Self {
             Self::with_state(|state| state.fallback = Err(stderr.to_string()));
+            self
+        }
+
+        /// Every command containing `needle` in its argument vector fails with
+        /// `stderr`; every other command succeeds. Lets a test fail one
+        /// specific step of an apply without having to count the commands that
+        /// precede it.
+        pub(super) fn fail_commands_matching(&self, needle: &str, stderr: &str) -> &Self {
+            Self::with_state(|state| {
+                state.fail_matching = Some((needle.to_string(), stderr.to_string()));
+            });
             self
         }
 
@@ -1984,7 +2020,12 @@ mod test_firewall {
             let mut argv = Vec::with_capacity(args.len() + 1);
             argv.push(command.to_string());
             argv.extend(args.iter().map(|arg| arg.to_string()));
-            state.issued.push(argv);
+            state.issued.push(argv.clone());
+            if let Some((needle, stderr)) = &state.fail_matching {
+                if argv.iter().any(|arg| arg.contains(needle.as_str())) {
+                    return Some(Err(stderr.clone()));
+                }
+            }
             Some(
                 state
                     .scripted
@@ -3144,6 +3185,45 @@ mod tests {
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
             .expect("an allow that programs no rule cannot accept the unresolved deny");
+    }
+
+    #[test]
+    fn a_forward_hook_is_owned_even_when_its_insert_command_never_completed() {
+        // The signal race this guards: the kernel accepts `-I`, and the process
+        // dies before recording it. Ownership must already cover the hook at
+        // that point, or cleanup skips it and the surviving rule keeps the
+        // chain referenced and undeletable.
+        //
+        // A signal cannot be delivered mid-apply in a unit test, so this uses
+        // the observable that distinguishes the two orderings: a hook insert
+        // that does not complete successfully. Claiming after the command would
+        // leave it unowned and the rollback silent; claiming before means the
+        // rollback still tries to remove it.
+        let fake = test_firewall::install();
+        fake.fail_commands_matching("FORWARD", "simulated interruption");
+
+        let mut manager = NetworkIptablesManager::new("hook-race");
+        manager.set_veth_interface("mxcv-race");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        assert!(
+            result.is_err(),
+            "a failed FORWARD hook insert must fail the apply, got {:?}",
+            result
+        );
+
+        let issued = fake.issued();
+        let attempted_hook_removal = issued
+            .iter()
+            .any(|cmd| cmd.iter().any(|arg| arg == "-D") && cmd.iter().any(|arg| arg == "FORWARD"));
+        assert!(
+            attempted_hook_removal,
+            "the rollback must try to remove a hook whose insert did not complete, \
+             otherwise a signal in that same window would leak it; issued: {:?}",
+            issued
+        );
     }
 
     #[test]
