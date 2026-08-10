@@ -26,13 +26,16 @@
 //! that defeats a reg-free WinRT activation context on an image where the
 //! `Windows.AI.IsolationSession.*` classes are already registered inbox.
 //!
-//! Fallback contract: when the private CLSID is not registered
+//! No-fallback contract: when the private CLSID is not registered
 //! (`REGDB_E_CLASSNOTREG`) -- i.e. the manifest was not fused, such as an
-//! inbox-only build -- [`activate_via_private_clsid`] returns `None` and the
-//! caller falls back to default inbox activation (`T::new()`), so hosts without
-//! the fused manifest / nuget shim keep working. Any *other* activation error
-//! is surfaced as `Some(Err(..))` rather than silently redirected to a
-//! different binary set.
+//! inbox-only build -- [`activate_via_private_clsid`] returns `None`. The
+//! callers (`manager::check_service_available_and_activate` and
+//! `process_options::build_iso_process_options`) turn that `None` into a hard,
+//! actionable error (`error::regfree_not_fused`): MXC deliberately does **not**
+//! fall back to the inbox `System32` runtime, because silently binding a
+//! different, unversioned binary set is exactly the failure this design exists
+//! to prevent. Any *other* activation error is surfaced as `Some(Err(..))`
+//! rather than silently redirected to a different binary set.
 //!
 //! GUID contract: the two private activator CLSIDs below are a hard contract
 //! duplicated in THREE places -- change all together:
@@ -76,8 +79,8 @@ impl ActivatorClsid for IsoSessionProcessOptions {
 ///
 /// Returns:
 /// - `None` when the private CLSID is not registered (`REGDB_E_CLASSNOTREG`) --
-///   the manifest was not fused / this is an inbox-only build. The caller falls
-///   back to default inbox activation (`T::new()`).
+///   the manifest was not fused / this is an inbox-only build. The caller turns
+///   this into a hard `error::regfree_not_fused` error (NO inbox fallback).
 /// - `Some(Err(..))` when activation was attempted but failed (the shim could
 ///   not load the client, the factory failed, an unexpected HRESULT, ...). The
 ///   caller must surface this rather than silently bind a different binary set.
@@ -142,8 +145,14 @@ where
     };
 
     instance.cast::<T>().map_err(|e| {
+        // A cast failure here means the activated `IsoSessionApp.dll` produced
+        // an object that does not implement the interface IID the Preview WinMD
+        // was built against -- the winmd/MSI version-pin mismatch. The
+        // actionable mapping lives in `error::activation_error`
+        // (E_NOINTERFACE branch); this stays a diagnostic breadcrumb.
         eprintln!(
-            "[mxc isosession] cast to '{}' failed (IID mismatch?): {}",
+            "[mxc isosession] cast to '{}' failed (winmd/MSI version-pin mismatch? the \
+             activated IsoSessionApp.dll does not implement the expected interface IID): {}",
             <T as RuntimeName>::NAME,
             e
         );
