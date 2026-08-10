@@ -275,6 +275,35 @@ impl LxcScriptRunner {
                     reason
                 ));
             }
+        } else if !container_created {
+            // This run pins nothing, but a container it did not create may
+            // still carry a pin from an earlier one. Leaving it would let a
+            // hostname resolve to the address a previous policy authorized
+            // while this policy is written against whatever it resolves to
+            // now, so a deny could be programmed for one address and evaded at
+            // another. Removing it is therefore part of applying the policy,
+            // and failing to remove it is a failure to apply the policy.
+            let unpin = Self::build_hosts_unpin_command();
+            let unpin_error = match container.attach_run(&unpin, "/", &[], true, None) {
+                Ok((0, _, _)) => None,
+                Ok((code, _, stderr)) => Some(format!(
+                    "clearing /etc/hosts exited with {}: {}",
+                    code,
+                    stderr.trim()
+                )),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(reason) = unpin_error {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Failed to clear a previous run's proxy host pin from the container: {}. \
+                     A stale pin can redirect a hostname this policy resolved separately, \
+                     so the script was not run.",
+                    reason
+                ));
+            }
         }
 
         // Execute the script using lxc-attach (container is already running).
@@ -355,6 +384,26 @@ impl LxcScriptRunner {
              && cat /tmp/.mxc-hosts > /etc/hosts && rm -f /tmp/.mxc-hosts",
             marker = HOSTS_PIN_MARKER,
             hosts_line = hosts_line
+        )
+    }
+
+    /// Strip every pin this runner has ever written from `/etc/hosts`.
+    ///
+    /// Re-pinning is self-cleaning because it filters the marker out before
+    /// appending, but a run that pins *nothing* never reaches that path. On a
+    /// container kept alive across runs the previous pin would then survive
+    /// into a policy that never authorized it, and a hostname the new policy
+    /// resolves fresh -- to build a DROP rule, say -- would still be reached at
+    /// the stale address. The deny would be written against one address and
+    /// evaded at another.
+    ///
+    /// Uses the same rewrite-in-place form as the pin, for the same
+    /// bind-mount reason, and the same four utilities so it runs under BusyBox.
+    fn build_hosts_unpin_command() -> String {
+        format!(
+            "{{ grep -v '{marker}' /etc/hosts 2>/dev/null; }} > /tmp/.mxc-hosts \
+             && cat /tmp/.mxc-hosts > /etc/hosts && rm -f /tmp/.mxc-hosts",
+            marker = HOSTS_PIN_MARKER
         )
     }
 }
@@ -439,6 +488,41 @@ mod tests {
         assert!(
             command.matches(HOSTS_PIN_MARKER).count() >= 2,
             "the written line must carry the marker that the strip looks for; got: {command}"
+        );
+    }
+
+    #[test]
+    fn the_hosts_unpin_command_removes_the_marker_without_writing_a_new_one() {
+        let command = LxcScriptRunner::build_hosts_unpin_command();
+
+        assert!(
+            command.contains(&format!("grep -v '{}'", HOSTS_PIN_MARKER)),
+            "the command must filter out every marked line; got: {command}"
+        );
+        assert!(
+            !command.contains("printf"),
+            "clearing must not append a replacement mapping; got: {command}"
+        );
+        assert_eq!(
+            command.matches(HOSTS_PIN_MARKER).count(),
+            1,
+            "the marker should appear only in the filter; got: {command}"
+        );
+    }
+
+    #[test]
+    fn the_hosts_unpin_command_rewrites_the_file_in_place_rather_than_replacing_it() {
+        // Same bind-mount reasoning as the pin: replacing the inode would leave
+        // the container still reading the file that carries the stale pin.
+        let command = LxcScriptRunner::build_hosts_unpin_command();
+
+        assert!(
+            command.contains("> /etc/hosts"),
+            "the command must rewrite the existing file; got: {command}"
+        );
+        assert!(
+            !command.contains("mv "),
+            "the command must not replace the inode; got: {command}"
         );
     }
 
