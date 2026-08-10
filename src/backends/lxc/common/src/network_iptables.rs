@@ -226,6 +226,14 @@ pub struct NetworkIptablesManager {
     /// Whether a caller that never supplies a veth is expected rather than
     /// broken. Defaults to `false`, so a missing veth fails fast.
     veth_scoping_optional: bool,
+    /// Topology the hook logic should assume, bypassing the sysfs probe.
+    ///
+    /// Unit tests run on hosts with no `/sys/class/net`, where the honest probe
+    /// answer is [`VethTopology::Unknown`] and every apply would take the
+    /// bridged branch. Tests therefore declare a topology rather than inherit
+    /// the build host's; only tests can set this.
+    #[cfg(test)]
+    topology_override: Option<VethTopology>,
     /// Chains and FORWARD hooks this manager successfully created, so teardown
     /// and rollback remove only resources this attempt actually installed.
     created: CreatedResources,
@@ -315,6 +323,27 @@ pub fn chain_name_for(container_name: &str) -> String {
     }
 }
 
+/// What a sysfs lookup was able to establish about a veth's topology.
+///
+/// The third state is the point of this type. `Path::exists()` folds every
+/// metadata error into `false`, so a masked, unmounted, or permission-denied
+/// sysfs used to read as "directly routed" -- and that is the reading which
+/// downgrades a failed physdev hook from fatal to a warning. The lookup is
+/// independent of how the interface was discovered: `discover_veth_interface`
+/// parses `lxc-info`, not sysfs, so a veth can be known to exist while its
+/// sysfs entry is unreadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VethTopology {
+    /// `master` is present, so the interface is enslaved to a bridge.
+    Bridged,
+    /// The interface directory is present and holds no `master`. This is a
+    /// positive finding, not the absence of one.
+    DirectlyRouted,
+    /// The lookup failed, so the topology is not known. Callers must treat
+    /// this as bridged: that is the branch which keeps a physdev hook
+    /// failure fatal.
+    Unknown,
+}
 impl NetworkIptablesManager {
     /// Create a new manager for the given container name.
     pub fn new(container_name: &str) -> Self {
@@ -323,6 +352,8 @@ impl NetworkIptablesManager {
             rules_applied: false,
             veth_interface: None,
             veth_scoping_optional: false,
+            #[cfg(test)]
+            topology_override: Some(VethTopology::DirectlyRouted),
             created: CreatedResources::default(),
             proxy_pin: None,
         }
@@ -395,6 +426,12 @@ impl NetworkIptablesManager {
         self.veth_interface = Some(iface.to_string());
     }
 
+    /// Declare the topology the hook logic should assume, in place of probing.
+    #[cfg(test)]
+    fn set_topology_override(&mut self, topology: VethTopology) {
+        self.topology_override = Some(topology);
+    }
+
     /// Declare that this caller has no veth to scope the chain to, so a missing
     /// one is a structural fact rather than a failed lookup.
     ///
@@ -462,13 +499,26 @@ impl NetworkIptablesManager {
         ]
     }
 
-    /// Whether `iface` is enslaved to a bridge, looked up under an injectable
-    /// sysfs root so this is testable without a live interface.
+    /// Determine whether `iface` is enslaved to a bridge, looked up under an
+    /// injectable sysfs root so this is testable without a live interface.
     ///
-    /// The kernel exposes `master` only for an enslaved interface, so its mere
-    /// presence is the answer.
-    fn veth_is_bridge_enslaved_in(sysfs_net_root: &Path, iface: &str) -> bool {
-        sysfs_net_root.join(iface).join("master").exists()
+    /// `master` is a symlink, so the probe uses `symlink_metadata` rather than
+    /// `exists`, which follows the link and would report a dangling `master` as
+    /// absent. A `NotFound` on `master` only means "directly routed" when the
+    /// interface directory itself is readable; otherwise nothing was
+    /// established and the answer is [`VethTopology::Unknown`].
+    fn veth_topology_in(sysfs_net_root: &Path, iface: &str) -> VethTopology {
+        let iface_dir = sysfs_net_root.join(iface);
+        match std::fs::symlink_metadata(iface_dir.join("master")) {
+            Ok(_) => VethTopology::Bridged,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(&iface_dir) {
+                    Ok(_) => VethTopology::DirectlyRouted,
+                    Err(_) => VethTopology::Unknown,
+                }
+            }
+            Err(_) => VethTopology::Unknown,
+        }
     }
 
     /// Whether bridged traffic is delivered to iptables at all, read from an
@@ -483,9 +533,23 @@ impl NetworkIptablesManager {
             .unwrap_or(false)
     }
 
-    /// Production wrapper over [`Self::veth_is_bridge_enslaved_in`].
-    fn veth_is_bridge_enslaved(iface: &str) -> bool {
-        Self::veth_is_bridge_enslaved_in(Path::new(SYSFS_NET_ROOT), iface)
+    /// Probe the real sysfs, unless a test declared the topology outright.
+    fn veth_topology(&self, iface: &str) -> VethTopology {
+        #[cfg(test)]
+        if let Some(topology) = self.topology_override {
+            return topology;
+        }
+        Self::veth_topology_in(Path::new(SYSFS_NET_ROOT), iface)
+    }
+
+    /// Whether the hook logic must treat `topology` as bridged.
+    ///
+    /// Only a positive [`VethTopology::DirectlyRouted`] finding earns the
+    /// relaxed treatment, because that is the branch which downgrades a failed
+    /// physdev hook to a warning. An unknown topology has established nothing,
+    /// so it is handled as bridged and the failure stays fatal.
+    fn treat_as_bridged(topology: VethTopology) -> bool {
+        topology != VethTopology::DirectlyRouted
     }
 
     /// Production wrapper over [`Self::bridge_netfilter_active_at`].
@@ -1803,7 +1867,20 @@ impl NetworkIptablesManager {
         // block: a caller with no veth has no port to name, and an unscoped
         // ACCEPT would carry traffic for every container on the host.
         if let Some(ref iface) = self.veth_interface {
-            let bridged = Self::veth_is_bridge_enslaved(iface);
+            let topology = self.veth_topology(iface);
+            // Only a positive "directly routed" finding earns the relaxed
+            // treatment. An unreadable sysfs establishes nothing, and the
+            // relaxed branch is the one that downgrades a failed physdev hook
+            // to a warning -- so an unknown topology is handled as bridged.
+            let bridged = Self::treat_as_bridged(topology);
+            if topology == VethTopology::Unknown {
+                logger.log_line(&format!(
+                    "Warning: could not determine whether container veth {} is bridged \
+                     ({} is unreadable). Treating it as bridged, which keeps a failed \
+                     physdev hook fatal rather than silently unenforced.",
+                    iface, SYSFS_NET_ROOT
+                ));
+            }
             let chain_name = self.chain_name.clone();
 
             // On a bridged veth the physdev rule is the only one that can
@@ -3550,6 +3627,39 @@ mod tests {
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
             .expect("an allow that programs no rule cannot accept the unresolved deny");
+    }
+
+    #[test]
+    fn an_unknown_topology_reaches_the_call_site_and_says_so() {
+        // The probe states three things, but only the call site decides. This
+        // pins the join: an unreadable sysfs must arrive as Unknown, be handled
+        // as bridged, and leave a diagnosable trace. Without the log line the
+        // fail-closed choice is invisible in the field, which is how the
+        // original fail-open behavior survived review in the first place.
+        //
+        // The apply's Result is deliberately not asserted: whether the bridged
+        // branch then errors depends on whether the host has br_netfilter
+        // active, which is not what this test is about.
+        let _fake = test_firewall::install();
+
+        let mut manager = NetworkIptablesManager::new("unknown-topology");
+        manager.set_veth_interface("mxcv-unknown");
+        manager.set_topology_override(VethTopology::Unknown);
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let _ = manager.apply_firewall_rules(&policy, &mut logger);
+
+        let logged = logger.get_buffer();
+        assert!(
+            logged.contains("could not determine whether container veth mxcv-unknown is bridged"),
+            "an unknown topology must be reported, or the fail-closed choice is \
+             undiagnosable in the field; logged: {logged}"
+        );
+        assert!(
+            logged.contains("Treating it as bridged"),
+            "the log must say which way the ambiguity was resolved; logged: {logged}"
+        );
     }
 
     #[test]

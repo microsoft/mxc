@@ -287,11 +287,12 @@ fn an_interface_with_a_master_entry_is_reported_as_bridge_enslaved() {
     fs::create_dir_all(&iface_dir).expect("failed to create the fake sysfs interface directory");
     fs::write(iface_dir.join("master"), "").expect("failed to create the fake master entry");
 
-    let result = NetworkIptablesManager::veth_is_bridge_enslaved_in(&root, "veth-a1b2");
+    let result = NetworkIptablesManager::veth_topology_in(&root, "veth-a1b2");
 
     fs::remove_dir_all(&root).expect("failed to clean up the fake sysfs root");
-    assert!(
+    assert_eq!(
         result,
+        VethTopology::Bridged,
         "an interface with a master entry must be reported as bridge-enslaved"
     );
 }
@@ -304,29 +305,70 @@ fn an_interface_without_a_master_entry_is_not_bridge_enslaved() {
     let iface_dir = root.join("veth-d4e5");
     fs::create_dir_all(&iface_dir).expect("failed to create the fake sysfs interface directory");
 
-    let result = NetworkIptablesManager::veth_is_bridge_enslaved_in(&root, "veth-d4e5");
+    let result = NetworkIptablesManager::veth_topology_in(&root, "veth-d4e5");
 
     fs::remove_dir_all(&root).expect("failed to clean up the fake sysfs root");
-    assert!(
-        !result,
-        "an interface directory with no master entry must not be reported as bridge-enslaved"
+    assert_eq!(
+        result,
+        VethTopology::DirectlyRouted,
+        "an interface directory with no master entry is a positive directly-routed finding"
     );
 }
 
-// If the interface itself has no sysfs directory at all -- for example a
-// name that does not exist on the host -- there is nothing to be enslaved,
-// and the function must say so rather than erroring.
+// This assertion is the reverse of what it used to be, and the reversal is the
+// fix.  It previously read a missing interface directory as "not enslaved",
+// which is how an unreadable sysfs came to be reported as directly routed.
+//
+// The two facts are independent: `discover_veth_interface` parses `lxc-info`,
+// not sysfs, so the veth can be known to exist while its sysfs entry is
+// missing, masked, or unreadable.  Absence of the directory is therefore a
+// failed lookup, not evidence about the topology.
 #[test]
-fn a_missing_interface_directory_is_not_bridge_enslaved() {
+fn a_missing_interface_directory_is_an_unknown_topology_not_a_routed_one() {
     let root = fresh_fixture_dir("missing-iface");
     fs::create_dir_all(&root).expect("failed to create the fake sysfs root");
 
-    let result = NetworkIptablesManager::veth_is_bridge_enslaved_in(&root, "veth-ghost");
+    let result = NetworkIptablesManager::veth_topology_in(&root, "veth-ghost");
 
     fs::remove_dir_all(&root).expect("failed to clean up the fake sysfs root");
+    assert_eq!(
+        result,
+        VethTopology::Unknown,
+        "a missing interface directory establishes nothing about the topology"
+    );
+}
+
+// The whole sysfs root being absent is the masked/unmounted case from review.
+#[test]
+fn an_unreadable_sysfs_root_is_an_unknown_topology() {
+    let root = fresh_fixture_dir("no-sysfs-at-all");
+    let _ = fs::remove_dir_all(&root);
+
+    let result = NetworkIptablesManager::veth_topology_in(&root, "veth-a1b2");
+
+    assert_eq!(
+        result,
+        VethTopology::Unknown,
+        "an absent sysfs root must not be read as a directly-routed topology"
+    );
+}
+
+// The decision that actually carries the security weight: which topologies get
+// the relaxed treatment that downgrades a failed physdev hook to a warning.
+// Only a positive directly-routed finding may.
+#[test]
+fn only_a_confirmed_directly_routed_topology_escapes_the_bridged_treatment() {
     assert!(
-        !result,
-        "an interface with no sysfs directory at all must not be reported as bridge-enslaved"
+        NetworkIptablesManager::treat_as_bridged(VethTopology::Bridged),
+        "a bridged veth must be treated as bridged"
+    );
+    assert!(
+        NetworkIptablesManager::treat_as_bridged(VethTopology::Unknown),
+        "an unknown topology must be treated as bridged, so a failed physdev hook stays fatal"
+    );
+    assert!(
+        !NetworkIptablesManager::treat_as_bridged(VethTopology::DirectlyRouted),
+        "a confirmed directly-routed veth is the one case that may relax the hook requirement"
     );
 }
 
