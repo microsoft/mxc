@@ -543,8 +543,7 @@ fn audit_stop_args(
         args.push(std::ffi::OsString::from("--config-path"));
         args.push(config_path.as_os_str().to_owned());
     }
-    args.push(std::ffi::OsString::from("--exit-code"));
-    args.push(std::ffi::OsString::from(exit_code.to_string()));
+    args.push(std::ffi::OsString::from(format!("--exit-code={exit_code}")));
     args
 }
 
@@ -1507,14 +1506,18 @@ mod tests {
         let args = audit_stop_args(Some(std::path::Path::new(r"C:\config.json")), 23);
         assert_eq!(
             args,
-            [
-                "stop",
-                "--config-path",
-                r"C:\config.json",
-                "--exit-code",
-                "23"
-            ]
-            .map(std::ffi::OsString::from)
+            ["stop", "--config-path", r"C:\config.json", "--exit-code=23"]
+                .map(std::ffi::OsString::from)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn audit_stop_args_accept_negative_workload_exit_code() {
+        let args = audit_stop_args(None, -1);
+        assert_eq!(
+            args,
+            ["stop", "--exit-code=-1"].map(std::ffi::OsString::from)
         );
     }
 
