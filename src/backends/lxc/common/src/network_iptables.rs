@@ -12,7 +12,21 @@ use std::path::Path;
 use std::process::Command;
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
+use wxc_common::models::{
+    ContainerPolicy, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ProxyHostPin,
+};
+
+/// One destination the container is allowed to reach when the policy routes
+/// egress through a cooperative proxy: an address the proxy host resolved to,
+/// and the TCP port the proxy listens on.
+///
+/// The address is held as a string because that is what an iptables `-d`
+/// argument takes, matching [`ResolvedDestinations`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProxyEndpoint {
+    ip: String,
+    port: u16,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IpFamily {
@@ -201,6 +215,11 @@ pub struct NetworkIptablesManager {
     /// Chains and FORWARD hooks this manager successfully created, so teardown
     /// and rollback remove only resources this attempt actually installed.
     created: CreatedResources,
+    /// The hosts-file pin the container needs so it resolves the proxy
+    /// hostname to the one address this manager authorized. Recorded during
+    /// apply, because the resolution that produced the firewall rule is the
+    /// only one the container is allowed to agree with.
+    proxy_pin: Option<ProxyHostPin>,
 }
 
 impl NetworkIptablesManager {
@@ -219,12 +238,25 @@ impl NetworkIptablesManager {
             veth_interface: None,
             veth_scoping_optional: false,
             created: CreatedResources::default(),
+            proxy_pin: None,
         }
     }
 
     /// Whether rules have been applied and need cleanup.
     pub fn rules_applied(&self) -> bool {
         self.rules_applied
+    }
+
+    /// The hosts-file pin a proxied container must be given before it runs, or
+    /// `None` when the policy needs no pin.
+    ///
+    /// Populated by [`Self::apply_firewall_rules`] and only meaningful after
+    /// it succeeds: the pin names the address that apply authorized, and
+    /// resolving the proxy host a second time to build it could return a
+    /// different address under round-robin or split-horizon DNS -- one the
+    /// chain does not allow.
+    pub fn proxy_host_pin(&self) -> Option<&ProxyHostPin> {
+        self.proxy_pin.as_ref()
     }
 
     /// Whether this manager has been told a missing veth is expected.
@@ -594,15 +626,200 @@ impl NetworkIptablesManager {
         .collect()
     }
 
-    fn build_default_policy_rule_arg(chain_name: &str, policy: NetworkPolicy) -> Vec<String> {
-        let default_action = match policy {
+    /// The catch-all action for a chain. Proxy mode is "deny all except the
+    /// proxy", so it always closes with DROP regardless of the configured
+    /// default policy.
+    fn default_policy_action(default_policy: NetworkPolicy, proxy_enabled: bool) -> &'static str {
+        if proxy_enabled {
+            return "DROP";
+        }
+        match default_policy {
             NetworkPolicy::Block => "DROP",
             NetworkPolicy::Allow => "ACCEPT",
-        };
+        }
+    }
+
+    fn build_default_policy_rule_arg(
+        chain_name: &str,
+        policy: NetworkPolicy,
+        proxy_enabled: bool,
+    ) -> Vec<String> {
+        let default_action = Self::default_policy_action(policy, proxy_enabled);
         vec!["-A", chain_name, "-j", default_action]
             .into_iter()
             .map(String::from)
             .collect()
+    }
+
+    /// Build the ACCEPT rules that open the proxy endpoints, and nothing else.
+    ///
+    /// These are the only allow rules a proxied chain carries. They are emitted
+    /// straight before the closing DROP from
+    /// [`Self::build_default_policy_rule_arg`], so the chain reads "the proxy,
+    /// then nothing".
+    ///
+    /// IPv4 only, so the caller must not run these through `ip6tables`: the
+    /// endpoints come from [`Self::resolve_proxy_endpoints`], which refuses an
+    /// IPv6 proxy rather than programming a rule for it. A proxied IPv6 chain
+    /// therefore holds its closing DROP alone, which is the fail-closed
+    /// outcome -- IPv6 egress is denied rather than left open.
+    fn build_proxy_chain_rule_args(
+        chain_name: &str,
+        endpoints: &[ProxyEndpoint],
+    ) -> Vec<Vec<String>> {
+        endpoints
+            .iter()
+            .map(|endpoint| {
+                vec![
+                    "-A".to_string(),
+                    chain_name.to_string(),
+                    "-p".to_string(),
+                    "tcp".to_string(),
+                    "-d".to_string(),
+                    endpoint.ip.clone(),
+                    "--dport".to_string(),
+                    endpoint.port.to_string(),
+                    "-j".to_string(),
+                    "ACCEPT".to_string(),
+                ]
+            })
+            .collect()
+    }
+
+    /// Whether `host` is an IPv6 literal (bracketed `[..]` or bare).
+    ///
+    /// The proxy firewall rule is emitted with IPv4 `iptables` only, so an IPv6
+    /// proxy endpoint cannot be enforced. It must be rejected explicitly rather
+    /// than passed through IPv4-only endpoint selection, which would drop it and
+    /// leave a deny-all container whose proxy was silently discarded.
+    fn host_is_ipv6_literal(host: &str) -> bool {
+        let candidate = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        matches!(candidate.parse::<IpAddr>(), Ok(IpAddr::V6(_)))
+    }
+
+    /// The error returned when a proxy endpoint is IPv6, which the IPv4-only
+    /// proxy firewall rule cannot enforce.
+    fn ipv6_proxy_unsupported(host: &str) -> String {
+        format!(
+            "IPv6 network proxy endpoints are not supported: the proxy firewall rule is \
+             emitted with IPv4 iptables only, so '{}' cannot be enforced and would be \
+             silently dropped. Use an IPv4 proxy address.",
+            host
+        )
+    }
+
+    /// Resolve the policy's proxy into the destinations the chain will allow,
+    /// and the hosts-file pin the container needs to agree with them.
+    ///
+    /// Returns an empty vector when the policy carries no proxy, which is what
+    /// puts the chain back on the ordinary allow/block path.
+    ///
+    /// The pin is produced from this same resolution rather than from a second
+    /// lookup. Two lookups of one name can disagree -- DNS round-robin returns
+    /// a different order, or a TTL expires between the calls -- and a container
+    /// pinned to an address this chain did not authorize cannot reach its
+    /// proxy at all. `None` means no pin is needed because the address is
+    /// already an IP literal.
+    ///
+    /// Every resolved IPv4 address is opened, not just the pinned one. They are
+    /// all addresses of the configured proxy host, so the posture is unchanged,
+    /// and a client that resolves the name through something other than
+    /// `/etc/hosts` still reaches the proxy instead of being dropped.
+    fn resolve_proxy_endpoints(
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<(Vec<ProxyEndpoint>, Option<ProxyHostPin>), String> {
+        if !policy.network_proxy.is_enabled() {
+            return Ok((Vec::new(), None));
+        }
+
+        let address = policy.network_proxy.address.as_ref().ok_or_else(|| {
+            "Network proxy is enabled but no proxy address is configured".to_string()
+        })?;
+
+        if address.port() == 0 {
+            return Err("Network proxy port must be between 1 and 65535".to_string());
+        }
+
+        // Reject an IPv6 literal explicitly. Selecting the IPv4 bucket below
+        // would leave it empty, which the emptiness check would then report as
+        // an unresolvable host -- a misleading error for a perfectly valid
+        // literal we simply cannot enforce.
+        if Self::host_is_ipv6_literal(address.host()) {
+            return Err(Self::ipv6_proxy_unsupported(address.host()));
+        }
+
+        let resolved = Self::resolve_host(address.host());
+        if resolved.ipv4.is_empty() {
+            // A name with AAAA records and no A records is the same
+            // unenforceable case as the literal above, so say so rather than
+            // claiming the name does not resolve.
+            if !resolved.ipv6.is_empty() {
+                return Err(Self::ipv6_proxy_unsupported(address.host()));
+            }
+            return Err(format!(
+                "Could not resolve network proxy host '{}'",
+                address.host()
+            ));
+        }
+
+        let endpoints: Vec<ProxyEndpoint> = resolved
+            .ipv4
+            .iter()
+            .map(|ip| {
+                logger.log_line(&format!(
+                    "Allowing network proxy egress: {}:{} ({})",
+                    address.host(),
+                    address.port(),
+                    ip
+                ));
+                ProxyEndpoint {
+                    ip: ip.clone(),
+                    port: address.port(),
+                }
+            })
+            .collect();
+
+        let pin = Self::build_proxy_host_pin(address, &endpoints[0].ip, logger)?;
+        Ok((endpoints, pin))
+    }
+
+    /// Build the hosts-file pin that makes the container resolve the proxy
+    /// hostname to `ip`.
+    ///
+    /// Under "deny all except the proxy" the chain opens no port 53, so the
+    /// container has no resolver to reach: the pin is what lets it find the
+    /// proxy at all, and it also stops the container selecting an address the
+    /// chain never allowed.
+    fn build_proxy_host_pin(
+        address: &ProxyAddress,
+        ip: &str,
+        logger: &mut Logger,
+    ) -> Result<Option<ProxyHostPin>, String> {
+        let parsed: IpAddr = ip.parse().map_err(|_| {
+            format!(
+                "Network proxy host '{}' resolved to '{}', which is not an IP address",
+                address.host(),
+                ip
+            )
+        })?;
+
+        let pin = address
+            .host_pin(parsed)
+            .map_err(|e| format!("Cannot pin network proxy host: {}", e))?;
+
+        if let Some(pin) = pin.as_ref() {
+            logger.log_line(&format!(
+                "Pinning network proxy '{}' to resolved address {} inside the container.",
+                pin.hostname(),
+                pin.ip()
+            ));
+        }
+
+        Ok(pin)
     }
 
     fn build_resolved_destination_rule_args(
@@ -1038,6 +1255,11 @@ impl NetworkIptablesManager {
     /// before the error is returned, so a retry does not trip over a leftover
     /// `MXC-<name>` chain ("chain already exists") and a partial failure never
     /// tears down a chain this attempt did not create.
+    ///
+    /// A policy carrying a proxy is resolved here, once, before any rule is
+    /// installed. The resulting endpoints are what the chain opens and the
+    /// recorded [`Self::proxy_host_pin`] is what the container must be given,
+    /// so both sides name the address a single lookup returned.
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
@@ -1064,7 +1286,10 @@ impl NetworkIptablesManager {
             ));
         }
 
-        let outcome = self.apply_firewall_rules_inner(policy, logger);
+        let (proxy_endpoints, proxy_pin) = Self::resolve_proxy_endpoints(policy, logger)?;
+        self.proxy_pin = proxy_pin;
+
+        let outcome = self.apply_firewall_rules_inner(policy, &proxy_endpoints, logger);
         self.record_apply_outcome(outcome, logger)
     }
 
@@ -1136,10 +1361,11 @@ impl NetworkIptablesManager {
     fn apply_firewall_rules_inner(
         &self,
         policy: &ContainerPolicy,
+        proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
     ) -> Result<CreatedResources, (String, CreatedResources)> {
         let mut created = CreatedResources::default();
-        match self.install_firewall_rules(policy, logger, &mut created) {
+        match self.install_firewall_rules(policy, proxy_endpoints, logger, &mut created) {
             Ok(()) => Ok(created),
             Err(e) => {
                 let residual = Self::teardown_created(
@@ -1159,6 +1385,7 @@ impl NetworkIptablesManager {
     fn install_firewall_rules(
         &self,
         policy: &ContainerPolicy,
+        proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
         created: &mut CreatedResources,
     ) -> Result<(), String> {
@@ -1194,35 +1421,77 @@ impl NetworkIptablesManager {
             Self::publish_created(created);
         }
 
-        let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
-        Self::run_iptables_rule_args(&base_rules, logger)?;
-        if ipv6_enabled {
-            Self::run_ip6tables_rule_args(&base_rules, logger)?;
-        }
+        let proxy_mode = !proxy_endpoints.is_empty();
 
-        // Resolve every allow/block entry exactly once and reuse that single
-        // resolution for both the unresolved-host warning and rule
-        // construction, so the rule installed matches the entry that was
-        // validated and logged. A block entry that resolves to nothing is an
-        // error here rather than a warning, and propagating it aborts the
-        // apply so the caller rolls back the chains created above instead of
-        // leaving a chain that is missing one of its deny rules.
-        let policy_rules = Self::build_policy_rules_logged(&self.chain_name, policy, logger)?;
-        Self::run_iptables_rule_args(&policy_rules.ipv4, logger)?;
-        if ipv6_enabled {
-            Self::run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
-        } else if !policy_rules.ipv6.is_empty() {
-            logger.log_line(&format!(
-                "Warning: {} IPv6 firewall rule(s) not applied because ip6tables \
-                 is unavailable; IPv6 egress is unfiltered on this host.",
-                policy_rules.ipv6.len()
-            ));
+        if proxy_mode {
+            // Proxy mode is "deny all except the proxy", so the chain carries
+            // the proxy ACCEPTs and its closing DROP and nothing else.
+            //
+            // None of the base exemptions belong here. There is no port 53
+            // accept because the container resolves the proxy through the
+            // hosts-file pin instead, and an unscoped one would be a standing
+            // DNS-tunnel exfil path through a posture whose whole point is
+            // that the proxy is the only reachable destination. There is no
+            // `-i lo` accept because every packet reaching this chain arrived
+            // on the container's veth by construction, and no
+            // ESTABLISHED,RELATED accept because return traffic flows toward
+            // the container and never traverses it -- such a rule would only
+            // let flows opened before the chain existed keep running straight
+            // through the deny-all posture.
+            //
+            // The allow and block lists are not programmed either: every
+            // destination other than the proxy is denied by the closing DROP,
+            // so a block entry is redundant, and an allow entry naming
+            // anything but the proxy contradicts the model.
+            let proxy_rules = Self::build_proxy_chain_rule_args(&self.chain_name, proxy_endpoints);
+            Self::run_iptables_rule_args(&proxy_rules, logger)?;
+            for rule in &proxy_rules {
+                logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
+            }
+            if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
+                logger.log_line(
+                    "Warning: network.proxy is configured, so allowedHosts and blockedHosts \
+                     are not programmed; the container may reach the proxy and nothing else.",
+                );
+            }
+            if ipv6_enabled {
+                logger.log_line(
+                    "IPv6 egress is denied outright while a proxy is configured: the proxy \
+                     endpoint is IPv4, so the IPv6 chain carries only its closing DROP.",
+                );
+            }
+        } else {
+            let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
+            Self::run_iptables_rule_args(&base_rules, logger)?;
+            if ipv6_enabled {
+                Self::run_ip6tables_rule_args(&base_rules, logger)?;
+            }
+
+            // Resolve every allow/block entry exactly once and reuse that single
+            // resolution for both the unresolved-host warning and rule
+            // construction, so the rule installed matches the entry that was
+            // validated and logged. A block entry that resolves to nothing is an
+            // error here rather than a warning, and propagating it aborts the
+            // apply so the caller rolls back the chains created above instead of
+            // leaving a chain that is missing one of its deny rules.
+            let policy_rules = Self::build_policy_rules_logged(&self.chain_name, policy, logger)?;
+            Self::run_iptables_rule_args(&policy_rules.ipv4, logger)?;
+            if ipv6_enabled {
+                Self::run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
+            } else if !policy_rules.ipv6.is_empty() {
+                logger.log_line(&format!(
+                    "Warning: {} IPv6 firewall rule(s) not applied because ip6tables \
+                     is unavailable; IPv6 egress is unfiltered on this host.",
+                    policy_rules.ipv6.len()
+                ));
+            }
         }
 
         // Append default policy at end of each chain.
         let default_rule = Self::build_default_policy_rule_arg(
             &self.chain_name,
             policy.default_network_policy.clone(),
+            proxy_mode,
         );
         let default_args: Vec<&str> = default_rule.iter().map(String::as_str).collect();
         let default_action = default_args.last().copied().unwrap_or("ACCEPT");
@@ -1590,6 +1859,12 @@ mod forward_hook_spec;
 #[cfg(test)]
 #[path = "network_iptables_deny_precedence_spec.rs"]
 mod deny_precedence_spec;
+
+/// Black-box specification for cooperative-proxy egress enforcement, kept in
+/// its own file for the same reason as `veth_spec`.
+#[cfg(test)]
+#[path = "network_iptables_proxy_spec.rs"]
+mod proxy_spec;
 
 #[cfg(test)]
 mod test_firewall {
@@ -2973,12 +3248,20 @@ mod tests {
         let chain_name = "MXC-default";
 
         assert_eq!(
-            NetworkIptablesManager::build_default_policy_rule_arg(chain_name, NetworkPolicy::Block),
+            NetworkIptablesManager::build_default_policy_rule_arg(
+                chain_name,
+                NetworkPolicy::Block,
+                false
+            ),
             strings(&["-A", chain_name, "-j", "DROP"]),
             "NetworkPolicy::Block should produce the exact DROP terminal rule"
         );
         assert_eq!(
-            NetworkIptablesManager::build_default_policy_rule_arg(chain_name, NetworkPolicy::Allow),
+            NetworkIptablesManager::build_default_policy_rule_arg(
+                chain_name,
+                NetworkPolicy::Allow,
+                false
+            ),
             strings(&["-A", chain_name, "-j", "ACCEPT"]),
             "NetworkPolicy::Allow should produce the exact ACCEPT terminal rule"
         );
