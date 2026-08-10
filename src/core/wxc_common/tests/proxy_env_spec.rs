@@ -503,3 +503,30 @@ fn a_url_without_a_scheme_carries_no_credentials() {
     assert!(!proxy_url_has_credentials("proxy.example.com:8080"));
     assert!(!proxy_url_has_credentials("not-a-url@at-all"));
 }
+
+// Protects client (d): a proxy URL is redacted on the *failure* path, where it
+// may not be a well-formed absolute URL.  `url::Url::parse` accepts
+// `alice:hunter2@example.com` as scheme `alice`, so a redactor that gives up
+// without `://` hands the password straight to the scheme diagnostic.
+#[test]
+fn redact_proxy_url_removes_userinfo_from_a_scheme_opaque_url() {
+    let redacted = redact_proxy_url("alice:hunter2@proxy.example.com");
+
+    assert!(
+        !redacted.contains("hunter2"),
+        "password survived: {redacted}"
+    );
+    assert!(
+        redacted.contains("proxy.example.com"),
+        "the host must survive so the error still diagnoses anything: {redacted}"
+    );
+}
+
+// The complement: a string with no userinfo and no `://` must come back intact,
+// or the redactor would corrupt ordinary diagnostics.
+#[test]
+fn redact_proxy_url_leaves_a_scheme_opaque_url_without_userinfo_alone() {
+    let input = "socks5:proxy.example.com";
+
+    assert_eq!(redact_proxy_url(input), input);
+}

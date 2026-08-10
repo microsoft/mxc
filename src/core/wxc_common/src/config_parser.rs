@@ -510,6 +510,14 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     }
 
     if let Some(url_str) = url {
+        // Redact once, up front, and use this in every diagnostic below. A
+        // proxy URL commonly carries basic-auth credentials, and every error in
+        // this block reaches the diagnostic/log stream. Redacting at each site
+        // instead invites exactly the miss this hoist removes: the host and
+        // port errors used to interpolate the raw URL, so a credential-bearing
+        // URL with no port leaked the password before the LXC credential guard
+        // downstream ever ran.
+        let redacted = crate::proxy_env::redact_proxy_url(&url_str);
         let parsed = url::Url::parse(&url_str)
             .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
 
@@ -518,10 +526,6 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         // by many clients, which fails open under WSLc's defaultPolicy=allow.
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
-            // Redact any embedded userinfo (`user:password@`) before it reaches
-            // the diagnostic/log stream — a proxy URL commonly carries basic-auth
-            // credentials, and the scheme alone diagnoses the failure.
-            let redacted = crate::proxy_env::redact_proxy_url(&url_str);
             return Err(WxcError::ConfigParse(format!(
                 "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
             )));
@@ -531,13 +535,13 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
             .host_str()
             .ok_or_else(|| {
                 WxcError::ConfigParse(format!(
-                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
+                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {redacted}"
                 ))
             })?
             .to_string();
         let port = parsed.port().ok_or_else(|| {
             WxcError::ConfigParse(format!(
-                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
+                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {redacted}"
             ))
         })?;
 
@@ -3648,6 +3652,32 @@ mod tests {
         );
     }
 
+    // Raised in review: the credential guard runs after `convert_wire_proxy`,
+    // so a credential-bearing URL that fails an *earlier* check never reaches
+    // it.  The port error used to interpolate the raw URL, which leaked the
+    // password the guard downstream exists to keep out of the diagnostic
+    // stream.
+    #[test]
+    fn a_malformed_credential_bearing_proxy_url_does_not_leak_the_password() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+
+        assert!(
+            msg.contains("must include a port"),
+            "expected the port diagnostic, got: {msg}"
+        );
+        assert!(
+            !msg.contains("hunter2"),
+            "the password leaked into the port diagnostic: {msg}"
+        );
+        assert!(
+            !msg.contains("alice:hunter2"),
+            "the userinfo leaked into the port diagnostic: {msg}"
+        );
+    }
     #[test]
     fn proxy_url_with_credentials_is_rejected_for_lxc() {
         // LXC forwards the URL to lxc-attach as `--set-var=HTTP_PROXY=...`, and

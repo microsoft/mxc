@@ -89,14 +89,35 @@ pub fn is_managed_proxy_key(key: &str) -> bool {
 }
 
 /// Redact any `user:pass@` userinfo from a proxy URL so it is safe to log.
+///
+/// Handles the malformed input a diagnostic actually sees: a proxy URL is
+/// redacted on the failure path, where it may not be a well-formed absolute
+/// URL. `scheme:opaque` is redacted too, since `url::Url::parse` accepts it and
+/// the resulting error message would otherwise carry the password.
 pub fn redact_proxy_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
+        return redact_opaque_userinfo(url);
     };
     let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(auth_end);
     match authority.rsplit_once('@') {
         Some((_userinfo, host)) => format!("{scheme}://***@{host}{tail}"),
+        None => url.to_string(),
+    }
+}
+
+/// Redact userinfo from a `scheme:rest` URL that has no `://` authority.
+///
+/// `url::Url::parse("alice:hunter2@example.com")` succeeds with scheme `alice`,
+/// so such a string reaches the scheme diagnostic with the password intact.
+fn redact_opaque_userinfo(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return url.to_string();
+    };
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(auth_end);
+    match authority.rsplit_once('@') {
+        Some((_userinfo, host)) => format!("{scheme}:***@{host}{tail}"),
         None => url.to_string(),
     }
 }
