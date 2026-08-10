@@ -222,7 +222,7 @@ fn spawn_exec(
     // fast `$PWD` path (a single stat) instead of walking parent directories
     // the sandbox may not let it read — which otherwise leaks
     // "getcwd: ... Operation not permitted" to stderr.
-    let cwd = resolve_working_directory(request);
+    let cwd = resolve_working_directory(request, logger);
     command.current_dir(&cwd);
     command.env("PWD", &cwd);
 
@@ -685,16 +685,42 @@ fn spawn_error(error: &std::io::Error) -> String {
 
 /// Resolve the working directory for the sandboxed child.
 ///
-/// An explicit `working_directory` always wins. Otherwise — rather than
-/// inheriting the host process's cwd, which under the deny-by-default Seatbelt
-/// profile may be inaccessible and make `getcwd()` fail (leaking a
-/// "getcwd: ... Operation not permitted" line on the child's stderr) — we pick
-/// a directory the profile is guaranteed to allow: the first readwrite path,
-/// else the first readonly path, else `/` (always readable per the baseline).
-fn resolve_working_directory(request: &ExecutionRequest) -> String {
+/// An explicit `working_directory` wins **only when it is readable under the
+/// sandbox policy**. Otherwise — whether it is empty (so we would inherit the
+/// host process's cwd) or an explicit directory outside the policy — the
+/// deny-by-default Seatbelt profile makes `getcwd()`'s parent-directory walk
+/// fail, leaking noisy "getcwd: ... Operation not permitted" lines from
+/// `bash`'s `shell-init` / `job-working-directory` onto the child's stderr. In
+/// that case we fall back to a directory the profile is guaranteed to allow:
+/// the first readwrite path, else the first readonly path, else `/` (always
+/// readable per the baseline). Falling back only changes the launch directory;
+/// it never grants additional filesystem access.
+fn resolve_working_directory(request: &ExecutionRequest, logger: &mut Logger) -> String {
     if !request.working_directory.is_empty() {
-        return request.working_directory.clone();
+        // A raw `profileOverride` replaces the generated profile entirely, so the
+        // readwrite/readonly/denied policy fields are not applied and cannot be
+        // used to predict readability. Honor the explicit cwd unchanged in that
+        // case rather than second-guessing an opaque profile.
+        if has_profile_override(request)
+            || is_working_directory_allowed(request, &request.working_directory)
+        {
+            return request.working_directory.clone();
+        }
+        let fallback = policy_fallback_directory(request);
+        logger.log_line(&format!(
+            "Seatbelt: requested working directory '{}' is not readable under the \
+             sandbox policy; launching from policy-allowed directory '{}' to avoid \
+             getcwd startup warnings",
+            request.working_directory, fallback
+        ));
+        return fallback;
     }
+    policy_fallback_directory(request)
+}
+
+/// Pick a directory the Seatbelt profile is guaranteed to allow: the first
+/// readwrite path, else the first readonly path, else `/`.
+fn policy_fallback_directory(request: &ExecutionRequest) -> String {
     let default = request
         .policy
         .readwrite_paths
@@ -706,6 +732,103 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
     // sandbox profile does so `Command::current_dir` never gets a literal `~`
     // (which would fail). Fall back to the unexpanded value if `HOME` is unset.
     crate::profile_builder::expand_tilde(&default).unwrap_or(default)
+}
+
+/// Whether a raw Seatbelt `profileOverride` is set, in which case the generated
+/// filesystem policy fields are ignored by the profile builder.
+fn has_profile_override(request: &ExecutionRequest) -> bool {
+    request
+        .seatbelt
+        .as_ref()
+        .and_then(|c| c.profile_override.as_ref())
+        .is_some()
+}
+
+/// Whether `dir` is readable under the sandbox's filesystem policy — i.e. a
+/// process launched there can `getcwd()` without the profile denying the walk.
+///
+/// A directory is considered readable when it is within (a subpath of, or
+/// equal to) some `readwritePaths` / `readonlyPaths` entry and is not within
+/// any `deniedPaths` entry (deny overrides allow, matching the profile's rule
+/// ordering). Policy paths are tilde-expanded exactly as the profile builder
+/// expands them so the comparison sees the same absolute paths the profile
+/// grants. Matching is component-wise, so `/data` never matches `/database`.
+fn is_working_directory_allowed(request: &ExecutionRequest, dir: &str) -> bool {
+    // Expand `~` exactly as the profile builder does, then lexically fold `.` /
+    // `..` so the containment test compares the path the kernel actually
+    // resolves. Without this, `/work/../private` would spuriously match an
+    // allowed `/work` even though it resolves outside it.
+    let dir = normalize_path(
+        &crate::profile_builder::expand_tilde(dir).unwrap_or_else(|_| dir.to_string()),
+    );
+    let policy = &request.policy;
+
+    // Deny wins: if the directory is within any denied subpath it is unreadable.
+    for denied in &policy.denied_paths {
+        if let Ok(denied) = crate::profile_builder::expand_tilde(denied) {
+            if path_within(&dir, &normalize_path(&denied)) {
+                return false;
+            }
+        }
+    }
+
+    // Allowed only when within a readwrite or readonly policy subpath.
+    policy
+        .readwrite_paths
+        .iter()
+        .chain(policy.readonly_paths.iter())
+        .filter_map(|p| crate::profile_builder::expand_tilde(p).ok())
+        .any(|allowed| path_within(&dir, &normalize_path(&allowed)))
+}
+
+/// Lexically normalize an absolute path: collapse repeated slashes, drop `.`
+/// components, and resolve `..` by popping the previous component (never past
+/// the root). Purely lexical — it does not resolve symlinks or touch the
+/// filesystem — which is sufficient to fold the `..` a caller may embed in a
+/// requested cwd before the containment check.
+fn normalize_path(path: &str) -> String {
+    let is_absolute = path.starts_with('/');
+    let mut components: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                // Pop a real component; keep `..` for relative paths that walk
+                // above their start, but for absolute paths never go past root.
+                match components.last() {
+                    Some(&last) if last != ".." => {
+                        components.pop();
+                    }
+                    _ if is_absolute => {}
+                    _ => components.push(".."),
+                }
+            }
+            other => components.push(other),
+        }
+    }
+    let joined = components.join("/");
+    if is_absolute {
+        format!("/{joined}")
+    } else if joined.is_empty() {
+        ".".to_string()
+    } else {
+        joined
+    }
+}
+
+/// Whether `child` is equal to, or nested within, `ancestor`, comparing whole
+/// path components so `/data` does not match `/database`. Both paths are
+/// treated as already absolute/expanded; trailing slashes are ignored.
+fn path_within(child: &str, ancestor: &str) -> bool {
+    let child_components: Vec<&str> = child.trim_end_matches('/').split('/').collect();
+    let ancestor_components: Vec<&str> = ancestor.trim_end_matches('/').split('/').collect();
+    if ancestor_components.len() > child_components.len() {
+        return false;
+    }
+    child_components
+        .iter()
+        .zip(ancestor_components.iter())
+        .all(|(c, a)| c == a)
 }
 
 /// Baseline `PATH` for the sandboxed child. We always start from a cleared
@@ -951,5 +1074,164 @@ mod tests {
         for p in &paths {
             let _ = fs::remove_file(p);
         }
+    }
+
+    // --- working-directory resolution -------------------------------------
+
+    use wxc_common::logger::{Logger, Mode};
+
+    fn discard_logger() -> Logger {
+        Logger::new(Mode::Buffer)
+    }
+
+    #[test]
+    fn path_within_matches_whole_components_only() {
+        assert!(path_within("/data", "/data"));
+        assert!(path_within("/data/sub/dir", "/data"));
+        assert!(path_within("/data/", "/data"));
+        // Component boundary: /database must not match the /data root.
+        assert!(!path_within("/database", "/data"));
+        assert!(!path_within("/data", "/data/sub"));
+    }
+
+    #[test]
+    fn resolve_working_directory_keeps_allowed_subpath() {
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/work".into()];
+        request.working_directory = "/work/project".into();
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/work/project"
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_falls_back_when_outside_policy() {
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/work".into()];
+        request.policy.readonly_paths = vec!["/data".into()];
+        request.working_directory = "/somewhere/else".into();
+        // Falls back to the first readwrite path.
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/work"
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_falls_back_when_denied() {
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/work".into()];
+        request.policy.denied_paths = vec!["/work/secret".into()];
+        request.working_directory = "/work/secret/inner".into();
+        // Deny overrides the broader readwrite allow, so we fall back.
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/work"
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_falls_back_to_readonly_then_root() {
+        let mut request = base_request();
+        request.policy.readonly_paths = vec!["/ro".into()];
+        request.working_directory = "/nope".into();
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/ro"
+        );
+
+        let mut bare = base_request();
+        bare.working_directory = "/nope".into();
+        // No policy paths at all → `/`.
+        assert_eq!(resolve_working_directory(&bare, &mut discard_logger()), "/");
+    }
+
+    #[test]
+    fn resolve_working_directory_matches_tilde_expanded_policy_path() {
+        // A tilde policy path allows a matching absolute requested cwd.
+        let home = std::env::var("HOME").expect("HOME set in test env");
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["~/projects".into()];
+        request.working_directory = format!("{home}/projects/app");
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            format!("{home}/projects/app")
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_empty_uses_first_readwrite() {
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/work".into()];
+        request.working_directory = String::new();
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/work"
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_component_boundary_falls_back() {
+        // Policy allows /data; a requested /database cwd must not be treated as
+        // allowed and should fall back.
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/data".into()];
+        request.working_directory = "/database".into();
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/data"
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_folds_dotdot_before_containment() {
+        // `/work/../private` resolves outside the allowed `/work`, so it must
+        // not be treated as allowed and should fall back.
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/work".into()];
+        request.working_directory = "/work/../private".into();
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/work"
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_allows_dot_segments_within_policy() {
+        // `.` and redundant slashes inside an allowed root stay allowed.
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/work".into()];
+        request.working_directory = "/work/./sub//dir".into();
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/work/./sub//dir"
+        );
+    }
+
+    #[test]
+    fn resolve_working_directory_preserves_explicit_cwd_with_profile_override() {
+        // With a raw profileOverride the generated filesystem policy is ignored,
+        // so an explicit out-of-policy cwd must be honored, not replaced.
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/work".into()];
+        request.working_directory = "/anywhere".into();
+        request.seatbelt = Some(SeatbeltConfig {
+            profile_override: Some("(version 1)(allow default)".into()),
+            ..SeatbeltConfig::default()
+        });
+        assert_eq!(
+            resolve_working_directory(&request, &mut discard_logger()),
+            "/anywhere"
+        );
+    }
+
+    #[test]
+    fn normalize_path_folds_dot_and_dotdot() {
+        assert_eq!(normalize_path("/work/../private"), "/private");
+        assert_eq!(normalize_path("/work/./sub//dir"), "/work/sub/dir");
+        assert_eq!(normalize_path("/a/b/../../c"), "/c");
+        assert_eq!(normalize_path("/.."), "/");
+        assert_eq!(normalize_path("/work/"), "/work");
     }
 }
