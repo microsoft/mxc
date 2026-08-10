@@ -55,9 +55,13 @@ production configs and the dev schema when working on experimental features:
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
-                                           // WSLC supports the cooperative proxy too, but only via
-                                           // { "url": "http://proxy.example:8080" } (own-netns:
-                                           //  localhost/builtinTestServer are unreachable, rejected)
+                                           // WSLC and LXC support the cooperative proxy too, but
+                                           // only via { "url": "http://proxy.example:8080" }
+                                           // (own-netns: localhost/builtinTestServer are
+                                           //  unreachable, rejected)
+                                           // Under LXC the proxy is enforced: egress is restricted
+                                           //  to the proxy endpoint and nothing else, so the
+                                           //  allow/block host lists and DNS are not opened.
     },
 
     "ui": {

@@ -207,6 +207,45 @@ would apply to every container and to the host's own traffic.
 
 Firewall state is torn down automatically with best-effort removal of the `FORWARD` hooks and both per-container chains; there is no network-policy opt-out field. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains.
 
+### Cooperative proxy
+
+`network.proxy` puts the container in a "deny all except the proxy" posture:
+egress is restricted to the proxy endpoint, and `HTTP_PROXY`/`HTTPS_PROXY` are
+injected so a cooperating client uses it. The env vars are the routing hint;
+the firewall is the enforcement, so an application that ignores them reaches
+nothing rather than reaching the internet directly.
+
+Only the `{ "url": "http://proxy.example:8080" }` form is accepted. The LXC
+container has its own network namespace, so `{ "localhost": <port> }` names the
+*container's* loopback rather than the host's — the injected proxy would be
+unreachable and the firewall rule would never match. `{ "builtinTestServer":
+true }` is rejected for the same reason, as is a `url` whose host is a loopback
+literal.
+
+The chain a proxied container gets differs from the ordinary one in four ways,
+each of which would otherwise be a hole in the posture:
+
+| Ordinary chain | Proxied chain | Why |
+|----------------|---------------|-----|
+| Terminal rule follows `defaultPolicy` | Terminal rule is always DROP | An ACCEPT terminal would make the proxy rule above it meaningless |
+| Accepts UDP/TCP port 53 | No DNS rule | An unscoped port-53 accept is a standing DNS-tunnel exfil path through a deny-all posture |
+| Accepts `-i lo` and `ESTABLISHED,RELATED` | Neither | Neither describes traffic this chain sees, and the conntrack rule would carry flows the proxy never brokered |
+| Programs `allowedHosts` and `blockedHosts` | Programs neither | A block entry is redundant under the closing DROP, and an allow entry naming anything but the proxy contradicts the model |
+
+The IPv6 chain of a proxied container carries its closing DROP and nothing
+else, because the proxy rule is emitted with IPv4 `iptables` only. An IPv6
+proxy endpoint is therefore rejected outright rather than silently discarded.
+
+With DNS closed, a container handed a proxy URL naming a hostname has no
+resolver to find it with. MXC resolves the proxy once, when it builds the
+firewall rule, and writes that same mapping into the container's `/etc/hosts`
+before the script runs — so the name resolves, and it resolves to an address
+the chain allows. The URL itself is left alone: rewriting its host to an IP
+literal would break SNI and certificate validation for an `https://` proxy.
+Every address the proxy host resolved to is opened, since they all belong to
+that same proxy. If the hosts entry cannot be written, execution **fails**
+rather than running a container whose proxy is unreachable.
+
 ## Usage
 
 ### Command Line
