@@ -35,7 +35,7 @@ use wslc_common::daemon_protocol::{
 };
 use wslc_common::policy_mapping;
 use wslc_common::wslc_bindings::{
-    WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
+    WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ScriptResponse;
@@ -363,23 +363,21 @@ impl Worker {
         Ok(())
     }
 
-    /// Validate that a sandbox exists and is started, without touching the SDK.
-    fn validate_exec(&self, sandbox_id: &str) -> Result<(), WorkerError> {
+    /// Validate that a sandbox exists and is started, returning the live handle
+    /// needed to run. Sole owner of the exists+started invariant: [`exec`] trusts
+    /// the handle it is given and never re-checks, because the worker services
+    /// admission and the run on one thread without yielding between them.
+    fn validate_exec(&self, sandbox_id: &str) -> Result<WslcContainer, WorkerError> {
         match self.containers.get(sandbox_id) {
             None => Err(WorkerError::NotProvisioned(sandbox_id.to_string())),
             Some(entry) if !entry.started => Err(WorkerError::NotStarted(sandbox_id.to_string())),
-            Some(_) => Ok(()),
+            Some(entry) => Ok(entry.container.as_raw()),
         }
     }
 
-    fn exec(&mut self, config: ExecConfig) -> Result<i32, WorkerError> {
-        let (container, started) = match self.containers.get(&config.sandbox_id) {
-            Some(e) => (e.container.as_raw(), e.started),
-            None => return Err(WorkerError::NotProvisioned(config.sandbox_id)),
-        };
-        if !started {
-            return Err(WorkerError::NotStarted(config.sandbox_id));
-        }
+    /// Run a command in a sandbox whose existence/started state was already
+    /// confirmed by [`validate_exec`]; `container` is that validated handle.
+    fn exec(&mut self, config: ExecConfig, container: WslcContainer) -> Result<i32, WorkerError> {
         let sdk = self
             .sdk
             .as_ref()
@@ -553,10 +551,25 @@ pub fn spawn() -> Result<SessionHandle> {
                             Err(e) => {
                                 let _ = admit.send(Err(e));
                             }
-                            Ok(()) => {
-                                let _ = admit.send(Ok(()));
-                                let _ = done.send(worker.exec(config));
+                            // Only run if the admission receiver is still there:
+                            // if the client handler was dropped before it read
+                            // admission, the blocking exec would otherwise starve
+                            // every other lifecycle command for its full timeout.
+                            Ok(container) if admit.send(Ok(())).is_ok() => {
+                                let sandbox_id = config.sandbox_id.clone();
+                                let outcome = worker.exec(config, container);
+                                if let Err(orphaned) = done.send(outcome) {
+                                    // The client handler is gone (e.g. its
+                                    // post-admission Ok write failed) but the run
+                                    // already happened. Record the result so a
+                                    // completed exec is never silently lost.
+                                    worker.logger.warning_line(&format!(
+                                        "exec on {sandbox_id} completed after the client \
+                                         disconnected; orphaned result: {orphaned:?}"
+                                    ));
+                                }
                             }
+                            Ok(_) => {}
                         }
                     }
                     WorkerCommand::Stop { config, reply } => {

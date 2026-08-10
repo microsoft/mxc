@@ -17,16 +17,16 @@
 //! connect to the control plane.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use windows::core::{PCWSTR, PWSTR};
@@ -93,10 +93,14 @@ pub async fn run(
     pipe_name: String,
     security: OwnerOnlySecurity,
     first_instance: NamedPipeServer,
-    active_clients: Arc<AtomicUsize>,
-    activity: Arc<AtomicU64>,
-    shutdown: Arc<Notify>,
+    signals: crate::DaemonSignals,
 ) -> Result<()> {
+    let crate::DaemonSignals {
+        active_clients,
+        activity,
+        shutdown,
+        draining,
+    } = signals;
     let mut server = first_instance;
     let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
     let mut clients: JoinSet<()> = JoinSet::new();
@@ -109,6 +113,11 @@ pub async fn run(
 
     loop {
         tokio::select! {
+            // Bias toward shutdown: once the watchdog signals, prefer tearing
+            // down over accepting a connection that raced the final idle sample.
+            biased;
+
+            _ = shutdown.notified() => break,
             connect = server.connect() => {
                 if let Err(e) = connect {
                     eprintln!("[wslc-daemon] pipe connect error: {e}");
@@ -120,6 +129,14 @@ pub async fn run(
                         }
                     }
                     continue;
+                }
+                // The watchdog may have entered the draining state after its
+                // final sample but before this connection arrived. Refuse it
+                // rather than provision into a session that is about to be
+                // released, handing the client an ID that teardown invalidates.
+                // The client re-spawns a fresh daemon once our record is gone.
+                if draining.load(Ordering::SeqCst) {
+                    break;
                 }
                 let connected = server;
                 // Record the connection so an idle streak that spans this
@@ -154,7 +171,6 @@ pub async fn run(
             }
             // Reap finished handlers so the JoinSet does not accumulate.
             Some(_) = clients.join_next() => {}
-            _ = shutdown.notified() => break,
         }
     }
 
@@ -411,14 +427,27 @@ async fn handle_exec(
 ) -> Result<()> {
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.
-    let done = match session.exec(config).await {
+    write_exec_result(&mut pipe, session.exec(config).await).await
+}
+
+/// Turn an exec **admission** outcome into the client's frame sequence, generic
+/// over the transport so the protocol can be exercised over an in-memory duplex
+/// in tests. On rejection it writes a single typed [`DaemonResponse::Err`]; on
+/// admission it writes `Ok` then awaits completion and writes exactly one
+/// terminal [`StreamFrame`] — `Exit` on success, `Error` on a run failure or a
+/// dropped completion channel.
+async fn write_exec_result<S: AsyncWrite + Unpin>(
+    pipe: &mut S,
+    admission: Result<oneshot::Receiver<Result<i32, WorkerError>>, WorkerError>,
+) -> Result<()> {
+    let done = match admission {
         Ok(done) => done,
         Err(e) => {
-            write_frame(&mut pipe, &worker_err_response(e)).await?;
+            write_frame(pipe, &worker_err_response(e)).await?;
             return Ok(());
         }
     };
-    write_frame(&mut pipe, &DaemonResponse::Ok).await?;
+    write_frame(pipe, &DaemonResponse::Ok).await?;
     let terminal = match done.await {
         Ok(Ok(code)) => StreamFrame::Exit { code },
         Ok(Err(e)) => StreamFrame::Error {
@@ -428,7 +457,7 @@ async fn handle_exec(
             message: "WSLc worker dropped the exec reply channel".to_string(),
         },
     };
-    write_frame(&mut pipe, &terminal).await?;
+    write_frame(pipe, &terminal).await?;
     Ok(())
 }
 
@@ -449,7 +478,7 @@ fn worker_err_response(e: WorkerError) -> DaemonResponse {
 }
 
 /// Read one length-prefixed frame and deserialise it.
-async fn read_frame<T: DeserializeOwned>(pipe: &mut NamedPipeServer) -> Result<T> {
+async fn read_frame<S: AsyncRead + Unpin, T: DeserializeOwned>(pipe: &mut S) -> Result<T> {
     let mut len_buf = [0u8; 4];
     pipe.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
@@ -462,9 +491,104 @@ async fn read_frame<T: DeserializeOwned>(pipe: &mut NamedPipeServer) -> Result<T
 }
 
 /// Serialise `msg` and write it as a length-prefixed frame.
-async fn write_frame<T: Serialize>(pipe: &mut NamedPipeServer, msg: &T) -> Result<()> {
+async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(pipe: &mut S, msg: &T) -> Result<()> {
     let frame = encode_frame(msg)?;
     pipe.write_all(&frame).await?;
     pipe.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+    use wslc_common::daemon_protocol::ErrKind;
+
+    /// A rejected admission (unknown sandbox) round-trips as a single typed
+    /// `DaemonResponse::Err { NotProvisioned }` through frame encode → transport
+    /// → decode, with no terminal frame following it.
+    #[tokio::test]
+    async fn exec_rejection_round_trips_as_typed_error() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let admission = Err(WorkerError::NotProvisioned("wslc:nope".to_string()));
+
+        write_exec_result(&mut server, admission).await.unwrap();
+        drop(server);
+
+        let resp: DaemonResponse = read_frame(&mut client).await.unwrap();
+        match resp {
+            DaemonResponse::Err { kind, message } => {
+                assert_eq!(kind, ErrKind::NotProvisioned);
+                assert!(message.contains("wslc:nope"), "message was {message:?}");
+            }
+            other => panic!("expected a typed Err response, got {other:?}"),
+        }
+        // A rejected exec is a single frame: nothing else follows.
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+    }
+
+    /// The `NotStarted` admission contract has an SDK-free regression here: a
+    /// provisioned-but-not-started sandbox surfaces as a typed pre-admission
+    /// error, exercised without constructing a real container handle.
+    #[tokio::test]
+    async fn exec_not_started_round_trips_as_typed_error() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let admission = Err(WorkerError::NotStarted("wslc:cold".to_string()));
+
+        write_exec_result(&mut server, admission).await.unwrap();
+        drop(server);
+
+        let resp: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(
+            resp,
+            DaemonResponse::Err {
+                kind: ErrKind::NotStarted,
+                message: "sandbox wslc:cold is not started".to_string(),
+            }
+        );
+    }
+
+    /// Dropping the completion sender after admission must produce exactly one
+    /// terminal `StreamFrame::Error` — never a hang or a malformed stream.
+    #[tokio::test]
+    async fn dropped_completion_channel_yields_single_error_terminal() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        drop(done_tx);
+
+        write_exec_result(&mut server, Ok(done_rx)).await.unwrap();
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        let terminal: StreamFrame = read_frame(&mut client).await.unwrap();
+        match terminal {
+            StreamFrame::Error { message } => {
+                assert!(
+                    message.contains("dropped the exec reply channel"),
+                    "message was {message:?}"
+                );
+            }
+            other => panic!("expected a terminal Error frame, got {other:?}"),
+        }
+        // Exactly one terminal frame is emitted.
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+    }
+
+    /// A successful run writes admission `Ok` then a single `Exit` terminal
+    /// carrying the process exit code.
+    #[tokio::test]
+    async fn successful_exec_writes_ok_then_exit() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        done_tx.send(Ok(7)).unwrap();
+
+        write_exec_result(&mut server, Ok(done_rx)).await.unwrap();
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        let terminal: StreamFrame = read_frame(&mut client).await.unwrap();
+        assert_eq!(terminal, StreamFrame::Exit { code: 7 });
+    }
 }
