@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright (c) Microsoft Corporation. All rights reserved.
+
+  Side-by-side WinRT activation manifest for the NuGet-delivered
+  IsoSessionApp.dll.  Ships in the SDK NuGet next to the consumer (e.g.
+  wxc-exec.exe) alongside IsoSessionApp.dll.
+
+  Purpose:
+    1. Reg-free SxS resolution of IsoSessionApp.dll (the file element) so the
+       shim loads by full path from the consumer directory, not the inbox
+       WinRT catalog.
+    2. The instance marker carries the target MonthId -- the versioned runtime
+       this consumer was built against.  Both the MXC host and
+       IsoSessionApp.dll read it: MXC compares it to its build-baked
+       EXPECTED_INSTANCE; IsoSessionApp.dll maps it to the versioned MSI client
+       under ProgramFiles Microsoft Agentic Runtime MonthId.
+
+  Contract mirrors MXC regfree.rs.  No activatableClass element is needed --
+  both consumers call the DllGetActivationFactory export directly by full path.
+  pack.ps1 stamps the MonthId placeholder from GENERATION_INFO.toml instance.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity name="IsoSession.Runtime" version="1.0.0.0" type="win32" />
+  <file name="IsoSessionApp.dll" />
+  <iso:instance xmlns:iso="urn:schemas-microsoft-com:agentic-runtime.v1" name="$(MonthId)" />
+</assembly>

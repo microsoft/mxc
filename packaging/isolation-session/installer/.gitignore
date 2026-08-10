@@ -1,0 +1,14 @@
+# WiX v5 SDK / MSBuild build intermediates and NuGet restore output.
+# The installer is built out-of-tree by makeinstaller.ps1 into an -OutDir
+# supplied by the caller (or the default under obj/); these local folders are
+# transient and must not be committed.
+obj/
+bin/
+out/
+
+# Per-(month, architecture) generated preprocessor include (produced by
+# makeinstaller.ps1).
+IsoSessionVars_*.wxi
+
+# Local NuGet restore cache used only for offline validation runs.
+.nugetcache/

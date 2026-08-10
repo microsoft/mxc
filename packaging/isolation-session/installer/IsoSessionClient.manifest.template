@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Copyright (c) Microsoft Corporation. All rights reserved.
+
+  Registration-Free COM Manifest for IsolationSession Client Applications.
+
+  PURPOSE:
+    Embed this manifest in your application to activate a specific monthly
+    version of the IsolationSession service without relying on global COM
+    registry entries.  This enables true side-by-side: two applications with
+    different manifests can simultaneously activate different monthly versions.
+
+  USAGE:
+    1. The MSI build (makeinstaller.ps1) generates a filled-in copy of this template
+       with the correct paths and AppId for the target month/architecture.
+    2. Embed the generated manifest in your application's .exe.manifest or
+       reference it as an external manifest:
+         MyApp.exe.manifest  (same directory as MyApp.exe)
+
+  VARIABLES (replaced by makeinstaller.ps1):
+    $(MonthId)    - e.g., "2026.06"
+    $(Arch)       - e.g., "x64" or "arm64"
+    $(AppId)      - Per-month COM AppID GUID
+    $(ClientClsid) - Per-month CLSID for ComSessionClient
+    $(ProxyConnectionClsid) - Per-month CLSID for ComSessionProxyConnection
+    $(InstallDir) - e.g., "%ProgramFiles%\Microsoft\Agentic Runtime\2026.06"
+
+  HOW IT WORKS:
+    When your app calls CoCreateInstance(CLSID_ComSessionClient), the Windows
+    loader checks your manifest FIRST (before the registry).  The manifest
+    redirects the CLSID to the versioned proxy stub DLL, which connects to
+    the versioned service.  No registry CLSID lookup occurs.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+
+  <assemblyIdentity
+      type="win32"
+      name="IsolationSession.Client.$(MonthId).$(Arch)"
+      version="1.0.0.0" />
+
+  <description>IsolationSession client activation ($(MonthId), $(Arch))</description>
+
+  <!-- Proxy stub DLL — handles COM marshaling for all IsolationSession interfaces -->
+  <file name="$(InstallDir)\IsoSessionProxyStub.dll">
+
+    <!-- ComSessionClient — primary entry point for creating isolation sessions -->
+    <comClass
+        clsid="$(ClientClsid)"
+        threadingModel="Both"
+        description="ComSessionClient ($(MonthId), $(Arch))" />
+
+    <!-- ComSessionProxyConnection — internal proxy connection management -->
+    <comClass
+        clsid="$(ProxyConnectionClsid)"
+        threadingModel="Both"
+        description="ComSessionProxyConnection ($(MonthId), $(Arch))" />
+
+    <!-- Proxy stub CLSID — interface marshaling -->
+    <comClass
+        clsid="{20A5CDEF-405F-456F-82B4-87050A919E5C}"
+        threadingModel="Both"
+        description="IsoSessionProxyStub ($(MonthId), $(Arch))" />
+
+    <!-- Interface proxy entries (bind IIDs to the proxy stub) -->
+    <comInterfaceProxyStub
+        iid="{F1C3C112-2B26-4095-A31C-6F110C14B229}"
+        name="IComSessionClient"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+    <comInterfaceProxyStub
+        iid="{B5C6D7E8-1F2A-4B3C-E4D5-8C9D0E1F2A3B}"
+        name="IComSessionProxyConnection"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+    <comInterfaceProxyStub
+        iid="{D1C2E3F4-7B8A-4D9E-A0F1-4E5F6A7B8C9D}"
+        name="IComSessionWorkerProcess"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+    <comInterfaceProxyStub
+        iid="{936EF0BB-31C0-4517-8B14-5179B1893EE3}"
+        name="IComSessionOperationCallback"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+    <comInterfaceProxyStub
+        iid="{0DBC36F5-07AC-4848-8A45-1A5740C8113B}"
+        name="IComSessionProvisionCallback"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+    <comInterfaceProxyStub
+        iid="{8A007D3E-6697-4CA8-B677-7ABE5F6ACF5B}"
+        name="IComSessionProxyCallback"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+    <comInterfaceProxyStub
+        iid="{C4AF7CC6-5F2C-413B-9C90-D1106DC2202B}"
+        name="IComSessionRegistrationCallback"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+    <comInterfaceProxyStub
+        iid="{4D347EF6-CF1D-4F8B-B434-23166F4C6CBC}"
+        name="IComSessionWorkerProcessCallback"
+        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+
+  </file>
+
+</assembly>

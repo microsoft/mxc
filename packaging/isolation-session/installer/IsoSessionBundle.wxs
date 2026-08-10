@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) Microsoft Corporation. All rights reserved.
+
+  WiX v5 bootstrapper bundle for IsolationSession — the user-facing UI installer
+  EXE that wraps the IsoSession MSI. Modeled on the PowerToys bootstrapper:
+  a WixStandardBootstrapperApplication (rtfLicense theme + logo) whose chain runs
+  a terminate step then installs the MSI. Built separately per architecture
+  (x64 or arm64) — never x86.
+
+  Monthly side-by-side is preserved: each month gets its own BundleUpgradeCode
+  and Version (from the generated IsoSessionVars include). x64 and arm64
+  bundles preserve the same MonthId-only runtime identity used by the OS code.
+
+  Variables (from the generated $(var.IsoSessionVars) include, written per
+  (month, architecture) by makeinstaller.ps1):
+    $(var.Version)            - Bundle/MSI version (YY.M.Patch.0)
+    $(var.BundleUpgradeCode)  - Per-month bundle UpgradeCode (UUID v5)
+    $(var.MonthId)            - Release month (e.g., "2026.07")
+    $(var.Arch)               - Target architecture ("x64" or "arm64")
+    $(var.ServiceName)        - Versioned service name (terminate arg)
+    $(var.MsiPath)            - Absolute path to the built IsoSession MSI
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+
+  <?include $(var.IsoSessionVars) ?>
+
+  <Bundle Name="IsolationSession Service $(var.MonthId) ($(var.Arch)) (Dev)"
+          Version="$(var.Version)"
+          Manufacturer="Microsoft Corporation"
+          UpgradeCode="$(var.BundleUpgradeCode)"
+          IconSourceFile="bootstrapper\icon.ico">
+
+    <!-- UI: WiX standard bootstrapper, license/EULA page + logo (like PowerToys).
+         SuppressOptionsUI="no" surfaces WixStdBA's built-in Options page, which
+         includes an install-location edit + Browse control bound to the bundle
+         variable named "InstallFolder" (below). -->
+    <BootstrapperApplication>
+      <!-- ThemeFile is a copy of the stock rtfLicense theme whose <Window>
+           carries IconFile="icon.ico", so the installer window's title-bar and
+           taskbar icon is the shield. The stock theme sets no window icon (NULL
+           hIcon -> default app icon). This is the same mechanism PowerToys uses
+           (installer\PowerToysSetupVNext\RtfTheme.xml). The icon.ico Payload
+           below places the file in the BA working dir so the theme's relative
+           IconFile="icon.ico" resolves at runtime. -->
+      <bal:WixStandardBootstrapperApplication
+          LicenseFile="bootstrapper\License.rtf"
+          LogoFile="bootstrapper\logo.png"
+          Theme="rtfLicense"
+          ThemeFile="bootstrapper\RtfTheme.xml"
+          SuppressOptionsUI="no"
+          SuppressRepair="yes" />
+      <Payload SourceFile="bootstrapper\icon.ico" Name="icon.ico" Compressed="yes" />
+    </BootstrapperApplication>
+
+    <!-- Install location. WixStdBA's Options page binds its folder control to a
+         variable that MUST be named "InstallFolder". Overridable so silent runs
+         can pass InstallFolder=... on the command line. Defaults to the
+         monthly side-by-side convention; the chosen value is
+         forwarded to the MSI's INSTALLDIR below.
+         ProgramFiles64Folder is the native (non-WOW64) Program Files folder on
+         BOTH x64 and arm64 — no per-arch branching needed here either. -->
+    <Variable Name="InstallFolder"
+              Type="formatted"
+              Value="[ProgramFiles64Folder]Microsoft\Agentic Runtime\$(var.MonthId)"
+              bal:Overridable="yes" />
+
+    <Log Prefix="IsoSessionSetup-$(var.MonthId)-$(var.Arch)" Extension=".log" />
+
+    <Chain>
+      <!-- Terminate step: stop this month's service + kill workers so the
+           MSI can replace in-use files. Runs elevated; never blocks (Vital="no"). -->
+      <ExePackage DisplayName="Stopping IsolationSession ($(var.MonthId), $(var.Arch))"
+                  SourceFile="bootstrapper\terminate_isosession.cmd"
+                  InstallArguments="$(var.ServiceName)"
+                  DetectCondition="false"
+                  PerMachine="yes"
+                  Permanent="yes"
+                  Vital="no"
+                  Compressed="yes" />
+
+      <!-- The IsoSession MSI. Its own UI is suppressed; the bundle drives UX.
+           The install location chosen on the Options page (InstallFolder) is
+           forwarded to the MSI's public INSTALLDIR property. -->
+      <MsiPackage DisplayName="IsolationSession MSI ($(var.MonthId), $(var.Arch))"
+                  SourceFile="$(var.MsiPath)"
+                  Compressed="yes"
+                  Vital="yes"
+                  bal:DisplayInternalUICondition="false">
+        <MsiProperty Name="INSTALLDIR" Value="[InstallFolder]" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

@@ -1,0 +1,112 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+trigger: none
+pr: none
+
+name: isosession_$(Date:yyyyMMdd)$(Rev:.r)
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+parameters:
+- name: buildGuid
+  displayName: Windows OS BNS BuildGuid
+  type: string
+  default: '00000000-0000-0000-0000-000000000000'
+- name: monthId
+  displayName: Release month (YYYY.MM)
+  type: string
+  default: '2026.08'
+- name: patch
+  displayName: In-month patch number
+  type: number
+  default: 0
+- name: basePackageFeedUrl
+  displayName: Restricted Azure Artifacts NuGet v3 feed URL
+  type: string
+  default: 'REPLACE-WITH-RESTRICTED-FEED-URL'
+- name: basePackageId
+  displayName: Metadata-only base package ID
+  type: string
+  default: Microsoft.Windows.AI.IsolationSession.SDK
+- name: basePackageVersion
+  displayName: Metadata-only base package version
+  type: string
+  default: '0.202608.0'
+- name: osBranch
+  displayName: Windows OS branch recorded in provenance
+  type: string
+  default: ge_current_directwinpd_sf2
+- name: x64DropNameOverride
+  displayName: Exact x64 BIN drop name (optional)
+  type: string
+  default: ' '
+- name: arm64DropNameOverride
+  displayName: Exact ARM64 BIN drop name (optional)
+  type: string
+  default: ' '
+
+variables:
+- group: MXC-ESRP-Signing
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: windows-2022
+      os: windows
+
+    customBuildTags:
+    - ES365AIMigrationTooling
+
+    stages:
+    - stage: Build_IsoSession_Artifacts
+      displayName: Build IsoSession artifacts
+      jobs:
+      - template: templates/IsoSession.Artifacts.Build.Job.yml@self
+        parameters:
+          archTag: x64
+          flavor: amd64fre
+          rid: win-x64
+          buildGuid: ${{ parameters.buildGuid }}
+          monthId: ${{ parameters.monthId }}
+          patch: ${{ parameters.patch }}
+          basePackageFeedUrl: ${{ parameters.basePackageFeedUrl }}
+          basePackageId: ${{ parameters.basePackageId }}
+          basePackageVersion: ${{ parameters.basePackageVersion }}
+          osBranch: ${{ parameters.osBranch }}
+          dropNameOverride: ${{ parameters.x64DropNameOverride }}
+          ESRPInfo:
+            serviceName: $(serviceName)
+            tenantId: $(tenantId)
+            azureKeyVaultName: $(azureKeyVaultName)
+            authCertName: $(authCertName)
+            signCertName: $(signCertName)
+            clientId: $(clientId)
+
+      - template: templates/IsoSession.Artifacts.Build.Job.yml@self
+        parameters:
+          archTag: arm64
+          flavor: arm64fre
+          rid: win-arm64
+          buildGuid: ${{ parameters.buildGuid }}
+          monthId: ${{ parameters.monthId }}
+          patch: ${{ parameters.patch }}
+          basePackageFeedUrl: ${{ parameters.basePackageFeedUrl }}
+          basePackageId: ${{ parameters.basePackageId }}
+          basePackageVersion: ${{ parameters.basePackageVersion }}
+          osBranch: ${{ parameters.osBranch }}
+          dropNameOverride: ${{ parameters.arm64DropNameOverride }}
+          ESRPInfo:
+            serviceName: $(serviceName)
+            tenantId: $(tenantId)
+            azureKeyVaultName: $(azureKeyVaultName)
+            authCertName: $(authCertName)
+            signCertName: $(signCertName)
+            clientId: $(clientId)

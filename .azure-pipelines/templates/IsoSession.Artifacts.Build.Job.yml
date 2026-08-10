@@ -1,0 +1,359 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: archTag
+  type: string
+- name: flavor
+  type: string
+- name: rid
+  type: string
+- name: buildGuid
+  type: string
+- name: monthId
+  type: string
+- name: patch
+  type: number
+- name: basePackageFeedUrl
+  type: string
+- name: basePackageId
+  type: string
+- name: basePackageVersion
+  type: string
+- name: osBranch
+  type: string
+- name: dropNameOverride
+  type: string
+  default: ' '
+- name: dropServiceUri
+  type: string
+  default: https://microsoft.artifacts.visualstudio.com/DefaultCollection
+- name: ESRPInfo
+  type: object
+  default:
+    serviceName: ''
+    tenantId: ''
+    azureKeyVaultName: ''
+    authCertName: ''
+    signCertName: ''
+    clientId: ''
+
+jobs:
+- job: build_isosession_${{ parameters.archTag }}
+  displayName: Build IsoSession artifacts (${{ parameters.archTag }})
+  timeoutInMinutes: 90
+  variables:
+    workDirectory: $(Pipeline.Workspace)/isosession/${{ parameters.archTag }}
+    dropClientDirectory: $(workDirectory)/drop-client
+    payloadDirectory: $(workDirectory)/payload
+    payloadBinDirectory: $(payloadDirectory)/bin/${{ parameters.archTag }}
+    basePackageDirectory: $(workDirectory)/base-package
+    nugetOutputDirectory: $(workDirectory)/nuget
+    installerOutputDirectory: $(workDirectory)/installer
+    artifactDirectory: $(Build.SourcesDirectory)/out/isosession/${{ parameters.archTag }}
+    artifactName: isosession-artifacts-${{ parameters.archTag }}
+
+  steps:
+  - checkout: self
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      if ('${{ parameters.buildGuid }}' -eq '00000000-0000-0000-0000-000000000000') {
+          throw 'A Windows OS BNS BuildGuid must be supplied.'
+      }
+      [void][guid]::Parse('${{ parameters.buildGuid }}')
+      if ('${{ parameters.monthId }}' -notmatch '^\d{4}\.\d{2}$') {
+          throw 'monthId must use YYYY.MM format.'
+      }
+      if ([int]${{ parameters.patch }} -lt 0) {
+          throw 'patch must be non-negative.'
+      }
+      $expectedVersion = '0.' + '${{ parameters.monthId }}'.Replace('.', '') + '.0'
+      if ('${{ parameters.basePackageVersion }}' -ne $expectedVersion) {
+          throw "basePackageVersion must be $expectedVersion for monthId ${{ parameters.monthId }}."
+      }
+      if ('${{ parameters.basePackageFeedUrl }}' -like 'REPLACE-*') {
+          throw 'A restricted Azure Artifacts feed URL must be supplied.'
+      }
+      if ('${{ parameters.archTag }}' -eq 'x64' -and '${{ parameters.rid }}' -ne 'win-x64') {
+          throw 'x64 must use the win-x64 RID.'
+      }
+      if ('${{ parameters.archTag }}' -eq 'arm64' -and '${{ parameters.rid }}' -ne 'win-arm64') {
+          throw 'arm64 must use the win-arm64 RID.'
+      }
+  displayName: Validate pipeline parameters
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $serviceRoot = (
+          New-Object System.Uri('${{ parameters.dropServiceUri }}')
+      ).GetLeftPart([System.UriPartial]::Authority)
+      $zipPath = Join-Path '$(dropClientDirectory)' 'drop.zip'
+      $extractPath = Join-Path '$(dropClientDirectory)' 'client'
+      New-Item -ItemType Directory -Force -Path '$(dropClientDirectory)' | Out-Null
+      Invoke-WebRequest `
+          -Uri "$serviceRoot/_apis/drop/client/exe" `
+          -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" } `
+          -OutFile $zipPath `
+          -UseBasicParsing
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
+      $dropExe = Get-ChildItem -LiteralPath $extractPath -Recurse -File -Filter drop.exe |
+          Select-Object -First 1
+      if (-not $dropExe) {
+          throw 'drop.exe was not found in the downloaded client package.'
+      }
+      Write-Host "##vso[task.setvariable variable=dropExe]$($dropExe.FullName)"
+  displayName: Bootstrap drop.exe
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $override = '${{ parameters.dropNameOverride }}'.Trim()
+      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Get-IsoSessionOsBinaries.ps1' `
+          -DropExe '$(dropExe)' `
+          -DropServiceUri '${{ parameters.dropServiceUri }}' `
+          -BuildGuid '${{ parameters.buildGuid }}' `
+          -ArchTag '${{ parameters.archTag }}' `
+          -OutDir '$(payloadDirectory)' `
+          -DropNameOverride $override `
+          -OsBranch '${{ parameters.osBranch }}'
+  displayName: Download filtered OS IsoSession payload
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+  - task: EsrpCodeSigning@5
+    displayName: Test sign IsoSession payload
+    inputs:
+      ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+      AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+      AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+      AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+      AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+      FolderPath: $(payloadBinDirectory)
+      Pattern: |
+        **/*.dll
+        **/*.exe
+      UseMinimatch: true
+      signConfigType: inlineSignParams
+      inlineOperation: >-
+        [
+          {
+            "KeyCode": "CP-230072",
+            "OperationCode": "SigntoolSign",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {
+              "OpusName": "Microsoft",
+              "OpusInfo": "https://www.microsoft.com",
+              "FileDigest": "/fd SHA256",
+              "PageHash": "/NPH",
+              "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+            }
+          },
+          {
+            "KeyCode": "CP-230012",
+            "OperationCode": "SigntoolVerify",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {}
+          }
+        ]
+
+  - task: NuGetToolInstaller@1
+    displayName: Install NuGet client
+
+  - task: NuGetAuthenticate@1
+    displayName: Authenticate Azure Artifacts
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $nugetExe = (Get-Command nuget.exe -ErrorAction Stop).Source
+      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Get-BaseIsoSessionPackage.ps1' `
+          -NuGetExe $nugetExe `
+          -FeedUrl '${{ parameters.basePackageFeedUrl }}' `
+          -PackageId '${{ parameters.basePackageId }}' `
+          -Version '${{ parameters.basePackageVersion }}' `
+          -OutDir '$(basePackageDirectory)'
+  displayName: Download restricted metadata base package
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $nupkg = & '$(Build.SourcesDirectory)/packaging/isolation-session/nuget/pack.ps1' `
+          -BinDir '$(payloadBinDirectory)' `
+          -BaseNupkg '$(baseIsoSessionNupkg)' `
+          -OutDir '$(nugetOutputDirectory)' `
+          -ArchTag '${{ parameters.archTag }}' `
+          -MonthId '${{ parameters.monthId }}'
+      if (-not $nupkg -or -not (Test-Path -LiteralPath $nupkg -PathType Leaf)) {
+          throw 'The architecture-specific IsoSession NuGet was not produced.'
+      }
+      Write-Host "##vso[task.setvariable variable=packagedNupkg]$nupkg"
+  displayName: Package IsoSession NuGet (${{ parameters.rid }})
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      & '$(Build.SourcesDirectory)/packaging/isolation-session/installer/makeinstaller.ps1' `
+          -Arch '${{ parameters.archTag }}' `
+          -BinDir '$(payloadBinDirectory)' `
+          -MonthId '${{ parameters.monthId }}' `
+          -Patch ${{ parameters.patch }} `
+          -OutDir '$(installerOutputDirectory)' `
+          -MsiOnly
+      if ($LASTEXITCODE -ne 0) {
+          throw "MSI build failed with exit code $LASTEXITCODE."
+      }
+  displayName: Build native MSI
+
+  - task: EsrpCodeSigning@5
+    displayName: Test sign MSI
+    inputs:
+      ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+      AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+      AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+      AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+      AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+      FolderPath: $(installerOutputDirectory)
+      Pattern: '**/*.msi'
+      UseMinimatch: true
+      signConfigType: inlineSignParams
+      inlineOperation: >-
+        [
+          {
+            "KeyCode": "CP-230072",
+            "OperationCode": "SigntoolSign",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {
+              "OpusName": "Microsoft",
+              "OpusInfo": "https://www.microsoft.com",
+              "FileDigest": "/fd SHA256",
+              "PageHash": "/NPH",
+              "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+            }
+          },
+          {
+            "KeyCode": "CP-230012",
+            "OperationCode": "SigntoolVerify",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {}
+          }
+        ]
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      & '$(Build.SourcesDirectory)/packaging/isolation-session/installer/makeinstaller.ps1' `
+          -Arch '${{ parameters.archTag }}' `
+          -BinDir '$(payloadBinDirectory)' `
+          -MonthId '${{ parameters.monthId }}' `
+          -Patch ${{ parameters.patch }} `
+          -OutDir '$(installerOutputDirectory)' `
+          -BundleOnly
+      if ($LASTEXITCODE -ne 0) {
+          throw "Installer bundle build failed with exit code $LASTEXITCODE."
+      }
+  displayName: Build installer EXE with signed MSI
+
+  - task: EsrpCodeSigning@5
+    displayName: Test sign installer EXE
+    inputs:
+      ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+      AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+      AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+      AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+      AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+      FolderPath: $(installerOutputDirectory)
+      Pattern: '**/*.exe'
+      UseMinimatch: true
+      signConfigType: inlineSignParams
+      inlineOperation: >-
+        [
+          {
+            "KeyCode": "CP-230072",
+            "OperationCode": "SigntoolSign",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {
+              "OpusName": "Microsoft",
+              "OpusInfo": "https://www.microsoft.com",
+              "FileDigest": "/fd SHA256",
+              "PageHash": "/NPH",
+              "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+            }
+          },
+          {
+            "KeyCode": "CP-230012",
+            "OperationCode": "SigntoolVerify",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {}
+          }
+        ]
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $signedFiles = @(
+          Get-ChildItem -LiteralPath '$(payloadBinDirectory)' -File |
+              Where-Object { $_.Extension -in @('.dll', '.exe') }
+          Get-ChildItem -LiteralPath '$(installerOutputDirectory)' -File |
+              Where-Object { $_.Extension -in @('.msi', '.exe') }
+      )
+      $verification = foreach ($file in $signedFiles) {
+          $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "Signature verification failed for '$($file.FullName)': $($signature.Status)"
+          }
+          [ordered]@{
+              name = $file.Name
+              path = $file.FullName
+              status = $signature.Status.ToString()
+              signer = $signature.SignerCertificate.Subject
+              thumbprint = $signature.SignerCertificate.Thumbprint
+          }
+      }
+      $verification | ConvertTo-Json -Depth 4 |
+          Set-Content -LiteralPath '$(workDirectory)/signature-verification.json' -Encoding UTF8
+  displayName: Verify test signatures
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      New-Item -ItemType Directory -Force -Path '$(artifactDirectory)' | Out-Null
+      Copy-Item -LiteralPath '$(packagedNupkg)' -Destination '$(artifactDirectory)'
+      $month = '${{ parameters.monthId }}'.Replace('.', '_')
+      foreach ($name in @(
+          "IsoSession_${month}_${{ parameters.archTag }}.msi",
+          "IsoSessionSetup_${month}_${{ parameters.archTag }}.exe",
+          "IsoSessionClient_${month}_${{ parameters.archTag }}.manifest"
+      )) {
+          $source = Join-Path '$(installerOutputDirectory)' $name
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "Required packaged output missing: $source"
+          }
+          Copy-Item -LiteralPath $source -Destination '$(artifactDirectory)'
+      }
+      Copy-Item -LiteralPath '$(payloadDirectory)/source-manifest.json' `
+          -Destination '$(artifactDirectory)/source-manifest.json'
+      Copy-Item -LiteralPath '$(workDirectory)/signature-verification.json' `
+          -Destination '$(artifactDirectory)/signature-verification.json'
+
+      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/New-IsoSessionArtifactManifest.ps1' `
+          -SourceManifest '$(artifactDirectory)/source-manifest.json' `
+          -ArtifactDirectory '$(artifactDirectory)' `
+          -MonthId '${{ parameters.monthId }}' `
+          -Patch ${{ parameters.patch }} `
+          -ArchTag '${{ parameters.archTag }}' `
+          -BasePackageId '${{ parameters.basePackageId }}' `
+          -BasePackageVersion '${{ parameters.basePackageVersion }}' `
+          -SigningMode test
+  displayName: Assemble artifact and provenance manifests
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: Publish $(artifactName)
+    inputs:
+      path: $(artifactDirectory)
+      artifactName: $(artifactName)

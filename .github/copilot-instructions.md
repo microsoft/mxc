@@ -60,6 +60,20 @@ npm install && npm run build
 dotnet build Microsoft.Mxc.Sdk.slnx
 ```
 
+### IsolationSession OS artifact packaging
+
+`.azure-pipelines/1ES.IsoSession.Artifacts.yml` is a manually queued 1ES
+pipeline that accepts a Windows OS `BuildGuid`, `MonthId`, and `Patch`. It
+performs a filtered download of the six required IsolationSession binaries
+from the OS `BIN` artifact drop, then produces separate x64 and ARM64 NuGet,
+MSI, and bootstrapper EXE pipeline artifacts.
+
+Maintained packaging inputs live under `packaging/isolation-session/`. The
+metadata-only base NuGet comes from a restricted Azure Artifacts feed and must
+match the selected `MonthId`. The initial pipeline uses test signing and does
+not publish publicly; WinMD redistribution approval and production signing are
+required before release.
+
 ### Lint and format
 
 ```
@@ -92,6 +106,14 @@ tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
+
+# IsolationSession artifact packaging (from repo root)
+.azure-pipelines\scripts\isolation-session\tests\Test-Stage-IsoSessionOsBinaries.ps1
+.azure-pipelines\scripts\isolation-session\tests\Test-Get-IsoSessionOsBinaries.ps1
+.azure-pipelines\scripts\isolation-session\tests\Test-New-IsoSessionArtifactManifest.ps1
+.azure-pipelines\scripts\isolation-session\tests\Test-IsoSessionArtifactFlow.ps1
+packaging\isolation-session\nuget\tests\Test-Pack.ps1
+packaging\isolation-session\installer\tests\Test-MakeInstaller.ps1
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly

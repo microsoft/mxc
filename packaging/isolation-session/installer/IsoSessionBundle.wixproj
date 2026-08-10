@@ -1,0 +1,36 @@
+<!-- Copyright (c) Microsoft Corporation. All rights reserved. -->
+<!--
+  SDK-style WiX v5 project for the IsoSession bootstrapper bundle (UI installer EXE).
+
+  Consumes the same generated include as the MSI (per-(month, architecture)
+  values, plus the bundle UpgradeCode and the path to the built MSI). Built
+  AFTER the MSI by makeinstaller.ps1:
+
+    dotnet build IsoSessionBundle.wixproj -c Release -p:Platform=x64 `
+      -p:OutputName=IsoSessionSetup_2026_07_x64 `
+      "-p:DefineConstants=IsoSessionVars=<abs path to IsoSessionVars.wxi>"
+
+  Platform must match the MSI it wraps ("x64" or "arm64"); overridable via
+  -p:Platform=... so the same project builds both architectures.
+
+  Output: $(OutputName).exe  (the user-facing UI installer).
+-->
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <Platform Condition="'$(Platform)'==''">x64</Platform>
+    <Configuration Condition="'$(Configuration)'==''">Release</Configuration>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="IsoSessionBundle.wxs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- WixStandardBootstrapperApplication (rtfLicense theme) lives in the Bal ext. -->
+    <PackageReference Include="WixToolset.Bal.wixext" Version="5.0.2" />
+  </ItemGroup>
+
+</Project>

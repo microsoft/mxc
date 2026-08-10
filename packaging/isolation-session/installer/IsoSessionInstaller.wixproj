@@ -1,0 +1,42 @@
+<!-- Copyright (c) Microsoft Corporation. All rights reserved. -->
+<!--
+  SDK-style WiX v5 project for the IsoSession MSI.
+
+  Per-(month, architecture) values (Version, UpgradeCode, AppId, CLSIDs,
+  ServiceName, InstallSubDir, BinDir, InstallerDir, MonthId, Arch) are supplied
+  by makeinstaller.ps1 via the DefineConstants MSBuild property, e.g.:
+
+    dotnet build IsoSessionInstaller.wixproj -c Release -p:Platform=x64 `
+      -p:OutputName=IsoSession_2026_07_x64 `
+      "-p:DefineConstants=IsoSessionVars=<abs path to generated .wxi>"
+
+  Platform selects the native WiX/MSI architecture — must be exactly "x64" or
+  "arm64" (never "x86"); the default below is overridable via -p:Platform=...
+  so the same project builds both architectures without editing this file.
+
+  Output: $(OutputName).msi (consumed by the IsoSession bootstrapper bundle).
+-->
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <!-- Native architecture: x64 or arm64. Overridable via -p:Platform=...
+         so components and registry writes are the correct bitness for the
+         target machine. Never x86 for this product. -->
+    <Platform Condition="'$(Platform)'==''">x64</Platform>
+    <Configuration Condition="'$(Configuration)'==''">Release</Configuration>
+    <!-- Only compile the MSI authoring here; the bundle is a separate project. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- ICE validation cannot run non-elevated; harmless for our authoring. -->
+    <SuppressValidation>true</SuppressValidation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="IsoSession.wxs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+
+</Project>

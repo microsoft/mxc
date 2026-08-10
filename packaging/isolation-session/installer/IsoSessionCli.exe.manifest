@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+
+  <assemblyIdentity
+      type="win32"
+      name="IsoSessionCli"
+      version="1.0.0.0" />
+
+  <!-- Registration-free WinRT activation for IsoSessionApp.dll.
+       Without this manifest, RoGetActivationFactory cannot find
+       our test WinRT classes because they are not registered in
+       the system metadata catalog.
+
+       Format follows the reg-free WinRT manifest specification:
+       file element in default namespace, activatableClass in
+       urn:schemas-microsoft-com:winrt.v1 namespace. -->
+  <file name="IsoSessionApp.dll">
+    <activatableClass
+        name="Windows.AI.IsolationSession.IsoSessionError"
+        threadingModel="both"
+        xmlns="urn:schemas-microsoft-com:winrt.v1" />
+    <activatableClass
+        name="Windows.AI.IsolationSession.IsoSessionProcessOptions"
+        threadingModel="both"
+        xmlns="urn:schemas-microsoft-com:winrt.v1" />
+    <activatableClass
+        name="Windows.AI.IsolationSession.IsoSessionAppConfig"
+        threadingModel="both"
+        xmlns="urn:schemas-microsoft-com:winrt.v1" />
+    <activatableClass
+        name="Windows.AI.IsolationSession.IsoSessionApp"
+        threadingModel="both"
+        xmlns="urn:schemas-microsoft-com:winrt.v1" />
+    <activatableClass
+        name="Windows.AI.IsolationSession.IsoSessionOps"
+        threadingModel="both"
+        xmlns="urn:schemas-microsoft-com:winrt.v1" />
+  </file>
+
+</assembly>
