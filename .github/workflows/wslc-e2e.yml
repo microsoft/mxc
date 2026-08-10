@@ -1,0 +1,227 @@
+# ============================================================================
+# WSLC E2E Tests — executes the WSL Container backend on a 1ES nested-virt
+# runner. Unlike microvm/hyperlight (which run on GitHub-hosted windows-latest
+# and skip when WHP is absent), WSLC needs WSL2 — which requires nested
+# virtualization — so it can only EXECUTE on a nested-virt-capable 1ES pool.
+#
+# Pool: 1es-mxc-e2e-windows-25h2-wsl2 (REPOSITORY-level, microsoft/mxc). Its VMs
+# boot from the windows-25h2-wsl2 1ES Managed Image, which bakes WSL2 in (see
+# below). `shell: powershell` for parity with the sibling client images. Cold-
+# start pickup on the idle Stateless pool is ~10-11 min — the long timeout
+# accounts for that plus an in-image toolchain/WSL setup on first run.
+#
+# IMAGE PREREQUISITES (see docs/wsl/wsl-container-getting-started.md):
+#   The pool's windows-25h2-wsl2 Managed Image is win11-25h2-pro with a 1ES
+#   provisioning script (.azure-pipelines/1es-images/wsl2/Setup.ps1) that enables
+#   Microsoft-Windows-Subsystem-Linux + VirtualMachinePlatform at image-build
+#   time; 1ES's mandatory post-provisioning reboot activates them, so runner VMs
+#   boot WSL2-ready (the DISM-at-image-build approach microsoft/ebpf-for-windows
+#   uses for Hyper-V). The job still installs git + the Rust/MSVC toolchain and
+#   finishes WSL2 runtime setup (`wsl --update`), and builds the WSLC SDK via a
+#   `--features wslc` build. Every runtime-dependent step below is guarded so the
+#   job degrades to a clean SKIP rather than a hard failure if a prerequisite is
+#   missing.
+# ============================================================================
+name: WSLC E2E Tests
+
+on:
+  push:
+    branches:
+      - user/modanish/1es-github-runner-e2e
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wslc-e2e:
+    name: WXC-Exec WSLC
+    # Default every `run:` step to Windows PowerShell 5.1 (always present on the
+    # image). The Windows default shell is pwsh, but the bare client image does
+    # not reliably ship pwsh on PATH, so steps without an explicit shell (the
+    # cargo build/test steps) would otherwise fail.
+    defaults:
+      run:
+        shell: powershell
+    runs-on:
+      - self-hosted
+      - "1ES.Pool=1es-mxc-e2e-windows-25h2-wsl2"
+      - "JobId=wslc-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Image verification: report WSL2 optional-feature state BEFORE the build,
+      # so we confirm whether the 1ES Managed Image baked WSL2 in even if later
+      # build/test steps fail for unrelated reasons (e.g. missing MSVC linker).
+      # Best-effort: never fails the job.
+      - name: Report WSL2 feature state (image verification)
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "=== Windows optional features (baked into image?) ==="
+          foreach ($f in 'Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform') {
+            try {
+              $state = (Get-WindowsOptionalFeature -Online -FeatureName $f -ErrorAction Stop).State
+            } catch {
+              $state = "query-failed: $($_.Exception.Message)"
+            }
+            Write-Host ("  {0} = {1}" -f $f, $state)
+          }
+          Write-Host "=== wsl.exe presence + status ==="
+          $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+          if ($wsl) {
+            Write-Host "wsl.exe: $($wsl.Source)"
+            wsl --status  2>&1 | Write-Host
+            wsl --version 2>&1 | Write-Host
+            Write-Host "wsl --status exit code: $LASTEXITCODE"
+          } else {
+            Write-Host "wsl.exe NOT found on PATH"
+          }
+          # Never fail the job on this diagnostic step (wsl --status exits non-zero
+          # when WSL isn't installed, which would otherwise fail the PowerShell step).
+          exit 0
+
+      # Stateful-pool WSL2 preparation. This pool is agentProfile.kind=Stateful, so
+      # the same VM persists across jobs (maxAgentLifetime 7d). WSL2's optional
+      # features are NOT in the base image, so the FIRST job on a fresh VM enables
+      # them via DISM and reboots — a normal running-VM reboot finalizes the
+      # pending features (no sysprep involved, unlike image capture). That reboot
+      # ends this job (expected). A SUBSEQUENT job on the same persisted VM sees
+      # the features Enabled and proceeds. This sidesteps the ephemeral-image
+      # sysprep-reset problem entirely.
+      - name: Prepare WSL2 on stateful VM (enable + reboot if needed)
+        id: prep
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $features = @('Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform')
+          $disabled = @()
+          foreach ($f in $features) {
+            $state = (Get-WindowsOptionalFeature -Online -FeatureName $f).State
+            Write-Host ("{0} = {1}" -f $f, $state)
+            if ($state -ne 'Enabled') { $disabled += $f }
+          }
+          if ($disabled.Count -eq 0) {
+            Write-Host 'WSL2 features already Enabled on this persisted VM. Proceeding.'
+            'ready=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host ("Running elevated: {0}" -f $isAdmin)
+          foreach ($f in $disabled) {
+            Write-Host ("Enabling {0} ..." -f $f)
+            $proc = Start-Process dism.exe -ArgumentList '/online','/enable-feature',"/featurename:$f",'/all','/norestart' -Wait -PassThru -NoNewWindow
+            Write-Host ("  dism exit {0}" -f $proc.ExitCode)
+            if (@(0,3010) -notcontains $proc.ExitCode) { throw ("dism enable {0} failed ({1})" -f $f, $proc.ExitCode) }
+          }
+          'ready=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host '::warning::WSL2 features enabled on this stateful VM; rebooting to finalize. This job will end; re-run the workflow and the next job on this persisted VM will have WSL2 ready.'
+          shutdown /r /t 15 /c "WSL2 feature finalize reboot"
+          Start-Sleep -Seconds 180
+
+      # setup-rust-toolchain auto-reads rust-toolchain.toml from the repo root
+      # only. Surface src/rust-toolchain.toml there so the pinned toolchain is
+      # honored. Use PowerShell (bare client image may lack bash).
+      - name: Surface toolchain file at repo root
+        if: steps.prep.outputs.ready == 'true'
+        shell: powershell
+        run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml -Force
+
+      # The bare 1ES client image has no rustup/cargo and no bash, so we can't
+      # use actions-rust-lang/setup-rust-toolchain (it runs internal bash steps
+      # and fails with "bash: command not found"). Install rustup directly in
+      # PowerShell; rust-toolchain.toml (surfaced at repo root above) pins
+      # channel 1.93, which rustup installs and selects automatically.
+      - name: Install Rust toolchain
+        if: steps.prep.outputs.ready == 'true'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Write-Host "Installing rustup..."
+            $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $init -UseBasicParsing
+            & $init -y --default-toolchain none --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init failed ($LASTEXITCODE)" }
+            $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+            $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $env:Path = "$cargoBin;$env:Path"
+          }
+          # Install the exact channel pinned by rust-toolchain.toml (repo root),
+          # reading it from the file so there is no drift with the pin.
+          $chan = ([regex]::Match((Get-Content rust-toolchain.toml -Raw), 'channel\s*=\s*"([^"]+)"')).Groups[1].Value
+          if (-not $chan) { throw "could not parse channel from rust-toolchain.toml" }
+          Write-Host "Pinned Rust channel: $chan"
+          rustup toolchain install $chan --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install $chan failed ($LASTEXITCODE)" }
+          rustup target add --toolchain $chan x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "rustup target add failed ($LASTEXITCODE)" }
+          rustc "+$chan" --version
+          cargo "+$chan" --version
+
+      - name: Point cargo at the MxcDependencies feed
+        if: steps.prep.outputs.ready == 'true'
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.prep.outputs.ready == 'true'
+        with:
+          workspaces: src -> target
+          key: wslc-e2e-v1
+
+      - name: Build with WSLC support
+        if: steps.prep.outputs.ready == 'true'
+        working-directory: src
+        run: cargo build --release --target x86_64-pc-windows-msvc
+             --no-default-features --features wslc
+
+      - name: Ensure WSL2 runtime
+        id: wsl
+        if: steps.prep.outputs.ready == 'true'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "=== WSL runtime check ==="
+          # Best-effort update; do not fail the job if the update path is
+          # unavailable on this image.
+          wsl --update 2>&1 | Write-Host
+          wsl --version 2>&1 | Write-Host
+          wsl --status  2>&1 | Write-Host
+          $available = ($LASTEXITCODE -eq 0)
+          Write-Host "wsl_available = $available"
+          "wsl_available=$($available.ToString().ToLower())" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Pre-pull WSLC images
+        if: steps.wsl.outputs.wsl_available == 'true'
+        shell: powershell
+        run: |
+          $exe = "src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe"
+          ./scripts/setup-wslc.ps1 -Image alpine:latest, python:3.12-alpine -WxcExecPath $exe
+
+      - name: Run WSLC E2E suite
+        if: steps.wsl.outputs.wsl_available == 'true'
+        working-directory: src
+        run: cargo test --release --target x86_64-pc-windows-msvc
+             -p wxc_e2e_tests test_wslc_suite -- --nocapture
+
+      - name: Note skip when WSL unavailable
+        if: steps.wsl.outputs.wsl_available != 'true'
+        shell: powershell
+        run: |
+          Write-Host "::warning::WSL2 runtime not available on this runner image — WSLC suite skipped."
+          Write-Host "The raw client image needs WSL2 + VirtualMachinePlatform baked in (1ES Managed Image)."
+
+      - name: Upload logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wslc-e2e-logs-${{ github.event.pull_request.number || github.run_number }}
+          retention-days: 7
+          path: |
+            logs/
+            **/*.log
+            wslc-perf-results.json
