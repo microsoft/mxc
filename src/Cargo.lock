@@ -3333,6 +3333,7 @@ dependencies = [
  "tempfile",
  "windows",
  "winresource",
+ "zip",
 ]
 
 [[package]]

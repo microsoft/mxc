@@ -17,6 +17,26 @@ use std::process::Command;
 /// The `ProductVersion` field is set to `<cargo-pkg-version>+<short-git-hash>`
 /// so that every build encodes the exact source commit.
 pub fn embed_version_info(file_description: &str, original_filename: &str) {
+    embed_version_info_with_manifest(file_description, original_filename, None);
+}
+
+/// Like [`embed_version_info`], but also fuses a side-by-side application
+/// manifest into the binary in the **same** resource compile.
+///
+/// `manifest_xml`, when `Some`, is the full text of an application manifest
+/// (e.g. an assembly manifest carrying `<comClass>` reg-free COM redirections).
+/// It MUST be embedded in the same `winresource` compile as the version info:
+/// two separate `.compile()` calls each emit a `.res` and the second linker
+/// input silently clobbers the first, so the manifest and the version info have
+/// to share one invocation.
+///
+/// On non-Windows hosts / targets the manifest is ignored (there is no PE
+/// manifest resource to fuse), matching [`embed_version_info`]'s no-op shape.
+pub fn embed_version_info_with_manifest(
+    file_description: &str,
+    original_filename: &str,
+    manifest_xml: Option<&str>,
+) {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
 
@@ -26,14 +46,14 @@ pub fn embed_version_info(file_description: &str, original_filename: &str) {
     #[cfg(windows)]
     {
         if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-            embed_version_info_windows(file_description, original_filename);
+            embed_version_info_windows(file_description, original_filename, manifest_xml);
         }
     }
 
     // Suppress unused-variable warnings on non-Windows.
     #[cfg(not(windows))]
     {
-        let _ = (file_description, original_filename);
+        let _ = (file_description, original_filename, manifest_xml);
     }
 }
 
@@ -64,8 +84,15 @@ pub fn embed_version_info_for_binary(
 }
 
 #[cfg(windows)]
-fn embed_version_info_windows(file_description: &str, original_filename: &str) {
-    let resource = version_resource(file_description, original_filename);
+fn embed_version_info_windows(
+    file_description: &str,
+    original_filename: &str,
+    manifest_xml: Option<&str>,
+) {
+    let mut resource = version_resource(file_description, original_filename);
+    if let Some(xml) = manifest_xml {
+        resource.set_manifest(xml);
+    }
     resource
         .compile()
         .expect("failed to embed Windows version info");
