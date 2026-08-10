@@ -21,16 +21,30 @@
 .PARAMETER ConfigDir
     Path to test configs directory. Defaults to <repo-root>\tests\configs
 
+.PARAMETER NanvixBin
+    Offline mode. Directory of pre-fetched NanVix binaries to stage next to
+    wxc-exec.exe instead of relying on a --features microvm build. Contents are
+    checksum-verified; snapshots inside it are ignored (see
+    docs/nanvix-microvm/nanvix.md). Off unless explicitly passed.
+
+.PARAMETER ColdStart
+    Give each test a fresh NANVIX_HOME so the VM cold-boots every run instead of
+    reusing a warm-start snapshot. Off by default.
+
 .EXAMPLE
     .\run_microvm_tests.ps1
     .\run_microvm_tests.ps1 -Release
     .\run_microvm_tests.ps1 -BinDir C:\build\output
+    .\run_microvm_tests.ps1 -NanvixBin $env:NANVIX_BIN
+    .\run_microvm_tests.ps1 -ColdStart
 #>
 
 param(
     [switch]$Release,
     [string]$BinDir,
-    [string]$ConfigDir
+    [string]$ConfigDir,
+    [string]$NanvixBin,
+    [switch]$ColdStart
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,15 +100,57 @@ if (-not (Test-Path $WxcExePath)) {
 
 $wxcExe = Resolve-Path $WxcExePath
 
+# -- Offline mode -------------------------------------------------------------
+
+# Stage pre-fetched binaries next to wxc-exec.exe. The runner resolves them from
+# its own directory only, so NANVIX_BIN cannot be used in place.
+if ($NanvixBin) {
+    if (-not (Test-Path $NanvixBin)) {
+        Write-Host "ERROR: NANVIX_BIN directory not found: $NanvixBin" -ForegroundColor Red
+        exit 1
+    }
+
+    $checksumsPath = Join-Path $RepoRoot "src\backends\nanvix\binaries\checksums.json"
+    $checksums = (Get-Content $checksumsPath -Raw | ConvertFrom-Json).windows
+    Write-Host "Offline mode: staging NanVix binaries from $NanvixBin" -ForegroundColor Cyan
+
+    foreach ($rel in @("nanvixd.exe", "nanvix_rootfs.img", "python3.initrd", "bin\kernel.elf")) {
+        $source = Join-Path $NanvixBin $rel
+        if (-not (Test-Path $source)) {
+            Write-Host "ERROR: $rel missing from $NanvixBin" -ForegroundColor Red
+            exit 1
+        }
+
+        $expected = $checksums.($rel | Split-Path -Leaf)
+        $actual = (Get-FileHash -Path $source -Algorithm SHA256).Hash
+        if ($actual -ne $expected) {
+            Write-Host "ERROR: checksum mismatch for ${rel}: expected $expected, got $actual" -ForegroundColor Red
+            exit 1
+        }
+
+        $destination = Join-Path $BinDir $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path $destination -Parent) | Out-Null
+        Copy-Item $source $destination -Force
+        Write-Host "  $rel staged and verified"
+    }
+
+    # Snapshots in NANVIX_BIN are not covered by checksums.json, so they are
+    # never staged; drop any stale ones so no unverified image is warm-booted.
+    Remove-Item (Join-Path $BinDir "snapshots") -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # -- Verify MicroVM binaries --------------------------------------------------
 
+# Local runs get these from `cargo build --features microvm`, which stages them
+# next to wxc-exec.exe. CI gets them from scripts/ci/prepare-windows-host.ps1,
+# which downloads and checksum-verifies the pinned release, so this check is a
+# guard for the local path. Snapshots are excluded: they are a warm-start cache
+# the runner generates on demand, not a shipped artifact.
 $requiredBinaries = @(
     "nanvixd.exe",
     "nanvix_rootfs.img",
     "python3.initrd",
-    "bin\kernel.elf",
-    "snapshots\kernel.vmem",
-    "snapshots\kernel.whp.cbor"
+    "bin\kernel.elf"
 )
 $binDir = Split-Path $wxcExe
 $missing = $requiredBinaries | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
@@ -136,15 +192,37 @@ foreach ($test in $tests) {
 
     Write-Host "`n--- $($test.Description) ($($test.Config)) ---" -ForegroundColor White
 
+    # A fresh NANVIX_HOME per test means no snapshot is carried over, so the VM
+    # cold-boots every run. The runner's 60s boot grace covers the extra time.
+    $nanvixHome = $null
+    $previousNanvixHome = $env:NANVIX_HOME
+    if ($ColdStart) {
+        $nanvixHome = Join-Path ([System.IO.Path]::GetTempPath()) "mxc-nanvix-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Force -Path $nanvixHome | Out-Null
+        $env:NANVIX_HOME = $nanvixHome
+    }
+
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
-    $process = Start-Process -FilePath $wxcExe `
-        -ArgumentList "--debug", "--experimental", $configPath `
-        -PassThru -Wait `
-        -RedirectStandardOutput $stdoutFile `
-        -RedirectStandardError $stderrFile
-    $sw.Stop()
+    try {
+        $process = Start-Process -FilePath $wxcExe `
+            -ArgumentList "--debug", "--experimental", $configPath `
+            -PassThru -Wait `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile
+    } finally {
+        $sw.Stop()
+        if ($nanvixHome) {
+            if ($null -eq $previousNanvixHome) {
+                Remove-Item Env:\NANVIX_HOME -ErrorAction SilentlyContinue
+            } else {
+                $env:NANVIX_HOME = $previousNanvixHome
+            }
+            # Snapshots are large; do not let them accumulate across tests.
+            Remove-Item $nanvixHome -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 
     $actualExit = $process.ExitCode
     $expectedExit = $test.ExpectedExit

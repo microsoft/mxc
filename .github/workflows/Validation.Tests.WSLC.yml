@@ -28,7 +28,7 @@ on:
   push:
     branches:
       - user/modanish/1es-github-runner-e2e
-      - user/emichlin/validation-infra-lite
+      # - user/emichlin/validation-infra-lite
   workflow_dispatch:
 
 permissions:

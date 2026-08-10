@@ -57,19 +57,149 @@ function Assert-RequiredFile {
     Get-ChildItem $BinaryDirectory -Include $leaves -Recurse | Format-Table FullName, Length
 }
 
-# Report whether the artifact carries a complete WHP warm-start snapshot set.
-# A partial set is worth calling out: the runner treats a complete set as the
-# signal to warm-boot, so a missing half silently costs a cold boot per run.
-function Write-SnapshotAvailability {
-    $snapshots = @('snapshots\kernel.vmem', 'snapshots\kernel.whp.cbor')
-    $present = @($snapshots | Where-Object { Test-Path (Join-Path $BinaryDirectory $_) })
+# Fetch the pinned NanVix release onto the test host, mirroring the offline-build
+# contract in docs/nanvix-microvm/nanvix.md: flat binaries plus bin/, verified
+# against checksums.json, and no snapshots (the runtime cold-boots and
+# regenerates a verified one on first use).
+function Install-NanvixBinaries {
+    $configDir = Join-Path $PSScriptRoot '..\..\src\backends\nanvix\binaries'
+    $versionsPath = Join-Path $configDir 'versions.json'
+    $checksumsPath = Join-Path $configDir 'checksums.json'
+    foreach ($path in $versionsPath, $checksumsPath) {
+        if (-not (Test-Path $path)) {
+            Exit-WithError "NanVix pin file not found: $path"
+        }
+    }
 
-    if ($present.Count -eq $snapshots.Count) {
-        Write-Host 'WHP warm-start snapshots are present; the runner will warm-boot.'
-    } elseif ($present.Count -eq 0) {
-        Write-Host 'WHP warm-start snapshots are absent; the runner will cold-boot (slower, expected on cross-arch or offline builds).'
-    } else {
-        Write-Host "WARNING: incomplete WHP snapshot set (found: $($present -join ', ')); the runner will cold-boot."
+    $release = (Get-Content $versionsPath -Raw | ConvertFrom-Json).nanvix_python
+    $checksums = (Get-Content $checksumsPath -Raw | ConvertFrom-Json).windows
+    $prefix = [System.IO.Path]::GetFileNameWithoutExtension($release.asset)
+    $binSubdir = Join-Path $BinaryDirectory 'bin'
+
+    # The build VM's copies are discarded: its snapshots are a host-specific WHP
+    # memory image, and a partial set would silently cost a cold boot per run.
+    Write-Host 'Discarding build-staged NanVix binaries in favor of the pinned release.'
+    Remove-Item (Join-Path $BinaryDirectory 'snapshots') -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($name in $release.binaries) {
+        Remove-Item (Join-Path $BinaryDirectory $name) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item (Join-Path $binSubdir 'kernel.elf') -Force -ErrorAction SilentlyContinue
+
+    $url = "https://github.com/nanvix/nanvix-python/releases/download/$($release.tag)/$($release.asset)"
+    $archive = Join-Path ([System.IO.Path]::GetTempPath()) $release.asset
+    Write-Host "Downloading nanvix/nanvix-python $($release.tag)..."
+
+    try {
+        $curlArgs = @(
+            '--silent', '--show-error', '--fail', '--location',
+            '--retry', '5', '--retry-delay', '5', '--retry-all-errors',
+            '--output', $archive
+        )
+        $token = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { $env:GH_TOKEN }
+        if ($token) {
+            $curlArgs += @('--header', "Authorization: Bearer $token")
+        }
+        $curlArgs += $url
+
+        & curl.exe @curlArgs
+        if ($LASTEXITCODE -ne 0) {
+            Exit-WithError "curl failed for $url (exit code $LASTEXITCODE)"
+        }
+
+        New-Item -ItemType Directory -Force -Path $binSubdir | Out-Null
+
+        # nanvixd.exe and kernel.elf live under <prefix>/bin/; the rest at <prefix>/.
+        Expand-NanvixEntry -Archive $archive -Entry "$prefix/bin/nanvixd.exe" -StripComponents 2 -Destination $BinaryDirectory
+        Expand-NanvixEntry -Archive $archive -Entry "$prefix/bin/kernel.elf" -StripComponents 2 -Destination $binSubdir
+        foreach ($name in $release.binaries | Where-Object { $_ -ne 'nanvixd.exe' }) {
+            Expand-NanvixEntry -Archive $archive -Entry "$prefix/$name" -StripComponents 1 -Destination $BinaryDirectory
+        }
+    } finally {
+        Remove-Item $archive -Force -ErrorAction SilentlyContinue
+    }
+
+    Assert-NanvixChecksum -Path (Join-Path $binSubdir 'kernel.elf') -Expected $checksums.'kernel.elf'
+    foreach ($name in $release.binaries) {
+        Assert-NanvixChecksum -Path (Join-Path $BinaryDirectory $name) -Expected $checksums.$name
+    }
+
+    Write-Host "NanVix $($release.tag) staged and verified; the runner will cold-boot and regenerate its snapshot."
+}
+
+function Expand-NanvixEntry {
+    param(
+        [Parameter(Mandatory)][string]$Archive,
+        [Parameter(Mandatory)][string]$Entry,
+        [Parameter(Mandatory)][int]$StripComponents,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    & tar.exe -xf $Archive -C $Destination --strip-components $StripComponents $Entry
+    if ($LASTEXITCODE -ne 0) {
+        Exit-WithError "tar failed to extract $Entry (exit code $LASTEXITCODE)"
+    }
+}
+
+function Assert-NanvixChecksum {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Expected
+    )
+
+    if (-not (Test-Path $Path)) {
+        Exit-WithError "NanVix binary missing after extraction: $Path"
+    }
+    if (-not $Expected) {
+        Exit-WithError "No pinned checksum for $(Split-Path $Path -Leaf)"
+    }
+
+    $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash
+    if ($actual -ne $Expected) {
+        Exit-WithError "Checksum mismatch for $(Split-Path $Path -Leaf): expected $($Expected.ToLowerInvariant()), got $($actual.ToLowerInvariant())"
+    }
+    Write-Host "  $(Split-Path $Path -Leaf) verified"
+}
+
+# Read a Windows optional feature's state without throwing, so both the
+# diagnostic and assertion paths can share one query. A host that cannot answer
+# (querying needs elevation) reports the reason as its state rather than
+# aborting, which keeps the failure message actionable.
+function Get-OptionalFeatureState {
+    param([Parameter(Mandatory)][string]$Name)
+
+    try {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $Name -ErrorAction Stop
+    } catch {
+        return "query-failed: $($_.Exception.Message.Trim())"
+    }
+
+    if ($null -eq $feature) {
+        return 'unknown'
+    }
+    return [string]$feature.State
+}
+
+# Require every named optional feature to be Enabled. Enabling one needs a
+# reboot the runner cannot take mid-job, so this verifies rather than installs:
+# a mis-imaged pool fails here with a pointed message instead of surfacing
+# later as an opaque backend error. $Remedy names the image-level fix.
+function Assert-RequiredFeature {
+    param(
+        [Parameter(Mandatory)][string[]]$Name,
+        [Parameter(Mandatory)][string]$Remedy
+    )
+
+    $notEnabled = @()
+    foreach ($feature in $Name) {
+        $state = Get-OptionalFeatureState -Name $feature
+        Write-Host "  $feature = $state"
+        if ($state -ne 'Enabled') {
+            $notEnabled += "$feature ($state)"
+        }
+    }
+
+    if ($notEnabled) {
+        Exit-WithError "Required Windows optional feature(s) not enabled: $($notEnabled -join '; '). $Remedy"
     }
 }
 
@@ -78,37 +208,20 @@ function Write-SnapshotAvailability {
 # check below rather than as an unexplained collection error.
 function Write-HypervisorDiagnostic {
     Write-Host '=== Hypervisor Diagnostics ==='
-    try {
-        Write-Host "OS: $([System.Environment]::OSVersion)"
+    Write-Host "OS: $([System.Environment]::OSVersion)"
 
-        $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
-        $hypervisorPresent = if ($null -eq $computerSystem) { 'unknown' } else { $computerSystem.HypervisorPresent }
-        Write-Host "HypervisorPresent: $hypervisorPresent"
-        Write-Host "WinHvPlatform.dll exists: $(Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")"
-
-        $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
-        $featureState = if ($null -eq $feature) { 'unknown' } else { $feature.State }
-        Write-Host "HypervisorPlatform feature state: $featureState"
-    } catch {
-        Write-Host "WARNING: hypervisor diagnostics could not be collected: $($_.Exception.Message)"
-    }
+    $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+    $hypervisorPresent = if ($null -eq $computerSystem) { 'unknown' } else { $computerSystem.HypervisorPresent }
+    Write-Host "HypervisorPresent: $hypervisorPresent"
+    Write-Host "WinHvPlatform.dll exists: $(Test-Path "$env:SystemRoot\System32\WinHvPlatform.dll")"
     Write-Host '=== end diagnostics ==='
 }
 
 # The feature can be enabled while the hypervisor is not actually running (for
 # example when a host reboot is still pending), so both are required.
 function Assert-HypervisorPlatform {
-    try {
-        $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction SilentlyContinue
-    } catch {
-        # Querying optional features needs elevation; a host that cannot answer
-        # cannot be certified as WHP-capable.
-        Exit-WithError "Unable to query the HypervisorPlatform feature: $($_.Exception.Message)"
-    }
-
-    if ($null -eq $feature -or $feature.State -ne 'Enabled') {
-        Exit-WithError 'Windows Hypervisor Platform is not enabled. This backend requires WHP.'
-    }
+    Assert-RequiredFeature -Name 'HypervisorPlatform' `
+        -Remedy 'This backend requires Windows Hypervisor Platform on the runner image.'
 
     $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
     if ($null -eq $computerSystem -or -not $computerSystem.HypervisorPresent) {
@@ -139,30 +252,53 @@ function Initialize-ProcessContainerHost {
 }
 
 function Initialize-MicroVmHost {
-    # NanVix binaries are pinned GitHub release assets fetched and checksum-
-    # verified at build time, so the build either staged all of them or failed.
-    # Their absence here means a broken artifact, not a host problem.
-    Assert-RequiredFile @(
-        'wxc-exec.exe',
-        'nanvixd.exe',
-        'nanvix_rootfs.img',
-        'python3.initrd',
-        'bin\kernel.elf'
-    )
+    Assert-RequiredFile @('wxc-exec.exe')
+    Install-NanvixBinaries
 
-    # The WHP snapshots are a warm-start cache generated by running nanvixd on
-    # an x86_64 build host, not a release asset. The build legitimately skips
-    # them (cross-arch or offline NANVIX_BIN builds) and the runner cold-boots
-    # when they are absent, so report the boot path instead of failing.
-    Write-SnapshotAvailability
-
-    # NanVix boots a VM from these images on every invocation; Defender
-    # scanning them can push boot past its timeout.
+    # NanVix boots a VM from these images on every invocation; Defender scanning
+    # them can push boot past its timeout.
     Add-MpPreference -ExclusionPath $BinaryDirectory
     Write-Host "Added Defender exclusion for $BinaryDirectory"
 
     Write-HypervisorDiagnostic
     Assert-HypervisorPlatform
+}
+
+# WSL2 is baked into the pool image, so this verifies rather than installs:
+# enabling a feature needs a reboot the runner cannot take mid-job. Container
+# images are pulled by the suite itself (tests/scripts/run_wslc_all_tests.ps1).
+function Initialize-WslcHost {
+    # wslcsdk.dll ships beside wxc-exec.exe only in a --features wslc build.
+    Assert-RequiredFile @('wxc-exec.exe', 'wslcsdk.dll')
+
+    Assert-RequiredFeature -Name 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform' `
+        -Remedy 'WSL2 must be baked into the runner image; enabling these features requires a host reboot this job cannot take.'
+
+    if ((Invoke-Wsl @('--version')) -ne 0) {
+        Exit-WithError 'wsl --version failed; the WSL2 runtime is not usable on this runner.'
+    }
+
+    # Diagnostic only: --status exits non-zero with no distribution installed,
+    # which is expected since WSLC creates its own containers via the SDK.
+    Invoke-Wsl @('--status') | Out-Null
+}
+
+# wsl.exe emits UTF-16LE, which the default console encoding renders as
+# null-separated garbage. Returns the exit code.
+function Invoke-Wsl {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+        & wsl.exe @Arguments 2>&1 | Write-Host
+        return $LASTEXITCODE
+    } catch {
+        Write-Host "WARNING: wsl.exe $($Arguments -join ' ') could not be run: $($_.Exception.Message)"
+        return 1
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
 }
 
 if (-not (Test-Path $BinaryDirectory)) {
@@ -175,5 +311,6 @@ Write-Host "Preparing Windows host for backend '$Backend' using $BinaryDirectory
 switch ($Backend) {
     'process-t3' { Initialize-ProcessContainerHost }
     'microvm' { Initialize-MicroVmHost }
+    'wslc' { Initialize-WslcHost }
     default { Write-Host "$Backend has no artifact-only Windows test prerequisites yet." }
 }
