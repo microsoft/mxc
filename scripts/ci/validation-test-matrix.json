@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "platforms": [
     {
-      "id": "windows-prerelease-a",
-      "displayName": "Windows Pre-release A",
+      "id": "windows-prerelease-t1-process-container",
+      "displayName": "Windows Prerelease T1 Process Container",
       "family": "windows",
       "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-windows-prerelease-t1-x64",
           "backends": [
             "process-t1",
             "isolation-session",
@@ -489,6 +489,12 @@
       }
     ],
     "enabled": [
+      {
+        "os": "windows-prerelease-t1-process-container",
+        "backends": [
+          "process-t3"
+        ]
+      },
       {
         "os": "windows-25h2",
         "backends": [

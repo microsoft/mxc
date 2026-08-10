@@ -264,9 +264,10 @@ function Initialize-MicroVmHost {
     Assert-HypervisorPlatform
 }
 
-# WSL2 is baked into the pool image, so this verifies rather than installs:
-# enabling a feature needs a reboot the runner cannot take mid-job. Container
-# images are pulled by the suite itself (tests/scripts/run_wslc_all_tests.ps1).
+# The optional features must be baked into the pool image (enabling one needs a
+# reboot this job cannot take), but the WSL runtime package is installed here if
+# missing. Container images are pulled by the suite itself
+# (tests/scripts/run_wslc_all_tests.ps1).
 function Initialize-WslcHost {
     # wslcsdk.dll ships beside wxc-exec.exe only in a --features wslc build.
     Assert-RequiredFile @('wxc-exec.exe', 'wslcsdk.dll')
@@ -274,8 +275,17 @@ function Initialize-WslcHost {
     Assert-RequiredFeature -Name 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform' `
         -Remedy 'WSL2 must be baked into the runner image; enabling these features requires a host reboot this job cannot take.'
 
+    # The optional features can be enabled while the WSL runtime package itself
+    # is absent. Installing that package needs no reboot once the features are
+    # on, so it is safe to do mid-job.
     if ((Invoke-Wsl @('--version')) -ne 0) {
-        Exit-WithError 'wsl --version failed; the WSL2 runtime is not usable on this runner.'
+        Write-Host 'WSL runtime not installed; installing (features are already enabled, so no reboot is needed)...'
+        if ((Invoke-Wsl @('--install', '--no-distribution')) -ne 0) {
+            Exit-WithError 'wsl --install failed; the WSL2 runtime could not be installed on this runner.'
+        }
+        if ((Invoke-Wsl @('--version')) -ne 0) {
+            Exit-WithError 'wsl --version still fails after install; the WSL2 runtime is not usable on this runner.'
+        }
     }
 
     # Diagnostic only: --status exits non-zero with no distribution installed,
