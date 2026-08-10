@@ -71,7 +71,7 @@ pub struct MxcConfig {
     /// distinct), passes an already-frozen vector through unchanged, and reseeds a
     /// brand-new base if the relayed value is absent or malformed — so a missing
     /// or hostile relay never reaches telemetry unvalidated. Ignored unless
-    /// experimental telemetry is enabled; not valid on one-shot requests.
+    /// telemetry is enabled; not valid on one-shot requests.
     pub correlation_vector: Option<String>,
 
     /// Externally assigned container identifier.
@@ -112,6 +112,9 @@ pub struct MxcConfig {
     /// `seatbelt`.
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
+
+    /// Telemetry configuration.
+    pub telemetry: Option<Telemetry>,
 
     /// Experimental features. Only honored when `--experimental` is passed.
     pub experimental: Option<Experimental>,
@@ -467,11 +470,9 @@ pub struct Experimental {
     /// Seatbelt backend config (pre-promotion alias).
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
-    /// Telemetry configuration.
-    pub telemetry: Option<Telemetry>,
 }
 
-/// Telemetry configuration (`experimental.telemetry`).
+/// Telemetry configuration (`telemetry`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]

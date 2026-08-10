@@ -155,7 +155,7 @@ pub fn version() -> &'static str {
 ///    Policy, and that denial overrides an existing user grant. It is never a
 ///    grant in the other direction — no policy value can enable telemetry for
 ///    a user who has not consented.
-/// 3. `experimental.telemetry.enabled` in the JSON config is an explicit
+/// 3. Top-level `telemetry.enabled` in the JSON config is an explicit
 ///    per-invocation opt-in that can only ever subtract further: telemetry
 ///    requires `Some(true)`, an explicit `Some(false)` always forces it off
 ///    (useful for CI, support repros, or policy), and omitting the field
@@ -166,12 +166,9 @@ pub fn version() -> &'static str {
 /// owns consent end-to-end (persistence, and the CLI/SDK toggle surfaces); it
 /// does not merely trust a per-request flag from the caller.
 ///
-/// This function is *necessary but not sufficient*: telemetry is still an
-/// experimental feature, so the executors only reach [`init`] at all when
-/// `--experimental` was passed **and** the request carries an
-/// `experimental.telemetry` block. A consenting user who omits that block — or
-/// who supplies the block without `enabled: true` — gets no telemetry; the
-/// gates compose, and every one of them can only subtract.
+/// A consenting user who omits the top-level `telemetry` block — or who supplies
+/// it without `enabled: true` — gets no telemetry; the gates compose, and every
+/// one of them can only subtract.
 pub fn is_enabled(config: &TelemetryConfig) -> bool {
     // Fail closed: only an explicit `true` opts in. `None` is not "no
     // opinion" — an author who omits the field gets no telemetry, which is
@@ -247,7 +244,15 @@ pub fn emit_completion(
     if already_emitted() {
         return;
     }
+    emit_completion_event(containment, response, elapsed);
+    shutdown();
+}
 
+fn emit_completion_event(
+    containment: &ContainmentBackend,
+    response: &ScriptResponse,
+    elapsed: Duration,
+) {
     let backend = containment.wire_name();
     let failed = response.exit_code != 0;
     let outcome = if failed { "failure" } else { "success" };
@@ -280,7 +285,23 @@ pub fn emit_completion(
             response.exit_code,
         );
     }
+}
 
+/// Emit completion telemetry for an in-process SDK invocation.
+///
+/// Unlike [`emit_completion`], this does not use the executable-wide
+/// exactly-once slot: SDK processes may run multiple or concurrent sandboxes,
+/// and their handle wrappers enforce exactly-once emission per invocation.
+pub fn emit_sdk_completion(
+    active: bool,
+    containment: &ContainmentBackend,
+    response: &ScriptResponse,
+    elapsed: Duration,
+) {
+    if !active {
+        return;
+    }
+    emit_completion_event(containment, response, elapsed);
     shutdown();
 }
 
@@ -301,7 +322,11 @@ pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: F
     if already_emitted() {
         return;
     }
+    emit_early_exit_event(containment, reason);
+    shutdown();
+}
 
+fn emit_early_exit_event(containment: &ContainmentBackend, reason: FailureReason) {
     let backend = containment.wire_name();
 
     log_execution(&ExecutionEvent {
@@ -325,7 +350,14 @@ pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: F
         reason,
         1,
     );
+}
 
+/// Emit an SDK spawn failure without claiming the executable-wide terminal slot.
+pub fn emit_sdk_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
+    if !active {
+        return;
+    }
+    emit_early_exit_event(containment, reason);
     shutdown();
 }
 
@@ -670,7 +702,15 @@ pub fn emit_state_aware(
     if already_emitted() {
         return;
     }
+    emit_state_aware_event(ctx, outcome, elapsed);
+    shutdown();
+}
 
+fn emit_state_aware_event(
+    ctx: TelemetryContext<'_>,
+    outcome: &Result<DispatchOutcome, MxcError>,
+    elapsed: Duration,
+) {
     let duration_ms = elapsed.as_millis() as u64;
     let plan = plan_state_aware(ctx, outcome, duration_ms);
 
@@ -678,7 +718,22 @@ pub fn emit_state_aware(
     if let Some(reason) = plan.error {
         log_error(ctx, reason, plan.execution.exit_code);
     }
+}
 
+/// Emit telemetry for an in-process SDK state-aware invocation.
+///
+/// The SDK wrapper owns exactly-once emission for its request/handle, so this
+/// bypasses the executable-wide terminal slot used by `wxc-exec`.
+pub fn emit_sdk_state_aware(
+    active: bool,
+    ctx: TelemetryContext<'_>,
+    outcome: &Result<DispatchOutcome, MxcError>,
+    elapsed: Duration,
+) {
+    if !active {
+        return;
+    }
+    emit_state_aware_event(ctx, outcome, elapsed);
     shutdown();
 }
 

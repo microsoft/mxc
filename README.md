@@ -227,15 +227,14 @@ wxc-exec.exe --audit policy.json
 
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
-## Telemetry (Experimental)
+## Telemetry
 
 MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`Execution` and `Error`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
-Telemetry is **experimental** and requires:
-1. The `--experimental` CLI flag
-2. `"experimental": { "telemetry": { "enabled": true } }` in the JSON config
-3. Explicit per-user telemetry consent on Windows
-4. An administrative policy that permits collection, when a policy is configured
+Telemetry requires:
+1. Top-level `"telemetry": { "enabled": true }` in the JSON config
+2. Explicit per-user telemetry consent on Windows
+3. An administrative policy that permits collection, when a policy is configured
 
 The configuration flag is an additional per-run opt-in; it cannot grant consent
 or bypass an administrative block. Telemetry remains off unless every applicable
@@ -262,10 +261,9 @@ statement.
 
 #### How to turn telemetry off
 
-Telemetry is **off by default**. MXC emits telemetry only when **both** of the following are set, so no action is required to keep it disabled:
-
-1. The `--experimental` CLI flag is passed, **and**
-2. `"experimental": { "telemetry": { "enabled": true } }` is present in the JSON config.
+Telemetry is **off by default**. MXC emits telemetry only when top-level
+`"telemetry": { "enabled": true }` is present in the JSON config, so no
+action is required to keep it disabled.
 
 Those settings are necessary but not sufficient: on Windows, explicit
 per-user consent and an administrative policy that permits collection are also

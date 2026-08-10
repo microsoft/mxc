@@ -56,6 +56,7 @@ import type {
   PortMapping as PublicPortMapping,
   LxcConfig,
   SeatbeltConfig,
+  TelemetryConfig,
   ContainerConfig,
   ClipboardPolicy as PublicClipboardPolicy,
   ContainmentType,
@@ -74,6 +75,7 @@ import type {
   PortMapping as WirePortMapping,
   Lxc as WireLxc,
   Seatbelt as WireSeatbelt,
+  Telemetry as WireTelemetry,
   MXCConfiguration as WireMxcConfig,
   ClipboardPolicy as WireClipboardPolicy,
   Containment as WireContainment,
@@ -135,6 +137,7 @@ type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBasePro
 type _WslcVals = AssertTrue<Assignable<WslcConfig, WireWslc>>;
 type _PortMappingVals = AssertTrue<Assignable<PublicPortMapping, WirePortMapping>>;
 type _SeatbeltVals = AssertTrue<Assignable<SeatbeltConfig, WireSeatbelt>>;
+type _TelemetryVals = AssertTrue<Assignable<TelemetryConfig, WireTelemetry>>;
 type _LxcVals = AssertTrue<Assignable<StripIndex<LxcConfig>, WireLxc>>;
 
 // --- key conformance (rename / removal detection) -------------------------
@@ -155,6 +158,7 @@ type _BaseProcessUiKeys = AssertTrue<Equivalent<OnlyInPublic<BaseProcessUiConfig
 type _WslcKeys = AssertTrue<Equivalent<OnlyInPublic<WslcConfig, WireWslc>, never>>;
 type _PortMappingKeys = AssertTrue<Equivalent<OnlyInPublic<PublicPortMapping, WirePortMapping>, never>>;
 type _SeatbeltKeys = AssertTrue<Equivalent<OnlyInPublic<SeatbeltConfig, WireSeatbelt>, never>>;
+type _TelemetryKeys = AssertTrue<Equivalent<OnlyInPublic<TelemetryConfig, WireTelemetry>, never>>;
 
 // `FilesystemConfig.clearPolicyOnExit` is an SDK-side convenience flag mapped
 // into `lifecycle.preservePolicy`; it is not a wire `filesystem` field.
@@ -208,6 +212,7 @@ type _ProcessContainerWireKeys = AssertTrue<
 type _SeatbeltWireKeys = AssertTrue<
   Equivalent<OnlyInWire<SeatbeltConfig, WireSeatbelt>, 'guiAccess' | 'launchMethod'>
 >;
+type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, WireTelemetry>, never>>;
 
 // Root: the SDK's `ContainerConfig` intentionally omits the schema-metadata keys
 // (`$schema`, `_comment`), the state-aware-only keys (`phase`, `sandboxId`,

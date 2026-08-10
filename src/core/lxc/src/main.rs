@@ -266,17 +266,12 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
@@ -319,7 +314,7 @@ fn main() {
 
     display_script_results(&response, &mut logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
+    // ── Telemetry emit ──────────────────────────────────────────────
     telemetry::emit_completion(
         telemetry_active,
         &request.containment,

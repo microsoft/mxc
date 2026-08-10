@@ -261,7 +261,7 @@ await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
 
-> **Correlating telemetry across phases:** when experimental telemetry is enabled, `provisionSandbox` returns a `correlationVector` (a Microsoft Correlation Vector). Relay it verbatim as `options.correlationVector` on every later phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The client relays the value unchanged; the executor validates it on each phase and derives that phase's own vector from it (spinning a fresh child element off a mutable base, or reseeding if it is missing or malformed). It is `undefined` when telemetry is off, and safe to omit otherwise.
+> **Correlating telemetry across phases:** when telemetry is enabled, `provisionSandbox` returns a `correlationVector` (a Microsoft Correlation Vector). Relay it verbatim as `options.correlationVector` on every later phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The client relays the value unchanged; the executor validates it on each phase and derives that phase's own vector from it (spinning a fresh child element off a mutable base, or reseeding if it is missing or malformed). It is `undefined` when telemetry is off, and safe to omit otherwise.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
@@ -443,6 +443,12 @@ emission (never a Windows-level setting like Diagnostics & feedback). See
 [`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md)
 for the full design.
 
+Telemetry is additionally off per invocation unless a one-shot
+`ContainerConfig` includes `telemetry: { enabled: true }`, or a state-aware
+call passes `options.telemetry: { enabled: true }`. This stable switch does not
+require `options.experimental` and cannot bypass consent or administrative
+policy.
+
 The SDK does not ship a consent UI — call these once at first run, and again
 at any later time from your own settings surface:
 
@@ -531,4 +537,3 @@ Like every other consent surface it fails closed: an unreadable or missing
 ## License
 
 [MIT](https://github.com/microsoft/mxc/blob/main/sdk/node/LICENSE.md). Contributions welcome — see the main [MXC repository](https://github.com/microsoft/mxc).
-

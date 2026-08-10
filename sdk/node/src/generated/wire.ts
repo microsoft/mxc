@@ -79,10 +79,6 @@ export interface Experimental {
    */
   seatbelt?: Seatbelt | null;
   /**
-   * Telemetry configuration.
-   */
-  telemetry?: Telemetry | null;
-  /**
    * Placeholder feature for testing experimental infrastructure.
    */
   test?: TestFeature | null;
@@ -343,7 +339,7 @@ export interface Seatbelt {
 }
 
 /**
- * Telemetry configuration (`experimental.telemetry`).
+ * Telemetry configuration (`telemetry`).
  */
 export interface Telemetry {
   /**
@@ -471,7 +467,7 @@ export interface MXCConfiguration {
    */
   containment?: Containment | null;
   /**
-   * Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in the provision result. The client relays it verbatim into every later state-aware phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on each non-provision phase it validates the relayed value and *spins* a fresh child element off a mutable base (so multiple invocations of one phase stay distinct), passes an already-frozen vector through unchanged, and reseeds a brand-new base if the relayed value is absent or malformed — so a missing or hostile relay never reaches telemetry unvalidated. Ignored unless experimental telemetry is enabled; not valid on one-shot requests.
+   * Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in the provision result. The client relays it verbatim into every later state-aware phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on each non-provision phase it validates the relayed value and *spins* a fresh child element off a mutable base (so multiple invocations of one phase stay distinct), passes an already-frozen vector through unchanged, and reseeds a brand-new base if the relayed value is absent or malformed — so a missing or hostile relay never reaches telemetry unvalidated. Ignored unless telemetry is enabled; not valid on one-shot requests.
    */
   correlationVector?: string | null;
   /**
@@ -518,6 +514,10 @@ export interface MXCConfiguration {
    * macOS Seatbelt backend configuration. Used when containment is `seatbelt`.
    */
   seatbelt?: Seatbelt | null;
+  /**
+   * Telemetry configuration.
+   */
+  telemetry?: Telemetry | null;
   /**
    * Cross-platform UI isolation policy.
    */

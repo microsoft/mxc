@@ -89,6 +89,13 @@ for the full design.
 `MxcTelemetry` is UI-agnostic: call it once at first run, and again at any
 later time from your own settings surface.
 
+Collection is also disabled for each invocation unless the caller opts in.
+Set `SandboxPolicy.TelemetryEnabled = true` for one-shot `Run`/`Spawn` calls.
+For state-aware calls, set `TelemetryEnabled = true` in each phase's options
+and relay `ProvisionResult.CorrelationVector` through the later phases'
+`CorrelationVector` option. These switches do not bypass persisted consent or
+administrative policy.
+
 ```csharp
 using Microsoft.Mxc.Sdk;
 
@@ -234,4 +241,3 @@ than linking third-party code directly against `mxc_ffi`.
   `scripts/check-dotnet-errorcode-parity.js` enforces that.
 - The C# package version tracks the Rust workspace version;
   `scripts/check-version-sync.js` enforces that.
-

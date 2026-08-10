@@ -60,7 +60,7 @@ mod provider {
     /// concurrent `init`/`shutdown` race from leaving the wrapper flag and the
     /// provider's real state out of sync (e.g. flag set to registered after a
     /// `register()` that actually failed, or a double register/unregister).
-    static REGISTERED: Mutex<bool> = Mutex::new(false);
+    static REGISTERED: Mutex<usize> = Mutex::new(0);
 
     /// Lock-free "is the provider currently registered" flag.
     ///
@@ -100,9 +100,10 @@ mod provider {
         });
 
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
-        if *registered {
+        if *registered > 0 {
             // Already registered — the tracelogging crate panics on double
-            // register, so we must not call `register()` again.
+            // register, so retain a reference instead.
+            *registered += 1;
             return true;
         }
 
@@ -110,12 +111,12 @@ mod provider {
         // executable (not a DLL), so unload ordering is not a concern.
         let status = unsafe { MXC_PROVIDER.register() };
         if status != 0 {
-            // Registration failed; leave `*registered` false so the wrapper
+            // Registration failed; leave the reference count at zero so the wrapper
             // state matches reality and a later attempt can retry.
             return false;
         }
 
-        *registered = true;
+        *registered = 1;
         ACTIVE.store(true, Ordering::Release);
         true
     }
@@ -123,9 +124,11 @@ mod provider {
     /// Unregister the ETW provider.
     pub fn shutdown() {
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
-        if *registered {
+        if *registered > 1 {
+            *registered -= 1;
+        } else if *registered == 1 {
             MXC_PROVIDER.unregister();
-            *registered = false;
+            *registered = 0;
             ACTIVE.store(false, Ordering::Release);
         }
     }
@@ -320,6 +323,8 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = init("0.0.0-test", "dev");
         let _ = init("0.0.0-test", "dev");
+        shutdown();
+        assert!(is_active(), "one retained registration must remain active");
         shutdown();
     }
 

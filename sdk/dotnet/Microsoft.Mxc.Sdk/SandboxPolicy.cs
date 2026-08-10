@@ -31,6 +31,14 @@ public sealed class SandboxPolicy
     /// <summary>Execution timeout in milliseconds (<c>null</c> = no timeout).</summary>
     [JsonPropertyName("timeoutMs")]
     public uint? TimeoutMs { get; set; }
+
+    /// <summary>
+    /// Stable per-invocation telemetry switch. Setting this to <see langword="true"/>
+    /// is necessary but does not bypass persisted user consent or administrative
+    /// policy. Omitted or false keeps telemetry off.
+    /// </summary>
+    [JsonPropertyName("telemetryEnabled")]
+    public bool? TelemetryEnabled { get; set; }
 }
 
 /// <summary>Filesystem section of a <see cref="SandboxPolicy"/>.</summary>

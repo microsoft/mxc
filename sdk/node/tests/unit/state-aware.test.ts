@@ -148,6 +148,17 @@ describe('buildStateAwareEnvelope', () => {
     assert.strictEqual(provision.correlationVector, undefined);
   });
 
+  it('places stable telemetry at the envelope top level', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:abc',
+      telemetry: { enabled: true },
+    });
+    assert.deepStrictEqual(env.telemetry, { enabled: true });
+    assert.strictEqual(env.experimental, undefined);
+  });
+
 });
 
 describe('parseNonExecResponse', () => {
@@ -340,6 +351,15 @@ describe('startSandbox', { skip: platformSkip }, () => {
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
     await startSandbox(id, undefined, testOptions({ correlationVector: 'BASEbaseBASEbaseBASEba.7' }));
     assert.strictEqual(fake.captured.envelope?.correlationVector, 'BASEbaseBASEbaseBASEba.7');
+  });
+
+  it('relays stable telemetry from options onto the start envelope', async () => {
+    const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+    _setSpawnImpl(fake.spawn);
+    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
+    await startSandbox(id, undefined, testOptions({ telemetry: { enabled: true } }));
+    assert.deepStrictEqual(fake.captured.envelope?.telemetry, { enabled: true });
+    assert.strictEqual(fake.captured.envelope?.experimental, undefined);
   });
 });
 

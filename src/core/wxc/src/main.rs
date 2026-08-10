@@ -403,19 +403,10 @@ fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
 /// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
 /// regardless of mode (per design §7.3 stream protocol — stdout reserved
 /// for the response envelope).
-fn run_state_aware_main(
-    parsed: ParsedStateAwareRequest,
-    dry_run: bool,
-    experimental: bool,
-    logger: &mut Logger,
-) -> ! {
+fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
     // Resolve attribution (phase + backend) and telemetry enablement BEFORE
-    // dispatch consumes `parsed`. State-aware telemetry is gated on
-    // `--experimental` exactly like the one-shot path, and reads the same typed
-    // `experimental.telemetry` field — the state-aware parser populates it while
-    // keeping the per-backend `experimental_raw` block for dispatch. A malformed
-    // telemetry block is rejected at parse time (as a state-aware envelope), so
-    // no client-error handling is needed here.
+    // dispatch consumes `parsed`. Telemetry is stable and independent of the
+    // `--experimental` gate used by experimental containment backends.
     let phase = parsed.phase.as_str();
     // Whether this invocation is the provision phase. Provision seeds a fresh
     // random correlation-vector base and returns it in the result envelope;
@@ -436,17 +427,12 @@ fn run_state_aware_main(
         .as_ref()
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
-    let telemetry_active = if experimental {
-        parsed
-            .request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let telemetry_active = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, logger))
+        .unwrap_or(false);
 
     // Compute this phase's Microsoft Correlation Vector (MS-CV), executing the
     // pure seed-vs-spin plan against the operators. Only computed when telemetry
@@ -1096,7 +1082,7 @@ fn main() {
             // `--experimental` on the CLI.
             parsed.request.experimental_enabled = cli.experimental;
             parsed.request.dry_run = cli.dry_run;
-            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
+            run_state_aware_main(parsed, cli.dry_run, &mut logger)
         }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -1114,17 +1100,12 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
@@ -1448,12 +1429,18 @@ fn main() {
     }
 
     if cli.dry_run {
+        telemetry::emit_completion(
+            telemetry_active,
+            &request.containment,
+            &response,
+            run_elapsed,
+        );
         handle_dry_run_exit(&response, &mut logger);
     }
 
     display_script_results(&response, &mut logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
+    // ── Telemetry emit ──────────────────────────────────────────────
     telemetry::emit_completion(
         telemetry_active,
         &request.containment,

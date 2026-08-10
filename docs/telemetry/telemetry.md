@@ -162,7 +162,7 @@ caller-supplied identity (e.g. a UPN embedded in an IsolationSession
 — a missing, empty, or malformed relayed value falls back to a fresh seed rather
 than panicking telemetry. `__TlgCV__` is empty for one-shot executions (which have
 no lifecycle to correlate) and for a crash during `provision` before the vector is
-stashed. It is only computed and emitted when experimental telemetry is active, so
+stashed. It is only computed and emitted when telemetry is active, so
 provision output is unchanged when telemetry is off.
 
 **Why a relayed random vector rather than a hashed `sandbox_id`.** An alternative
@@ -238,7 +238,7 @@ free-form text.
 ## Consent
 
 Telemetry emission is gated by a **persisted, MXC-owned consent flag**, not
-just the `experimental.telemetry.enabled` config field. See
+just the top-level `telemetry.enabled` config field. See
 [`docs/telemetry/telemetry-consent-design.md`](telemetry-consent-design.md)
 for the full design; the summary:
 

@@ -22,8 +22,41 @@ use wxc_common::state_aware_dispatch::{
     resolve_backend, run_state_aware as run_state_aware_fallback, DispatchOutcome,
 };
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use wxc_common::telemetry;
 
 use crate::error::Error;
+use crate::wrap_state_aware_telemetry_process;
+
+fn phase_correlation(active: bool, phase: Phase, incoming: Option<&str>) -> String {
+    if !active {
+        return String::new();
+    }
+    if phase != Phase::Provision {
+        if let Some(value) =
+            incoming.filter(|value| telemetry::correlation_vector::is_relayable(value))
+        {
+            return telemetry::correlation_vector::spin(value);
+        }
+    }
+    telemetry::correlation_vector::seed()
+}
+
+fn inject_correlation_vector(
+    outcome: &mut Result<DispatchOutcome, MxcError>,
+    correlation_vector: &str,
+) {
+    if let Ok(DispatchOutcome::Envelope(value)) = outcome {
+        if let Some(result) = value
+            .get_mut("result")
+            .and_then(|result| result.as_object_mut())
+        {
+            result.insert(
+                "correlationVector".to_string(),
+                serde_json::Value::String(correlation_vector.to_string()),
+            );
+        }
+    }
+}
 
 /// Resolve `parsed`'s backend and run the requested state-aware phase.
 ///
@@ -132,7 +165,37 @@ pub fn run_state_aware_json(request_json: &str, dry_run: bool) -> Result<String,
         )));
     }
 
-    match run_state_aware(parsed, dry_run).map_err(Error::from)? {
+    let phase = parsed.phase;
+    let phase_name = phase.as_str();
+    let incoming_correlation = parsed.correlation_vector.clone();
+    let mut logger = Logger::new(Mode::Buffer);
+    let telemetry_active = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    let backend = resolve_backend(&parsed)
+        .map(|backend| backend.wire_name().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let correlation = phase_correlation(telemetry_active, phase, incoming_correlation.as_deref());
+    let started = std::time::Instant::now();
+    let mut outcome = run_state_aware(parsed, dry_run);
+    if phase == Phase::Provision && telemetry_active {
+        inject_correlation_vector(&mut outcome, &correlation);
+    }
+    telemetry::emit_sdk_state_aware(
+        telemetry_active,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase_name,
+            correlation_vector: &correlation,
+        },
+        &outcome,
+        started.elapsed(),
+    );
+
+    match outcome.map_err(Error::from)? {
         DispatchOutcome::Envelope(value) => serde_json::to_string(&value).map_err(|e| {
             Error::from(MxcError::backend_error(format!(
                 "serialising the response envelope failed: {e}"
@@ -155,7 +218,44 @@ pub fn exec_state_aware_json(request_json: &str) -> Result<Box<dyn SandboxProces
             parsed.phase
         ))));
     }
-    exec_state_aware(parsed).map_err(Error::from)
+    let phase = parsed.phase;
+    let incoming_correlation = parsed.correlation_vector.clone();
+    let mut logger = Logger::new(Mode::Buffer);
+    let telemetry_active = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    let backend = resolve_backend(&parsed)
+        .map(|backend| backend.wire_name().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let correlation = phase_correlation(telemetry_active, phase, incoming_correlation.as_deref());
+    let started = std::time::Instant::now();
+    match exec_state_aware(parsed) {
+        Ok(process) => Ok(wrap_state_aware_telemetry_process(
+            process,
+            telemetry_active,
+            backend,
+            phase.as_str().to_string(),
+            correlation,
+            started,
+        )),
+        Err(error) => {
+            let outcome = Err(error.clone());
+            telemetry::emit_sdk_state_aware(
+                telemetry_active,
+                telemetry::TelemetryContext {
+                    backend: &backend,
+                    phase: phase.as_str(),
+                    correlation_vector: &correlation,
+                },
+                &outcome,
+                started.elapsed(),
+            );
+            Err(Error::from(error))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +264,42 @@ mod tests {
     use wxc_common::models::{ContainmentBackend, ExecutionRequest};
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::Phase;
+
+    #[test]
+    fn inactive_telemetry_does_not_create_a_correlation_vector() {
+        assert_eq!(
+            phase_correlation(false, Phase::Provision, None),
+            String::new()
+        );
+    }
+
+    #[test]
+    fn later_phase_spins_a_relayable_correlation_vector() {
+        let incoming = telemetry::correlation_vector::seed();
+        let correlation = phase_correlation(true, Phase::Start, Some(&incoming));
+
+        assert_ne!(correlation, incoming);
+        assert!(correlation.starts_with(incoming.split('.').next().unwrap_or_default()));
+        assert!(telemetry::correlation_vector::is_relayable(&correlation));
+    }
+
+    #[test]
+    fn provision_result_receives_the_correlation_vector() {
+        let mut outcome = Ok(DispatchOutcome::Envelope(serde_json::json!({
+            "result": { "sandboxId": "iso:abc" }
+        })));
+
+        inject_correlation_vector(&mut outcome, "AAAAAAAAAAAAAAAAAAAAAA.0");
+
+        let value = match outcome {
+            Ok(DispatchOutcome::Envelope(value)) => value,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        assert_eq!(
+            value["result"]["correlationVector"],
+            "AAAAAAAAAAAAAAAAAAAAAA.0"
+        );
+    }
 
     #[test]
     fn experimental_backend_requires_flag() {

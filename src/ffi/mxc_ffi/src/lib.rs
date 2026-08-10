@@ -262,6 +262,25 @@ pub(crate) unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
     CStr::from_ptr(p).to_str().ok()
 }
 
+pub(crate) fn parse_policy_json(
+    policy_json: &str,
+) -> Result<(SandboxPolicy, Option<bool>), String> {
+    let value: serde_json::Value = serde_json::from_str(policy_json)
+        .map_err(|error| format!("failed to parse policy JSON: {error}"))?;
+    let telemetry_enabled = match value.get("telemetryEnabled") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(enabled)) => Some(*enabled),
+        Some(_) => {
+            return Err(
+                "failed to parse policy JSON: telemetryEnabled must be a boolean".to_string(),
+            )
+        }
+    };
+    let policy = serde_json::from_value(value)
+        .map_err(|error| format!("failed to parse policy JSON: {error}"))?;
+    Ok((policy, telemetry_enabled))
+}
+
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
@@ -324,14 +343,9 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
         None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "command is not UTF-8"),
     };
 
-    let policy: SandboxPolicy = match serde_json::from_str(policy_json) {
-        Ok(p) => p,
-        Err(e) => {
-            return MxcRunResult::error(
-                MXC_STATUS_MALFORMED_REQUEST,
-                format!("failed to parse policy JSON: {e}"),
-            )
-        }
+    let (policy, telemetry_enabled) = match parse_policy_json(policy_json) {
+        Ok(parsed) => parsed,
+        Err(error) => return MxcRunResult::error(MXC_STATUS_MALFORMED_REQUEST, error),
     };
 
     let mut request = match build_request(&policy, None) {
@@ -339,6 +353,9 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
         Err(e) => return MxcRunResult::error(status_from_error_code(e.code), e.message),
     };
     request.set_script(command);
+    if let Some(enabled) = telemetry_enabled {
+        request.set_telemetry_enabled(enabled);
+    }
 
     match run(request) {
         Ok(output) => {
@@ -609,6 +626,24 @@ mod tests {
         let status = unsafe { mxc_run(policy.as_ptr(), command_ptr, &mut out) };
         assert_eq!(status, out.status);
         out
+    }
+
+    #[test]
+    fn policy_telemetry_switch_is_applied_outside_public_policy_shape() {
+        let (policy, telemetry_enabled) =
+            parse_policy_json(r#"{"version":"0.8.0-alpha","telemetryEnabled":true}"#)
+                .expect("policy should parse");
+
+        assert_eq!(policy.version, "0.8.0-alpha");
+        assert_eq!(telemetry_enabled, Some(true));
+    }
+
+    #[test]
+    fn policy_telemetry_switch_rejects_non_boolean_values() {
+        let error = parse_policy_json(r#"{"version":"0.8.0-alpha","telemetryEnabled":"yes"}"#)
+            .expect_err("non-boolean telemetry switch must fail");
+
+        assert!(error.contains("telemetryEnabled must be a boolean"));
     }
 
     #[test]

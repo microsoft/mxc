@@ -132,13 +132,13 @@ Write-Host "ETW session started, writing to $etlFile"
 Write-Host "`n--- Running wxc-exec with telemetry ---" -ForegroundColor Yellow
 
 try {
-    # Run with --experimental to enable the telemetry section. The provider is
-    # registered during init (before execution); the MXC.Execution / MXC.Error
+    # The provider is registered during init (before execution); the
+    # MXC.Execution / MXC.Error
     # events are emitted on completion, after the runner returns. The sandbox
     # itself may fail (e.g. AppContainer prerequisites), but completion
     # telemetry still fires for the failure, so events should be captured.
     $proc = Start-Process -FilePath $wxcExe `
-        -ArgumentList "--debug", "--experimental", $configFile `
+        -ArgumentList "--debug", $configFile `
         -PassThru -NoNewWindow -Wait
     Write-Host "wxc-exec exited with code $($proc.ExitCode)"
 } catch {

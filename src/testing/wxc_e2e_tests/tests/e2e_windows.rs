@@ -575,7 +575,7 @@ fn test_on_repeat() {
 // ---------------------------------------------------------------------------
 
 fn telemetry_enabled() {
-    let result = run_wxc_example("28_telemetry_enabled.json", &["--debug", "--experimental"]);
+    let result = run_wxc_example("28_telemetry_enabled.json", &["--debug"]);
     assert_success_or_skip_missing_prerequisite(&result);
 }
 

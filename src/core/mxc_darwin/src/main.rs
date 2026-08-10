@@ -181,21 +181,16 @@ fn main() {
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     use wxc_common::telemetry;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
+    // ── Telemetry init ──────────────────────────────────────────────
     // Mirrors lxc-exec / wxc-exec. The ETW provider has no macOS backend today,
     // so `init` returns false and every emit below is a no-op; wiring it anyway
     // keeps the three executors structurally identical and ready the moment
     // telemetry gains a macOS sink.
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, logger))
+        .unwrap_or(false);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
@@ -226,7 +221,7 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
 
     display_script_results(&response, logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
+    // ── Telemetry emit ──────────────────────────────────────────────
     telemetry::emit_completion(
         telemetry_active,
         &request.containment,

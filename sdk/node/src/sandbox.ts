@@ -6,7 +6,13 @@ import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
+import {
+    SandboxPolicy,
+    ContainerConfig,
+    ContainmentType,
+    ContainmentBackend,
+    TelemetryConfig,
+} from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromEnvelope } from './errors.js';
@@ -399,6 +405,13 @@ export interface SandboxSpawnOptions {
    * Enable experimental features
    */
   experimental?: boolean;
+
+  /**
+   * State-aware lifecycle only: stable per-invocation telemetry configuration.
+   * Telemetry remains off unless `enabled` is explicitly `true`, persisted user
+   * consent is granted, and administrative policy permits collection.
+   */
+  telemetry?: TelemetryConfig;
 
   /**
    * Allow testing-only, deliberately-permissive features that must never run

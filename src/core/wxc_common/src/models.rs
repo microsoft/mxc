@@ -680,11 +680,9 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
-    /// Telemetry configuration (experimental).
-    pub telemetry: Option<TelemetryConfig>,
 }
 
-/// Telemetry configuration parsed from the JSON config `experimental.telemetry` section.
+/// Telemetry configuration parsed from the top-level JSON config `telemetry` section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
@@ -716,6 +714,8 @@ pub struct ExecutionRequest {
     pub lxc_config: LxcConfig,
     /// Seatbelt (macOS) backend configuration (used when containment == Seatbelt).
     pub seatbelt: Option<SeatbeltConfig>,
+    /// Per-invocation telemetry configuration.
+    pub telemetry: Option<TelemetryConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Whether the --allow-testing-features flag was passed. Gates testing-only,

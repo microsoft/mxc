@@ -54,12 +54,12 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{build_request, spawn_sandbox, Sandbox, SandboxPolicy, WaitOutcome};
+use mxc_sdk::{build_request, spawn_sandbox, Sandbox, WaitOutcome};
 
 use crate::{
-    alloc_cstring, cstr_to_str, status_from_error_code, MXC_STATUS_BACKEND_ERROR,
-    MXC_STATUS_INVALID_UTF8, MXC_STATUS_MALFORMED_REQUEST, MXC_STATUS_NULL_ARGUMENT,
-    MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
+    alloc_cstring, cstr_to_str, parse_policy_json, status_from_error_code,
+    MXC_STATUS_BACKEND_ERROR, MXC_STATUS_INVALID_UTF8, MXC_STATUS_MALFORMED_REQUEST,
+    MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
 
 // ---------------------------------------------------------------------------
@@ -201,16 +201,15 @@ fn spawn_inner(
         None => return Err((MXC_STATUS_INVALID_UTF8, "command is not UTF-8".into())),
     };
 
-    let policy: SandboxPolicy = serde_json::from_str(policy_json).map_err(|e| {
-        (
-            MXC_STATUS_MALFORMED_REQUEST,
-            format!("failed to parse policy JSON: {e}"),
-        )
-    })?;
+    let (policy, telemetry_enabled) =
+        parse_policy_json(policy_json).map_err(|error| (MXC_STATUS_MALFORMED_REQUEST, error))?;
 
     let mut request =
         build_request(&policy, None).map_err(|e| (status_from_error_code(e.code), e.message))?;
     request.set_script(command);
+    if let Some(enabled) = telemetry_enabled {
+        request.set_telemetry_enabled(enabled);
+    }
 
     spawn_sandbox(request).map_err(|e| (status_from_error_code(e.code), e.message))
 }

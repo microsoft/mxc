@@ -59,6 +59,7 @@ public static class MxcLifecycle
         {
             SandboxId = new SandboxId(sandboxId),
             MetadataJson = metadata?.ToJsonString(),
+            CorrelationVector = result["correlationVector"]?.GetValue<string>(),
         };
     }
 
@@ -73,6 +74,7 @@ public static class MxcLifecycle
         {
             envelope["filesystem"] = SerializeToNode(fs);
         }
+        ApplyTelemetry(envelope, options?.TelemetryEnabled);
         if (options?.User is { } user)
         {
             SetBackendConfig(envelope, "provision", "user", SerializeToNode(user));
@@ -93,6 +95,7 @@ public static class MxcLifecycle
     {
         var envelope = NewEnvelope("start");
         envelope["sandboxId"] = id.Value;
+        ApplyOperationOptions(envelope, options?.CorrelationVector, options?.TelemetryEnabled);
         if (options?.Size is { } size)
         {
             // The wire model reads the sizing profile from `configurationId`
@@ -113,11 +116,14 @@ public static class MxcLifecycle
     /// to release native resources.
     /// </summary>
     /// <exception cref="MxcException">The exec could not be started.</exception>
-    public static MxcSandboxProcess ExecInSandbox(SandboxId id, string command)
+    public static MxcSandboxProcess ExecInSandbox(
+        SandboxId id,
+        string command,
+        StateAwareOperationOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(command);
 
-        var requestJson = BuildExecEnvelope(id, command).ToJsonString();
+        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
         var requestBuf = ToNullTerminatedUtf8(requestJson);
 
         unsafe
@@ -143,10 +149,14 @@ public static class MxcLifecycle
 
     // Build the exec request envelope: sandboxId + the command as the
     // cross-cutting process.commandLine.
-    internal static JsonObject BuildExecEnvelope(SandboxId id, string command)
+    internal static JsonObject BuildExecEnvelope(
+        SandboxId id,
+        string command,
+        StateAwareOperationOptions? options = null)
     {
         var envelope = NewEnvelope("exec");
         envelope["sandboxId"] = id.Value;
+        ApplyOperationOptions(envelope, options?.CorrelationVector, options?.TelemetryEnabled);
         envelope["process"] = new JsonObject { ["commandLine"] = command };
         return envelope;
     }
@@ -159,12 +169,13 @@ public static class MxcLifecycle
     public static async Task<RunResult> ExecInSandboxAsync(
         SandboxId id,
         string command,
+        StateAwareOperationOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         // Offload the blocking exec-start P/Invoke so this method never blocks
         // the caller's thread (for a backend that relays exec internally, the
         // whole exec runs during ExecInSandbox).
-        var proc = await Task.Run(() => ExecInSandbox(id, command), cancellationToken)
+        var proc = await Task.Run(() => ExecInSandbox(id, command, options), cancellationToken)
             .ConfigureAwait(false);
         try
         {
@@ -186,21 +197,35 @@ public static class MxcLifecycle
         }
     }
 
+    /// <summary>
+    /// Compatibility overload retaining the original positional cancellation
+    /// token signature.
+    /// </summary>
+    public static Task<RunResult> ExecInSandboxAsync(
+        SandboxId id,
+        string command,
+        CancellationToken cancellationToken) =>
+        ExecInSandboxAsync(id, command, null, cancellationToken);
+
     /// <summary>Stop a running sandbox.</summary>
     /// <exception cref="MxcException">Stopping failed.</exception>
-    public static void StopSandbox(SandboxId id)
+    public static void StopSandbox(SandboxId id, StateAwareOperationOptions? options = null)
     {
         var envelope = NewEnvelope("stop");
         envelope["sandboxId"] = id.Value;
+        ApplyOperationOptions(envelope, options?.CorrelationVector, options?.TelemetryEnabled);
         RunEnvelopePhase(envelope);
     }
 
     /// <summary>Deprovision (destroy) a sandbox, releasing its resources.</summary>
     /// <exception cref="MxcException">Deprovisioning failed.</exception>
-    public static void DeprovisionSandbox(SandboxId id)
+    public static void DeprovisionSandbox(
+        SandboxId id,
+        StateAwareOperationOptions? options = null)
     {
         var envelope = NewEnvelope("deprovision");
         envelope["sandboxId"] = id.Value;
+        ApplyOperationOptions(envelope, options?.CorrelationVector, options?.TelemetryEnabled);
         RunEnvelopePhase(envelope);
     }
 
@@ -211,6 +236,26 @@ public static class MxcLifecycle
         ["version"] = StateAwareVersion,
         ["phase"] = phase,
     };
+
+    private static void ApplyOperationOptions(
+        JsonObject envelope,
+        string? correlationVector,
+        bool? telemetryEnabled)
+    {
+        if (!string.IsNullOrEmpty(correlationVector))
+        {
+            envelope["correlationVector"] = correlationVector;
+        }
+        ApplyTelemetry(envelope, telemetryEnabled);
+    }
+
+    private static void ApplyTelemetry(JsonObject envelope, bool? telemetryEnabled)
+    {
+        if (telemetryEnabled is not null)
+        {
+            envelope["telemetry"] = new JsonObject { ["enabled"] = telemetryEnabled.Value };
+        }
+    }
 
     // Nest a backend-specific config value under experimental.isolation_session.<phase>.
     private static void SetBackendConfig(JsonObject envelope, string phase, string key, JsonNode? value)

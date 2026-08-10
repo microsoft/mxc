@@ -297,7 +297,7 @@ export interface ProvisionResult<C extends StateAwareContainmentBackend> {
   metadata?: ProvisionMetadataFor<C>;
   /**
    * Correlation vector (MS-CV) seeded by the executor for this lifecycle when
-   * experimental telemetry is enabled. Relay it verbatim as
+   * telemetry is enabled. Relay it verbatim as
    * {@link SandboxSpawnOptions.correlationVector} on every later phase so all
    * phases of the lifecycle share a telemetry base prefix. The client relays it
    * unchanged; the executor derives each phase's own vector from it (spinning a

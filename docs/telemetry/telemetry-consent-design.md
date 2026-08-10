@@ -10,9 +10,9 @@
 
 MXC already has a fully-built ETW TraceLogging pipeline
 (`mxc_telemetry` + `wxc_common::telemetry`, see
-[`telemetry.md`](telemetry.md)), gated behind `--experimental` and a
-per-request JSON field, `experimental.telemetry.enabled`. Today that field is
-the *entire* consent model, and the code says so explicitly
+[`telemetry.md`](telemetry.md)), enabled per request by the top-level
+`telemetry.enabled` field. Before this consent feature, that field was the
+*entire* consent model, and the code said so explicitly
 (`wxc_common/src/telemetry/mod.rs`):
 
 > "Note: Consent is the SDK consumer's responsibility. MXC does not
@@ -136,7 +136,7 @@ Telemetry emission (`wxc_common::telemetry::is_enabled`) becomes:
 effective = platform_is_windows
          && admin_policy_permits
          && persisted_consent == Granted
-         && request.experimental.telemetry.enabled != Some(false)
+         && request.telemetry.enabled == Some(true)
 ```
 
 - Persisted consent is the **gate**. Without `Granted`, nothing fires,
@@ -145,7 +145,7 @@ effective = platform_is_windows
   administrator can stop MXC collecting on a device, but an administrator
   permitting collection does not stand in for the user's own decision. See
   [`telemetry-policy.md`](telemetry-policy.md) for the full specification.
-- The existing `experimental.telemetry.enabled` field becomes an
+- The top-level `telemetry.enabled` field is an
   **explicit opt-in that can only subtract**: collection requires
   `true`, while omitting the field or setting `false` always disables it (a
   caller can always force telemetry off for one run, e.g. CI, a support
@@ -436,7 +436,7 @@ exactly the flow described in §8.
   run in the existing Windows CI job)**:
   - Fresh machine (no file) ⇒ `Undetermined`, `is_enabled() == false`.
   - Grant ⇒ persists, re-read returns `Granted`, `is_enabled() == true`
-    (with `experimental.telemetry.enabled` set to `true`).
+    (with top-level `telemetry.enabled` set to `true`).
   - Grant + request omits `enabled` or sets it to `false` ⇒ `is_enabled()
     == false` (collection requires an explicit opt-in).
   - Deny ⇒ persists, `is_enabled() == false` even if request sets
@@ -652,4 +652,3 @@ without one.
   tests, the C# and Node suites driving a native binary) only get them from a
   debug build, so their consent/policy coverage is debug-only. Tracked as
   [#691](https://github.com/microsoft/mxc/issues/691).
-

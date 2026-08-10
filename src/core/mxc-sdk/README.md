@@ -24,7 +24,7 @@ let policy = SandboxPolicy {
     capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
-request.set_script("echo hello");
+request.set_script("echo hello").set_telemetry_enabled(true);
 
 // Run to completion and capture the output.
 let output = run(request)?;
@@ -44,6 +44,10 @@ network validation, building the same wire config internally and running it
 through the shared parser. The returned [`SandboxRequest`] has an empty
 command line — set the command with [`SandboxRequest::set_script`] (and any
 working directory / env) before spawning.
+
+Telemetry remains off unless `SandboxRequest::set_telemetry_enabled(true)` is
+called. Enabling that per-invocation switch still requires persisted user
+consent and a permitting administrative policy.
 
 To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`] — the same choice the
@@ -315,6 +319,11 @@ for the full design.
 The crate is UI-agnostic: it does not render a prompt. Call
 `needs_consent_prompt()` once at first sandbox run, show your own UI, then
 record the answer — and let a settings surface flip it at any later time.
+
+Telemetry is also off per invocation unless the request explicitly enables it
+with `SandboxRequest::set_telemetry_enabled(true)`. This stable switch does not
+require `set_experimental(true)` and cannot bypass consent or administrative
+policy.
 
 ```rust,no_run
 use mxc_sdk::telemetry;

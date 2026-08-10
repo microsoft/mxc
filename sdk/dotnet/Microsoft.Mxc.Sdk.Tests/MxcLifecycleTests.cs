@@ -182,4 +182,42 @@ public class MxcLifecycleTests
         Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
         Assert.False(root.TryGetProperty("experimental", out _));
     }
+
+    [Fact]
+    public void BuildStartEnvelope_RelaysStableTelemetryAndCorrelation()
+    {
+        var options = new StartSandboxOptions
+        {
+            CorrelationVector = "AAAAAAAAAAAAAAAAAAAAAA.0",
+            TelemetryEnabled = true,
+        };
+        var root = MxcLifecycle
+            .BuildStartEnvelope(new SandboxId("iso:abc"), options);
+
+        Assert.Equal(
+            "AAAAAAAAAAAAAAAAAAAAAA.0",
+            root["correlationVector"]?.GetValue<string>());
+        Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
+        Assert.Null(root["experimental"]);
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_RelaysStableTelemetryAndCorrelation()
+    {
+        var options = new StateAwareOperationOptions
+        {
+            CorrelationVector = "AAAAAAAAAAAAAAAAAAAAAA.0",
+            TelemetryEnabled = true,
+        };
+        var root = MxcLifecycle.BuildExecEnvelope(
+            new SandboxId("iso:abc"),
+            "echo hi",
+            options);
+
+        Assert.Equal(
+            "AAAAAAAAAAAAAAAAAAAAAA.0",
+            root["correlationVector"]?.GetValue<string>());
+        Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
+        Assert.Null(root["experimental"]);
+    }
 }
