@@ -68,7 +68,8 @@ export const EXPECTED_MACOS_BINARIES = [
 // Binaries that are optional (feature-gated or only present in certain builds)
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
-  'wslcsdk.dll',   // Only built with --with-wslc
+  'wslcsdk.dll',          // Only built with --with-wslc
+  'wxc-wslc-daemon.exe',  // Only built with --with-wslc
   'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
                    // only when the plm crate is included in the build.
 ];

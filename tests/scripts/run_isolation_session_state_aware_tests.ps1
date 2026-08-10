@@ -419,7 +419,8 @@ try {
             # appId is deliberately NOT echoed in metadata -- the caller already
             # supplied it, so echoing it would be redundant surface.
             Assert-True ($null -eq $envObj.result.metadata.appId) "metadata does not echo appId"
-            Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental | Out-Null
+            $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental
+            Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
         }
     } | Out-Null
 
@@ -437,7 +438,8 @@ try {
             Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
             Assert-True ($decoded.PSObject.Properties.Name -contains 'appId') "payload keeps the appId key when empty"
             Assert-True ($decoded.appId -eq '') "payload appId is the empty string (got '$($decoded.appId)')"
-            Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental | Out-Null
+            $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental
+            Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
         }
     } | Out-Null
 

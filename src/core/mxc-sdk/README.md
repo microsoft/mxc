@@ -70,7 +70,7 @@ questions:
   launchability guarantee.
 
 ```rust,no_run
-use mxc_sdk::{available_backends, platform_support};
+use mxc_sdk::{available_backends, platform_support, BackendCapability};
 
 // Will run()/spawn_sandbox() work here, and with which backends?
 let support = platform_support();
@@ -82,17 +82,27 @@ if support.is_supported {
 
 // What can the host run at all, and at what isolation-tier ceiling?
 for backend in available_backends() {
+    let capture_denials = backend
+        .capabilities
+        .contains(&BackendCapability::CaptureDenials);
     match backend.tier {
-        Some(tier) => println!("{} (tier: {tier})", backend.backend),
+        Some(tier) => println!(
+            "{} (tier: {tier}, captureDenials: {capture_denials})",
+            backend.backend
+        ),
         None => println!("{}", backend.backend),
     }
 }
 ```
 
 The reported `tier` is a **ceiling** — the strongest isolation the host can
-reach for that backend; a policy can still force a weaker tier at dispatch. And
-a backend appearing in `available_backends()` is a host-capability signal, **not**
-a guarantee this SDK can launch it — cross-check [`platform_support`] for that.
+reach for that backend; a policy can still force a weaker tier at dispatch.
+`capabilities` reports optional features that passed the host probe, including
+the ProcessContainer's `CaptureDenials`. These are advisory: callers must still
+handle `ErrorCode::BackendUnavailable` if availability changes before launch.
+And a backend appearing in `available_backends()` is a host-capability signal,
+**not** a guarantee this SDK can launch it — cross-check [`platform_support`]
+for that.
 
 > **Before / after.** Host-and-backend discovery previously lived only in the
 > TypeScript SDK (`getPlatformSupport`), so Rust callers and the executor
@@ -113,7 +123,7 @@ use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
 use mxc_sdk::SandboxPolicy;
 
 let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
+    version: "0.8.0-alpha".to_string(),
     filesystem: None,
     network: None,
     ui: None,

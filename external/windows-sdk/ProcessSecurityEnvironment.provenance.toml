@@ -12,8 +12,8 @@
 # then regenerate the bindings (see the crate README).
 
 [source]
-# The schema originates from the internal Microsoft Windows OS repository and is
-# not publicly redistributable. Only the schema text (not the OS tree) is vendored.
+# The schema originates from the Microsoft Windows OS repository. Only the
+# schema text (not the OS tree) is vendored.
 repository = "Windows OS (internal Azure DevOps)"
 # The PSEC schema is a Windows OS containment contract; there is no public OS
 # revision to cite. Instead of guessing a source path/revision, we record the

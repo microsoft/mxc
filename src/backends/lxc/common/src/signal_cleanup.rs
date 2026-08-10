@@ -235,8 +235,8 @@ mod tests {
         );
 
         // A new container must not inherit the previous one's ownership record.
-        // Chain names truncate, so acting on a stale record can tear down a
-        // different container's chain.
+        // The chain name depends only on the container name, so acting on a
+        // stale record can tear down a chain that is still in use.
         set_active("ctr-b");
         assert_eq!(
             active_snapshot(),

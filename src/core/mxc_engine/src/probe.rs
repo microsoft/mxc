@@ -12,11 +12,20 @@
 use serde::Serialize;
 use wxc_common::models::ContainmentBackend;
 
+/// Optional feature supported by a containment backend on the current host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[non_exhaustive]
+#[serde(rename_all = "camelCase")]
+pub enum BackendCapability {
+    /// Windows ProcessContainer denial capture.
+    CaptureDenials,
+}
+
 /// One host-available backend, plus its effective isolation tier (if any).
 ///
 /// Serializes to camelCase JSON such as `{"backend":"seatbelt"}` or
-/// `{"backend":"processcontainer","tier":"appcontainer-dacl"}`; `tier` is
-/// omitted (never `null`) when the backend has no tier ladder.
+/// `{"backend":"processcontainer","tier":"base-container","capabilities":
+/// ["captureDenials"]}`; empty optional fields are omitted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableBackend {
@@ -27,6 +36,9 @@ pub struct AvailableBackend {
     /// backends with no tier ladder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Optional backend features usable on this host.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<BackendCapability>,
 }
 
 impl AvailableBackend {
@@ -34,14 +46,7 @@ impl AvailableBackend {
         Self {
             backend: backend.to_string(),
             tier: None,
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    fn tiered(backend: &str, tier: &str) -> Self {
-        Self {
-            backend: backend.to_string(),
-            tier: Some(tier.to_string()),
+            capabilities: Vec::new(),
         }
     }
 }
@@ -65,7 +70,10 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
     #[cfg(target_os = "windows")]
     {
-        windows_backends()
+        windows_backends(
+            appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(
+            ),
+        )
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -101,16 +109,22 @@ fn linux_backends() -> Vec<AvailableBackend> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_backends() -> Vec<AvailableBackend> {
+fn windows_backends(capture_denials_usable: bool) -> Vec<AvailableBackend> {
     use appcontainer_common::fallback_detector::is_base_container_usable;
 
     // `processcontainer` is always present and the only backend with a tier
     // ladder, so it carries its effective (highest-reachable) tier.
     let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
-    let mut backends = vec![AvailableBackend::tiered(
-        ContainmentBackend::ProcessContainer.wire_name(),
-        tier.as_str(),
-    )];
+    let capabilities = capture_denials_usable
+        .then_some(BackendCapability::CaptureDenials)
+        .into_iter()
+        .collect();
+    let process_container = AvailableBackend {
+        backend: ContainmentBackend::ProcessContainer.wire_name().to_string(),
+        tier: Some(tier.as_str().to_string()),
+        capabilities,
+    };
+    let mut backends = vec![process_container];
 
     if windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
         backends.push(AvailableBackend::tierless(
@@ -210,11 +224,26 @@ mod tests {
         let backend = AvailableBackend {
             backend: "processcontainer".to_string(),
             tier: Some("appcontainer-dacl".to_string()),
+            capabilities: Vec::new(),
         };
         let json = serde_json::to_string(&backend).expect("serializes");
         assert_eq!(
             json,
             r#"{"backend":"processcontainer","tier":"appcontainer-dacl"}"#
+        );
+    }
+
+    #[test]
+    fn capabilities_are_serialized_in_camel_case_when_present() {
+        let backend = AvailableBackend {
+            backend: "processcontainer".to_string(),
+            tier: Some("base-container".to_string()),
+            capabilities: vec![BackendCapability::CaptureDenials],
+        };
+        let json = serde_json::to_string(&backend).expect("serializes");
+        assert_eq!(
+            json,
+            r#"{"backend":"processcontainer","tier":"base-container","capabilities":["captureDenials"]}"#
         );
     }
 
@@ -295,6 +324,24 @@ mod tests {
             CANONICAL_TIERS.contains(&tier),
             "unexpected processcontainer tier: {tier:?}"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reports_capture_denials_from_probe_result() {
+        for capture_denials_usable in [false, true] {
+            let backends = windows_backends(capture_denials_usable);
+            let process_container = backends
+                .iter()
+                .find(|backend| backend.backend == "processcontainer")
+                .expect("processcontainer must always be reported on Windows");
+            assert_eq!(
+                process_container
+                    .capabilities
+                    .contains(&BackendCapability::CaptureDenials),
+                capture_denials_usable
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
