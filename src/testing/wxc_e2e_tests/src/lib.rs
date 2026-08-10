@@ -256,51 +256,6 @@ pub fn has_hyperlight_snapshot() -> bool {
     }
 }
 
-/// Return whether the WSLC SDK (`wslcsdk.dll`) is present next to
-/// `wxc-exec.exe`. The DLL is copied there by a `--features wslc` build; its
-/// absence means the WSLC backend cannot load at runtime, so WSLC E2E tests
-/// must skip rather than fail.
-pub fn has_wslc_sdk() -> bool {
-    let Some(exe) = find_binary("wxc-exec.exe") else {
-        println!("SKIPPED: wxc-exec.exe not found — build with `--features wslc` first");
-        return false;
-    };
-    let dll = exe.parent().unwrap_or(Path::new(".")).join("wslcsdk.dll");
-    if dll.is_file() {
-        println!("Using wslcsdk.dll at {}", dll.display());
-        true
-    } else {
-        println!(
-            "SKIPPED: wslcsdk.dll not found next to wxc-exec.exe — build with `--features wslc`"
-        );
-        false
-    }
-}
-
-/// Return whether a usable WSL runtime is available (WSL2 installed and
-/// responsive). WSLC boots Linux containers inside WSL2, which requires
-/// nested virtualization on the host — unavailable on GitHub-hosted runners,
-/// so these tests only execute on a nested-virt-capable (e.g. 1ES) runner.
-pub fn has_wsl_runtime() -> bool {
-    // `wsl.exe --status` exits 0 when the runtime is installed and a default
-    // distribution/version is configured. On hosts without WSL the command is
-    // either missing or returns a non-zero status.
-    let available = Command::new("wsl.exe")
-        .arg("--status")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-
-    if !available {
-        println!(
-            "SKIPPED: WSL runtime not available — WSLC requires WSL2 (needs nested virtualization; \
-             run `wsl --update`)"
-        );
-    }
-
-    available
-}
-
 /// Return whether the Windows Sandbox optional feature is enabled.
 pub fn has_windows_sandbox_feature() -> bool {
     let available = Command::new("dism")
