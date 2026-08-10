@@ -22,8 +22,8 @@ use windows_core::{HSTRING, PCWSTR};
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
 use super::error::{
-    activation_error, check_result, format_iso_error, lifecycle_err, op, transport_err,
-    IsolationSessionError, StalePromotion,
+    activation_error, check_result, format_iso_error, lifecycle_err, op, regfree_not_fused,
+    transport_err, IsolationSessionError, StalePromotion,
 };
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, PipeRelayParams, PipeRelayWithStopParams,
@@ -31,20 +31,23 @@ use super::pipe_relay::{
 use super::process_options::{build_iso_process_options, ProcessOptions};
 
 /// Activates the in-proc IsolationSession runtime factory and returns the
-/// instance. When the fused private-CLSID activator is registered (see
-/// [`super::regfree`]), activation is redirected reg-free to the co-located
-/// `IsoSessionApp.dll`, binding the MSI-installed runtime instead of the inbox
-/// `System32` one; otherwise it falls back to default system activation.
+/// instance. Activation is redirected reg-free through the fused private-CLSID
+/// activator (see [`super::regfree`]) to the co-located `IsoSessionApp.dll`,
+/// binding the version-pinned MSI-installed runtime.
+///
+/// There is **no inbox fallback**: if the private-CLSID activator is not fused
+/// into this executable, this returns a hard [`regfree_not_fused`] error rather
+/// than silently binding the inbox `System32` runtime.
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
-    let activated = super::regfree::activate_via_private_clsid::<IsoSessionOps>()
-        .unwrap_or_else(IsoSessionOps::new);
-
-    match activated {
-        Ok(ops) => Ok(ops),
+    match super::regfree::activate_via_private_clsid::<IsoSessionOps>() {
+        Some(Ok(ops)) => Ok(ops),
         // The HRESULT→error mapping lives in `activation_error` so it stays
         // testable without depending on whether this host can activate the
         // API at all.
-        Err(e) => Err(activation_error(e.code().0 as u32, &e.message())),
+        Some(Err(e)) => Err(activation_error(e.code().0 as u32, &e.message())),
+        // The fused manifest is absent: refuse to silently bind the inbox
+        // runtime, and surface an actionable hard error instead.
+        None => Err(regfree_not_fused(op::ACTIVATE)),
     }
 }
 
@@ -1036,10 +1039,15 @@ mod tests {
             Err(IsolationSessionError::ServiceUnavailable(failure)) => {
                 // Service is NOT available. Verify the error is clean and
                 // descriptive (not a panic or cryptic COM error), and that
-                // it names the activation operation it failed on.
+                // it names the activation operation it failed on. On a host
+                // without the fused private-CLSID manifest (the usual dev
+                // box), activation resolves to the reg-free hard error; on a
+                // host where the class is inbox-registered but unavailable it
+                // is the "not available" message.
                 assert!(
                     failure.message.contains("not available")
-                        || failure.message.contains("activation failed"),
+                        || failure.message.contains("activation failed")
+                        || failure.message.contains("reg-free activation was not taken"),
                     "Expected descriptive error message, got: {}",
                     failure.message
                 );
