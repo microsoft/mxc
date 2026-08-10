@@ -366,22 +366,39 @@ impl LxcScriptRunner {
     /// previously written entry is stripped by its marker before the new one
     /// is appended.
     ///
-    /// The file is rewritten with `cat >` rather than `mv`, because LXC may
+    /// The file is rewritten in place rather than with `mv`, because LXC may
     /// bind-mount `/etc/hosts`; replacing the inode would leave the container
-    /// still reading the old file. Only `grep`, `printf`, `cat`, and `rm` are
-    /// used, so this runs under BusyBox as well as coreutils.
+    /// still reading the old file. Only `grep` and `printf` are used, so this
+    /// runs under BusyBox as well as coreutils.
+    ///
+    /// The kept lines are staged in a shell variable rather than a scratch
+    /// file. An earlier form wrote them to `/tmp/.mxc-hosts` first, but `/tmp`
+    /// belongs to the container: on a container reused across runs, a previous
+    /// workload can leave that predictable name as a symlink, and `>` follows
+    /// symlinks. This command runs privileged through `lxc-attach`, so the
+    /// redirect would truncate and overwrite whatever the link pointed at --
+    /// another container file, or a host path exposed through a writable bind
+    /// mount. A variable has no name in the filesystem to hijack.
+    ///
+    /// Staging in a variable also removes a failure window rather than adding
+    /// one. The substitution completes before the redirect opens `/etc/hosts`,
+    /// so the only commands running against the truncated file are `printf`
+    /// builtins operating on text already in memory.
     ///
     /// The line is single-quoted, which is safe by construction:
     /// `ProxyHostPin` can only be built from a validated hostname and a parsed
     /// [`std::net::IpAddr`], so it cannot contain a quote, a space, or a
     /// newline.
     fn build_hosts_pin_command(hosts_line: &str) -> String {
-        // The group's exit status is printf's, so a grep that matches nothing
-        // and exits 1 does not abort the chain.
+        // `$(...)` strips trailing newlines, so the kept text is re-emitted
+        // with an explicit one and the guard keeps an empty result from
+        // becoming a blank first line. The group's exit status is the final
+        // printf's, so a grep that matches nothing and exits 1 does not fail
+        // the command.
         format!(
-            "{{ grep -v '{marker}' /etc/hosts 2>/dev/null; \
-             printf '%s {marker}\\n' '{hosts_line}'; }} > /tmp/.mxc-hosts \
-             && cat /tmp/.mxc-hosts > /etc/hosts && rm -f /tmp/.mxc-hosts",
+            "kept=$(grep -v '{marker}' /etc/hosts 2>/dev/null); \
+             {{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; \
+             printf '%s {marker}\\n' '{hosts_line}'; }} > /etc/hosts",
             marker = HOSTS_PIN_MARKER,
             hosts_line = hosts_line
         )
@@ -398,11 +415,12 @@ impl LxcScriptRunner {
     /// evaded at another.
     ///
     /// Uses the same rewrite-in-place form as the pin, for the same
-    /// bind-mount reason, and the same four utilities so it runs under BusyBox.
+    /// bind-mount reason, and the same variable staging for the same
+    /// symlink reason.
     fn build_hosts_unpin_command() -> String {
         format!(
-            "{{ grep -v '{marker}' /etc/hosts 2>/dev/null; }} > /tmp/.mxc-hosts \
-             && cat /tmp/.mxc-hosts > /etc/hosts && rm -f /tmp/.mxc-hosts",
+            "kept=$(grep -v '{marker}' /etc/hosts 2>/dev/null); \
+             {{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; }} > /etc/hosts",
             marker = HOSTS_PIN_MARKER
         )
     }
@@ -499,10 +517,12 @@ mod tests {
             command.contains(&format!("grep -v '{}'", HOSTS_PIN_MARKER)),
             "the command must filter out every marked line; got: {command}"
         );
-        assert!(
-            !command.contains("printf"),
-            "clearing must not append a replacement mapping; got: {command}"
-        );
+        // This used to assert the command contained no `printf` at all, which
+        // worked only while `printf` was the sole way a line could be written.
+        // Re-emitting the *kept* lines now needs one, so the ban would fail on
+        // a command that adds nothing. The marker count below is the invariant
+        // the ban was standing in for, and states it directly: the marker's one
+        // appearance is inside the filter, so no marked line can be written.
         assert_eq!(
             command.matches(HOSTS_PIN_MARKER).count(),
             1,
@@ -552,6 +572,65 @@ mod tests {
             assert!(
                 !command.contains(forbidden),
                 "the command must not depend on {forbidden:?}, got: {command}"
+            );
+        }
+    }
+
+    // `/tmp` is the container's, and this command runs privileged through
+    // `lxc-attach`. On a container reused across runs a previous workload can
+    // pre-create any predictable name there as a symlink, and `>` follows
+    // symlinks -- so a scratch file would let it aim a privileged truncating
+    // write at another container file or at a host path exposed through a
+    // writable bind mount. Neither command may stage anything in a directory
+    // the container can write.
+    #[test]
+    fn the_hosts_commands_stage_nothing_in_a_container_writable_directory() {
+        let commands = [
+            LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com"),
+            LxcScriptRunner::build_hosts_unpin_command(),
+        ];
+
+        for command in commands {
+            for scratch in ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/"] {
+                assert!(
+                    !command.contains(scratch),
+                    "the command must not stage under {scratch:?}, got: {command}"
+                );
+            }
+            assert_eq!(
+                command.matches("> /etc/hosts").count(),
+                1,
+                "/etc/hosts must be the only redirect target; got: {command}"
+            );
+        }
+    }
+
+    // Staging in a variable is only an improvement if the content is complete
+    // before the target is truncated. `>` truncates as the redirect opens, so
+    // any command that still had to *produce* content after that point would
+    // leave the container with an empty /etc/hosts if it failed.
+    #[test]
+    fn the_hosts_commands_build_their_content_before_truncating_the_target() {
+        let commands = [
+            LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com"),
+            LxcScriptRunner::build_hosts_unpin_command(),
+        ];
+
+        for command in commands {
+            let capture = command.find("kept=$(").unwrap_or_else(|| {
+                panic!("the command must stage into a variable; got: {command}")
+            });
+            let redirect = command
+                .find("> /etc/hosts")
+                .unwrap_or_else(|| panic!("the command must target /etc/hosts; got: {command}"));
+
+            assert!(
+                capture < redirect,
+                "the content must be captured before /etc/hosts is truncated; got: {command}"
+            );
+            assert!(
+                !command[redirect..].contains("grep"),
+                "no file-reading command may run after the target is truncated; got: {command}"
             );
         }
     }
