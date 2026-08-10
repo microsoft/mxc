@@ -43,6 +43,40 @@ export function getSdkBinDir(): string {
   return path.join(getSdkPackageRoot(), 'bin', arch);
 }
 
+export const SEATBELT_BUILD_TYPE_FILENAME = 'mxc-exec-mac.build-type';
+export type SeatbeltBuildType = 'debug' | 'release';
+
+/**
+ * Return the build profile of the packaged Seatbelt executor.
+ *
+ * MXC_SEATBELT_BUILD_TYPE supports manually supplied executables that do not
+ * carry the marker written by build-mac.sh and the macOS CI build.
+ */
+export function getSeatbeltBuildType(): SeatbeltBuildType | undefined {
+  const override = process.env.MXC_SEATBELT_BUILD_TYPE;
+  if (override !== undefined) {
+    if (override === 'debug' || override === 'release') {
+      return override;
+    }
+    throw new Error(
+      `MXC_SEATBELT_BUILD_TYPE must be "debug" or "release", got "${override}"`,
+    );
+  }
+
+  const markerPath = path.join(getSdkBinDir(), SEATBELT_BUILD_TYPE_FILENAME);
+  if (!fs.existsSync(markerPath)) {
+    return undefined;
+  }
+
+  const buildType = fs.readFileSync(markerPath, 'utf8').trim();
+  if (buildType === 'debug' || buildType === 'release') {
+    return buildType;
+  }
+  throw new Error(
+    `Invalid Seatbelt build type in ${markerPath}: "${buildType}"`,
+  );
+}
+
 // Expected package binaries
 
 export const EXPECTED_WINDOWS_BINARIES = [
@@ -65,6 +99,11 @@ export const EXPECTED_MACOS_BINARIES = [
   'unix-test-proxy',
 ];
 
+export const EXPECTED_MACOS_PACKAGE_FILES = [
+  ...EXPECTED_MACOS_BINARIES,
+  SEATBELT_BUILD_TYPE_FILENAME,
+];
+
 // Binaries that are optional (feature-gated or only present in certain builds)
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
@@ -74,13 +113,13 @@ const OPTIONAL_BINARIES = [
                    // only when the plm crate is included in the build.
 ];
 
-// Combined list of all known binaries across platforms. The npm package
-// bundles both Windows and Linux binaries in the same arch directory, so
-// the "no unexpected binaries" check must allow binaries from either OS.
-export const ALL_KNOWN_BINARIES = [
+// Combined list of all known bin-directory files across platforms. The npm
+// package bundles files for multiple platforms in the same architecture
+// directory, so the "no unexpected files" check must allow every known entry.
+export const ALL_KNOWN_PACKAGE_FILES = [
   ...EXPECTED_WINDOWS_BINARIES,
   ...EXPECTED_LINUX_BINARIES,
-  ...EXPECTED_MACOS_BINARIES,
+  ...EXPECTED_MACOS_PACKAGE_FILES,
   ...OPTIONAL_BINARIES,
 ];
 

@@ -13,10 +13,23 @@ import {
   debugSpawnOptions,
   NETWORK_TEST_URL,
   createTempDir,
+  getSeatbeltBuildType,
   spawnFromConfigAsync,
 } from './test-helpers.js';
 
 const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
+const seatbeltBuildType = os.platform() === 'darwin'
+  ? getSeatbeltBuildType()
+  : undefined;
+const unknownBuildTypeReason = seatbeltBuildType === undefined
+  ? 'Seatbelt build type is unknown; run build-mac.sh or set MXC_SEATBELT_BUILD_TYPE'
+  : undefined;
+const releaseBuildSkipReason = seatbeltBuildType === 'release'
+  ? undefined
+  : unknownBuildTypeReason ?? 'Requires a release mxc-exec-mac build';
+const debugBuildSkipReason = seatbeltBuildType === 'debug'
+  ? undefined
+  : unknownBuildTypeReason ?? 'Requires a debug mxc-exec-mac build';
 
 // Seatbelt requires at least schema 0.5.0; the corpus floor is now 0.6.0-alpha.
 const schemaVersion = '0.6.0-alpha';
@@ -241,7 +254,10 @@ describe('macOS Seatbelt Container', {
     );
   });
 
-  it('should reject profile override in release builds', { timeout: 30_000 }, async () => {
+  it('should reject profile override in release builds', {
+    timeout: 30_000,
+    skip: releaseBuildSkipReason,
+  }, async () => {
     const config = sdk.createConfigFromPolicy({ version: schemaVersion });
     config.process = { commandLine: "echo 'profile override must not run'" };
     config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
@@ -256,5 +272,19 @@ describe('macOS Seatbelt Container', {
       `Expected profileOverride rejection, got: ${result.stdout}`,
     );
     assert.ok(!result.stdout.includes('profile override must not run'));
+  });
+
+  it('should apply profile override in debug builds', {
+    timeout: 30_000,
+    skip: debugBuildSkipReason,
+  }, async () => {
+    const config = sdk.createConfigFromPolicy({ version: schemaVersion });
+    config.process = { commandLine: "echo 'profile override works'" };
+    config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
+    config.containerId = 'seatbelt-profile-override';
+
+    const result = await spawnFromConfigAsync(config, seatbeltSpawnOptions);
+    assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
+    assert.ok(result.stdout.includes('profile override works'));
   });
 });
