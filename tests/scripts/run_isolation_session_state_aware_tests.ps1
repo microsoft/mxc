@@ -11,9 +11,8 @@
 .DESCRIPTION
     Each test invokes wxc-exec.exe with a base64-encoded state-aware request
     envelope, parses the JSON response on stdout, and asserts on the
-    envelope's `result` or `error` fields. Subsequent commits extend the
-    skeleton with start, exec, stop, and deprovision tests; this revision
-    asserts only the provision phase.
+    envelope's `result` or `error` fields. The corpus covers lifecycle,
+    process execution, sandbox-internal persistence, and validation errors.
 
     This script must run INTERACTIVELY on the test host. The OS-side service
     calling-process identity check rejects network-logon tokens, so
@@ -21,11 +20,10 @@
     and this script to the host, then run it directly in cmd.exe or
     PowerShell on that host.
 
-    Prerequisite probes (skip if missing --not a failure):
-      - IsoSessionApp.dll present in System32
-      - WinRT activatable class IsoSessionOps registered
-      - wxc-exec.exe responds to a state-aware request without
-        backend_unavailable (catches feature-flag-off builds)
+    Prerequisite probe (skip if unavailable -- not a failure):
+      - `wxc-exec --probe` reports `probes.isolationSessionAvailable`. This
+        single signal covers an OS that cannot activate the isolation session
+        API as well as a binary built without `--features isolation_session`.
 
 .PARAMETER WxcExePath
     Path to wxc-exec.exe. Default probes the host-arch target dir, then
@@ -87,17 +85,77 @@ Write-Host "`nIsolationSession State-Aware E2E Tests" -ForegroundColor Cyan
 Write-Host "=======================================" -ForegroundColor Cyan
 Write-Host "Binary: $WxcExec`n" -ForegroundColor Gray
 
-# ---------------- Prerequisite probes ----------------
+# ---------------- Backend-availability probe ----------------
+#
+# Decided by `wxc-exec --probe` → `probes.isolationSessionAvailable`, which
+# covers both an unsupported host and a binary built without
+# `--features isolation_session`.
+#
+# Availability is asked of the binary under test rather than inferred from a
+# DLL path or a registered class name. A check that names a specific runtime
+# artifact stops tracking what the code actually activates, and a gate that no
+# longer reflects the thing it guards can pass or skip for the wrong reason.
+# Asking the binary what it supports cannot drift.
+function Get-IsolationSessionProbe {
+    param([string]$Exe)
 
-if (-not (Test-Path 'C:\Windows\System32\IsoSessionApp.dll')) {
-    Write-Host "SKIPPED: IsoSessionApp.dll not present in System32" -ForegroundColor Yellow
-    exit 0
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $prevPref = $ErrorActionPreference
+    try {
+        # This script runs under `$ErrorActionPreference = "Stop"`, which turns
+        # a native command's stderr output into a terminating error. The probe
+        # is expected to write to stderr on a host carrying leftover state, so
+        # relax it for the duration of the call — the same idiom used around
+        # the wxc-exec invocation in Run-IsolationSessionTest below.
+        $ErrorActionPreference = "Continue"
+        $stdout = (& $Exe --probe 2>$errFile) | Out-String
+        $exitCode = $LASTEXITCODE
+        $stderr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+    } catch {
+        return @{ Status = 'error'; Detail = "could not run '$Exe --probe': $($_.Exception.Message)" }
+    } finally {
+        $ErrorActionPreference = $prevPref
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $stderrNote = if ([string]::IsNullOrWhiteSpace($stderr)) { '' } else { " stderr: $($stderr.Trim())" }
+
+    if ($exitCode -ne 0) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe exited $exitCode.$stderrNote" }
+    }
+    $parsed = $null
+    try { $parsed = $stdout | ConvertFrom-Json } catch {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe did not emit valid JSON.$stderrNote" }
+    }
+    if ($null -eq $parsed -or $null -eq $parsed.probes) {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes' object.$stderrNote" }
+    }
+    if ($parsed.probes.PSObject.Properties.Name -notcontains 'isolationSessionAvailable') {
+        return @{ Status = 'error'; Detail = "wxc-exec --probe output has no 'probes.isolationSessionAvailable' field.$stderrNote" }
+    }
+    # Only a literal boolean is meaningful. Treating anything else as `false`
+    # would recreate the conflation this function exists to remove: a value of
+    # `null`, a string, or a number is a malformed answer, not a statement that
+    # the backend is unavailable, and it gets the same infrastructure-failure
+    # treatment as a missing field.
+    $value = $parsed.probes.isolationSessionAvailable
+    if ($value -is [bool]) {
+        if ($value) { return @{ Status = 'available' } }
+        return @{ Status = 'unavailable' }
+    }
+    return @{ Status = 'error'; Detail = "wxc-exec --probe reported a non-boolean 'probes.isolationSessionAvailable' ($(if ($null -eq $value) { 'null' } else { "'$value'" })).$stderrNote" }
 }
 
-$IsoSessionOpsKey = "HKLM:\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.AI.IsolationSession.IsoSessionOps"
-if (-not (Test-Path $IsoSessionOpsKey)) {
-    Write-Host "SKIPPED: Windows.AI.IsolationSession.IsoSessionOps WinRT class not registered" -ForegroundColor Yellow
+$probeResult = Get-IsolationSessionProbe -Exe $WxcExec
+if ($probeResult.Status -eq 'unavailable') {
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
     exit 0
+}
+if ($probeResult.Status -ne 'available') {
+    Write-Host "FAILED: could not determine whether the isolation session backend is available." -ForegroundColor Red
+    Write-Host "  $($probeResult.Detail)" -ForegroundColor Red
+    Write-Host "  This is an infrastructure failure, not an unsupported host, so it is not a skip." -ForegroundColor Red
+    exit 1
 }
 
 # ---------------- Helpers ----------------
@@ -121,7 +179,13 @@ function Invoke-StateAware {
         [hashtable]$Request,
         [string]$ConfigFile,
         [string]$SandboxId,
-        [switch]$Experimental
+        [switch]$Experimental,
+        # Adds --dry-run: wxc-exec parses, routes, and runs the backend's
+        # validate_<phase> hook, then returns an empty result envelope WITHOUT
+        # performing the phase. Lets a test pin that validation-time rejections
+        # (e.g. a malformed sandboxId) fire identically whether or not the phase
+        # would really run -- the dry-run/execution agreement.
+        [switch]$DryRun
     )
 
     if ($ConfigFile) {
@@ -146,6 +210,7 @@ function Invoke-StateAware {
 
     $argList = @()
     if ($Experimental.IsPresent) { $argList += '--experimental' }
+    if ($DryRun.IsPresent) { $argList += '--dry-run' }
     $argList += @('--config-base64', $b64)
 
     $stdoutFile = [System.IO.Path]::GetTempFileName()
@@ -183,6 +248,26 @@ function Parse-Envelope {
     try { $Stdout | ConvertFrom-Json } catch { $null }
 }
 
+# Decodes the `iso:<base64url-nopad(JSON)>` sandbox id payload. Returns $null
+# if the id is not in that shape. base64url differs from standard base64 in two
+# ways that both have to be undone before [Convert] will accept it: the '-' and
+# '_' substitutions, and the stripped '=' padding.
+function Decode-SandboxId {
+    param([string]$SandboxId)
+    if ([string]::IsNullOrWhiteSpace($SandboxId)) { return $null }
+    $parts = $SandboxId.Split(':', 2)
+    if ($parts.Count -ne 2 -or $parts[0] -ne 'iso') { return $null }
+    $b64 = $parts[1].Replace('-', '+').Replace('_', '/')
+    switch ($b64.Length % 4) {
+        2 { $b64 += '==' }
+        3 { $b64 += '=' }
+        1 { return $null }
+    }
+    try {
+        [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | ConvertFrom-Json
+    } catch { $null }
+}
+
 # Returns "result" / "error" / "<empty>" describing which arm of the envelope
 # is present. Useful for failure messages.
 function Envelope-Arm {
@@ -193,45 +278,24 @@ function Envelope-Arm {
     '<unknown>'
 }
 
-# Creates a directory with a locked-down DACL: inheritance disabled,
-# ACEs reset to current user + SYSTEM + Administrators (FullControl).
-# Subdirectories created inside inherit this ACL automatically.
+# ---------------- Provision smoke check ----------------
+
+# Availability was already settled by the `--probe` gate near the top of this
+# script, so this is a functional smoke check rather than a second gate. It
+# provisions once and immediately deprovisions, both to confirm the lifecycle
+# works before running the full corpus and so the check does not leak an agent
+# user.
 #
-# Why: by default, dirs under C:\ inherit Authenticated Users / Users
-# read+execute ACEs. The agent user is a member of those groups, so
-# without lockdown the "control" test (agent has no share, so cannot
-# access the dir) would spuriously pass and the readonly-deny test (B6)
-# would not actually prove the ACE granted is read-only.
-function Setup-LockedDownTestDir {
-    param([string]$Path)
-
-    New-Item -Path $Path -ItemType Directory -Force | Out-Null
-
-    $acl = Get-Acl $Path
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $inherit = "ContainerInherit,ObjectInherit"
-    foreach ($principal in @($currentUser, "SYSTEM", "Administrators")) {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $principal, "FullControl", $inherit, "None", "Allow")))
-    }
-    Set-Acl -Path $Path -AclObject $acl
-}
-
-# ---------------- Backend-availability probe ----------------
-
-# Sends a state-aware provision request and surfaces a `backend_unavailable`
-# envelope as a SKIP. This catches feature-flag-off builds without raising
-# false test failures. On a healthy build the probe successfully creates an
-# agent user, so we immediately deprovision the throwaway sandbox -- without
-# this, every test run would leak one local agent user.
+# A `backend_unavailable` or `unsupported_phase` envelope here *contradicts*
+# the earlier probe, so it is a failure rather than a skip — two gates that can
+# disagree about whether the suite should run is exactly the ambiguity the
+# single `--probe` gate exists to remove.
 $probe = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
-if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
-    Write-Host "SKIPPED: wxc-exec reports backend_unavailable (likely built without --features isolation_session)" -ForegroundColor Yellow
-    exit 0
+if ($null -ne $probeEnv -and $probeEnv.error.code -in @('backend_unavailable', 'unsupported_phase')) {
+    Write-Host "FAILED: --probe reported the backend available, but provision returned '$($probeEnv.error.code)'." -ForegroundColor Red
+    Write-Host "  Stdout: $($probe.Stdout)" -ForegroundColor Gray
+    exit 1
 }
 if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
     $probeSandboxId = [string]$probeEnv.result.sandboxId
@@ -300,40 +364,6 @@ function Run-StateAwareTest {
     return $script:currentTestPassed
 }
 
-# Test-dir setup. Lifecycle A's "control" test, Lifecycle B's full
-# filesystem-policy lifecycle, and the grant-scope check all run against
-# a single locked-down host directory tree:
-#
-#   C:\mxc_share_test\        (locked-down: current user + SYSTEM + Admins)
-#     rw\                     (inherits parent ACL; granted to B agent as rw)
-#     ro\
-#       marker.txt            (pre-populated; granted to B agent as ro)
-#     restricted\
-#       marker.txt            (pre-populated; NOT granted to B agent --
-#                              proves grants are path-specific, not blanket
-#                              on the parent)
-#
-# The lockdown is essential -- without it the agent user (a member of
-# Authenticated Users / Users) would inherit read access by default, so
-# the control test would not actually demonstrate that share_folders is
-# what enables access in Lifecycle B.
-$script:TestRoot = 'C:\mxc_share_test'
-$script:FilterTestRoot = 'C:\mxc_filter_test'
-$script:RoMarkerContent = 'readonly-marker-content'
-$script:RestrictedMarkerContent = 'restricted-marker-content'
-Setup-LockedDownTestDir $script:TestRoot
-New-Item -Path "$script:TestRoot\rw" -ItemType Directory -Force | Out-Null
-New-Item -Path "$script:TestRoot\ro" -ItemType Directory -Force | Out-Null
-New-Item -Path "$script:TestRoot\restricted" -ItemType Directory -Force | Out-Null
-$script:RoMarkerContent | Set-Content -Path "$script:TestRoot\ro\marker.txt" -NoNewline
-$script:RestrictedMarkerContent | Set-Content -Path "$script:TestRoot\restricted\marker.txt" -NoNewline
-Setup-LockedDownTestDir $script:FilterTestRoot
-New-Item -Path "$script:FilterTestRoot\rw" -ItemType Directory -Force | Out-Null
-
-# Outer try-finally: ensures the host directory tree is removed even if a
-# test panics. The summary at the end runs after the cleanup.
-try {
-
 # try-finally wraps the lifecycle so any mid-flow failure still triggers a
 # best-effort deprovision. Mirrors the defensive cleanup in
 # IsolationSessionRunner::execute -- failed runs do not leak Indefinite-
@@ -342,8 +372,8 @@ $script:sandboxId = $null
 $deprovisionedOk = $false
 try {
 
-    # Test 1: provision returns iso:wxc-<8-hex> and a backend_unavailable-free
-    # envelope.
+    # Test 1: provision returns iso:<opaque agent user name> and a
+    # backend_unavailable-free envelope.
     Run-StateAwareTest "provision (sandbox_id format)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
         $envObj = Parse-Envelope -Stdout $r.Stdout
@@ -357,18 +387,277 @@ try {
             Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
             $script:sandboxId = $envObj.result.sandboxId
             $agentUserName = $envObj.result.metadata.agentUserName
-            Assert-True ($script:sandboxId -match '^iso:wxc-[0-9a-f]{8}$') "sandbox_id matches iso:wxc-<8-hex> ($script:sandboxId)"
+            $agentUserSid = $envObj.result.metadata.agentUserSid
+            $workspacePath = $envObj.result.metadata.ephemeralWorkspacePath
+            Assert-True ($script:sandboxId -match '^iso:[A-Za-z0-9_-]+$') "sandbox_id is iso:<base64url payload> ($script:sandboxId)"
+            $decoded = Decode-SandboxId $script:sandboxId
+            Assert-True ($null -ne $decoded) "sandbox_id payload decodes as base64url JSON"
+            Assert-True ($decoded.version -eq 1) "payload version is 1 (got '$($decoded.version)')"
+            Assert-True ($decoded.agentUserName -eq $agentUserName) "payload agentUserName matches metadata ($($decoded.agentUserName))"
+            Assert-True ($null -eq $decoded.appId) "payload omits appId when none was supplied"
             Assert-True ($null -ne $agentUserName) "metadata.agentUserName is present ($agentUserName)"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($agentUserSid)) "metadata.agentUserSid is present ($agentUserSid)"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($workspacePath)) "metadata.ephemeralWorkspacePath is present ($workspacePath)"
         }
     } | Out-Null
 
-    # Test 1b: provision rejects non-empty deniedPaths. Backend has no Deny
-    # ACE primitive, so any deniedPaths request must be rejected (consistent
-    # with how readwrite/readonly are accepted but denied is not). Uses a
+    # Test 1b: appId round-trips through the sandboxId. The value is carried
+    # inside the id (not in metadata) so post-provision phases recover it
+    # without the caller re-supplying it. This sandbox is real, so it is
+    # deprovisioned immediately after the assertions.
+    Run-StateAwareTest "provision (appId round-trips through sandboxId)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid.json' -Experimental
+        Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj -and $null -ne $envObj.result) "provision returned a result envelope"
+        if ($envObj -and $envObj.result) {
+            $id = $envObj.result.sandboxId
+            $decoded = Decode-SandboxId $id
+            Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
+            Assert-True ($decoded.appId -eq 'Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
+            Assert-True ($decoded.agentUserName -eq $envObj.result.metadata.agentUserName) "payload agentUserName matches metadata"
+            # appId is deliberately NOT echoed in metadata -- the caller already
+            # supplied it, so echoing it would be redundant surface.
+            Assert-True ($null -eq $envObj.result.metadata.appId) "metadata does not echo appId"
+            Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental | Out-Null
+        }
+    } | Out-Null
+
+    # Test 1b-empty: an explicitly empty appId is a DISTINCT value from an
+    # absent one and must survive as such -- a future OS API may assign it
+    # meaning, so MXC must not collapse the two.
+    Run-StateAwareTest "provision (empty appId is preserved, not dropped)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid_empty.json' -Experimental
+        Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj -and $null -ne $envObj.result) "provision returned a result envelope"
+        if ($envObj -and $envObj.result) {
+            $id = $envObj.result.sandboxId
+            $decoded = Decode-SandboxId $id
+            Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
+            Assert-True ($decoded.PSObject.Properties.Name -contains 'appId') "payload keeps the appId key when empty"
+            Assert-True ($decoded.appId -eq '') "payload appId is the empty string (got '$($decoded.appId)')"
+            Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental | Out-Null
+        }
+    } | Out-Null
+
+    # Test 1b-toolong / 1b-control: structural appId validation runs in
+    # validate_provision, before any OS call, so these never create a sandbox.
+    Run-StateAwareTest "provision (oversized appId rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid_too_long.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'appId') "error.message names appId (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "provision (control character in appId rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_appid_control.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    } | Out-Null
+
+    # Test 1d: id-format rejections. Both run entirely in the decoder, before
+    # any OS call, so they need no sandbox and leave nothing to clean up.
+    Run-StateAwareTest "malformed_id (undecodable sandboxId rejected)" {
+        # A tail that is not a valid encoded payload is refused by the decoder,
+        # before any OS call.
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = 'iso:not-a-valid-payload' } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (sandboxId from a newer MXC is called out)" {
+        # A structurally valid payload whose version this build does not
+        # understand must say so -- the remediation is "upgrade MXC", which is
+        # completely different from "this id is corrupt".
+        $json = '{"version":9999,"agentUserName":"a"}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'newer MXC') "error.message identifies a newer-MXC id (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (every id-consuming phase rejects an undecodable id)" {
+        # Run each phase BOTH ways. The real invocation proves the phase itself
+        # refuses the id; the --dry-run invocation proves the refusal happens in
+        # the validation hook, before the phase runs. Both must agree, or a dry
+        # run would report success for a request the real call rejects -- which
+        # is the whole point of decoding in all four hooks rather than just one.
+        foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+            $req = @{ phase = $phase; sandboxId = 'iso:not-a-valid-payload' }
+            if ($phase -eq 'exec') { $req.process = @{ commandLine = 'cmd.exe /c echo unreachable' } }
+
+            $r = Invoke-StateAware -Request $req -Experimental
+            Assert-True ($r.ExitCode -ne 0) "$phase (real): exit code is non-zero"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_id') "$phase (real): error.code is 'malformed_id' (got '$code')"
+
+            $d = Invoke-StateAware -Request $req -Experimental -DryRun
+            Assert-True ($d.ExitCode -ne 0) "$phase (--dry-run): exit code is non-zero"
+            $dEnv = Parse-Envelope -Stdout $d.Stdout
+            $dCode = if ($dEnv) { $dEnv.error.code } else { '<no envelope>' }
+            Assert-True ($dCode -eq 'malformed_id') "$phase (--dry-run): error.code is 'malformed_id' (got '$dCode')"
+            # The command must never run under either invocation.
+            Assert-True ($r.Stdout -notmatch 'unreachable' -and $d.Stdout -notmatch 'unreachable') "$phase : the id was refused before the phase body ran"
+        }
+    } | Out-Null
+
+    Run-StateAwareTest "dry-run accepts a well-formed id on every id-consuming phase" {
+        # The counterpart to the case above: --dry-run must not reject an id it
+        # should accept, or the agreement would be trivially satisfied by
+        # refusing everything. Provisions a real sandbox so the id is genuine.
+        #
+        # The exit code alone is NOT a discriminator -- a real start/stop/
+        # deprovision also exits 0, and a real exec of `echo` exits 0 too. The
+        # distinguishing observable is the envelope: every dry-run phase
+        # short-circuits to a `result` envelope, whereas a real EXEC emits the
+        # child's output and no envelope at all (DispatchOutcome::ExecCompleted
+        # -> StateAwareExit::ExecCode). Asserting the envelope is what makes
+        # this test fail if --dry-run were silently dropped.
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj -and $null -ne $envObj.result) "provision returned a result envelope"
+        if ($envObj -and $envObj.result) {
+            $id = $envObj.result.sandboxId
+            # The sandbox is REAL, so it must be reclaimed even if an assertion
+            # below throws. Run-StateAwareTest swallows throws, and the suite's
+            # finally reclaims only $script:sandboxId -- which this test does not
+            # set -- so without this the agent user would leak outside the
+            # harness's own leak discipline.
+            try {
+                foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+                    $req = @{ phase = $phase; sandboxId = $id }
+                    if ($phase -eq 'exec') {
+                        # Deliberately exits 1 and prints a marker: if --dry-run
+                        # were dropped this really would run, and BOTH the exit
+                        # code and the absent envelope would flag it.
+                        $req.process = @{ commandLine = 'cmd.exe /c echo DRY_RUN_LEAKED & exit /b 1' }
+                    }
+                    $d = Invoke-StateAware -Request $req -Experimental -DryRun
+                    Assert-True ($d.ExitCode -eq 0) "$phase (--dry-run): exit code = 0 for a well-formed id (got $($d.ExitCode))"
+                    $dEnv = Parse-Envelope -Stdout $d.Stdout
+                    # NOTE the limit of this assertion. For exec it IS a
+                    # discriminator: a real exec emits the child's output and no
+                    # envelope at all. For start/stop/deprovision the real
+                    # backends return `metadata: None`, which renders as the
+                    # same `{"result":{}}` the dry-run short-circuit produces --
+                    # so here it only confirms the phase was routed and
+                    # validated, NOT that the body was skipped. Skipping is
+                    # pinned for all five phases by the call-counting stub tests
+                    # in wxc_common::state_aware_dispatch, which the E2E layer
+                    # cannot express.
+                    Assert-True ($null -ne $dEnv -and $null -ne $dEnv.result) "$phase (--dry-run): returns a result envelope"
+                    if ($phase -eq 'exec') {
+                        # exec is the phase this DOES discriminate: a real run
+                        # would emit the marker, exit 1, and produce no envelope.
+                        Assert-True ($d.Stdout -notmatch 'DRY_RUN_LEAKED') "exec (--dry-run): the command did not execute"
+                    }
+                }
+            } finally {
+                $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental
+                Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
+            }
+        }
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (empty agentUserName in the payload is refused)" {
+        # The name is the addressing key; an empty one is structurally
+        # malformed and must not reach the OS as an empty string.
+        $json = '{"version":1,"agentUserName":""}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'agentUserName') "error.message names agentUserName (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (crafted id carrying an invalid appId is refused)" {
+        # sandboxId is caller-supplied on every post-provision phase, so the
+        # appId guarantee must hold by value, not by provenance.
+        #
+        # The control character MUST be written as the JSON escape \u0007, not
+        # spliced in raw: RFC 8259 forbids a literal U+0000-U+001F inside a
+        # string, so a raw byte fails at JSON *parse* time and the payload never
+        # reaches validate_app_id -- the test would pass for the wrong reason.
+        # Asserting the message names `appId` is what pins that distinction.
+        $json = '{"version":1,"agentUserName":"agent","appId":"has\u0007bell"}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        # malformed_id, NOT policy_validation: a bad id is an id problem, and
+        # the phases that consume one accept no policy.
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'appId') "error.message names appId, proving validate_app_id ran rather than the JSON parser (got '$msg')"
+    } | Out-Null
+
+    Run-StateAwareTest "malformed_id (crafted id carrying an oversized appId is refused)" {
+        # The length cap has no JSON-level analogue, so this case can only be
+        # caught by validate_app_id -- it cannot pass for the wrong reason.
+        $long = 'a' * 257
+        $json = '{"version":1,"agentUserName":"agent","appId":"' + $long + '"}'
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'malformed_id') "error.code is 'malformed_id' (got '$code')"
+        $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+        Assert-True ($msg -match 'appId') "error.message names appId (got '$msg')"
+    } | Out-Null
+
+    # Test 1e: provision rejects non-empty deniedPaths. The backend has no
+    # host-folder-sharing primitive at all, so the whole filesystem policy is
+    # refused at every phase (see the note above Lifecycle B) -- deniedPaths
+    # included. This test pins the deniedPaths arm of that rule. Uses a
     # separate throwaway sandbox -- never reaches the OS-side service since
     # validate_provision_policy rejects up-front, so no cleanup needed.
     Run-StateAwareTest "provision (deniedPaths rejected)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_denied.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    } | Out-Null
+
+    # Test 1c: provision rejects a non-canonical network policy. The container's
+    # network is unrestricted and cannot be filtered or denied, so only the
+    # canonical acknowledgment (defaultPolicy=allow + allowLocalNetwork=true) is
+    # accepted; here defaultPolicy=block is refused up-front (no cleanup needed).
+    Run-StateAwareTest "provision (non-canonical network rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_network.json' -Experimental
+        Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
+        $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    } | Out-Null
+
+    # Test 1d: provision rejects a `ui` policy. The isolation session isolates
+    # the host's UI from the contained code but does not deny it UI
+    # capabilities (window creation, GDI and the session's own clipboard all
+    # work inside it), so a UI restriction cannot be honored and is refused
+    # rather than accepted and dropped. Refused up-front, so no cleanup needed.
+    Run-StateAwareTest "provision (ui policy rejected)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_ui.json' -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
@@ -398,20 +687,7 @@ try {
         }
     }
 
-    # Test 2b: control -- the main sandbox has no fs grants, so the agent
-    # user must NOT be able to read C:\mxc_share_test\ro\marker.txt. The
-    # locked-down DACL (no Authenticated Users / Users) is what makes this
-    # check meaningful: without it the agent would inherit read access via
-    # default group membership. Pairs with Lifecycle B's B5, where the same
-    # read SUCCEEDS because B's sandbox was provisioned with readonlyPaths.
-    if ($startedOk) {
-        Run-StateAwareTest "control (unshared path inaccessible)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_readonly.json' -SandboxId $script:sandboxId -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (read denied)"
-        } | Out-Null
-    }
-
-    # Test 2c: start rejects requests that carry filesystem policy. Filesystem
+    # Test 2b: start rejects requests that carry filesystem policy. Filesystem
     # policy is bound to provision and immutable thereafter; a non-empty
     # readwritePaths on a start request must be rejected with policy_validation.
     if ($startedOk) {
@@ -420,6 +696,25 @@ try {
                 phase     = 'start'
                 sandboxId = $script:sandboxId
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        } | Out-Null
+    }
+
+    # Test 2c: start rejects a request that carries a network policy. The
+    # network posture is fixed at provision; ANY network policy on a
+    # post-provision phase is rejected -- even the canonical acknowledgment,
+    # because it is being supplied where the posture is immutable.
+    if ($startedOk) {
+        Run-StateAwareTest "start (network policy rejected post-provision)" {
+            $req = @{
+                phase     = 'start'
+                sandboxId = $script:sandboxId
+                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
             }
             $r = Invoke-StateAware -Request $req -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
@@ -466,13 +761,31 @@ try {
         } | Out-Null
     }
 
-    # Test 4: filesystem state continuity across separate wxc-exec invocations
-    # against the same sandbox_id. exec #1 writes a marker file to the agent
-    # user's TEMP, exec #2 reads it back. Each exec is a fresh wxc-exec
-    # process consuming the same sandbox_id, exercising the cross-process
-    # state-aware path.
+    # Test 3c: exec rejects a request that carries a network policy. The network
+    # posture is fixed at provision; any network policy on a post-provision phase
+    # is rejected -- even the canonical acknowledgment.
     if ($execedOk) {
-        Run-StateAwareTest "multi-exec (filesystem state continuity)" {
+        Run-StateAwareTest "exec (network policy rejected post-provision)" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:sandboxId
+                process   = @{ commandLine = 'echo unused' }
+                network   = @{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
+            }
+            $r = Invoke-StateAware -Request $req -Experimental
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+        } | Out-Null
+    }
+
+    # Test 4: sandbox-internal %TEMP% continuity across separate wxc-exec
+    # invocations against the same sandbox_id. exec #1 writes a marker file
+    # to the agent user's TEMP, exec #2 reads it back. Each exec is a fresh
+    # wxc-exec process consuming the same sandbox_id.
+    if ($execedOk) {
+        Run-StateAwareTest "multi-exec (%TEMP% state continuity)" {
             $w = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_marker.json' -SandboxId $script:sandboxId -Experimental
             Assert-True ($w.ExitCode -eq 0) "exec #1 (write) exit code = 0"
             $rd = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_marker.json' -SandboxId $script:sandboxId -Experimental
@@ -620,9 +933,9 @@ try {
         } | Out-Null
     }
 
-    # Test 10: deprovision tears down the agent user and unregisters the
-    # client. After this test, $sandboxId is no longer addressable -- the
-    # finally block below skips its cleanup pass when this test ran.
+    # Test 10: deprovision tears down the agent user. After this test,
+    # $sandboxId is no longer addressable -- the finally block below skips
+    # its cleanup pass when this test ran.
     if ($stoppedOk) {
         $deprovPassed = Run-StateAwareTest "deprovision (full lifecycle through deprovision)" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:sandboxId -Experimental
@@ -646,6 +959,11 @@ try {
     # `MxcError::StaleId` (wire `error.code = "stale_id"`), proving the
     # Rust-layer ERROR_NOT_FOUND HRESULT detection is wired through the
     # backend impl all the way to the wire envelope.
+    #
+    # This is also the one place the structured failure fields are asserted
+    # end-to-end against the live API: the OS-side mapping of "agent user not
+    # provisioned" to HRESULT_FROM_WIN32(ERROR_NOT_FOUND) is a documented
+    # cross-repo contract, so `nativeCode` has a stable expected value here.
     if ($deprovisionedOk) {
         Run-StateAwareTest "stale_id (stop on previously-deprovisioned sandbox)" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:sandboxId -Experimental
@@ -654,6 +972,29 @@ try {
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'stale_id') "error.code is 'stale_id' (got '$code')"
+
+            # Structured failure fields: an API failure names the operation
+            # that failed and carries the underlying HRESULT.
+            #
+            # Pinning the exact operation string is deliberate here: this
+            # verifies MXC's own mapping (that the right `op::` constant
+            # reaches the wire), so it is expected to move together with that
+            # constant. Consumers should not pin these values -- they mirror
+            # the projected WinRT names, which MXC does not own.
+            $operation = if ($envObj) { [string]$envObj.error.operation } else { '' }
+            Assert-True ($operation -eq 'IsoSessionOps.StopSessionAsync') `
+                "error.operation is 'IsoSessionOps.StopSessionAsync' (got '$operation')"
+            $nativeCode = if ($envObj) { [string]$envObj.error.nativeCode } else { '' }
+            Assert-True ($nativeCode -eq '0x80070490') `
+                "error.nativeCode is '0x80070490' (got '$nativeCode')"
+
+            # `message` is the bare API message -- the operation and HRESULT
+            # live in their own fields and must not be concatenated into it.
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True (-not $msg.Contains('0x80070490')) `
+                "error.message does not repeat the HRESULT (got '$msg')"
+            Assert-True (-not $msg.Contains('IsoSessionOps.')) `
+                "error.message does not repeat the operation (got '$msg')"
         } | Out-Null
     }
 
@@ -678,433 +1019,38 @@ try {
     }
 }
 
-# ---------------- Lifecycle B: Filesystem policy ----------------
 
-# A separate sandbox provisioned with both readwritePaths and readonlyPaths,
-# exercising the full read/write semantics of share_folders end-to-end:
-#   - rw grant: agent can write a file the host then sees, and read it back
-#   - ro grant: agent can read pre-populated host content, but cannot write
-#   - no grant: a sibling subdir (restricted) under the same parent is
-#     inaccessible -- proves grants are path-specific, not blanket on parent
-$script:fsSandboxId = $null
-$fsDeprovisionedOk = $false
-try {
-    $fsProvisionedOk = Run-StateAwareTest "filesystem: provision (rw + ro)" {
-        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
-        $envObj = Parse-Envelope -Stdout $r.Stdout
-        $arm = Envelope-Arm $envObj
-        if ($arm -ne 'result') {
-            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-            Assert-True $false "filesystem provision returned a result envelope"
-        } else {
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            $script:fsSandboxId = $envObj.result.sandboxId
-            Assert-True ($script:fsSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
-                "sandbox_id matches iso:wxc-<8-hex> ($script:fsSandboxId)"
-            $agentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
-            Write-Host "  filesystem provisioned: agentUserName=$agentUserName" -ForegroundColor DarkGray
-        }
-    }
+# ---------------- Lifecycle B: Filesystem policy rejection ----------------
 
-    $fsStartedOk = $false
-    if ($fsProvisionedOk) {
-        $fsStartedOk = Run-StateAwareTest "filesystem: start" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fsSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filesystem start returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-    }
-
-    if ($fsStartedOk) {
-        Run-StateAwareTest "filesystem: exec write-to-rw" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_shared.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 (agent wrote successfully)"
-            Assert-True ($r.Stdout -match 'shared-write-content') `
-                "agent's own type-back read succeeded ('shared-write-content' in stdout)"
-            $hostPath = Join-Path $script:TestRoot 'rw\agent_wrote.txt'
-            $hostExists = Test-Path $hostPath
-            Assert-True $hostExists "host sees the file the agent wrote ($hostPath)"
-            if ($hostExists) {
-                $hostContent = Get-Content $hostPath -Raw
-                Assert-True ($hostContent -match 'shared-write-content') `
-                    "host file contains 'shared-write-content'"
-            }
-        } | Out-Null
-
-        Run-StateAwareTest "filesystem: exec read-from-rw" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_shared.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Assert-True ($r.Stdout -match 'shared-write-content') `
-                "agent reads back the file it wrote earlier"
-        } | Out-Null
-
-        Run-StateAwareTest "filesystem: exec read-from-ro" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_readonly.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            $expected = [regex]::Escape($script:RoMarkerContent)
-            Assert-True ($r.Stdout -match $expected) `
-                "agent reads pre-populated marker.txt ('$($script:RoMarkerContent)')"
-        } | Out-Null
-
-        Run-StateAwareTest "filesystem: exec write-to-ro denied" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_readonly_denied.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (write to read-only path failed)"
-            $hostPath = Join-Path $script:TestRoot 'ro\agent_should_fail.txt'
-            Assert-True (-not (Test-Path $hostPath)) `
-                "host did not see the file (write was actually denied, not silently swallowed)"
-        } | Out-Null
-
-        Run-StateAwareTest "filesystem: exec read-from-restricted denied" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_restricted.json' -SandboxId $script:fsSandboxId -Experimental
-            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (read from unshared sibling failed)"
-            $stdoutText = if ($null -eq $r.Stdout) { "" } else { [string]$r.Stdout }
-            $leaked = $stdoutText.Contains($script:RestrictedMarkerContent)
-            Assert-True (-not $leaked) `
-                "stdout does NOT contain the restricted marker content (grant is path-specific, not blanket)"
-        } | Out-Null
-    }
-
-    $fsStoppedOk = $false
-    if ($fsStartedOk) {
-        $fsStoppedOk = Run-StateAwareTest "filesystem: stop" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fsSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filesystem stop returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            }
-        }
-    }
-
-    if ($fsStoppedOk) {
-        $fsDeprovPassed = Run-StateAwareTest "filesystem: deprovision" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fsSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filesystem deprovision returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            }
-        }
-        if ($fsDeprovPassed) { $fsDeprovisionedOk = $true }
-    }
-} finally {
-    if ($null -ne $script:fsSandboxId -and -not $fsDeprovisionedOk) {
-        Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of $script:fsSandboxId" -ForegroundColor DarkGray
-        try {
-            $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fsSandboxId -Experimental
-        } catch {
-            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
-        }
-    }
-}
-
-# ---------------- Lifecycle BF: filesystem-policy path filter ----------------
-#
-# Verifies the wxc-exec filesystem-policy path filter (MXC issue #330).
-# Provisions with a mix of protected (drive root, C:\Windows) and
-# non-protected (C:\mxc_filter_test\rw) paths in readwritePaths. Expected:
-# provision succeeds (the filter is silent -- no error returned, no
-# filter-specific metadata field added), the protected paths get NO new
-# agent ACE (filter dropped them before ShareFolderBatchAsync), and the
-# non-protected path receives the agent's ACE as normal (positive control:
-# legitimate path not accidentally dropped).
-#
-# Test-dir setup happens at file scope alongside $script:TestRoot so the
-# outer try-finally can clean both up between runs; without that cleanup
-# a stale $script:FilterTestRoot from a prior run causes Setup-LockedDownTestDir
-# to fail with SeSecurityPrivilege (Set-Acl on an existing
-# inheritance-disabled directory writes the SACL slot, which non-elevated
-# admins cannot do).
-
-# Translates a local-account name to its SID. Returns $null if the
-# translation fails (e.g., the user no longer exists).
-function Get-LocalAccountSid {
-    param([string]$Name)
-    try {
-        $nt = New-Object System.Security.Principal.NTAccount($Name)
-        $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
-    } catch {
-        $null
-    }
-}
-
-# Returns $true if the ACL on $Path has any access rule whose
-# IdentityReference translates to $TargetSid.
-function Test-AclContainsSid {
-    param([string]$Path, [string]$TargetSid)
-    $acl = Get-Acl $Path
-    foreach ($ace in $acl.Access) {
-        try {
-            $aceSid = $ace.IdentityReference.Translate(
-                [System.Security.Principal.SecurityIdentifier]).Value
-            if ($aceSid -eq $TargetSid) { return $true }
-        } catch {
-            # IdentityReference may be untranslatable (orphan SID etc.); skip.
-        }
-    }
-    $false
-}
-
-$script:filterSandboxId = $null
-$script:filterAgentUserName = $null
-$filterDeprovisionedOk = $false
-try {
-    $filterProvisionedOk = Run-StateAwareTest "filter: provision (protected + non-protected paths)" {
-        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filter.json' -Experimental
-        $envObj = Parse-Envelope -Stdout $r.Stdout
-        $arm = Envelope-Arm $envObj
-        if ($arm -ne 'result') {
-            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-            Assert-True $false "filter provision returned a result envelope (filter is silent -- no error expected)"
-        } else {
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 (filter dropped protected paths silently)"
-            $script:filterSandboxId = $envObj.result.sandboxId
-            Assert-True ($script:filterSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
-                "sandbox_id matches iso:wxc-<8-hex> ($script:filterSandboxId)"
-            $script:filterAgentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
-            Write-Host "  filter test provisioned: agentUserName=$($script:filterAgentUserName)" -ForegroundColor DarkGray
-        }
-    }
-
-    if ($filterProvisionedOk -and $script:filterAgentUserName -and $script:filterAgentUserName -ne '<absent>') {
-        $filterAgentSid = Get-LocalAccountSid -Name $script:filterAgentUserName
-
-        Run-StateAwareTest "filter: agent user name translates to SID" {
-            Assert-True ($null -ne $filterAgentSid) `
-                "translated '$($script:filterAgentUserName)' to SID ($filterAgentSid)"
-        } | Out-Null
-
-        if ($null -ne $filterAgentSid) {
-            Run-StateAwareTest "filter: protected drive root receives no agent ACE" {
-                Assert-True (-not (Test-AclContainsSid -Path 'C:\' -TargetSid $filterAgentSid)) `
-                    "agent SID is NOT in ACL of C:\ (drive root filter dropped the entry)"
-            } | Out-Null
-
-            Run-StateAwareTest "filter: protected SystemRoot receives no agent ACE" {
-                Assert-True (-not (Test-AclContainsSid -Path 'C:\Windows' -TargetSid $filterAgentSid)) `
-                    "agent SID is NOT in ACL of C:\Windows (SystemRoot filter dropped the entry)"
-            } | Out-Null
-
-            Run-StateAwareTest "filter: non-protected path receives agent ACE (positive control)" {
-                $nonProtected = Join-Path $script:FilterTestRoot 'rw'
-                Assert-True (Test-AclContainsSid -Path $nonProtected -TargetSid $filterAgentSid) `
-                    "agent SID IS in ACL of $nonProtected (filter passed legitimate path through)"
-            } | Out-Null
-        }
-    }
-
-    if ($filterProvisionedOk) {
-        $filterDeprovPassed = Run-StateAwareTest "filter: deprovision" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:filterSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Assert-True $false "filter deprovision returned a result envelope (got $arm)"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            }
-        }
-        if ($filterDeprovPassed) { $filterDeprovisionedOk = $true }
-    }
-} finally {
-    if ($null -ne $script:filterSandboxId -and -not $filterDeprovisionedOk) {
-        Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of $script:filterSandboxId" -ForegroundColor DarkGray
-        try {
-            $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:filterSandboxId -Experimental
-        } catch {
-            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
-        }
-    }
-}
-
-# ---------------- Lifecycle C: Medium configurationId ----------------
-
-# A separate, throwaway sandbox that exercises the Medium config-id end-to-end.
-# Lifecycle A defaulted to Composable (no `experimental.isolation_session.start`
-# block). This lifecycle proves Medium also works on the target OS build:
-# provision -> start with configurationId=medium -> one echo exec -> stop ->
-# deprovision. Independent of Lifecycle A's sandbox so a failure here does not
-# pollute the main lifecycle's results.
-$script:mediumSandboxId = $null
-$mediumDeprovisionedOk = $false
-try {
-    Run-StateAwareTest "Medium: provision" {
-        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
-        $envObj = Parse-Envelope -Stdout $r.Stdout
-        $arm = Envelope-Arm $envObj
-        if ($arm -ne 'result') {
-            Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-            Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-            Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-            Assert-True $false "Medium provision returned a result envelope"
-        } else {
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            $script:mediumSandboxId = $envObj.result.sandboxId
-            Assert-True ($script:mediumSandboxId -match '^iso:wxc-[0-9a-f]{8}$') `
-                "sandbox_id matches iso:wxc-<8-hex> ($script:mediumSandboxId)"
-            $agentUserName = if ($envObj.result.metadata) { [string]$envObj.result.metadata.agentUserName } else { '<absent>' }
-            Write-Host "  Medium provisioned: agentUserName=$agentUserName" -ForegroundColor DarkGray
-        }
-    } | Out-Null
-
-    $mediumStartedOk = $false
-    if ($null -ne $script:mediumSandboxId) {
-        $mediumStartedOk = Run-StateAwareTest "Medium: start (configurationId=medium)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_medium.json' -SandboxId $script:mediumSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-                Assert-True $false "Medium start returned a result envelope"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-    }
-
-    $mediumExecedOk = $false
-    if ($mediumStartedOk) {
-        $mediumExecedOk = Run-StateAwareTest "Medium: exec (basic echo)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_basic.json' -SandboxId $script:mediumSandboxId -Experimental
-            Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            Assert-True ($r.Stdout -match 'state-aware-exec-marker') `
-                "stdout contains the script's output (Medium config supports process launch)"
-        }
-    }
-
-    $mediumStoppedOk = $false
-    if ($mediumExecedOk) {
-        $mediumStoppedOk = Run-StateAwareTest "Medium: stop" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:mediumSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-                Assert-True $false "Medium stop returned a result envelope"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-    }
-
-    if ($mediumStoppedOk) {
-        $mediumDeprovPassed = Run-StateAwareTest "Medium: deprovision" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:mediumSandboxId -Experimental
-            $envObj = Parse-Envelope -Stdout $r.Stdout
-            $arm = Envelope-Arm $envObj
-            if ($arm -ne 'result') {
-                Write-Host "  Envelope arm: $arm" -ForegroundColor Red
-                Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
-                Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
-                Assert-True $false "Medium deprovision returned a result envelope"
-            } else {
-                Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            }
-        }
-        if ($mediumDeprovPassed) { $mediumDeprovisionedOk = $true }
-    }
-} finally {
-    if ($null -ne $script:mediumSandboxId -and -not $mediumDeprovisionedOk) {
-        Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of $script:mediumSandboxId" -ForegroundColor DarkGray
-        try {
-            $cleanupResult = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:mediumSandboxId -Experimental
-            if ($cleanupResult.ExitCode -eq 0) {
-                Write-Host "  cleanup deprovision succeeded" -ForegroundColor DarkGray
-            } else {
-                Write-Host "  cleanup deprovision exit $($cleanupResult.ExitCode); stdout: $($cleanupResult.Stdout)" -ForegroundColor DarkGray
-            }
-        } catch {
-            Write-Host "  cleanup deprovision threw: $($_.Exception.Message)" -ForegroundColor DarkGray
-        }
-    }
-}
-
-# ---------------- Lifecycle D: Entra agent validation rejections ----------------
-
-# Validation runs before any OS-side call, so these tests never reach the
-# IsoEnvBroker service and need no sandbox cleanup. They cover the four
-# rejection cells of the validate_provision/validate_start matrix added
-# alongside the v2 binding wiring: malformed user shape at provision, and
-# the three sandboxId-vs-user mismatches at start.
-
-Run-StateAwareTest "provision (user.upn malformed: missing @)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_malformed_upn.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
+# Filesystem policy is not accepted at any lifecycle phase. Provision with
+# readwrite/readonly policy fails before creating a sandbox, so no cleanup
+# is needed.
+Run-StateAwareTest "filesystem: provision rejected" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
+    Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('upn')) "error.message mentions 'upn' (got '$msg')"
+
+    # MXC rejects this before any API call is made, so the structured
+    # failure fields must be absent entirely -- they describe an API
+    # operation that was in flight, and none was.
+    $hasOperation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['operation'] } else { $true }
+    Assert-True (-not $hasOperation) "error.operation is absent on an MXC-side rejection"
+    $hasNativeCode = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['nativeCode'] } else { $true }
+    Assert-True (-not $hasNativeCode) "error.nativeCode is absent on an MXC-side rejection"
+    $hasRemediation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['remediation'] } else { $true }
+    Assert-True (-not $hasRemediation) "error.remediation is absent on an MXC-side rejection"
 } | Out-Null
 
-Run-StateAwareTest "provision (user.wamToken empty)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_empty_wamtoken.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('wamToken')) "error.message mentions 'wamToken' (got '$msg')"
-} | Out-Null
 
-Run-StateAwareTest "start (Entra sandbox without user)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_entra_missing_user.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('Entra sandbox requires user')) "error.message mentions Entra-requires-user (got '$msg')"
-} | Out-Null
-
-Run-StateAwareTest "start (local sandbox with user)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_local_with_user.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('not allowed for local sandbox')) "error.message mentions local-sandbox restriction (got '$msg')"
-} | Out-Null
-
-Run-StateAwareTest "start (user.upn mismatches sandboxId)" {
-    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start_upn_mismatch.json' -Experimental
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (validation rejected)"
-    $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
-    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg.Contains('does not match sandboxId')) "error.message mentions sandboxId mismatch (got '$msg')"
-} | Out-Null
 
 # ---------------- Lifecycle E: Simultaneous isolation-session sandboxes ----------------
 #
 # Three concurrently-provisioned sandboxes (A, B, C) verify that
-# deprovisioning one does not tear down the others. The runner does not
-# call UnregisterAppAsync (see IsolationSessionManager::unregister_client)
-# so the per-user hardcoded `regid` registration survives a deprovision of
-# any individual sandbox. Without that property the first deprovision
-# would break every still-running concurrent sandbox.
+# deprovisioning one does not tear down the others. The first deprovision
+# must not break every still-running concurrent sandbox.
 #
 # Per-agent state isolation is verified by having each sandbox write a
 # unique marker file into its agent's %TEMP% and asserting that each
@@ -1171,7 +1117,7 @@ try {
         $script:saSandboxA = Provision-LifecycleESandbox -Label "A"
         Assert-True ($null -ne $script:saSandboxA) "saSandboxA is non-null"
         if ($null -ne $script:saSandboxA) {
-            Assert-True ($script:saSandboxA -match '^iso:wxc-[0-9a-f]{8}$') "saSandboxA matches expected format ($script:saSandboxA)"
+            Assert-True ($script:saSandboxA -match '^iso:.+$') "saSandboxA is iso:<opaque agent user name> ($script:saSandboxA)"
         }
     } | Out-Null
     Run-StateAwareTest "Lifecycle E: provision B" {
@@ -1247,8 +1193,8 @@ try {
             Assert-True (-not $out.Contains("marker_B.txt")) "C does not see marker_B.txt"
         } | Out-Null
 
-        # E5: Stop + deprovision B. The regid leak means the registration
-        # survives B's deprovision and A / C remain functional.
+        # E5: Stop + deprovision B. Each sandbox is a distinct OS agent user,
+        # so deprovisioning B removes only B's user; A / C remain functional.
         Run-StateAwareTest "Lifecycle E: stop B" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxB -Experimental
             Assert-True ($r.ExitCode -eq 0) "stop B exit 0"
@@ -1260,17 +1206,17 @@ try {
         if ($bDeprovPassed) { $saBDeprov = $true }
 
         # E6: Regression check -- A and C remain functional after B
-        # deprovisioned. Would fail without the regid leak.
+        # deprovisioned. Per-user isolation means B's teardown cannot affect them.
         Run-StateAwareTest "Lifecycle E: A still functional after B deprov" {
             $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxA
             $out = [string]$r.Stdout
-            Assert-True ($r.ExitCode -eq 0) "list exit 0 (regid not torn down by B's deprovision)"
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (A's agent user not torn down by B's deprovision)"
             Assert-True ($out.Contains("marker_A.txt")) "A still sees marker_A.txt"
         } | Out-Null
         Run-StateAwareTest "Lifecycle E: C still functional after B deprov" {
             $r = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxC
             $out = [string]$r.Stdout
-            Assert-True ($r.ExitCode -eq 0) "list exit 0 (regid not torn down by B's deprovision)"
+            Assert-True ($r.ExitCode -eq 0) "list exit 0 (C's agent user not torn down by B's deprovision)"
             Assert-True ($out.Contains("marker_C.txt")) "C still sees marker_C.txt"
         } | Out-Null
 
@@ -1305,8 +1251,8 @@ try {
         if ($cDeprovPassed) { $saCDeprov = $true }
     }
 
-    # E10: Fresh provision D after all three torn down -- the leaked regid
-    # must not poison new sandboxes either.
+    # E10: Fresh provision D after all three torn down -- per-user isolation
+    # means new sandboxes are unaffected by the earlier teardowns.
     Run-StateAwareTest "Lifecycle E: provision D after all torn down" {
         $script:saSandboxD = Provision-LifecycleESandbox -Label "D"
         Assert-True ($null -ne $script:saSandboxD) "saSandboxD is non-null"
@@ -1346,15 +1292,154 @@ try {
     }
 }
 
-} finally {
-    # Outer-try finally: remove the locked-down test trees. Runs even if a
-    # test panics so we don't leak the directories between runs. Cleanup is
-    # necessary: re-running Setup-LockedDownTestDir on an existing locked-down
-    # directory fails non-elevated because Set-Acl tries to write the SACL
-    # slot, which requires SeSecurityPrivilege.
-    Remove-Item -Recurse -Force $script:TestRoot -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force $script:FilterTestRoot -ErrorAction SilentlyContinue
+
+# ---------------- Lifecycle F: Ephemeral workspace sharing ----------------
+#
+# Provision now returns `ephemeralWorkspacePath` -- a directory shared between
+# the calling user (this harness) and the isolated agent user. This group
+# verifies the sharing + isolation contract end to end:
+#   - the caller can stage a file INTO a session through its workspace,
+#   - a session can hand a file back to the caller through its workspace,
+#   - an isolated user can access ONLY its own workspace, not a peer's,
+#   - the workspace is deleted when the sandbox is deprovisioned.
+#
+# It also exercises `agentUserSid` (asserted present at provision).
+
+$script:fA = $null   # @{ SandboxId; Workspace; Sid }
+$script:fB = $null
+$fADeprov = $false
+$fBDeprov = $false
+
+# Provision a sandbox and capture its workspace path + agent SID from the
+# provision metadata. Returns $null on failure.
+function Provision-LifecycleFSandbox {
+    param([string]$Label)
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json' -Experimental
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    if ((Envelope-Arm $envObj) -ne 'result') {
+        Write-Host "  $Label provision arm: $(Envelope-Arm $envObj)" -ForegroundColor Red
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        return $null
+    }
+    $meta = $envObj.result.metadata
+    $obj = @{
+        SandboxId = [string]$envObj.result.sandboxId
+        Workspace = if ($meta) { [string]$meta.ephemeralWorkspacePath } else { '' }
+        Sid       = if ($meta) { [string]$meta.agentUserSid } else { '' }
+    }
+    Write-Host "  $Label provisioned: sandboxId=$($obj.SandboxId) workspace=$($obj.Workspace) sid=$($obj.Sid)" -ForegroundColor DarkGray
+    return $obj
 }
+
+# Exec an arbitrary command inside a started session.
+function Exec-InSession {
+    param([string]$SandboxId, [string]$CommandLine)
+    $req = @{
+        phase     = 'exec'
+        sandboxId = $SandboxId
+        process   = @{ commandLine = $CommandLine; timeout = 30000 }
+    }
+    Invoke-StateAware -Request $req -Experimental
+}
+
+try {
+    Run-StateAwareTest "Lifecycle F: provision A + B with workspaces" {
+        $script:fA = Provision-LifecycleFSandbox -Label "F-A"
+        $script:fB = Provision-LifecycleFSandbox -Label "F-B"
+        Assert-True ($null -ne $script:fA) "A provisioned"
+        Assert-True ($null -ne $script:fB) "B provisioned"
+        if ($null -ne $script:fA -and $null -ne $script:fB) {
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fA.Workspace)) "A ephemeralWorkspacePath present ($($script:fA.Workspace))"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fB.Workspace)) "B ephemeralWorkspacePath present ($($script:fB.Workspace))"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:fA.Sid)) "A agentUserSid present ($($script:fA.Sid))"
+            Assert-True ($script:fA.Workspace -ne $script:fB.Workspace) "A and B have distinct workspaces"
+            # The caller (this harness == the provisioning user) can access every
+            # concurrent sandbox's workspace directory.
+            Assert-True (Test-Path -LiteralPath $script:fA.Workspace) "caller can access A's workspace dir"
+            Assert-True (Test-Path -LiteralPath $script:fB.Workspace) "caller can access B's workspace dir"
+        }
+    } | Out-Null
+
+    if ($null -ne $script:fA -and $null -ne $script:fB -and $script:fA.Workspace -and $script:fB.Workspace) {
+        Run-StateAwareTest "Lifecycle F: start A + B" {
+            $rsa = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rsa.ExitCode -eq 0) "start A exit 0"
+            $rsb = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rsb.ExitCode -eq 0) "start B exit 0"
+        } | Out-Null
+
+        # F2: caller -> session. The caller stages a file into A's workspace;
+        # session A reads it back.
+        Run-StateAwareTest "Lifecycle F: caller shares a file into session A" {
+            $wsA = $script:fA.Workspace
+            Set-Content -LiteralPath (Join-Path $wsA 'caller_to_A.txt') -Value 'from-caller' -Encoding Ascii
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c type `"$wsA\caller_to_A.txt`""
+            $out = [string]$r.Stdout
+            Assert-True ($r.ExitCode -eq 0) "session A reads the caller's file (exit 0)"
+            Assert-True ($out.Contains('from-caller')) "session A sees caller_to_A.txt content"
+        } | Out-Null
+
+        # F3: session -> caller. Session A writes into its workspace; the caller
+        # reads it back on the host.
+        Run-StateAwareTest "Lifecycle F: session A shares a file back to the caller" {
+            $wsA = $script:fA.Workspace
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c echo from-session-A> `"$wsA\A_to_caller.txt`""
+            Assert-True ($r.ExitCode -eq 0) "session A writes to its workspace (exit 0)"
+            $backFile = Join-Path $wsA 'A_to_caller.txt'
+            Assert-True (Test-Path -LiteralPath $backFile) "caller sees the file session A wrote"
+            $content = Get-Content -LiteralPath $backFile -Raw -ErrorAction SilentlyContinue
+            Assert-True ($content -match 'from-session-A') "caller reads session A's content"
+        } | Out-Null
+
+        # F4: cross-session isolation. The caller stages a marker into B's
+        # workspace; session A must NOT be able to read B's workspace.
+        Run-StateAwareTest "Lifecycle F: session A cannot access session B's workspace" {
+            $wsB = $script:fB.Workspace
+            Set-Content -LiteralPath (Join-Path $wsB 'caller_to_B.txt') -Value 'B-only' -Encoding Ascii
+            Assert-True (Test-Path -LiteralPath (Join-Path $wsB 'caller_to_B.txt')) "caller can stage into B's workspace"
+            $r = Exec-InSession -SandboxId $script:fA.SandboxId -CommandLine "cmd /c type `"$wsB\caller_to_B.txt`""
+            $out = [string]$r.Stdout
+            Assert-True (-not $out.Contains('B-only')) "session A does NOT see B's workspace content"
+            Assert-True ($r.ExitCode -ne 0) "session A's read of B's workspace fails (access denied)"
+        } | Out-Null
+
+        # F5: teardown deletes the workspace.
+        $script:fADeprovOk = $false
+        Run-StateAwareTest "Lifecycle F: deprovision A deletes its workspace" {
+            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rstop.ExitCode -eq 0) "stop A exit 0"
+            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fA.SandboxId -Experimental
+            Assert-True ($rdep.ExitCode -eq 0) "deprovision A exit 0"
+            if ($rdep.ExitCode -eq 0) { $script:fADeprovOk = $true }
+            Assert-True (-not (Test-Path -LiteralPath $script:fA.Workspace)) "A's workspace dir is gone after deprovision"
+        } | Out-Null
+        if ($script:fADeprovOk) { $fADeprov = $true }
+
+        $script:fBDeprovOk = $false
+        Run-StateAwareTest "Lifecycle F: deprovision B" {
+            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rstop.ExitCode -eq 0) "stop B exit 0"
+            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fB.SandboxId -Experimental
+            Assert-True ($rdep.ExitCode -eq 0) "deprovision B exit 0"
+            if ($rdep.ExitCode -eq 0) { $script:fBDeprovOk = $true }
+        } | Out-Null
+        if ($script:fBDeprovOk) { $fBDeprov = $true }
+    }
+} finally {
+    foreach ($entry in @(
+            @{ obj = $script:fA; done = $fADeprov; label = 'F-A' },
+            @{ obj = $script:fB; done = $fBDeprov; label = 'F-B' }
+        )) {
+        if ($null -ne $entry.obj -and -not $entry.done) {
+            Write-Host ""
+            Write-Host "[cleanup] best-effort deprovision of Lifecycle F sandbox $($entry.label) ($($entry.obj.SandboxId))" -ForegroundColor DarkGray
+            try {
+                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.obj.SandboxId -Experimental
+            } catch { }
+        }
+    }
+}
+
 
 # ---------------- Summary ----------------
 
@@ -1368,6 +1453,15 @@ $passed = $total - $failed
 
 Write-Host ""
 Write-Host "==========================" -ForegroundColor Cyan
+# A suite that executed nothing is not a pass — see the equivalent guard in
+# run_isolation_session_tests.ps1. It cannot fire on an unsupported host:
+# that case exits at the availability probe near the top of the script and
+# stays a clean skip.
+if ($total -eq 0) {
+    Write-Host "FAILED: backend was available but no tests executed" -ForegroundColor Red
+    Write-Host "  A zero-execution run cannot substantiate anything; treating it as a failure." -ForegroundColor Red
+    exit 1
+}
 if ($failed -eq 0) {
     Write-Host "$passed/$total passed" -ForegroundColor Green
     exit 0

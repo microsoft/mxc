@@ -118,6 +118,23 @@ fn wslc_available() -> bool {
     }
 }
 
+/// Read-only activation probe of the in-process IsolationSession service.
+///
+/// Reports whether the isolation-session backend's OS-side service is
+/// available on this host. Exposed from the engine so `wxc` reaches the
+/// isolation-session backend through `mxc_engine` rather than depending on
+/// `isolation_session_common` directly.
+///
+/// Delegates to the backend's own availability probe — the same one
+/// [`available_backends`](crate::available_backends) consults — so the CLI
+/// `--probe` surface and the Rust SDK surface can never disagree about this
+/// host. That probe owns its COM apartment, so this is callable regardless of
+/// whether the caller has initialized COM.
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+pub fn isolation_session_available() -> bool {
+    isolation_session_common::availability::is_isolation_session_available()
+}
+
 #[cfg(test)]
 mod tests {
     use super::platform_support;

@@ -78,10 +78,14 @@ pub(super) fn classify(record: &INPUT_RECORD) -> InputAction {
 /// `WINDOW_BUFFER_SIZE_EVENT` with the local console's current viewport
 /// dimensions.
 ///
-/// # Safety
-/// All three handles must remain valid until the relay thread exits, and
-/// this struct must outlive the thread (the caller waits on the thread
-/// before dropping the struct).
+/// # Ownership
+/// Ownership of this struct transfers to the relay thread, which frees it on
+/// exit. This matters more here than for the plain pipe relays:
+/// `resize_callback` captures a cloned (AddRef'd) `IsoSessionProcess`
+/// reference, so freeing the struct releases that COM reference. Letting the
+/// spawning frame own it would drop that reference while the thread may still
+/// be invoking the callback. The HANDLEs it carries are borrowed — see the
+/// safety contract on [`create_console_relay_thread`].
 pub(super) struct ConsoleRelayParams {
     pub h_read: HANDLE,
     pub h_write: HANDLE,
@@ -97,10 +101,13 @@ pub(super) struct ConsoleRelayParams {
 /// write error, peek error, or wait failure.
 ///
 /// # Safety
-/// `param` must point to a valid `ConsoleRelayParams` that outlives the
-/// thread.
+/// `param` must be the `Box::into_raw` pointer produced by
+/// [`create_console_relay_thread`], passed exactly once.
 unsafe extern "system" fn console_relay_thread_proc(param: *mut core::ffi::c_void) -> u32 {
-    let params = &*(param as *const ConsoleRelayParams);
+    // Reclaim ownership at entry so every exit path frees exactly once, and so
+    // the captured COM reference in `resize_callback` outlives the thread's
+    // use of it.
+    let params = unsafe { Box::from_raw(param as *mut ConsoleRelayParams) };
     let mut buffer = [0u8; BUFFER_SIZE as usize];
     let wait_handles = [params.h_stop_event, params.h_read];
 
@@ -179,29 +186,35 @@ unsafe extern "system" fn console_relay_thread_proc(param: *mut core::ffi::c_voi
 /// Create the console-aware relay thread. Returns the thread HANDLE
 /// wrapped in `OwnedHandle`.
 ///
+/// Takes `params` by value and moves it to the heap for the thread to own and
+/// free — see [`ConsoleRelayParams`].
+///
 /// # Safety
-/// `params` must remain valid until the thread exits. The caller is
-/// responsible for joining (waiting on) the thread before `params` is
-/// dropped.
+/// The HANDLEs inside `params` are borrowed and must remain valid until the
+/// thread exits.
 pub(super) unsafe fn create_console_relay_thread(
-    params: *mut ConsoleRelayParams,
+    params: ConsoleRelayParams,
 ) -> Result<OwnedHandle, WxcError> {
-    let handle = CreateThread(
-        None,
-        0,
-        Some(console_relay_thread_proc),
-        Some(params as *const core::ffi::c_void),
-        THREAD_CREATION_FLAGS(0),
-        None,
-    )
-    .map_err(|e| {
-        WxcError::Process(format!(
-            "CreateThread for console-aware relay failed: {}",
-            e
-        ))
-    })?;
-
-    Ok(OwnedHandle::new(handle))
+    let raw = Box::into_raw(Box::new(params));
+    match unsafe {
+        CreateThread(
+            None,
+            0,
+            Some(console_relay_thread_proc),
+            Some(raw as *const core::ffi::c_void),
+            THREAD_CREATION_FLAGS(0),
+            None,
+        )
+    } {
+        Ok(handle) => Ok(OwnedHandle::new(handle)),
+        Err(e) => {
+            drop(unsafe { Box::from_raw(raw) });
+            Err(WxcError::Process(format!(
+                "CreateThread for console-aware relay failed: {}",
+                e
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -369,13 +382,13 @@ mod tests {
             OwnedHandle::new(h)
         };
 
-        let mut params = ConsoleRelayParams {
+        let params = ConsoleRelayParams {
             h_read: HANDLE::default(),
             h_write: HANDLE::default(),
             h_stop_event: stop_event.get(),
             resize_callback: Box::new(|_, _| {}),
         };
-        let relay_thread = unsafe { create_console_relay_thread(&mut params).unwrap() };
+        let relay_thread = unsafe { create_console_relay_thread(params).unwrap() };
 
         let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
         assert_eq!(

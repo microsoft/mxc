@@ -39,6 +39,8 @@ mod run;
 mod state_aware;
 
 pub use error::{Error, ErrorCode};
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+pub use platform::isolation_session_available;
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,

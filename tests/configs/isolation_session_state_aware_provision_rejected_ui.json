@@ -4,5 +4,8 @@
     "network": {
         "defaultPolicy": "allow",
         "allowLocalNetwork": true
+    },
+    "ui": {
+        "disable": true
     }
 }
