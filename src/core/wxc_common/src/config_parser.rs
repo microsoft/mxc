@@ -9,9 +9,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
+    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -343,6 +343,22 @@ fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
 
 fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     for path in paths {
+        // A blank entry names nothing: backends would either grant nothing or,
+        // worse, treat it as "unset" (e.g. a NULL working directory).
+        if path.trim().is_empty() {
+            return Err(WxcError::ConfigParse(
+                "Filesystem path is empty".to_string(),
+            ));
+        }
+        // An interior NUL silently truncates the path once it is converted to a
+        // C/UTF-16 string, so the enforced grant would not be the one requested.
+        if path.contains('\0') {
+            let msg = format!(
+                "Filesystem path '{}' contains an embedded NUL character",
+                config_deserialize::escape_diagnostic_text(path)
+            );
+            return Err(WxcError::ConfigParse(msg));
+        }
         if path.contains('"') {
             let msg = format!(
                 "Filesystem path '{}' contains invalid character '\"'",
@@ -428,6 +444,92 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             }
         }
     }
+}
+
+// ---------- Conversion from wire model to domain model ----------
+
+/// Convert a typed `wire::Proxy` block into the validated domain `ProxyConfig`.
+/// Exactly one of `builtinTestServer` / `localhost` / `url` may be set.
+fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
+    // Destructure (no `..`) so a new wire field fails to compile until handled.
+    let wire::Proxy {
+        builtin_test_server,
+        localhost,
+        url,
+    } = proxy;
+    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
+
+    if let Some(builtin) = builtin_test_server {
+        if !builtin {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.builtinTestServer must be true when present".to_string(),
+            ));
+        }
+        if localhost.is_some() || url.is_some() {
+            return Err(WxcError::ConfigParse(
+                "When builtinTestServer is true, no other proxy options may be set".to_string(),
+            ));
+        }
+        return Ok(ProxyConfig {
+            address: Some(proxy_addr),
+            builtin_test_server: true,
+        });
+    }
+
+    if let Some(port) = localhost {
+        if port == 0 {
+            return Err(WxcError::ConfigParse(
+                "network.proxy.localhost must be a port between 1 and 65535".to_string(),
+            ));
+        }
+        proxy_addr.port = port;
+        return Ok(ProxyConfig {
+            address: Some(proxy_addr),
+            builtin_test_server: false,
+        });
+    }
+
+    if let Some(url_str) = url {
+        let parsed = url::Url::parse(&url_str)
+            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+
+        // Only http/https are meaningful for the HTTP(S)_PROXY env vars we
+        // inject. A non-HTTP scheme (ftp://, socks5://, …) is silently ignored
+        // by many clients, which fails open under WSLc's defaultPolicy=allow.
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" {
+            // Redact any embedded userinfo (`user:password@`) before it reaches
+            // the diagnostic/log stream — a proxy URL commonly carries basic-auth
+            // credentials, and the scheme alone diagnoses the failure.
+            let redacted = crate::proxy_env::redact_proxy_url(&url_str);
+            return Err(WxcError::ConfigParse(format!(
+                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
+            )));
+        }
+
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| {
+                WxcError::ConfigParse(format!(
+                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
+                ))
+            })?
+            .to_string();
+        let port = parsed.port().ok_or_else(|| {
+            WxcError::ConfigParse(format!(
+                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
+            ))
+        })?;
+
+        return Ok(ProxyConfig {
+            address: Some(ProxyAddress::from_url(&url_str, host, port)),
+            builtin_test_server: false,
+        });
+    }
+
+    Err(WxcError::ConfigParse(
+        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
+    ))
 }
 
 fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
@@ -573,59 +675,11 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
     }
 }
 
-fn convert_wire_proxy(url_str: String) -> Result<ProxyConfig, WxcError> {
-    // GA `runtimeConfig.networkProxy` is a bare proxy URL string (e.g.
-    // "http://127.0.0.1:8080"), restricted to an http(s) proxy on the local
-    // loopback. The structured object / builtin test server form is not part of
-    // the GA wire contract.
-    let parsed = url::Url::parse(&url_str).map_err(|e| {
-        WxcError::ConfigParse(format!(
-            "runtimeConfig.networkProxy is not a valid URL: {e}"
-        ))
-    })?;
-
-    let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(WxcError::ConfigParse(format!(
-            "runtimeConfig.networkProxy must use the 'http' or 'https' scheme (got '{scheme}'): {url_str}"
-        )));
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| {
-            WxcError::ConfigParse(format!(
-                "runtimeConfig.networkProxy must include a host (e.g., http://127.0.0.1:8080), got: {url_str}"
-            ))
-        })?
-        .to_string();
-
-    // Per GA, only a loopback proxy is permitted: localhost, 127.0.0.1 or [::1].
-    let host_norm = host.trim_start_matches('[').trim_end_matches(']');
-    if host_norm != "localhost" && host_norm != "127.0.0.1" && host_norm != "::1" {
-        return Err(WxcError::ConfigParse(format!(
-            "runtimeConfig.networkProxy must be a loopback proxy: only localhost:<port>, \
-             127.0.0.1:<port> and [::1]:<port> are allowed for GA (got host '{host}'): {url_str}"
-        )));
-    }
-
-    let port = parsed.port().ok_or_else(|| {
-        WxcError::ConfigParse(format!(
-            "runtimeConfig.networkProxy must include a port (e.g., http://127.0.0.1:8080), got: {url_str}"
-        ))
-    })?;
-
-    Ok(ProxyConfig {
-        address: Some(ProxyAddress::from_url(&url_str, host, port)),
-        builtin_test_server: false,
-    })
-}
-
 /// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
 /// must be an absolute path whose parent directory already exists (the runner
-/// opens the file there when it seals the trace, under the caller's own
-/// identity). The path itself must not be an existing directory. A relative
-/// path, directory path, or missing parent yields an actionable error.
+/// writes the JSON denials output file there after the workload exits). The
+/// path itself must not be an existing directory. A relative path, directory
+/// path, or missing parent yields an actionable error.
 fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
     let candidate = std::path::Path::new(path);
     if !candidate.is_absolute() {
@@ -791,10 +845,6 @@ fn convert_wire_config(
         // available in every build.
         if ac.learning_mode.unwrap_or(false) {
             policy.capabilities.push("learningModeLogging".to_string());
-            logger.log(
-                "NOTE: 'learningModeLogging' enabled - AppContainer restrictions remain \
-enforced; access denials are recorded for diagnostics.\n",
-            );
         }
 
         // Learning-mode capability names are reserved for the dedicated entry
@@ -839,6 +889,39 @@ enforced; access denials are recorded for diagnostics.\n",
                 Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
                 Some(wire::CaptureDenialsMode::Block) | None => CaptureDenialsMode::Block,
             };
+
+            // captureDenials drives the learning-mode ETL capture in the runner,
+            // which requires the corresponding learning-mode capability on the
+            // child token so the OS emits the access-check records the capture
+            // path collects. Inject it additively (preserving the workload's real
+            // capabilities). `block` keeps deny-by-default via
+            // `learningModeLogging`; `allow` replaces deny-and-record with
+            // `permissiveLearningMode` (the runner surfaces the security warning).
+            let capture_capability = match mode {
+                CaptureDenialsMode::Block => {
+                    // Capability entries are exact names. Comma-packed entries
+                    // were rejected above, so substring matching here would
+                    // incorrectly remove unrelated custom capabilities.
+                    policy.capabilities.retain(|capability| {
+                        !capability.eq_ignore_ascii_case("permissiveLearningMode")
+                    });
+                    "learningModeLogging"
+                }
+                CaptureDenialsMode::Allow => {
+                    policy.capabilities.retain(|capability| {
+                        !capability.eq_ignore_ascii_case("learningModeLogging")
+                    });
+                    "permissiveLearningMode"
+                }
+            };
+            if !policy
+                .capabilities
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case(capture_capability))
+            {
+                policy.capabilities.push(capture_capability.to_string());
+            }
+
             policy.capture_denials = Some(CaptureDenialsConfig {
                 mode,
                 output_path: cd.output_path,
@@ -883,27 +966,120 @@ enforced; access denials are recorded for diagnostics.\n",
         }
     }
 
-    // Runtime config: network proxy.
-    if let Some(rc) = cfg.runtime_config {
-        if let Some(proxy) = rc.network_proxy {
+    // Network section. Capture presence before the typed mapping consumes
+    // `cfg.network` so backends can distinguish an absent policy from an
+    // explicit default-valued one (the domain `default_network_policy` defaults
+    // to `Block` either way).
+    policy.network_specified = cfg.network.is_some();
+    if let Some(net) = cfg.network {
+        if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
                 && containment != ContainmentBackend::Seatbelt
+                && containment != ContainmentBackend::Wslc
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', or 'seatbelt' containment backends";
+                           'bubblewrap', 'seatbelt', or 'wslc' containment backends";
+                logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
+
+            // WSLc containers run in their own network namespace, so an
+            // MXC-run host-loopback proxy is unreachable. Accept only the
+            // caller-supplied `url` form (which carries `original_url`); reject
+            // the `localhost` / `builtinTestServer` forms.
+            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
+                let is_url_form = proxy_config
+                    .address
+                    .as_ref()
+                    .is_some_and(|addr| addr.original_url.is_some());
+                if !is_url_form {
+                    let msg = "WSLc: network.proxy must use the 'url' form pointing at a \
+                               routable proxy (e.g. \"url\": \"http://proxy.example:8080\"). \
+                               The 'localhost' and 'builtinTestServer' forms are not supported \
+                               because a WSLc container runs in its own network namespace and \
+                               cannot reach a host-loopback proxy.";
+                    logger.log_line(msg);
+                    return Err(WxcError::ConfigParse(msg.to_string()));
+                }
+            }
+
             policy.network_proxy = proxy_config;
         }
-    }
 
-    // Backend compatibility guards for the network proxy. The proxy is read above
-    // from `runtimeConfig.networkProxy`; these guards reject proxy + enforcement
-    // combinations a backend cannot honor.
-    if cfg.network.is_some() {
+        if let Some(p) = net.default_policy {
+            policy.default_network_policy = p.into();
+        }
+
+        if let Some(m) = net.enforcement_mode {
+            policy.network_enforcement_mode = m.into();
+        }
+
+        if let Some(v) = net.allow_local_network {
+            policy.allow_local_network = v;
+        }
+
+        if let Some(v) = net.allowed_hosts {
+            policy.allowed_hosts = v;
+        }
+        if let Some(v) = net.blocked_hosts {
+            policy.blocked_hosts = v;
+        }
+
+        // WSLc routes egress through the cooperative proxy but does not forward
+        // host lists to it, and a 'block' default (the WSLc default) yields no
+        // outbound networking / a drop-floor that can't even reach the proxy.
+        // Require an 'allow' default with no host lists so the proxy is reachable.
+        if containment == ContainmentBackend::Wslc
+            && policy.network_proxy.is_enabled()
+            && (policy.default_network_policy == NetworkPolicy::Block
+                || !policy.allowed_hosts.is_empty()
+                || !policy.blocked_hosts.is_empty())
+        {
+            let msg = "WSLc: network.proxy requires network.defaultPolicy='allow' and no \
+                       allowedHosts/blockedHosts. A WSLc container reaches the proxy only \
+                       with outbound networking enabled, and host lists are enforced by the \
+                       proxy, not forwarded to it.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // WSLc cannot enforce per-host egress filtering: containers lack
+        // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
+        // cannot expose VM-level enforcement without breaking other security
+        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
+        // enforces the same for requests that bypass this parser. Bare defaults
+        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
+        if containment == ContainmentBackend::Wslc {
+            if policy.needs_host_filtering() {
+                let msg = "WSLc: per-host egress filtering (allowedHosts with \
+                           defaultPolicy='block', or blockedHosts with \
+                           defaultPolicy='allow') is not supported. A WSLc container has \
+                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
+                           enforcement is not available without breaking other security \
+                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
+                           for cooperative host filtering, or remove the host lists.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // WSLc cannot honor a blanket inbound-listen grant. The runner only
+            // wires explicit host->container port forwards (experimental.wslc
+            // portMappings) into the WSL2 VM's NAT; it never consults
+            // allowLocalNetwork. Reject `true` and point at portMappings.
+            // (`false` is the default and a no-op.)
+            if policy.allow_local_network {
+                let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
+                           container runs in the NAT'd WSL2 VM and MXC does not honor a \
+                           blanket inbound-listen grant; expose specific ports with \
+                           experimental.wslc.portMappings instead.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+        }
+
         // Bubblewrap is unprivileged by design; iptables-based enforcement
         // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
         // privilege story. Reject the combination explicitly.
@@ -914,7 +1090,7 @@ enforced; access denials are recorded for diagnostics.\n",
                 NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
             )
         {
-            let msg = "Bubblewrap: runtimeConfig.networkProxy cannot be combined with \
+            let msg = "Bubblewrap: network.proxy cannot be combined with \
                        network.enforcementMode='firewall' or 'both'. The cooperative \
                        env-var proxy enforces hosts at the proxy layer; iptables-based \
                        enforcement requires privilege and is mutually exclusive.";
@@ -933,7 +1109,7 @@ enforced; access denials are recorded for diagnostics.\n",
                 NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
             )
         {
-            let msg = "Seatbelt: runtimeConfig.networkProxy cannot be combined with \
+            let msg = "Seatbelt: network.proxy cannot be combined with \
                        network.enforcementMode='firewall' or 'both'. macOS Seatbelt \
                        enforces network policy through the sandbox profile and has no \
                        packet-filter layer, so a firewall mode cannot be honored.";
@@ -957,12 +1133,12 @@ enforced; access denials are recorded for diagnostics.\n",
                 .as_ref()
                 .is_some_and(|addr| !matches!(addr.host(), "127.0.0.1" | "::1" | "localhost"))
         {
-            let msg = "Seatbelt: a remote runtimeConfig.networkProxy (non-loopback host) cannot be \
+            let msg = "Seatbelt: a remote network.proxy (non-loopback host) cannot be \
                        combined with defaultPolicy='block'. Seatbelt cannot filter a remote \
                        proxy by host, so outbound reachability degrades to allow-all, \
                        silently weakening the deny for raw-socket clients that ignore \
                        HTTP_PROXY. Use a loopback proxy (127.0.0.1/::1/localhost) or \
-                       'runtimeConfig.networkProxy.builtinTestServer: true' for port-scoped reachability \
+                       'network.proxy.builtinTestServer: true' for port-scoped reachability \
                        under deny.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
@@ -979,12 +1155,11 @@ enforced; access denials are recorded for diagnostics.\n",
                 || !policy.blocked_hosts.is_empty()
                 || policy.default_network_policy == NetworkPolicy::Block)
         {
-            let msg =
-                "Bubblewrap: an external runtimeConfig.networkProxy (url/localhost) cannot be \
+            let msg = "Bubblewrap: an external network.proxy (url/localhost) cannot be \
                        combined with allowedHosts, blockedHosts, or defaultPolicy='block'. \
                        The external proxy is expected to enforce its own host policy; \
                        MXC does not forward host lists to it. Use \
-                       'runtimeConfig.networkProxy.builtinTestServer: true' (testing only) for \
+                       'network.proxy.builtinTestServer: true' (testing only) for \
                        MXC-enforced host filtering, or remove the host policy.";
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
@@ -999,11 +1174,11 @@ enforced; access denials are recorded for diagnostics.\n",
             && policy.blocked_hosts.is_empty()
         {
             logger.log_line(
-                "WARNING: Bubblewrap runtimeConfig.networkProxy with defaultPolicy='block' is \
+                "WARNING: Bubblewrap network.proxy with defaultPolicy='block' is \
                  cooperative. HTTP_PROXY-aware clients (curl, requests, etc.) are \
                  denied at the proxy, but raw-socket clients that ignore HTTP_PROXY \
                  bypass the proxy and reach the host network. For strict isolation \
-                 of all clients, remove runtimeConfig.networkProxy so --unshare-net applies; for \
+                 of all clients, remove network.proxy so --unshare-net applies; for \
                  host-list enforcement, add allowedHosts (cooperative tools only).",
             );
         }
@@ -1098,14 +1273,6 @@ enforced; access denials are recorded for diagnostics.\n",
         } else {
             None
         };
-        let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
-            let mut config = IsolationSessionConfig::default();
-            if let Some(id) = as_cfg.configuration_id {
-                config.configuration_id = id.into();
-            }
-            config.user = as_cfg.user.map(Into::into);
-            config
-        });
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
@@ -1119,7 +1286,6 @@ enforced; access denials are recorded for diagnostics.\n",
             test,
             windows_sandbox,
             wslc,
-            isolation_session,
             telemetry,
         }
     } else {
@@ -1130,7 +1296,12 @@ enforced; access denials are recorded for diagnostics.\n",
     // rejected above.
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
 
-    // UI section
+    // UI section. Capture presence before the typed mapping consumes `ui`:
+    // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
+    // otherwise indistinguishable from an absent one, and a backend that cannot
+    // honor UI restrictions has no way to tell "caller asked for lockdown" from
+    // "caller said nothing". Twin of `network_specified`.
+    policy.ui_specified = cfg.ui.is_some();
     if let Some(raw_ui) = cfg.ui {
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
@@ -1378,12 +1549,6 @@ fn mask_state_aware_experimental<'a>(
 
 #[cfg(test)]
 mod tests {
-    // SCOPE NOTE: some tests below feed `network.defaultPolicy`,
-    // `network.enforcementMode`, `network.allowLocalNetwork`,
-    // `network.allowedHosts`, or `network.blockedHosts`. The parser does not
-    // accept those fields yet, so `deny_unknown_fields` rejects them at parse
-    // time and those tests FAIL. Wiring those fields is tracked as follow-up
-    // work and is deliberately out of scope here.
     use super::*;
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
@@ -1512,7 +1677,7 @@ mod tests {
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {
-                "isolation_session": {"start": {"configurationId": "small"}}
+                "isolation_session": {"start": {"opaqueFutureField": true}}
             }
         }"#;
         match load_mxc(json).unwrap() {
@@ -1526,7 +1691,7 @@ mod tests {
                 assert_eq!(
                     exp,
                     serde_json::json!({
-                        "isolation_session": {"start": {"configurationId": "small"}}
+                        "isolation_session": {"start": {"opaqueFutureField": true}}
                     })
                 );
             }
@@ -1565,7 +1730,7 @@ mod tests {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
-            "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
+            "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
@@ -1931,7 +2096,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn full_config() {
         let json = r#"{
             "containerId": "TestProfile",
@@ -1983,7 +2147,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn invalid_network_policy() {
         let json =
             r#"{"process": {"commandLine": "echo x"}, "network": {"defaultPolicy": "invalid"}}"#;
@@ -2060,7 +2223,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn out_of_range_value_reports_path() {
         let json =
             r#"{"process":{"commandLine":"echo x"},"network":{"proxy":{"localhost":70000}}}"#;
@@ -2098,7 +2260,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn invalid_enforcement_mode() {
         let json =
             r#"{"process": {"commandLine": "echo x"}, "network": {"enforcementMode": "invalid"}}"#;
@@ -2407,6 +2568,107 @@ mod tests {
     }
 
     #[test]
+    fn capture_denials_block_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "block"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "block capture must additively inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+        assert!(
+            !req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "block must not inject permissiveLearningMode"
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_injects_permissive_learning_mode_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "allow capture must inject permissiveLearningMode: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_default_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "default (block) capture must inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_overrides_learning_mode_boolean() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {
+                "learningMode": true,
+                "capabilities": ["internetClient"],
+                "captureDenials": {"mode": "allow"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"internetClient".to_string()),
+            "the workload's own capabilities must be preserved"
+        );
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "allow capture must inject permissiveLearningMode"
+        );
+        assert!(
+            !req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "allow capture must remove deny-and-record mode"
+        );
+        assert!(
+            !logger.get_buffer().contains("restrictions remain enforced"),
+            "parser must not log the superseded deny-and-record mode"
+        );
+    }
+
+    #[test]
     fn capture_denials_unknown_mode_rejected() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
@@ -2429,7 +2691,7 @@ mod tests {
     #[test]
     fn capture_denials_accepts_valid_absolute_output_path() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("denials.etl");
+        let path = dir.path().join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
             r#"{{
@@ -2453,7 +2715,7 @@ mod tests {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
             "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"outputPath": "relative/denials.etl"}}
+            "processContainer": {"captureDenials": {"outputPath": "relative/denials.json"}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -2469,7 +2731,7 @@ mod tests {
     fn capture_denials_missing_parent_dir_rejected() {
         let dir = tempfile::tempdir().expect("temp dir");
         // Parent directory `nonexistent` is never created.
-        let path = dir.path().join("nonexistent").join("denials.etl");
+        let path = dir.path().join("nonexistent").join("denials.json");
         let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
         let json = format!(
             r#"{{
@@ -2544,7 +2806,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn network_default_policy_allow() {
         let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "allow"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2555,7 +2816,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn network_default_policy_block() {
         let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "block"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2587,7 +2847,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn network_enforcement_mode_capabilities() {
         let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "capabilities"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2601,7 +2860,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn network_enforcement_mode_firewall() {
         let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "firewall"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2615,7 +2873,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn network_enforcement_mode_both() {
         let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "both"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2629,7 +2886,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn network_hosts() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
@@ -2651,7 +2907,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn network_allow_local_network() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
@@ -2675,6 +2930,67 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn network_specified_true_when_network_present() {
+        // An empty `network: {}` object still counts as "supplied".
+        let json = r#"{
+            "process": {"commandLine": "echo x"},
+            "network": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_specified);
+    }
+
+    #[test]
+    fn network_specified_false_when_network_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.network_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_when_ui_present() {
+        // An empty `ui: {}` still counts as "supplied" — the twin of
+        // `network_specified`. Backends with no UI primitive refuse on
+        // presence, because `UiPolicy::default()` is full lockdown and so an
+        // explicit lockdown `ui` is indistinguishable from an absent one.
+        let json = r#"{"process": {"commandLine": "echo x"}, "ui": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_false_when_ui_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_on_state_aware_requests() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "ui": {"disable": true}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2711,6 +3027,47 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    /// A blank grant names nothing, and previously flowed through to backends
+    /// that treat an empty path as "unset" (e.g. a NULL working directory).
+    #[test]
+    fn block_blank_filesystem_paths() {
+        for blank in ["", "   "] {
+            let json = format!(
+                r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "filesystem": {{ "readwritePaths": ["{blank}", "C:\\workspace"] }}
+            }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let result = load_request(&encoded, &mut logger, true);
+            let err = result.expect_err("blank path should be rejected");
+            assert!(
+                format!("{err}").contains("empty"),
+                "unexpected error for {blank:?}: {err}"
+            );
+        }
+    }
+
+    /// An interior NUL truncates the path once converted to a C/UTF-16 string,
+    /// so the grant enforced would not be the one requested.
+    #[test]
+    fn block_filesystem_paths_with_embedded_nul() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readonlyPaths": ["C:\\workspace\u0000\\..\\secrets"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.expect_err("embedded NUL should be rejected");
+        assert!(format!("{err}").contains("NUL"), "unexpected error: {err}");
     }
 
     #[test]
@@ -2959,7 +3316,8 @@ mod tests {
 
     #[test]
     fn no_proxy_leaves_default() {
-        let json = r#"{"process": {"commandLine": "echo test"}}"#;
+        let json =
+            r#"{"process": {"commandLine": "echo test"}, "network": {"defaultPolicy": "block"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -2968,13 +3326,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_localhost_port() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
-            "runtimeConfig": {
-                "networkProxy": { "localhost": 8080 }
+            "network": {
+                "proxy": { "localhost": 8080 }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2989,13 +3346,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_url_parsed() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
-            "runtimeConfig": {
-                "networkProxy": { "url": "http://localhost:3128" }
+            "network": {
+                "proxy": { "url": "http://localhost:3128" }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -3009,13 +3365,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_url_non_localhost() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
-            "runtimeConfig": {
-                "networkProxy": { "url": "http://proxy.example.com:8080" }
+            "network": {
+                "proxy": { "url": "http://proxy.example.com:8080" }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -3029,7 +3384,8 @@ mod tests {
 
     #[test]
     fn proxy_url_missing_port() {
-        let json = r#"{"process":{"commandLine":"x"},"runtimeConfig":{"networkProxy":{"url":"http://localhost"}}}"#;
+        let json =
+            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"url":"http://localhost"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3038,13 +3394,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_url_ipv6_loopback() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
-            "runtimeConfig": {
-                "networkProxy": { "url": "http://[::1]:8080" }
+            "network": {
+                "proxy": { "url": "http://[::1]:8080" }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -3057,7 +3412,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_with_firewall_fields() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
@@ -3081,7 +3435,7 @@ mod tests {
 
     #[test]
     fn proxy_rejected_with_non_processcontainer() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","runtimeConfig":{"networkProxy":{"localhost":8080}}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3091,8 +3445,7 @@ mod tests {
 
     #[test]
     fn proxy_rejects_port_zero() {
-        let json =
-            r#"{"process":{"commandLine":"x"},"runtimeConfig":{"networkProxy":{"localhost":0}}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"localhost":0}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3102,7 +3455,7 @@ mod tests {
 
     #[test]
     fn proxy_rejects_missing_localhost() {
-        let json = r#"{"process":{"commandLine":"x"},"runtimeConfig":{"networkProxy":{}}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3112,7 +3465,7 @@ mod tests {
 
     #[test]
     fn proxy_rejects_non_object() {
-        let json = r#"{"process":{"commandLine":"x"},"runtimeConfig":{"networkProxy":true}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3121,13 +3474,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_builtin_test_server() {
         let json = r#"{
             "process": {"commandLine": "echo test"},
             "containment": "processcontainer",
-            "runtimeConfig": {
-                "networkProxy": { "builtinTestServer": true }
+            "network": {
+                "proxy": { "builtinTestServer": true }
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());
@@ -3141,7 +3493,7 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejects_extra_keys() {
-        let json = r#"{"process":{"commandLine":"x"},"runtimeConfig":{"networkProxy":{"builtinTestServer":true,"localhost":8080}}}"#;
+        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3151,7 +3503,8 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejects_false() {
-        let json = r#"{"process":{"commandLine":"x"},"runtimeConfig":{"networkProxy":{"builtinTestServer":false}}}"#;
+        let json =
+            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":false}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3161,8 +3514,8 @@ mod tests {
 
     #[test]
     fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
-        // lxc is not allowed -- proxy is gated to processcontainer, bubblewrap, or seatbelt.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","runtimeConfig":{"networkProxy":{"builtinTestServer":true}}}"#;
+        // lxc is not allowed -- proxy is gated to processcontainer + bubblewrap.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3171,13 +3524,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_accepted_with_bubblewrap() {
         let json = r#"{
             "version": "0.6.0-alpha",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
-            "runtimeConfig": {"networkProxy": {"builtinTestServer": true}}
+            "network": {"proxy": {"builtinTestServer": true}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -3188,13 +3540,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_accepted_with_seatbelt() {
         let json = r#"{
             "version": "0.7.0-alpha",
             "containment": "seatbelt",
             "process": {"commandLine": "echo hi"},
-            "runtimeConfig": {"networkProxy": {"builtinTestServer": true}}
+            "network": {"proxy": {"builtinTestServer": true}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -3205,13 +3556,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_url_accepted_with_seatbelt() {
         let json = r#"{
             "version": "0.7.0-alpha",
             "containment": "seatbelt",
             "process": {"commandLine": "echo hi"},
-            "runtimeConfig": {"networkProxy": {"url": "http://127.0.0.1:8080"}}
+            "network": {"proxy": {"url": "http://127.0.0.1:8080"}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -3224,7 +3574,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_with_seatbelt_and_firewall_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.7.0-alpha",
@@ -3248,7 +3597,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_with_seatbelt_and_both_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.7.0-alpha",
@@ -3272,7 +3620,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_remote_url_with_seatbelt_and_default_block_is_rejected() {
         // A remote (non-loopback) proxy under default-deny would degrade the
         // Seatbelt profile to allow-all outbound — reject it at validation.
@@ -3298,7 +3645,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_loopback_url_with_seatbelt_and_default_block_is_accepted() {
         // A loopback proxy is port-scoped under deny, so it must NOT be rejected.
         let json = r#"{
@@ -3319,7 +3665,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_builtin_with_seatbelt_and_default_block_is_accepted() {
         // builtinTestServer resolves to a loopback port at runtime → port-scoped,
         // so default-deny is safe and must be accepted.
@@ -3340,7 +3685,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
@@ -3383,7 +3727,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn proxy_with_bubblewrap_and_capabilities_enforcement_is_accepted() {
         // Capabilities mode never invokes iptables, so combining it with a
         // proxy is fine and must NOT trigger the conflict guard.
@@ -3406,7 +3749,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn external_proxy_url_with_bubblewrap_and_allowed_hosts_is_rejected() {
         // The external proxy enforces its own policy; the runner does not
         // forward host lists to it. Combining the two is a silent
@@ -3433,7 +3775,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn external_proxy_localhost_with_bubblewrap_and_blocked_hosts_is_rejected() {
         let json = r#"{
             "version": "0.6.0-alpha",
@@ -3452,7 +3793,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn external_proxy_with_bubblewrap_and_default_block_is_rejected() {
         // defaultPolicy=block is a hard-block intent; pairing it with an
         // external proxy whose policy we don't control silently weakens
@@ -3474,7 +3814,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn external_proxy_with_bubblewrap_and_no_host_policy_is_accepted() {
         // Pure delegate-to-external-proxy with no MXC-side host policy is
         // the supported external-proxy use case. Under deny-by-default,
@@ -3498,7 +3837,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn builtin_proxy_with_bubblewrap_and_host_policy_is_accepted() {
         // The builtin proxy DOES enforce host lists at the proxy layer, so
         // combining it with allowedHosts is fine.
@@ -3521,7 +3859,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn bubblewrap_proxy_with_default_block_and_empty_allowlist_warns() {
         // Cooperative mode with no allowlist denies HTTP_PROXY-aware clients
         // but raw-socket clients still reach the host network. Parser must
@@ -3543,6 +3880,279 @@ mod tests {
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
         // Warning is best-effort surfaced via the logger; the request still
         // succeeds.
+    }
+
+    #[test]
+    fn proxy_accepted_with_wslc_url_form() {
+        // WSLc supports the cooperative env-var proxy via a routable `url`.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://proxy.example:8080"},
+                "defaultPolicy": "allow"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.to_url(), "http://proxy.example:8080");
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_localhost_form() {
+        // The localhost form implies a host-loopback proxy, which a WSLc
+        // container (own network namespace) cannot reach. Must be rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"localhost": 8080}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_builtin_test_server() {
+        // builtinTestServer spins up an MXC-run in-host proxy, unreachable
+        // from a WSLc container. Must be rejected with the url-form message.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_non_http_scheme() {
+        // Non-HTTP schemes are silently ignored by many clients when injected
+        // as HTTP(S)_PROXY, which fails open. Reject at parse time.
+        for url in ["socks5://proxy.example:1080", "ftp://proxy.example:21"] {
+            let json = format!(
+                r#"{{
+                    "process": {{"commandLine": "echo hi"}},
+                    "containment": "processcontainer",
+                    "network": {{"proxy": {{"url": "{url}"}}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(
+                format!("{err}").contains("must use the 'http' or 'https' scheme"),
+                "expected scheme rejection for {url}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_scheme_error_redacts_credentials() {
+        // A rejected proxy URL must not echo embedded `user:password@`
+        // userinfo into the error (which reaches the diagnostic/log stream).
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "processcontainer",
+            "network": {"proxy": {"url": "socks5://alice:s3cr3t@proxy.example:1080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must use the 'http' or 'https' scheme"),
+            "expected scheme rejection, got: {msg}"
+        );
+        assert!(
+            !msg.contains("s3cr3t") && !msg.contains("alice:s3cr3t"),
+            "credentials leaked into error: {msg}"
+        );
+        assert!(
+            msg.contains("***@proxy.example"),
+            "expected redacted userinfo in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_url_with_block_default() {
+        // A WSLc url proxy needs outbound networking; the default 'block'
+        // policy (defaultPolicy omitted) leaves the proxy unreachable.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("requires network.defaultPolicy='allow'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_url_with_host_lists() {
+        // Host lists are not forwarded to the proxy; reject to avoid silently
+        // weaker enforcement.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://proxy.example:8080"},
+                "defaultPolicy": "allow",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowedHosts/blockedHosts"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_host_filtering_block_with_allowed_hosts() {
+        // 'block' default + an allowlist is the doomed in-container iptables path
+        // (Privileged != CAP_NET_ADMIN). Reject at parse time instead of failing
+        // the run at exec.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_host_filtering_allow_with_blocked_hosts() {
+        // 'allow' default + a blocklist is the other in-container iptables path.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_block_default_without_host_lists() {
+        // 'block' with no allowlist is a full cutoff (NetworkingMode::None) --
+        // enforceable, so it must NOT be rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        assert!(req.policy.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_accepts_allow_default_without_host_lists() {
+        // 'allow' with no blocklist is full NAT (Bridged) -- enforceable, not rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "allow"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+        assert!(req.policy.blocked_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_rejects_allow_local_network_true() {
+        // A blanket inbound-listen grant is silently ignored by the WSLc runner
+        // (only explicit portMappings have inbound effect), so accepting it would
+        // promise reachability the backend never delivers. Reject at parse time.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowLocalNetwork=true is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_allow_local_network_false() {
+        // The default/explicit `false` is a no-op and must be accepted.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": false}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
     }
 
     #[test]
@@ -3668,9 +4278,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn nested_proxy_unknown_field_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "runtimeConfig": {"networkProxy": {"localhost": 8080, "unexpected": true}}}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "network": {"proxy": {"localhost": 8080, "unexpected": true}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3714,19 +4323,28 @@ mod tests {
     }
 
     #[test]
-    fn experimental_isolation_user_unknown_field_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
+    fn one_shot_ignores_stray_isolation_session_config_rather_than_rejecting() {
+        // The one-shot surface takes no backend configuration at all, and the
+        // `experimental` block is deliberately permissive, so an unrecognised
+        // key there is silently ignored rather than rejected. Parsing must
+        // succeed and select the backend normally.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"unrecognizedSetting": {"nested": "value", "futureField": true}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("one-shot must accept and ignore a stray isolation_session key");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
+    }
+
+    #[test]
+    fn one_shot_accepts_empty_isolation_session_block() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let iso = req
-            .experimental
-            .isolation_session
-            .expect("iso config present");
-        let user = iso.user.expect("user present");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
     #[test]
@@ -4020,7 +4638,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "AB#62830582: legacy network/proxy schema, re-enable after parser/SDK test migration"]
     fn full_config_with_0_6_0_alpha_accepted() {
         let json = r#"{
             "version": "0.6.0-alpha",
@@ -4471,125 +5088,23 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
+    fn isolation_session_section_still_marks_a_configured_backend() {
+        // `experimental.isolation_session` no longer maps to any domain
+        // config, but its presence on the WIRE model is what
+        // `present_backend_sections` reads to detect a configured backend.
+        // Pairing it with another backend section must still be refused, or
+        // removing the domain slot would have silently dropped the check.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}, "wslc": {"image": "alpine:latest"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Small
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_medium() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Medium
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_large() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Large
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_composable() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_unknown_is_rejected() {
-        // Strict enums: an unrecognized configurationId is rejected at
-        // deserialize time rather than silently defaulting to `composable`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = err.to_string();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("two backend sections must be refused");
+        let msg = format!("{err}");
         assert!(
-            msg.contains("unknown variant") && msg.contains("xlarge"),
-            "expected an unknown-variant rejection for configurationId 'xlarge', got: {msg}"
+            msg.contains("experimental.wslc") || msg.contains("isolation_session"),
+            "expected the conflicting section to be named, got: {msg}"
         );
-    }
-
-    #[test]
-    fn isolation_session_absent_from_experimental() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.isolation_session.is_none());
-    }
-
-    #[test]
-    fn isolation_session_user_field_round_trips_through_one_shot_parser() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        let user = cfg
-            .user
-            .expect("user field should round-trip through the one-shot parser");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
-    }
-
-    #[test]
-    fn isolation_session_user_absent_when_field_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert!(cfg.user.is_none());
     }
 
     #[test]

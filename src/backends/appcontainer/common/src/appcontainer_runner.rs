@@ -34,7 +34,9 @@ use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ScriptResponse};
+use wxc_common::models::{
+    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
+};
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
@@ -45,6 +47,9 @@ use wxc_common::sandbox_process::{
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
+
+pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
+    "captureDenials requires the BaseContainer learning-mode APIs and is not supported by the AppContainer fallback tier";
 
 /// `UpdateProcThreadAttribute` value for
 /// `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` that opts the
@@ -59,7 +64,7 @@ const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
 /// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
-fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
+pub(crate) fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
     let mut sorted: Vec<&(String, String)> = entries.iter().collect();
     sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
 
@@ -80,7 +85,7 @@ fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
 /// Calls `CreateEnvironmentBlock` with `bInherit = FALSE` so that only the
 /// system/user profile variables are included (no process-level vars leak in).
 /// Returns the entries as `(key, value)` pairs.
-fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
+pub(crate) fn create_default_env_entries() -> Result<Vec<(String, String)>, WxcError> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
@@ -941,12 +946,15 @@ impl AppContainerScriptRunner {
         // --- Build command line ---
         let mut cmd_line_wide = string_util::to_wide(&request.script_code);
 
-        let working_dir_wide = string_util::to_wide(&request.working_directory);
-        let working_dir_pcwstr = if request.working_directory.is_empty() {
-            PCWSTR::null()
-        } else {
-            PCWSTR(working_dir_wide.as_ptr())
-        };
+        // Resolved via the shared helper so both Windows launch paths agree and
+        // neither can pass a NULL cwd (see `working_directory`).
+        let working_directory = crate::working_directory::launch_working_directory(request);
+        logger.log_line(&format!(
+            "working directory: {}",
+            working_directory.describe()
+        ));
+        let working_dir_wide = string_util::to_wide(&working_directory.path);
+        let working_dir_pcwstr = PCWSTR(working_dir_wide.as_ptr());
 
         // Environment block for the sandboxed child.
         // SECURITY: Never pass NULL (which would inherit the parent process's
@@ -994,19 +1002,6 @@ impl AppContainerScriptRunner {
         //   which handles the child can access.
         let mut pi = PROCESS_INFORMATION::default();
 
-        // Pre-launch check: abort if policy paths are on ReFS (Dev Drive) volumes
-        // where BFS cannot enforce filesystem policy.
-        if let Some(diag) = crate::launch_diagnostics::check_refs_volumes(
-            &request.policy.readonly_paths,
-            &request.policy.readwrite_paths,
-        ) {
-            logger.log_line(&format!(
-                "Error: Pre-launch diagnostic [{}]: {}",
-                diag.kind, diag.message
-            ));
-            return Err(WxcError::Process(diag.message));
-        }
-
         unsafe {
             CreateProcessW(
                 PCWSTR::null(),
@@ -1021,7 +1016,13 @@ impl AppContainerScriptRunner {
                 &mut pi,
             )
         }
-        .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
+        .map_err(|err| {
+            WxcError::Process(format!(
+                "CreateProcessW failed: {} (working directory: {})",
+                err,
+                working_directory.describe()
+            ))
+        })?;
 
         logger.log_line(&format!(
             "Process created successfully (PID: {})",
@@ -1303,6 +1304,12 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if request.policy.capture_denials.is_some() {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
+            });
+        }
         if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
             return Err(ScriptResponse::error(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
@@ -1823,8 +1830,10 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
-    use super::{AppContainerScriptRunner, FilesystemMode};
-    use wxc_common::models::ExecutionRequest;
+    use super::{
+        AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
+    };
+    use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
@@ -1884,5 +1893,21 @@ mod tests {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
         assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_capture_denials_on_appcontainer_fallback() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer fallback must not silently ignore captureDenials");
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            error.error_message,
+            CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG
+        );
     }
 }

@@ -15,5 +15,7 @@
             "/opt/homebrew"
         ]
     },
-    "network": {}
+    "network": {
+        "defaultPolicy": "block"
+    }
 }

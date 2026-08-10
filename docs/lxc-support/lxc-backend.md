@@ -109,18 +109,30 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 ## Network Policy
 
-Network policies are enforced via iptables/nftables rules applied to the container's virtual ethernet (veth) interface:
+Network policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
 
 | Policy | Implementation |
 |--------|---------------|
-| `defaultPolicy: "block"` | Default DROP rule on container veth |
-| `defaultPolicy: "allow"` | Default ACCEPT rule on container veth |
-| `allowedHosts` | ACCEPT rules for specific IPs/CIDRs |
-| `blockedHosts` | DROP rules for specific IPs/CIDRs |
+| `defaultPolicy: "block"` | Final DROP rule in the container chain |
+| `defaultPolicy: "allow"` | Final ACCEPT rule in the container chain |
+| `allowedHosts` | ACCEPT rules for IP literals, CIDR blocks, or resolved hostnames |
+| `blockedHosts` | DROP rules for IP literals, CIDR blocks, or resolved hostnames |
 
-Rules are automatically cleaned up when the container exits (if `removeRulesOnExit` is `true`).
+`allowedHosts` and `blockedHosts` entries may be bare IPv4/IPv6 literals, IPv4/IPv6 CIDR blocks, or hostnames. Hostnames are resolved to both A and AAAA records; IPv4 destinations are applied to the `iptables` chain and IPv6 destinations are applied to the `ip6tables` chain. Entries whose CIDR prefix is out of range for its family (or otherwise malformed) are reported as unresolved and skipped, leaving the rest of the policy in force. Host-list rules match all ports and protocols; port- and protocol-specific egress rules are not supported.
 
-**IPv4 only.** Firewall mode resolves `allowedHosts` / `blockedHosts` to IPv4 addresses only; AAAA (IPv6) records and IPv6 literals are silently dropped. A host that has only AAAA records is effectively unreachable from the sandbox under firewall mode.
+Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
+
+| Classification | Condition | Behavior |
+|----------------|-----------|----------|
+| `Available` | The `ip6tables` probe succeeds | Programs the parallel `ip6tables` chain alongside the IPv4 chain |
+| `KernelIpv6Disabled` | The probe fails **and** the host has no active IPv6 | Skips the IPv6 chain and logs that there is no IPv6 egress to filter — safe, because there is nothing to filter |
+| `UnusableButIpv6Active` | The probe fails **and** the host has active IPv6 | **Fails firewall setup** rather than applying an IPv4-only policy that would silently leave IPv6 egress unfiltered |
+
+Host IPv6 activity is read from `/proc/net/if_inet6`: a non-loopback interface with an IPv6 address counts as active, while loopback-only `::1` on `lo` (present even on IPv4-only hosts) does not. If that file cannot be read at all — as opposed to being absent, which means IPv6 is disabled — the state is treated as *unknown* rather than as a confirmed "IPv6 is off", so an unreadable IPv6 state fails closed instead of leaving IPv6 unfiltered.
+
+The chains are hooked into `FORWARD` for container egress by matching the host-side veth as the input interface. If MXC cannot discover the container veth, it skips the `FORWARD` hook with a warning rather than applying host-wide rules.
+
+Firewall state is torn down automatically with best-effort removal of the `FORWARD` hooks and both per-container chains; there is no network-policy opt-out field. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains.
 
 ## Usage
 

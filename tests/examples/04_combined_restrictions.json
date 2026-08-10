@@ -19,5 +19,10 @@
       "C:\\Program Files" 
     ]
   },
-  "network": {}
+  "network": {
+    "enforcementMode": "both",
+    "defaultPolicy": "block",
+    "allowedHosts": [ "api.github.com" ],
+    "blockedHosts": []
+  }
 }

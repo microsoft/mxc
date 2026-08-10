@@ -10,9 +10,7 @@
     "deniedPaths": ["C:\\objtest\\data_link"]
   },
   "network": {
-    "egress": {
-      "default": "allow"
-    }
+    "defaultPolicy": "allow"
   },
   "experimental": {
     "wslc": {

@@ -5,8 +5,6 @@
     },
     "containment": "microvm",
     "network": {
-      "egress": {
-        "default": "allow"
-      }
+        "defaultPolicy": "allow"
     }
 }

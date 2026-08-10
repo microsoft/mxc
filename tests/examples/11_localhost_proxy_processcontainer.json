@@ -9,5 +9,8 @@
   "processContainer": {
     "capabilities": ["internetClient"]
   },
-  "network": {}
+  "network": {
+    "defaultPolicy": "block",
+    "proxy": { "localhost": 8080 }
+  }
 }

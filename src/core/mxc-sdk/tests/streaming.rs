@@ -31,6 +31,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
         } else {
             Some(timeout_ms)
         },
+        capture_denials: None,
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
     request.set_script(command);

@@ -8,7 +8,9 @@
   "filesystem": {
     "readonlyPaths": ["C:\\workspace"]
   },
-  "network": {},
+  "network": {
+    "defaultPolicy": "block"
+  },
   "experimental": {
     "wslc": {
       "image": "alpine:latest"

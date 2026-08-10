@@ -32,7 +32,7 @@ pub enum ContainmentBackend {
     Hyperlight,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
-    /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
+    /// Isolation Session — process isolation via the IsolationSession API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
     /// macOS Seatbelt sandbox backend.
@@ -253,83 +253,20 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
-/// Session configuration size for the Isolation Session backend.
-/// Maps to `IsoSessionConfigId` in the in-proc `Windows.AI.IsolationSession`
-/// `IsoSessionOps` APIs, whose values must in turn match `ISOLATION_CONFIG_ID`
-/// in `winsta.h`.
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum IsolationSessionConfigurationId {
-    /// `Small` (1) — smallest pre-defined configuration.
-    Small,
-    /// `Medium` (2) — middle pre-defined configuration.
-    Medium,
-    /// `Large` (3) — largest pre-defined configuration.
-    Large,
-    /// `Composable` (4) — lightweight configuration with UI subsystems
-    /// stripped, intended for command-line workloads. The default.
-    #[default]
-    Composable,
-}
-
-impl From<crate::wire::IsolationConfigurationId> for IsolationSessionConfigurationId {
-    fn from(id: crate::wire::IsolationConfigurationId) -> Self {
-        match id {
-            crate::wire::IsolationConfigurationId::Small => Self::Small,
-            crate::wire::IsolationConfigurationId::Medium => Self::Medium,
-            crate::wire::IsolationConfigurationId::Large => Self::Large,
-            crate::wire::IsolationConfigurationId::Composable => Self::Composable,
-        }
-    }
-}
-
-/// Configuration specific to the Isolation Session backend.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct IsolationSessionConfig {
-    /// Session size/weight. Default: Composable.
-    #[serde(rename = "configurationId")]
-    pub configuration_id: IsolationSessionConfigurationId,
-    /// Optional Entra cloud-agent credentials. Honored on the state-aware
-    /// `start` phase; rejected by the one-shot path.
-    pub user: Option<IsolationSessionUser>,
-}
-
-/// Entra cloud-agent credentials. Both fields are required when the bundle
-/// is supplied. `wam_token` is a short-lived bearer token passed verbatim to
-/// the OS-side service; MXC stores nothing.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IsolationSessionUser {
-    pub upn: String,
-    pub wam_token: String,
-}
-
-impl std::fmt::Debug for IsolationSessionUser {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IsolationSessionUser")
-            .field("upn", &self.upn)
-            .field("wam_token", &"<redacted>")
-            .finish()
-    }
-}
-
-impl From<crate::wire::IsolationUser> for IsolationSessionUser {
-    fn from(u: crate::wire::IsolationUser) -> Self {
-        // Destructure (no `..`) so a new wire field fails to compile until mapped.
-        let crate::wire::IsolationUser { upn, wam_token } = u;
-        Self { upn, wam_token }
-    }
-}
-
 /// State-aware provision-phase config for the Isolation Session backend.
-/// Nested under `experimental.isolation_session.provision`. Carries Entra
-/// credentials when the caller wants a cloud-agent sandbox; absent for
-/// local sandboxes.
+/// Nested under `experimental.isolation_session.provision`. The one-shot
+/// surface takes no backend configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
-    pub user: Option<IsolationSessionUser>,
+    /// Optional identifier for the calling application — the Package Family
+    /// Name for a packaged app, any string otherwise. Carried verbatim into
+    /// the `sandboxId`; MXC does not interpret or verify it.
+    ///
+    /// An explicitly-supplied empty string is a **distinct** value from an
+    /// absent one and round-trips as such. A JSON `null` is a second spelling
+    /// of absent.
+    pub app_id: Option<String>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -376,36 +313,6 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
             crate::wire::NetworkEnforcement::Both => Self::Both,
         }
     }
-}
-
-/// Transport protocol for an egress rule (internal domain model).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Protocol {
-    Tcp,
-    Udp,
-    Icmp,
-    /// Matches every protocol.
-    Any,
-}
-
-/// Allow/deny action for an egress rule (internal domain model).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuleAction {
-    Allow,
-    Deny,
-}
-
-/// Parsed egress rule (internal domain model). Populated by the config
-/// parser from the wire `NetworkRules`; not yet consumed by enforcement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EgressRule {
-    /// IPv4/IPv6 CIDR ranges or bare IP addresses.
-    pub destinations: Vec<String>,
-    pub ports: Vec<u16>,
-    pub protocols: Vec<Protocol>,
-    pub action: RuleAction,
 }
 
 #[derive(Debug, Clone)]
@@ -582,14 +489,65 @@ pub struct ContainerPolicy {
     pub blocked_hosts: Vec<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
+    /// Whether the caller supplied a `network` block on the wire (any field
+    /// present), captured at parse time. Distinguishes an absent network policy
+    /// from an explicit one whose values equal the defaults — the other fields
+    /// here cannot, since `default_network_policy` defaults to `Block` either
+    /// way. Used by backends (e.g. IsolationSession) that must reject a network
+    /// policy supplied on a phase where the posture is immutable. Parse-derived,
+    /// never on the wire.
+    #[serde(skip)]
+    pub network_specified: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
+    /// Whether the caller supplied a `ui` block on the wire (any field
+    /// present), captured at parse time. The twin of `network_specified`, and
+    /// necessary for the same reason: `UiPolicy::default()` is full lockdown,
+    /// so an absent `ui` and an explicitly-supplied lockdown `ui` are
+    /// indistinguishable from the other fields here. Parse-derived, never on
+    /// the wire.
+    ///
+    /// Consumed only by IsolationSession today, which has no UI-restriction
+    /// primitive and refuses a supplied UI policy rather than accepting and
+    /// dropping it. The other backends that do not enforce `policy.ui` — LXC
+    /// and Bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox — still
+    /// accept and ignore it, so this flag being set does not mean a UI policy
+    /// was honored anywhere; it means only that the caller supplied one.
+    #[serde(skip)]
+    pub ui_specified: bool,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
     /// Windows denial capture (from `processContainer.captureDenials`). When
     /// `Some`, the runner records the sandboxed process's ungranted access
     /// attempts to a learning-mode ETL trace. `None` disables capture.
     pub capture_denials: Option<CaptureDenialsConfig>,
+}
+
+/// Do the host lists refine the default egress policy (i.e. require per-host
+/// filtering)? Only the list that can tighten the default matters:
+/// `Block` → allowlist; `Allow` → blocklist. Shared by the config parser and
+/// the WSLc backend so both agree on what "host filtering" means.
+pub fn needs_host_filtering(
+    is_default_block: bool,
+    allowed_hosts: &[String],
+    blocked_hosts: &[String],
+) -> bool {
+    if is_default_block {
+        !allowed_hosts.is_empty()
+    } else {
+        !blocked_hosts.is_empty()
+    }
+}
+
+impl ContainerPolicy {
+    /// True when this policy's host lists require per-host egress filtering.
+    pub fn needs_host_filtering(&self) -> bool {
+        needs_host_filtering(
+            self.default_network_policy == NetworkPolicy::Block,
+            &self.allowed_hosts,
+            &self.blocked_hosts,
+        )
+    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
@@ -603,8 +561,14 @@ pub struct CaptureDenialsConfig {
     /// How each ungranted access check is handled while it is recorded.
     /// Defaults to [`CaptureDenialsMode::Block`].
     pub mode: CaptureDenialsMode,
-    /// Absolute path where the denial ETL trace is written. When `None`, the
-    /// runner falls back to a managed per-run temporary file.
+    /// Absolute path where the JSON denials output file is written — the
+    /// deliverable a consuming application reads. The runner inserts a per-run
+    /// identifier into the file stem (`denials.json` ->
+    /// `denials.<run-id>.json`) so concurrent and sequential captures don't
+    /// collide, and reports the actual path on stderr. When `None`, the runner
+    /// falls back to a managed per-run temporary file and prints its path on
+    /// stderr. (The intermediate ETL trace is an internal runner temp that is
+    /// decoded then deleted.)
     pub output_path: Option<String>,
 }
 
@@ -716,9 +680,6 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
-    /// Isolation Session backend (experimental).
-    #[serde(rename = "isolation_session")]
-    pub isolation_session: Option<IsolationSessionConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
 }
@@ -770,6 +731,79 @@ pub struct ExecutionRequest {
     pub dry_run: bool,
 }
 
+/// Where a [`ResolvedWorkingDirectory`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingDirectorySource {
+    /// The caller's explicit `process.cwd`.
+    Explicit,
+    /// Derived from the filesystem policy because `process.cwd` was omitted.
+    Policy,
+}
+
+/// The working directory a backend should launch the sandboxed child in,
+/// together with where it came from (for logging and error context).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedWorkingDirectory<'a> {
+    /// The selected directory. Never empty.
+    pub path: &'a str,
+    /// Whether `path` is the caller's `process.cwd` or a policy fallback.
+    pub source: WorkingDirectorySource,
+}
+
+impl ExecutionRequest {
+    /// Resolve the working directory for the sandboxed child: an explicit
+    /// `working_directory`, else the first filesystem-policy grant that is an
+    /// existing directory (`readwrite` paths before `readonly` ones), else
+    /// `None`.
+    ///
+    /// Backends that must not let the child inherit the host process's cwd use
+    /// this to fall back to a policy-granted path. It matters most on Windows:
+    /// a `NULL` current directory makes `CreateProcessW` inherit the parent's
+    /// cwd, and when the AppContainer token can't open it the kernel silently
+    /// resets the child to the drive root (`C:\`) instead of failing the launch.
+    ///
+    /// Policy grants may name individual *files* or directories that do not
+    /// exist yet, neither of which a process can be launched in, so only
+    /// existing directories are considered. An explicit `working_directory` is
+    /// returned unchecked — the caller asked for it, so a bad one must fail the
+    /// launch loudly rather than be silently replaced.
+    ///
+    /// Callers whose policy paths need normalizing before they can be probed
+    /// (e.g. Seatbelt's `~` expansion) should use
+    /// [`ExecutionRequest::resolved_working_directory_with`].
+    pub fn resolved_working_directory(&self) -> Option<ResolvedWorkingDirectory<'_>> {
+        self.resolved_working_directory_with(|path| std::path::Path::new(path).is_dir())
+    }
+
+    /// [`ExecutionRequest::resolved_working_directory`] with an injectable
+    /// "is this an existing directory?" probe, so backends can normalize a
+    /// policy path before testing it and unit tests can run without touching
+    /// the filesystem. The returned path is always the *unnormalized* policy
+    /// entry; normalize it again if `is_dir` did.
+    pub fn resolved_working_directory_with(
+        &self,
+        is_dir: impl Fn(&str) -> bool,
+    ) -> Option<ResolvedWorkingDirectory<'_>> {
+        if !self.working_directory.trim().is_empty() {
+            return Some(ResolvedWorkingDirectory {
+                path: self.working_directory.as_str(),
+                source: WorkingDirectorySource::Explicit,
+            });
+        }
+        self.policy
+            .readwrite_paths
+            .iter()
+            .chain(self.policy.readonly_paths.iter())
+            .map(String::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .find(|path| is_dir(path))
+            .map(|path| ResolvedWorkingDirectory {
+                path,
+                source: WorkingDirectorySource::Policy,
+            })
+    }
+}
+
 /// Distinguishes whether an error occurred during process creation (launch)
 /// or after the process started but exited with a failure code.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -818,6 +852,9 @@ pub struct ScriptResponse {
     /// Indicates at what phase the failure occurred.
     #[serde(default)]
     pub failure_phase: FailurePhase,
+    /// Structured metadata produced after the sandboxed process exits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_metadata: Option<Box<SandboxOutputMetadata>>,
 }
 
 impl Default for ScriptResponse {
@@ -829,8 +866,40 @@ impl Default for ScriptResponse {
             error_message: String::new(),
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
+            output_metadata: None,
         }
     }
+}
+
+/// Structured outputs produced by optional sandbox features.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxOutputMetadata {
+    /// Location and summary of a captureDenials output document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_denials: Option<CaptureDenialsOutput>,
+}
+
+/// Location and summary of a captureDenials output document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDenialsOutput {
+    /// Discriminator used by line-oriented CLI consumers.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Absolute path to the JSON denials output file.
+    pub output_path: String,
+    /// Exit code of the sandboxed child.
+    pub exit_code: i32,
+    /// Count of unique denials written.
+    pub total_denials: usize,
+    /// Whether the emitted denial set was truncated.
+    pub denied_resources_truncated: bool,
+}
+
+impl CaptureDenialsOutput {
+    /// The fixed `type` discriminator value.
+    pub const KIND: &'static str = "captureDenials";
 }
 
 impl ScriptResponse {
@@ -848,7 +917,123 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn request_with_paths(readwrite: &[&str], readonly: &[&str]) -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: readwrite.iter().map(|s| s.to_string()).collect(),
+                readonly_paths: readonly.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Resolve against a fake filesystem: every path in `dirs` is an existing
+    /// directory, everything else is not (a file, or nonexistent).
+    fn resolve<'a>(
+        req: &'a ExecutionRequest,
+        dirs: &'a [&'a str],
+    ) -> Option<ResolvedWorkingDirectory<'a>> {
+        req.resolved_working_directory_with(|path| dirs.contains(&path))
+    }
+
+    #[test]
+    fn resolved_working_directory_prefers_explicit_value() {
+        let mut req = request_with_paths(&["C:\\rw"], &["C:\\ro"]);
+        req.working_directory = "C:\\explicit".to_string();
+        let resolved = resolve(&req, &["C:\\rw", "C:\\ro"]).expect("explicit cwd");
+        assert_eq!(resolved.path, "C:\\explicit");
+        assert_eq!(resolved.source, WorkingDirectorySource::Explicit);
+    }
+
+    /// An explicit cwd is the caller's own choice, so it is returned unchecked
+    /// rather than silently swapped for a policy path when it does not exist.
+    #[test]
+    fn resolved_working_directory_returns_explicit_value_unchecked() {
+        let mut req = request_with_paths(&["C:\\rw"], &[]);
+        req.working_directory = "C:\\does-not-exist".to_string();
+        let resolved = resolve(&req, &["C:\\rw"]).expect("explicit cwd");
+        assert_eq!(resolved.path, "C:\\does-not-exist");
+        assert_eq!(resolved.source, WorkingDirectorySource::Explicit);
+    }
+
+    #[test]
+    fn resolved_working_directory_falls_back_to_first_readwrite() {
+        let req = request_with_paths(&["C:\\rw1", "C:\\rw2"], &["C:\\ro"]);
+        let resolved = resolve(&req, &["C:\\rw1", "C:\\rw2", "C:\\ro"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\rw1");
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
+
+    #[test]
+    fn resolved_working_directory_falls_back_to_first_readonly() {
+        let req = request_with_paths(&[], &["C:\\ro1", "C:\\ro2"]);
+        let resolved = resolve(&req, &["C:\\ro1", "C:\\ro2"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\ro1");
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
+
+    #[test]
+    fn resolved_working_directory_none_when_no_dir_and_no_paths() {
+        let req = request_with_paths(&[], &[]);
+        assert_eq!(resolve(&req, &[]), None);
+    }
+
+    /// Policy grants may name individual files; `CreateProcessW` fails with
+    /// `ERROR_DIRECTORY` on one, so files must be skipped.
+    #[test]
+    fn resolved_working_directory_skips_policy_files() {
+        let req = request_with_paths(&["C:\\inputs\\config.json", "C:\\workspace"], &[]);
+        let resolved = resolve(&req, &["C:\\workspace"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\workspace");
+    }
+
+    /// A grant for a directory the caller intends to create later must not be
+    /// used as the cwd — the launch would fail before it could be created.
+    #[test]
+    fn resolved_working_directory_skips_nonexistent_policy_paths() {
+        let req = request_with_paths(&["C:\\not-yet"], &["C:\\ro"]);
+        let resolved = resolve(&req, &["C:\\ro"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\ro");
+    }
+
+    #[test]
+    fn resolved_working_directory_skips_blank_entries() {
+        let req = request_with_paths(&["", "   "], &[]);
+        assert_eq!(resolve(&req, &["", "   "]), None);
+    }
+
+    /// A whitespace-only `process.cwd` is not a caller choice; fall through to
+    /// the policy rather than treating it as an explicit directory.
+    #[test]
+    fn resolved_working_directory_ignores_blank_explicit_value() {
+        let mut req = request_with_paths(&["C:\\rw"], &[]);
+        req.working_directory = "   ".to_string();
+        let resolved = resolve(&req, &["C:\\rw"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\rw");
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
+
+    #[test]
+    fn resolved_working_directory_none_when_no_policy_path_is_a_directory() {
+        let req = request_with_paths(&["C:\\a.txt"], &["C:\\b.txt"]);
+        assert_eq!(resolve(&req, &[]), None);
+    }
+
+    /// Covers the real (non-injected) filesystem probe used in production.
+    #[test]
+    fn resolved_working_directory_probes_the_real_filesystem() {
+        let temp_dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let missing = std::env::temp_dir()
+            .join("mxc-resolver-nonexistent-4f1c9a")
+            .to_string_lossy()
+            .into_owned();
+        let req = request_with_paths(&[&missing], &[&temp_dir]);
+        let resolved = req.resolved_working_directory().expect("policy path");
+        assert_eq!(resolved.path, temp_dir);
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
 
     #[test]
     fn script_response_backend_unavailable_round_trips() {
@@ -881,56 +1066,5 @@ mod tests {
             let back: FailurePhase = serde_json::from_str(wire).unwrap();
             assert_eq!(back, variant, "round-trip {wire}");
         }
-    }
-
-    #[test]
-    fn isolation_session_user_serde_round_trips_camel_case() {
-        let wire = json!({"upn": "alice@contoso.com", "wamToken": "tok"});
-        let parsed: IsolationSessionUser = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(parsed.upn, "alice@contoso.com");
-        assert_eq!(parsed.wam_token, "tok");
-        let serialised = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(serialised, wire);
-    }
-
-    #[test]
-    fn isolation_session_user_debug_redacts_wam_token() {
-        let user = IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "super-secret-token".to_string(),
-        };
-        let s = format!("{:?}", user);
-        assert!(s.contains("alice@contoso.com"), "got {}", s);
-        assert!(s.contains("<redacted>"), "got {}", s);
-        assert!(!s.contains("super-secret-token"), "got {}", s);
-    }
-
-    #[test]
-    fn isolation_session_provision_config_accepts_user_field() {
-        let wire = json!({"user": {"upn": "alice@contoso.com", "wamToken": "tok"}});
-        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(wire).unwrap();
-        let u = parsed.user.unwrap();
-        assert_eq!(u.upn, "alice@contoso.com");
-        assert_eq!(u.wam_token, "tok");
-    }
-
-    #[test]
-    fn isolation_session_provision_config_defaults_to_no_user() {
-        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(json!({})).unwrap();
-        assert!(parsed.user.is_none());
-    }
-
-    #[test]
-    fn isolation_session_config_carries_optional_user() {
-        let wire = json!({
-            "configurationId": "medium",
-            "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
-        });
-        let parsed: IsolationSessionConfig = serde_json::from_value(wire).unwrap();
-        assert_eq!(
-            parsed.configuration_id,
-            IsolationSessionConfigurationId::Medium
-        );
-        assert!(parsed.user.is_some());
     }
 }

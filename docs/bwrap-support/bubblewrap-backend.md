@@ -22,8 +22,11 @@ requiring root privileges or a container runtime.
   apk add bubblewrap
   ```
   The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
-  read-only mounts via `--ro-bind-try`, which requires **bwrap 0.3.0+**
-  (released 2017; every currently-supported distro ships a newer version).
+  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
+  environment is built with `--clearenv` (bwrap 0.5.0+), so **bwrap 0.5.0 or
+  newer** is required. Platform detection probes `bwrap --version` and reports
+  the backend as unavailable — with the detected version — when the host is
+  below that floor.
 - User namespaces must be enabled:
   ```bash
   # Check: should print "1"
@@ -163,10 +166,11 @@ Example:
 
 Bubblewrap supports two network modes:
 
-**Full block** (`defaultPolicy: "block"`, no host lists) — uses
-`--unshare-net` for complete network namespace isolation. No network stack
-is available inside the sandbox (including loopback). Runs fully
-unprivileged.
+**Full block** (`defaultPolicy: "block"`, no host lists, no `network.proxy`)
+— uses `--unshare-net` for complete network namespace isolation. The sandbox
+gets a private network stack with only its own loopback (bwrap brings `lo`
+up), so nothing outside the sandbox is reachable and nothing outside can
+reach in. Runs fully unprivileged.
 
 ```json
 {
@@ -200,6 +204,30 @@ iptables.
 
 **Full allow** (`defaultPolicy: "allow"`, no host lists) — the sandbox
 shares the host network namespace with no restrictions.
+
+#### `allowLocalNetwork` is not independently enforceable
+
+`network.allowLocalNetwork` controls whether the sandboxed process may
+`bind()`/`listen()` on local IPs and accept **inbound** connections. It says
+nothing about *outbound* reachability of loopback or RFC1918 addresses —
+that is governed by `defaultPolicy` / `allowedHosts` / `blockedHosts`.
+
+Bubblewrap has no inbound-only primitive. Unprivileged bwrap has no veth
+interface to scope iptables to, and seccomp cannot dereference the `sockaddr`
+passed to `bind()`, so an AF_INET-only filter is not expressible. The
+namespace choice alone decides the outcome:
+
+| `allowLocalNetwork` | Namespace | Result |
+|---------------------|-----------|--------|
+| `false` (default) | private (`--unshare-net`) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
+| `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
+| `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
+| `true` | shared with host | Honored |
+
+Rows 2 and 3 emit a `WARNING:` line to the runner log at preflight rather
+than failing silently. Windows (AppContainer's `privateNetworkClientServer`
+capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)
+enforce the field at the syscall level; this divergence is Linux-specific.
 
 ### Process Settings
 

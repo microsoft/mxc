@@ -38,7 +38,7 @@ export interface BaseProcessUi {
 }
 
 /**
- * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional.
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Capture is incompatible with `processContainer.leastPrivilege` and `network.proxy`. Explicit `filesystem.deniedPaths` requires the host's V2 process security-environment support query to advertise native deny enforcement.
  */
 export interface CaptureDenials {
   /**
@@ -46,7 +46,7 @@ export interface CaptureDenials {
    */
   mode?: CaptureDenialsMode | null;
   /**
-   * Absolute path where the denial ETL trace is written. The caller names the path; the OS opens it under the caller's own identity when the trace is sealed. When omitted, MXC writes the trace to a managed per-run temporary file. The parent directory must already exist.
+   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file that is decoded then deleted.)
    */
   outputPath?: string | null;
 }
@@ -65,11 +65,6 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
  * Containment backend (abstract intent or concrete backend).
  */
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
-
-/**
- * Egress default outbound action applied when no egress rule matches.
- */
-export type EgressDefault = "allow" | "deny";
 
 /**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
@@ -131,73 +126,26 @@ export interface Filesystem {
 }
 
 /**
- * Host loopback ingress policy.
- */
-export type HostLoopbackPolicy = "allow" | "deny";
-
-/**
- * IsolationSession sizing profile.
- */
-export type IsolationConfigurationId = "small" | "medium" | "large" | "composable";
-
-/**
- * IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).
+ * IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision`). The one-shot surface takes no backend configuration at all. `start`, `stop`, `deprovision`, and `exec` take no per-phase config payload: `start`, `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.
  */
 export interface IsolationSession {
   /**
-   * Sizing profile (one-shot).
-   */
-  configurationId?: IsolationConfigurationId | null;
-  /**
-   * State-aware deprovision-phase configuration.
-   */
-  deprovision?: IsolationSessionPhase | null;
-  /**
    * State-aware provision-phase configuration.
    */
-  provision?: IsolationSessionPhase | null;
-  /**
-   * State-aware start-phase configuration.
-   */
-  start?: IsolationSessionPhase | null;
-  /**
-   * State-aware stop-phase configuration.
-   */
-  stop?: IsolationSessionPhase | null;
-  /**
-   * Optional Entra cloud-agent user bundle (one-shot).
-   */
-  user?: IsolationUser | null;
+  provision?: IsolationSessionProvisionPhase | null;
   [k: string]: unknown;
 }
 
 /**
- * Per-phase IsolationSession configuration (state-aware lifecycle).
+ * Provision-phase IsolationSession configuration (state-aware lifecycle).
+ * 
+ * The only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
  */
-export interface IsolationSessionPhase {
+export interface IsolationSessionProvisionPhase {
   /**
-   * Sizing profile for this phase.
+   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
-  configurationId?: IsolationConfigurationId | null;
-  /**
-   * Entra cloud-agent user bundle for this phase.
-   */
-  user?: IsolationUser | null;
-  [k: string]: unknown;
-}
-
-/**
- * Entra cloud-agent user bundle. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
- */
-export interface IsolationUser {
-  /**
-   * User principal name.
-   */
-  upn: string;
-  /**
-   * Short-lived WAM bearer token (passed verbatim to the OS service).
-   */
-  wamToken: string;
+  appId?: string | null;
   [k: string]: unknown;
 }
 
@@ -239,93 +187,40 @@ export interface Lxc {
  */
 export interface Network {
   /**
-   * Outbound policy rules.
+   * Allow binding/listening on local IPs and accepting inbound connections.
    */
-  egress?: NetworkEgress | null;
+  allowLocalNetwork?: boolean | null;
   /**
-   * Inbound policy.
+   * Hosts explicitly allowed.
    */
-  ingress?: NetworkIngress | null;
+  allowedHosts?: string[] | null;
+  /**
+   * Hosts explicitly blocked.
+   */
+  blockedHosts?: string[] | null;
+  /**
+   * Default outbound policy when no host rule matches.
+   */
+  defaultPolicy?: NetworkPolicy | null;
+  /**
+   * How the policy is enforced.
+   */
+  enforcementMode?: NetworkEnforcement | null;
+  /**
+   * Proxy configuration (one of localhost / builtinTestServer / url).
+   */
+  proxy?: Proxy | null;
 }
 
 /**
- * Outbound destination.
+ * Network enforcement mechanism.
  */
-export interface NetworkDestination {
-  /**
-   * IPv4/IPv6 CIDR range, or a bare IP address.
-   */
-  cidr: string;
-  /**
-   * Optional CIDR exclusions carved out of `cidr` (Kubernetes `ipBlock.except` style). Traffic to these ranges does not match this destination.
-   */
-  except?: string[];
-}
+export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
- * Outbound policy rule set.
+ * Default network policy.
  */
-export interface NetworkEgress {
-  /**
-   * Rules that allow matching outbound connections.
-   */
-  allow?: NetworkRules[];
-  /**
-   * Default outbound action when no egress rule matches (`allow` or `deny`). When omitted, defaults to `deny` (fail-closed). Setting `default: "allow"` expresses the "allow everything except this deny-list" model; when egress is present it supersedes the legacy `defaultPolicy`.
-   */
-  default?: EgressDefault | null;
-  /**
-   * Rules that deny matching outbound connections.
-   */
-  deny?: NetworkRules[];
-}
-
-/**
- * Inbound policy.
- */
-export interface NetworkIngress {
-  /**
-   * Whether host loopback can connect inbound to the sandbox.
-   */
-  hostLoopback?: HostLoopbackPolicy | null;
-}
-
-/**
- * Outbound port selector.
- */
-export interface NetworkPort {
-  /**
-   * End of an inclusive destination port range. When set, the selector matches `port..=endPort` and requires `port` with `endPort >= port`.
-   */
-  endPort?: number | null;
-  /**
-   * Destination port. Must be omitted for `icmp` (which has no ports); the parser rejects a port paired with `icmp`. When omitted for `tcp`/`udp` the selector matches all ports for that protocol. Acts as the start of an inclusive range when `endPort` is also set.
-   */
-  port?: number | null;
-  /**
-   * Transport protocol.
-   */
-  protocol: unknown;
-}
-
-/**
- * Outbound transport protocol. `any` matches every protocol.
- */
-export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
-
-/**
- * Outbound policy rule.
- */
-export interface NetworkRules {
-  /**
-   * Destination ports and protocols. When omitted or empty, the rule matches all ports and all protocols to the listed destinations.
-   */
-  ports?: NetworkPort[];
-  /**
-   * Destination CIDR ranges or bare IP addresses. DNS hostnames are rejected by the parser.
-   */
-  to: NetworkDestination[];
-}
+export type NetworkPolicy = "allow" | "block";
 
 /**
  * State-aware lifecycle phase.
@@ -360,7 +255,7 @@ export interface Process {
    */
   commandLine?: string | null;
   /**
-   * Working directory for the process.
+   * Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` ("Working Directory").
    */
   cwd?: string | null;
   /**
@@ -382,7 +277,7 @@ export interface ProcessContainer {
    */
   capabilities?: string[] | null;
   /**
-   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the learning-mode OS API.
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
    */
   captureDenials?: CaptureDenials | null;
   /**
@@ -394,33 +289,27 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
-   * Network settings specific to the processcontainer backend (loopback peer exemptions). Distinct from the shared top-level `network` policy.
-   */
-  network?: ProcessContainerNetwork | null;
-  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
 }
 
 /**
- * ProcessContainer-specific network settings (Windows).
+ * Proxy configuration. Exactly one variant applies.
  */
-export interface ProcessContainerNetwork {
+export interface Proxy {
   /**
-   * AppContainer friendly names whose loopback traffic is exempted (for example a caller-provided proxy container). MXC resolves each friendly name to a SID at launch to scope the loopback exemption rules.
+   * Have wxc launch its own built-in test proxy.
    */
-  allowedPeers?: string[];
-}
-
-/**
- * Runtime configuration applied to the launched container.
- */
-export interface RuntimeConfig {
+  builtinTestServer?: boolean | null;
   /**
-   * Proxy URL the container's outbound traffic is routed through, e.g. `"http://127.0.0.1:8080"`. Per the GA network spec this is a bare URL string restricted to a loopback proxy: only `localhost:<port>`, `127.0.0.1:<port>` and `[::1]:<port>` are permitted.
+   * External localhost proxy port.
    */
-  networkProxy?: string | null;
+  localhost?: number | null;
+  /**
+   * Proxy URL (parsed into host:port).
+   */
+  url?: string | null;
 }
 
 /**
@@ -621,10 +510,6 @@ export interface MXCConfiguration {
    * ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.
    */
   processContainer?: ProcessContainer | null;
-  /**
-   * Runtime configuration applied to the launched container.
-   */
-  runtimeConfig?: RuntimeConfig | null;
   /**
    * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
    */

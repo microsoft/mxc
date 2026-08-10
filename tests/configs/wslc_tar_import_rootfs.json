@@ -5,7 +5,9 @@
   "process": {
     "commandLine": "echo 'Hello from tar-imported image!' && cat /etc/alpine-release"
   },
-  "network": {},
+  "network": {
+    "defaultPolicy": "block"
+  },
   "experimental": {
     "wslc": {
       "image": "alpine-export:latest",

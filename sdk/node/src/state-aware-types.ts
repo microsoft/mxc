@@ -31,28 +31,6 @@ export type StateAwareContainmentBackend = Extract<
 export type SandboxId<C extends StateAwareContainmentBackend> =
   string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
 
-const ISO_USER_INSPECT = Symbol.for('nodejs.util.inspect.custom');
-
-/**
- * Entra credentials, supplied at provision to opt into an Entra-backed
- * sandbox and at start to authenticate the session. `wamToken` is treated
- * as a secret: `util.inspect` and `console.log` redact it. `JSON.stringify`
- * is unaffected — the wire envelope carries the token verbatim.
- */
-export class IsolationSessionUserConfig {
-  readonly upn: string;
-  readonly wamToken: string;
-
-  constructor(upn: string, wamToken: string) {
-    this.upn = upn;
-    this.wamToken = wamToken;
-  }
-
-  [ISO_USER_INSPECT](): string {
-    return `IsolationSessionUserConfig { upn: '${this.upn}', wamToken: '<redacted>' }`;
-  }
-}
-
 // IsolationSession per-(backend, phase) Configs. Each declares only
 // the fields the SDK currently exposes at that phase — scoped to
 // what the backend honors per the policy honor matrix and currently
@@ -61,29 +39,42 @@ export class IsolationSessionUserConfig {
 export interface IsolationSessionProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
-  filesystem?: FilesystemConfig;
   /**
-   * Optional Entra credentials. When supplied, provisioning uses the Entra
-   * identity for the sandbox; the same `user` must be supplied to
-   * `startSandbox`. Hosts that don't support this surface `backend_unavailable`.
+   * Optional identifier for the calling application. For a packaged
+   * application this is the Package Family Name; for an unpackaged one it may
+   * be any string — MXC does not interpret or verify it.
+   *
+   * Carried verbatim inside the returned `SandboxId` so later lifecycle
+   * phases can recover it without the caller re-supplying it. Nothing
+   * consumes it yet; it is accepted now so a future OS contract that acts on
+   * the calling application's identity does not require a breaking change.
+   *
+   * Validated structurally only: no control characters, at most 256
+   * characters. Whitespace and case are preserved exactly. An explicitly
+   * supplied empty string is a **distinct** value from omitting the field and
+   * round-trips as such. Rejections
+   * surface as `MxcError` with `code: 'policy_validation'`.
+   *
+   * Provision-phase only — it is fixed for the sandbox's lifetime and is not
+   * accepted on any later phase.
    */
-  user?: IsolationSessionUserConfig;
+  appId?: string;
+  /**
+   * Unrestricted-network acknowledgment (**required**). The isolation session
+   * container runs on a network MXC cannot filter or deny — outbound is open,
+   * and a process inside can listen on a port reachable from outside via
+   * localhost. The caller must explicitly acknowledge this; the ONLY accepted
+   * value is `{ defaultPolicy: 'allow', allowLocalNetwork: true }`. Any other
+   * network policy (including omission, which the backend treats as the
+   * unenforceable default-deny) is rejected at provision. The posture is fixed
+   * at provision, so `network` is not accepted on the post-provision phases.
+   */
+  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 
 export interface IsolationSessionStartConfig {
   /** Schema version (semver). */
   version?: string;
-  /**
-   * Selected IsoSession size profile. Unknown values are warned and
-   * downgraded to `'composable'` on the Rust side.
-   */
-  configurationId?: 'small' | 'medium' | 'large' | 'composable';
-  /**
-   * Entra credentials. Required when the sandbox was provisioned with a
-   * `user` bundle; rejected otherwise. When required, `upn` must match the
-   * UPN supplied at provision (case-insensitive).
-   */
-  user?: IsolationSessionUserConfig;
 }
 
 export interface IsolationSessionExecConfig {
@@ -103,17 +94,22 @@ export interface IsolationSessionDeprovisionConfig {
 }
 
 /**
- * IsolationSession's provision-phase metadata: the per-instance agent user
- * account name minted for this sandbox.
+ * IsolationSession's provision-phase metadata surfaced to the caller: the
+ * per-instance agent user account name minted for this sandbox, the agent
+ * user's SID, and the ephemeral workspace directory shared between the caller
+ * and this isolated user (through which the caller can stage files into the
+ * session; deleted when the sandbox is deprovisioned).
  */
 export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
+  agentUserSid: string;
+  ephemeralWorkspacePath: string;
 }
 
 // WindowsSandbox per-(backend, phase) Configs. WindowsSandbox holds a single
-// active sandbox behind a persistent host-side daemon. Unlike IsolationSession
-// it has no Entra/`user` bundle. Filesystem policy (readwrite/readonly/denied
-// HOST paths) is honored at provision and is immutable thereafter.
+// active sandbox behind a persistent host-side daemon. Filesystem policy
+// (readwrite/readonly/denied HOST paths) is honored at provision and is
+// immutable thereafter.
 
 export interface WindowsSandboxProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
@@ -205,6 +201,44 @@ export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
 
 export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['provision'];
+
+/**
+ * True when every member of `T` is optional — i.e. `{}` is a valid value.
+ *
+ * Applied to a single config type. For a possibly-union backend see
+ * {@link EveryBackendConfigIsOptional}, which is what `provisionSandbox`
+ * actually uses.
+ */
+export type HasNoRequiredMembers<T> = Record<string, never> extends T ? true : false;
+
+/**
+ * True only when **every** backend in `C` has an all-optional provision config.
+ *
+ * `provisionSandbox` uses this to require its config argument exactly when the
+ * selected backend needs one. The rule is derived from the types rather than an
+ * enumerated list of backends, so a future backend gaining or losing a required
+ * member is handled automatically.
+ *
+ * The `[C] extends [never]` shape is deliberate and is the whole point of this
+ * type. `C` is not always a single literal — a caller holding a variable typed
+ * as the full `StateAwareContainmentBackend` union instantiates it with that
+ * union. Asking `HasNoRequiredMembers` about the *union* of configs answers
+ * "yes" as soon as any one member is all-optional, because `{}` is assignable
+ * to that member — which would make the config optional for every backend,
+ * including the ones that require it. Instead this distributes over `C`, keeps
+ * only the backends that DO require a config, and reports "all optional" only
+ * when that set is empty. A union backend therefore behaves like its strictest
+ * member, which is the safe direction.
+ *
+ * Without this, a required field could be bypassed by omitting the whole
+ * argument — the config type would advertise a guarantee the call signature did
+ * not enforce. IsolationSession depends on it: its unrestricted-network
+ * acknowledgment is mandatory, and the backend refuses a provision without it.
+ */
+export type EveryBackendConfigIsOptional<C extends StateAwareContainmentBackend> =
+  [C extends unknown ? (HasNoRequiredMembers<ProvisionConfigFor<C>> extends true ? never : C) : never] extends [never]
+    ? true
+    : false;
 export type StartConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['start'];
 export type ExecConfigFor<C extends StateAwareContainmentBackend> =

@@ -225,7 +225,7 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 wxc-exec.exe --audit policy.json
 ```
 
-> **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`; use `processContainer.learningMode: true` for deny-and-record mode or `--audit` for permissive mode. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
+> **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
 ## Telemetry (Experimental)
 

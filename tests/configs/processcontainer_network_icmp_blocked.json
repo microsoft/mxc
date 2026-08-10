@@ -14,7 +14,10 @@
       "C:\\Windows"
     ]
   },
-  "network": {},
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "capabilities"
+  },
   "ui": {
     "disable": false
   }

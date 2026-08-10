@@ -228,16 +228,21 @@ fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
     }
 }
 
-fn validate_audit_containment(containment: &ContainmentBackend) -> Result<(), String> {
-    if *containment == ContainmentBackend::ProcessContainer {
-        Ok(())
-    } else {
-        Err(format!(
+const AUDIT_CAPTURE_DENIALS_CONFLICT_MSG: &str =
+    "--audit cannot be combined with processContainer.captureDenials; use captureDenials.mode: \"allow\" for permissive capture";
+
+fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
+    if request.containment != ContainmentBackend::ProcessContainer {
+        return Err(format!(
             "--audit is only supported with the Windows ProcessContainer backend; \
              resolved containment is '{}'",
-            containment.wire_name()
-        ))
+            request.containment.wire_name()
+        ));
     }
+    if request.policy.capture_denials.is_some() {
+        return Err(AUDIT_CAPTURE_DENIALS_CONFLICT_MSG.to_string());
+    }
+    Ok(())
 }
 
 /// Handles the `--telemetry-consent-{status,grant,revoke}` fast paths.
@@ -846,7 +851,13 @@ fn main() {
 
     // --probe is a detection-only fast path used by SDK
     // `getPlatformSupport()` on every first call. It does not spawn a
-    // sandbox, never parks a DaclManager, and never calls into COM/WinRT.
+    // sandbox and never parks a DaclManager.
+    //
+    // It does activate WinRT: `isolation_session_available()` resolves the
+    // IsolationSession activation factory. That probe owns and releases its
+    // own COM apartment, so it neither needs nor disturbs the process-wide
+    // init below — this ordering is not a claim that the probe is COM-free.
+    //
     // Run it AFTER recovery (so consumers that rely on `--probe`-as-
     // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
     // (which probe doesn't need; deferring them shaves cold-start cost
@@ -869,6 +880,16 @@ fn main() {
             wxc_common::models::ContainerPolicy::default()
         };
         let output = appcontainer_common::probe::run_probe(&policy);
+        // appcontainer_common has no dependency on the isolation-session
+        // backend, so it reports `isolationSessionAvailable` as `false`. When
+        // the backend is compiled in, override it with a read-only activation
+        // probe of the in-proc service.
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        let output = {
+            let mut output = output;
+            output.probes.isolation_session_available = mxc_engine::isolation_session_available();
+            output
+        };
         match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -1147,7 +1168,7 @@ fn main() {
     // because Windows derives capability SIDs case-insensitively.
     #[cfg(target_os = "windows")]
     if cli.audit {
-        if let Err(message) = validate_audit_containment(&request.containment) {
+        if let Err(message) = validate_audit_request(&request) {
             eprintln!("Error: {message}");
             telemetry::emit_early_exit(
                 telemetry_active,
@@ -1451,6 +1472,16 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+    if let Some(pointer) = response
+        .output_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.capture_denials.as_ref())
+    {
+        match serde_json::to_string(pointer) {
+            Ok(line) => eprintln!("{line}"),
+            Err(error) => eprintln!("failed to serialize captureDenials output pointer: {error}"),
+        }
+    }
 
     // Emit a structured JSON error envelope on stderr for SDK/caller consumption
     // when the runner produced an error message (one-shot flows only).
@@ -1507,7 +1538,11 @@ mod tests {
 
     #[test]
     fn audit_mode_only_accepts_process_container() {
-        assert!(validate_audit_containment(&ContainmentBackend::ProcessContainer).is_ok());
+        let mut request = ExecutionRequest {
+            containment: ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        };
+        assert!(validate_audit_request(&request).is_ok());
 
         for containment in [
             ContainmentBackend::WindowsSandbox,
@@ -1515,9 +1550,32 @@ mod tests {
             ContainmentBackend::IsolationSession,
             ContainmentBackend::MicroVm,
         ] {
-            let error = validate_audit_containment(&containment)
+            let containment_name = containment.wire_name();
+            request.containment = containment;
+            let error = validate_audit_request(&request)
                 .expect_err("non-ProcessContainer backend must reject --audit");
-            assert!(error.contains(containment.wire_name()));
+            assert!(error.contains(containment_name));
+        }
+    }
+
+    #[test]
+    fn audit_mode_rejects_both_capture_denials_modes() {
+        use wxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
+
+        for mode in [CaptureDenialsMode::Block, CaptureDenialsMode::Allow] {
+            let mut request = ExecutionRequest {
+                containment: ContainmentBackend::ProcessContainer,
+                ..Default::default()
+            };
+            request.policy.capture_denials = Some(CaptureDenialsConfig {
+                mode,
+                output_path: None,
+            });
+
+            let error = validate_audit_request(&request)
+                .expect_err("--audit and captureDenials must be mutually exclusive");
+            assert_eq!(error, AUDIT_CAPTURE_DENIALS_CONFLICT_MSG);
+            assert!(error.contains(r#"mode: "allow""#));
         }
     }
 

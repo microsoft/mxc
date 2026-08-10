@@ -20,6 +20,7 @@ pub mod logger;
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
+pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
 pub mod state_aware_backend;
@@ -51,6 +52,8 @@ pub mod filesystem_dacl;
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod string_util;
+#[cfg(target_os = "windows")]
+pub mod system_dir;
 
 // Unix-specific modules (shared by the Seatbelt and Bubblewrap backends).
 #[cfg(unix)]

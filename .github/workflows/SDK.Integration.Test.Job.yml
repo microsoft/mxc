@@ -58,8 +58,29 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      - name: Refresh Linux package indexes
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::Retries=3 update; then
+              exit 0
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to refresh Linux package indexes after $attempt attempts"
+              exit 1
+            fi
+
+            echo "::warning::Package index refresh failed; retrying"
+            sleep $((attempt * 5))
+          done
+
       - name: Install bubblewrap + LXC stack (Linux only, cached)
         if: matrix.os_label == 'linux'
+        continue-on-error: true
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
           # Installs the LXC + Bubblewrap substrate the SDK integration
@@ -80,19 +101,84 @@ jobs:
           # env var for the same reason (compounded by 1ES Hosted Pool
           # egress filtering).
           packages: bubblewrap lxc lxc-utils dnsmasq-base iptables bridge-utils
-          version: 1.3
+          version: 1.4
+
+      - name: Verify or repair Linux containment dependencies
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          packages=(
+            bubblewrap
+            lxc
+            lxc-utils
+            dnsmasq-base
+            iptables
+            bridge-utils
+          )
+
+          required_commands=(
+            bwrap
+            lxc-start
+            lxc-create
+            dnsmasq
+            iptables
+            brctl
+          )
+
+          missing_commands=()
+          for command in "${required_commands[@]}"; do
+            if ! command -v "$command" >/dev/null 2>&1; then
+              missing_commands+=("$command")
+            fi
+          done
+
+          if [ "${#missing_commands[@]}" -ne 0 ]; then
+            echo "::warning::Cached dependency installation was incomplete; missing commands: ${missing_commands[*]}"
+
+            # Runner images can have package indexes that reference versions
+            # already removed from the Ubuntu mirrors. Refresh and retry the
+            # complete install so a transient 404 cannot leave a green setup
+            # step with no containment packages installed.
+            for attempt in 1 2 3; do
+              if sudo apt-get -o Acquire::Retries=3 update &&
+                sudo env DEBIAN_FRONTEND=noninteractive \
+                  apt-get -o Acquire::Retries=3 install -y "${packages[@]}"; then
+                break
+              fi
+
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::Failed to install Linux containment dependencies after $attempt attempts"
+                exit 1
+              fi
+
+              echo "::warning::Dependency installation failed; refreshing package indexes and retrying"
+              sleep $((attempt * 5))
+            done
+          else
+            echo "Linux containment dependencies restored successfully from cache"
+          fi
+
+          for command in "${required_commands[@]}"; do
+            command -v "$command"
+          done
 
       - name: Start LXC services (cache restore skips postinst hooks)
         if: matrix.os_label == 'linux'
         shell: bash
         run: |
+          set -euo pipefail
+
           # cache-apt-pkgs-action restores package files but does not
           # re-run postinst hooks on cache hit, so AppArmor profiles
           # (lxc-container-default) and the lxc-net bridge service may
           # not be active. Load/start them explicitly so lxc-start
           # doesn't abort with an AppArmor denial.
-          sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
-          sudo systemctl start lxc-net 2>/dev/null || true
+          sudo apparmor_parser -rT /etc/apparmor.d/lxc-containers
+          sudo systemctl daemon-reload
+          sudo systemctl start lxc-net
+          sudo systemctl is-active --quiet lxc-net
 
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
@@ -102,28 +188,13 @@ jobs:
           BIN=$(find node_modules/@microsoft/mxc-sdk/bin -name mxc-exec-mac -print -quit)
           if [ -n "$BIN" ]; then chmod +x "$BIN"; else echo "mxc-exec-mac not found" && exit 1; fi
 
-      # AB#62830582: The Node SDK still emits the legacy network schema
-      # (sdk/node/src/sandbox.ts writes `network.defaultPolicy`), because its
-      # generated wire types have not been regenerated from the new GA
-      # `wire.rs` yet. The GA parser now rejects that field, so every
-      # SDK-generated config fails to parse and all integration tests error
-      # with "unknown field `defaultPolicy`, expected `egress` or `ingress`".
-      # Regenerating the SDK wire types and migrating config emission to the GA
-      # egress/ingress shape is deferred to the follow-up PR (see PR #676
-      # description, which intentionally limits this change to wire.rs + the
-      # test-config fixtures). Skip the suite until then so this schema-only PR
-      # is not blocked by the deferred SDK work.
-      #
-      # Re-enable by restoring the original invocation preserved below.
-      - name: npm test (deferred — AB#62830582)
+      # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
+      # preserves the env vars above.
+      - name: npm test
         shell: bash
         run: |
-          echo "SDK integration tests are temporarily skipped (AB#62830582):"
-          echo "the SDK still emits the legacy network schema (network.defaultPolicy),"
-          echo "which the GA wire.rs parser rejects. Migration is deferred to a follow-up PR."
-          # Original invocation (restore once the SDK is migrated to the GA network schema):
-          # if [ "${{ matrix.os_label }}" = "linux" ]; then
-          #   sudo -E npm test
-          # else
-          #   npm test
-          # fi
+          if [ "${{ matrix.os_label }}" = "linux" ]; then
+            sudo -E npm test
+          else
+            npm test
+          fi

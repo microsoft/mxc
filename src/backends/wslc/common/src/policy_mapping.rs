@@ -185,10 +185,11 @@ impl NormalizedPath {
     /// Excluding exact match here is deliberate: an exact same-*string* deny==mount
     /// is already collapsed most-restrictive-wins at parse time
     /// (`normalize_filesystem_paths`), and an exact same-*object* alias (a deny
-    /// that canonicalizes onto the mount root) is collapsed by D6
-    /// (`normalize_object_conflicts`) before this validator runs. This check
-    /// therefore only owns the *strictly-nested* overlap that neither of those
-    /// layers can resolve (deny under a mount = distinct objects).
+    /// that canonicalizes onto the mount root) is normally collapsed by D6
+    /// (`normalize_object_conflicts`) before this validator runs. This method
+    /// therefore only owns the *strictly-nested* overlap; the Tier-2 caller
+    /// separately rejects alias-induced canonical equality (differing original
+    /// strings) that D6 missed as absent.
     fn contains_strictly(&self, child: &NormalizedPath) -> bool {
         if self.rooted && self.components.is_empty() {
             // Whole-drive mount: covers the entire drive, so any same-anchor path
@@ -252,13 +253,13 @@ impl NormalizedPath {
 /// `C:\secrets` through `C:\project\link` if the runtime follows the reparse
 /// point. Detecting this would require walking the mounted subtree for reparse
 /// points (expensive and still racy) or controlling traversal beneath the mount,
-/// which the WSLC SDK does not expose. Likewise, Tier 2 does not fold Unicode
-/// normalization forms and compares path endpoints, not object identity: a hard
-/// link inside a mounted tree pointing at a denied file resolves to its own
-/// in-tree name (not the denied one), so it is not caught here or by D6 (the two
-/// are distinct objects). Creating either alias requires write access to a
-/// location the guest does not have, so both are out of scope under the
-/// trusted-author threat model. A residual TOCTOU window also remains between
+/// which the WSLC SDK does not expose. The same gap applies to a hard link: since
+/// hard links are names for one object, hard-linked *policy entries* are caught by
+/// D6's file-ID grouping (`normalize_object_conflicts`); only an *unlisted* hard
+/// link inside a mounted subtree escapes both Tier 2 and D6. Creating either alias
+/// needs write access the guest lacks, so both are out of scope under the
+/// trusted-author threat model. Tier 2 also does not fold Unicode normalization
+/// forms. A residual TOCTOU window remains between
 /// canonicalization and the SDK mount (an alias could be swapped in between);
 /// fully closing it needs handle-based mounting the WSLC SDK does not expose, so
 /// it is likewise accepted.
@@ -354,11 +355,29 @@ fn validate_denied_path_overlap_with(
             continue; // Absent: no on-disk ancestor resolved, so nothing to alias.
         };
         let denied_norm = NormalizedPath::parse(denied_resolved);
+        let denied_lexical = NormalizedPath::parse(denied);
         for (mounted, list_name, mount_canon) in &mount_canon {
             let PathCanonical::Canonical(mount_resolved) = mount_canon else {
                 continue;
             };
-            if NormalizedPath::parse(mount_resolved).contains_strictly(&denied_norm) {
+            let mount_norm = NormalizedPath::parse(mount_resolved);
+            // Strict nesting is always an unenforceable overlap: the denied
+            // subtree lives inside a flat mount that WSLC cannot mask.
+            if mount_norm.contains_strictly(&denied_norm) {
+                return Err(overlap_error(denied, mounted, list_name, true));
+            }
+            // Exact canonical equality is an overlap only when it comes from an
+            // on-disk alias — the two spellings normalize to *different lexical*
+            // forms yet resolve to the same object. A case/separator/`..` variant
+            // of the same spelling folds to an equal `NormalizedPath` here (via
+            // `NormalizedPath::parse`, NOT `normalize_filesystem_paths`, which only
+            // dedupes byte-identical strings) and is the enforceable exact-match
+            // case (enforced by not mounting the path), so accept it. But a deny
+            // that aliases onto the mount root via a symlink, junction, or short
+            // name has no exclusion primitive — `contains_strictly` (strictly
+            // deeper only) misses that, so reject it here.
+            let mount_lexical = NormalizedPath::parse(mounted);
+            if mount_norm == denied_norm && mount_lexical != denied_lexical {
                 return Err(overlap_error(denied, mounted, list_name, true));
             }
         }
@@ -373,13 +392,12 @@ fn validate_denied_path_overlap_with(
 /// - `None` — no network interface, fully isolated
 /// - `Bridged` — NAT networking through the WSL2 VM's virtual adapter
 ///
-/// When `allowedHosts` or `blockedHosts` are present, networking must be
-/// `Bridged` (so the container has connectivity), and per-host filtering
-/// is enforced via iptables rules applied post-start.
+/// Per-host filtering (`allowedHosts`/`blockedHosts` that need enforcement) is
+/// rejected before this runs — see `build_iptables_rules`. This only maps the
+/// bare-default posture:
 ///
 /// - `Block` with no host rules → `None` (fully isolated)
-/// - `Block` with `allowedHosts` → `Bridged` (iptables will restrict)
-/// - `Allow` → `Bridged`
+/// - `Allow` → `Bridged` (NAT)
 pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainerNetworkingMode {
     if is_block && !has_host_rules {
         WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
@@ -388,10 +406,11 @@ pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainer
     }
 }
 
-/// Returns true if per-host network filtering is needed (requires iptables
-/// exec after container start and `Privileged` flag).
+/// Returns true if the policy requests per-host filtering (which WSLc cannot
+/// enforce — such configs are rejected before execution).
 ///
-/// Only returns true when the host list can refine the selected default policy:
+/// Thin wrapper over [`wxc_common::models::needs_host_filtering`] so the parser
+/// and this backend share one definition:
 /// - `Block` → only `allowed_hosts` matter (allowlist)
 /// - `Allow` → only `blocked_hosts` matter (blocklist)
 pub fn needs_host_filtering(
@@ -399,11 +418,7 @@ pub fn needs_host_filtering(
     allowed_hosts: &[String],
     blocked_hosts: &[String],
 ) -> bool {
-    if is_default_block {
-        !allowed_hosts.is_empty()
-    } else {
-        !blocked_hosts.is_empty()
-    }
+    wxc_common::models::needs_host_filtering(is_default_block, allowed_hosts, blocked_hosts)
 }
 
 /// Validate that a host string is safe for use in an iptables command.
@@ -419,10 +434,17 @@ fn is_valid_host(host: &str) -> bool {
 
 /// Build iptables commands for per-host network filtering.
 ///
-/// These rules are exec'd inside the container after start via
-/// `WslcCreateContainerProcess`. The container must have the `Privileged`
-/// flag set (grants root + NET_ADMIN capability) for iptables to work.
-/// Images without iptables installed will not support per-host filtering.
+/// **NOTE: WSLC per-host filtering is non-functional.** Two independent
+/// blockers prevent it from working:
+/// 1. WSLC containers lack `CAP_NET_ADMIN` — the SDK's `Privileged` flag does
+///    **not** grant it — so the in-container `iptables` exec is rejected.
+/// 2. WSLC cannot expose VM-level network enforcement without breaking other
+///    security guarantees (e.g. MDE); a host-enforced design is longer-tail.
+///
+/// Configs that require per-host filtering are therefore **rejected at
+/// config-parse time** (and by `WSLContainerRunner::validate_runner`) before
+/// this function is reached. This function is retained for reference but its
+/// output is never applied.
 ///
 /// When `defaultPolicy` is `Block` + `allowedHosts`:
 ///   - Default DROP all outbound
@@ -753,6 +775,93 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn canonical_rejects_denied_alias_equal_to_mount_root() {
+        // Absent-tail deny whose parent alias lands *exactly* on the mount root:
+        // D6 saw the deny as absent, but tail replay canonicalizes it onto the
+        // mount root. `contains_strictly` (strictly deeper only) misses this equal
+        // case, so Tier 2's explicit canonical-equality check must reject it.
+        let resolve = resolver(vec![
+            (r"C:\real", canonical(r"C:\real")),
+            (r"C:\link\missing\..", canonical(r"C:\real")),
+        ]);
+        let err = validate_denied_path_overlap_with(
+            &strings(&[r"C:\real"]),
+            &[],
+            &strings(&[r"C:\link\missing\.."]),
+            resolve,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("cannot be enforced"), "{err}");
+    }
+
+    #[test]
+    fn canonical_allows_literal_exact_match_that_resolves() {
+        // A literal deny == mount (same original string) that both canonicalize to
+        // an existing object must still be accepted: parse-time normalization
+        // collapses it most-restrictive-wins, and it is enforceable by simply not
+        // mounting the path. Only alias-induced equality (differing originals) is
+        // rejected, so an identical string must survive Tier 2.
+        let resolve = resolver(vec![(r"C:\project", canonical(r"C:\project"))]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\project"]),
+            resolve,
+        )
+        .expect("literal exact-match deny is enforceable and must be accepted");
+    }
+
+    #[test]
+    fn canonical_allows_case_and_separator_variant_exact_match() {
+        // `NormalizedPath::parse` case-folds and folds `/` vs `\`, so these are the
+        // same spelling, not an on-disk alias: enforceable by not mounting → accept.
+        let resolve = resolver(vec![
+            (r"C:\Project", canonical(r"C:\project")),
+            ("c:/project", canonical(r"C:\project")),
+        ]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\Project"]),
+            &[],
+            &strings(&["c:/project"]),
+            resolve,
+        )
+        .expect("case/separator variant of the same path must be accepted");
+    }
+
+    #[test]
+    fn canonical_allows_dot_dot_variant_exact_match() {
+        // `C:\x\..\project` folds to `C:\project` lexically — same spelling, not an alias.
+        let resolve = resolver(vec![
+            (r"C:\project", canonical(r"C:\project")),
+            (r"C:\x\..\project", canonical(r"C:\project")),
+        ]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\x\..\project"]),
+            resolve,
+        )
+        .expect("`..`-variant of the same path must be accepted");
+    }
+
+    #[test]
+    fn canonical_allows_trailing_separator_variant_exact_match() {
+        // `parse` drops empty segments, so a trailing separator is the same spelling.
+        let resolve = resolver(vec![
+            (r"C:\project", canonical(r"C:\project")),
+            (r"C:\project\", canonical(r"C:\project")),
+        ]);
+        validate_denied_path_overlap_with(
+            &strings(&[r"C:\project"]),
+            &[],
+            &strings(&[r"C:\project\"]),
+            resolve,
+        )
+        .expect("trailing-separator variant of the same path must be accepted");
     }
 
     #[test]

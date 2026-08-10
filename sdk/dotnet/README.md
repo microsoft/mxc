@@ -38,6 +38,9 @@ catch (MxcException ex)
 
 `MxcSandbox.RunAsync(policy, command)` offloads the blocking native call to the
 thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
+Optional feature outputs are returned through `RunResult.OutputMetadata`; for
+`captureDenials`, `OutputMetadata.CaptureDenials.OutputPath` identifies the
+generated JSON document and carries its summary.
 
 ### Streaming
 
@@ -72,6 +75,8 @@ whole tree and may be called from another thread while `WaitAsync` is in flight.
 `WaitBlocking()` uses the native blocking wait and reports a policy timeout
 distinctly (but cannot be interrupted by a concurrent `Kill`). Dispose the
 process to release native resources (killing the child if still running).
+After a terminal wait, `MxcSandboxProcess.OutputMetadata` exposes the same
+structured feature outputs as `RunResult.OutputMetadata`.
 
 ## Telemetry consent
 

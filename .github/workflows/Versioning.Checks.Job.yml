@@ -7,8 +7,15 @@ jobs:
   versioning-checks:
     name: Versioning Checks
     runs-on: ubuntu-latest
+    env:
+      MXC_VERSIONING_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event_name == 'push' && github.event.before || 'HEAD^' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so a pull-request base ref can be resolved. For a
+          # pull_request event the checkout action fetches the base branch too,
+          # so the gates can read files at the base commit directly.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -24,6 +31,10 @@ jobs:
         working-directory: scripts/versioning
         run: npm ci
 
+      - name: Test versioning gate logic
+        working-directory: scripts/versioning
+        run: npm test
+
       - name: Check schema version sync
         run: node scripts/versioning/check-schema-versions.js
 
@@ -32,6 +43,9 @@ jobs:
 
       - name: Check schema is in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-schema-codegen.js
+
+      - name: Check PSEC generated contract (provenance + drift)
+        run: node scripts/versioning/check-psec-codegen.js
 
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js

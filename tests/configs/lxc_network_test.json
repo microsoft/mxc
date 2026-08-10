@@ -12,5 +12,10 @@
     "distribution": "alpine",
     "release": "3.23"
   },
-  "network": {}
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["api.github.com"],
+    "blockedHosts": ["evil.example.com"]
+  }
 }

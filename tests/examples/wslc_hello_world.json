@@ -5,7 +5,9 @@
   "process": {
     "commandLine": "echo 'Hello from WSL Container!' && uname -a"
   },
-  "network": {},
+  "network": {
+    "defaultPolicy": "block"
+  },
   "experimental": {
     "wslc": {
       "image": "alpine:latest"

@@ -12,5 +12,9 @@
     "distribution": "alpine",
     "release": "3.20"
   },
-  "network": {}
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["api.github.com"]
+  }
 }

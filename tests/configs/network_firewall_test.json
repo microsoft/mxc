@@ -16,7 +16,14 @@
       "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
     ]
   },
-  "network": {},
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": [
+      "api.github.com"
+    ],
+    "blockedHosts": []
+  },
   "ui": {
     "disable": false
   }
