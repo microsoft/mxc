@@ -62,6 +62,13 @@ mod isosession {
     /// The in-proc activation shim that owns knowledge of the MSI runtime dir.
     const APP_DLL: &str = "IsoSessionApp.dll";
 
+    /// Name of the pipeline-stamped runtime-version sidecar inside the nupkg
+    /// `runtime` folder. `IsoSessionApp.dll` is version-agnostic at OS build
+    /// time and reads this co-located token (e.g. `2026_08`) at load time to
+    /// build its MSI reg key + fallback runtime dir. Staged next to the exe
+    /// alongside the DLL so the co-located read works in the fused scenario.
+    const VERSION_SIDECAR: &str = "IsoSessionApp.runtimeversion";
+
     /// Locate the nupkg, extract the App.dll (stage next to the exe) and the
     /// manifest fragment, and return the manifest XML. Returns `None` (with a
     /// `cargo:warning`) when the nupkg does not carry the reg-free payload, so
@@ -114,6 +121,26 @@ mod isosession {
         let dll_dst = target_dir.join(APP_DLL);
         std::fs::write(&dll_dst, &app_dll)
             .unwrap_or_else(|e| panic!("stage {} to {}: {e}", APP_DLL, dll_dst.display()));
+
+        // Stage the pipeline-stamped runtime-version sidecar next to the DLL.
+        // Best-effort: if the nupkg predates the stamping pipeline, the shim
+        // falls back to its compile-time default version, so a missing sidecar
+        // is a warning, not a fatal error, and does NOT skip the manifest fuse.
+        match extract_entry(&nupkg, VERSION_SIDECAR) {
+            Some(bytes) => {
+                let sidecar_dst = target_dir.join(VERSION_SIDECAR);
+                std::fs::write(&sidecar_dst, &bytes).unwrap_or_else(|e| {
+                    panic!("stage {} to {}: {e}", VERSION_SIDECAR, sidecar_dst.display())
+                });
+            }
+            None => {
+                println!(
+                    "cargo:warning=isosession: {} not found in {} — IsoSessionApp.dll will use its compile-time default runtime version",
+                    VERSION_SIDECAR,
+                    nupkg.display()
+                );
+            }
+        }
 
         let manifest_bytes = match extract_entry(&nupkg, COMCLASS_MANIFEST) {
             Some(bytes) => bytes,
