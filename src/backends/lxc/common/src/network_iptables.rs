@@ -512,7 +512,14 @@ impl NetworkIptablesManager {
         match std::fs::symlink_metadata(iface_dir.join("master")) {
             Ok(_) => VethTopology::Bridged,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::symlink_metadata(&iface_dir) {
+                // `metadata` here, not `symlink_metadata`, and the asymmetry is
+                // deliberate. In real sysfs `/sys/class/net/<iface>` is itself a
+                // symlink into `/sys/devices`, and `symlink_metadata` succeeds
+                // on a dangling one -- which would report an interface whose
+                // target is unreachable as positively directly routed. Only a
+                // directory that actually resolves proves the absent `master`
+                // was observed rather than merely unreachable.
+                match std::fs::metadata(&iface_dir) {
                     Ok(_) => VethTopology::DirectlyRouted,
                     Err(_) => VethTopology::Unknown,
                 }
