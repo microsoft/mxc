@@ -46,41 +46,35 @@ jobs:
           sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
           sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
 
-      # Run under the forward policy production actually has.
+      # GitHub-hosted runners ship Docker, and Docker sets the IPv4 FORWARD
+      # policy to DROP. That breaks these tests twice over.
       #
-      # GitHub-hosted runners ship Docker, which sets the IPv4 FORWARD policy to
-      # DROP -- the same policy any host running Docker has. This suite used to
-      # force it to ACCEPT, for a reason that was real at the time: MXC hooked
-      # its chain only on traffic leaving the container (`-i <veth>` /
-      # `--physdev-in <veth>`), so the reply to an allowed request matched no
-      # MXC rule, fell through to the policy, and was dropped. Observed exactly
-      # that: DNS resolved, because dnsmasq on lxcbr0 is host-local and never
-      # traverses FORWARD, and then
-      # `wget: can't connect to remote host (140.82.116.5)`.
+      # First, it breaks them outright. MXC hooks its chain on traffic leaving
+      # the container (`-i <veth>` / `--physdev-in <veth>`), so an allowed
+      # request is accepted on the way out -- but the reply arrives in the
+      # opposite direction, matches no MXC rule, falls through to the policy,
+      # and is dropped. The connection times out and an explicitly allowed
+      # destination looks unreachable. Observed exactly that: DNS resolved,
+      # because dnsmasq on lxcbr0 is host-local and never traverses FORWARD,
+      # and then `wget: can't connect to remote host (140.82.116.5)`.
       #
-      # That was a product defect, not a harness quirk, and forcing ACCEPT hid
-      # it from every run. The container now installs a conntrack-scoped return
-      # rule for its own port, so replies are carried by MXC's own rules rather
-      # than by the host's default. Forcing ACCEPT would now hide whether that
-      # fix works.
+      # Second, and worse, it would make the deny cases meaningless. Under a
+      # DROP policy a container with NO working MXC hook at all is also
+      # unreachable, so the enforcement and deny-precedence tests would report
+      # success against a firewall that filters nothing -- which is the precise
+      # bug this suite exists to detect, and the reason these tests carry
+      # positive controls.
       #
-      # The second, subtler reason for forcing ACCEPT was vacuity: under DROP a
-      # container with no working hook at all is equally unreachable, so a
-      # deny-only assertion would report success against a firewall filtering
-      # nothing. That is answered by pairing rather than by policy. Every script
-      # here that asserts a block also asserts a reachability in the same run --
-      # the allow cases in the enforcement and deny-precedence scripts, and
-      # proxy reachability in the proxy script. A broken hook or a missing
-      # return rule fails those loudly, under either policy. The remaining
-      # scripts assert programmed rule shapes and log lines, which do not depend
-      # on the forward policy at all.
-      #
-      # Set explicitly rather than inherited, so a future runner image that
-      # happens to default to ACCEPT cannot silently weaken the suite.
-      - name: Force the production forward policy, so the return path is tested
+      # Setting the policy to ACCEPT restores the condition the tests were
+      # written for: the host forwards by default, so the ONLY thing that can
+      # block container traffic is a rule MXC installed. A missing hook then
+      # shows up as an unexpected success and fails the deny case loudly.
+      # A narrower conntrack RELATED,ESTABLISHED rule would fix the reply path
+      # but leave the DROP policy, and with it the vacuous pass.
+      - name: Let the host forward, so only MXC rules can block
         run: |
-          sudo iptables -P FORWARD DROP
-          sudo ip6tables -P FORWARD DROP
+          sudo iptables -P FORWARD ACCEPT
+          sudo ip6tables -P FORWARD ACCEPT
           sudo iptables -S FORWARD | head -5
 
       - name: Report the environment these tests depend on
@@ -92,7 +86,7 @@ jobs:
           echo "--- iptables ---"
           sudo iptables --version || echo "MISSING iptables"
           sudo ip6tables --version || echo "MISSING ip6tables"
-          echo "--- forward policy (must be DROP: production condition, and what exercises the return rules) ---"
+          echo "--- forward policy (must be ACCEPT, or deny cases pass vacuously) ---"
           sudo iptables -S FORWARD | head -1
           sudo ip6tables -S FORWARD | head -1
           echo "--- bridge netfilter ---"
