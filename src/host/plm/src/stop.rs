@@ -365,8 +365,19 @@ fn same_config_target(a: &Path, b: &Path) -> bool {
 
     match compare_existing_filesystem_objects(a, b) {
         ExistingObjectComparison::Same | ExistingObjectComparison::Unknown => true,
-        ExistingObjectComparison::Different => target_comparison_key(a) == target_comparison_key(b),
+        ExistingObjectComparison::Different => {
+            windows_paths_equal_ignore_case(&target_comparison_key(a), &target_comparison_key(b))
+        }
     }
+}
+
+fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
+    use windows::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+
+    let a: Vec<u16> = a.encode_utf16().collect();
+    let b: Vec<u16> = b.encode_utf16().collect();
+    // SAFETY: Both slices are valid UTF-16 buffers for the duration of the call.
+    unsafe { CompareStringOrdinal(&a, &b, true) == CSTR_EQUAL }
 }
 
 fn target_comparison_key(path: &Path) -> String {
@@ -392,8 +403,7 @@ fn target_comparison_key(path: &Path) -> String {
         .map(|rest| format!(r"\\{rest}"))
         .or_else(|| key.strip_prefix(r"\\?\").map(str::to_string))
         .unwrap_or(key);
-    let key = normalize_win32_components(&key, !is_verbatim);
-    key.to_ascii_lowercase()
+    normalize_win32_components(&key, !is_verbatim)
 }
 
 fn normalize_win32_components(path: &str, trim_trailing_dots_and_spaces: bool) -> String {
@@ -659,6 +669,14 @@ mod tests {
         let lower = dir.join("denials.json");
         let upper = dir.join("DENIALS.JSON");
         assert!(same_config_target(&lower, &upper));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_is_unicode_case_insensitive_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_unicode_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(&dir.join("Ä.etl"), &dir.join("ä.etl")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
