@@ -4,7 +4,7 @@
 import { spawn } from 'child_process';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
-import { mxcErrorFromCode } from './errors.js';
+import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
 import { diagLog } from './diagnostic.js';
 import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
 
@@ -99,7 +99,7 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
 }
 
 export interface WireErrorEnvelope {
-  error: { code: string; message: string; details?: Record<string, unknown> };
+  error: WireError;
 }
 
 export interface WireResultEnvelope<T> {
@@ -121,7 +121,7 @@ export function parseNonExecResponse<T>(stdout: string): T {
   if (parsed && typeof parsed === 'object') {
     if ('error' in parsed) {
       const env = (parsed as WireErrorEnvelope).error;
-      throw mxcErrorFromCode(env.code, env.message, env.details);
+      throw mxcErrorFromEnvelope(env);
     }
     if ('result' in parsed) {
       return (parsed as WireResultEnvelope<T>).result;

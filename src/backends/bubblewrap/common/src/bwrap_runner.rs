@@ -28,7 +28,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
 
@@ -44,7 +44,7 @@ use wxc_common::sandbox_process::{
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::validate_common;
 
-use crate::bwrap_command;
+use crate::{bwrap_command, bwrap_version};
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -54,17 +54,6 @@ pub struct BubblewrapScriptRunner;
 impl BubblewrapScriptRunner {
     pub fn new() -> Self {
         Self
-    }
-
-    /// Check whether `bwrap` is available on PATH.
-    fn is_bwrap_available() -> bool {
-        Command::new("bwrap")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
     }
 }
 
@@ -83,11 +72,11 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // `validate_common` (ahead of every `ScriptRunner::run`), so no
         // backend-local check is needed here.
 
-        if !Self::is_bwrap_available() {
-            return Err(ScriptResponse::error(
-                "Bubblewrap (bwrap) is not installed or not on PATH. \
-                 Install it via your package manager (e.g., apt install bubblewrap).",
-            ));
+        // `bwrap` must be present *and* new enough for every flag the argument
+        // builder emits — an old binary would otherwise fail at spawn time with
+        // an opaque "unknown option" error.
+        if let Err(err) = bwrap_version::probe_bwrap() {
+            return Err(ScriptResponse::error(&err.to_string()));
         }
 
         Ok(())
@@ -191,6 +180,9 @@ impl BubblewrapScriptRunner {
         // 2. Build the bwrap argument vector. `denied_files` is the file-mask
         //    subset classified during symlink resolution (see
         //    [`resolve_denied_paths`]).
+        if let Some(warning) = bwrap_command::local_network_diagnostic(request, proxy.address()) {
+            let _ = writeln!(logger, "{}", warning);
+        }
         let args = bwrap_command::build_args_classified(request, proxy.address(), denied_files);
         let _ = writeln!(
             logger,
@@ -597,33 +589,43 @@ fn is_file_mask_target(path: &str) -> bool {
 ///
 /// `std::fs::canonicalize` resolves symlinks at every level but requires the
 /// **whole** path to exist. To also cover not-yet-created denied paths under a
-/// symlinked ancestor, this walks up to the deepest existing ancestor,
-/// canonicalizes it, then re-appends the non-existent tail. Returns `None` only
-/// when no ancestor can be canonicalized (e.g. a relative path with no existing
-/// root).
+/// symlinked ancestor, this walks the components from the root: every existing
+/// prefix is canonicalized (following symlinks exactly like the kernel), while
+/// `.` and `..` in the not-yet-existent tail are folded lexically. Folding `..`
+/// this way is safe because a component that does not exist cannot be a symlink,
+/// so the result matches the target the kernel's path resolution would reach.
+/// Returns `None` only for an empty path.
+///
+/// A naive backward walk that collected `file_name()` silently dropped `..`
+/// components (Rust returns `None` for a `..` file name) and reconstructed the
+/// wrong target: `/link/missing/../secret` became `/real/missing/secret`
+/// instead of `/real/secret`, so the mask landed on a bystander path and the
+/// real denied target stayed exposed.
 fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
-    // Fast path: the whole path exists, so canonicalize resolves every component.
-    if let Ok(real) = std::fs::canonicalize(path) {
-        return Some(real);
-    }
-    // Otherwise find the deepest existing ancestor, canonicalize it, and
-    // re-append the components below it that do not exist on the host yet.
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut cur = path;
-    while let Some(parent) = cur.parent() {
-        if let Some(name) = cur.file_name() {
-            tail.push(name);
-        }
-        if let Ok(real_parent) = std::fs::canonicalize(parent) {
-            let mut result = real_parent;
-            for name in tail.iter().rev() {
-                result.push(name);
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => result.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
             }
-            return Some(result);
+            Component::Normal(name) => {
+                result.push(name);
+                // Canonicalize the prefix so far so symlinks are followed while
+                // it still exists; once a component is missing, canonicalize
+                // fails and the remaining tail is folded lexically above.
+                if let Ok(real) = std::fs::canonicalize(&result) {
+                    result = real;
+                }
+            }
         }
-        cur = parent;
     }
-    None
+    if result.as_os_str().is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 #[cfg(test)]
@@ -846,5 +848,41 @@ mod tests {
         assert!(plan.paths.is_none());
         // The dangling link is still masked, as a file.
         assert!(plan.files.contains(&link.to_string_lossy().into_owned()));
+    }
+
+    /// A denied path that traverses `..` under a symlinked ancestor with a
+    /// missing intermediate directory must fold the `..` and resolve to the real
+    /// target the kernel would reach. Regression test for a `..`-dropping bug
+    /// that reconstructed a bystander target (`/real/missing/secret`) and left
+    /// the real denied path (`/real/secret`) exposed.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_denied_paths_folds_dotdot_under_symlinked_ancestor() {
+        use wxc_common::logger::{Logger, Mode};
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let real = base.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Deny .../link/missing/../secret — `missing` does not exist and the
+        // `..` cancels it, so the real target is .../real/secret.
+        let denied = link.join("missing").join("..").join("secret");
+        let policy = wxc_common::models::ContainerPolicy {
+            denied_paths: vec![denied.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let plan = resolve_denied_paths(&policy, &mut logger).expect("must not fail closed");
+        let out = plan
+            .paths
+            .expect("`..` under a symlinked ancestor must be rewritten");
+        assert_eq!(
+            out,
+            vec![real.join("secret").to_string_lossy().into_owned()],
+            "`..` must fold so the mask targets the real denied path, not a bystander"
+        );
     }
 }

@@ -4,6 +4,7 @@ import * as path from 'path';
 import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
 import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
+import { diagLog } from './diagnostic.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,87 +22,6 @@ function getSdkPackageRoot(): string {
     // Fallback: __dirname is dist/, so parent is package root
     return path.join(__dirname, '..');
   }
-}
-
-/**
- * Query Windows Registry for a value
- * @param key - Registry key path (e.g., "HKLM\\Software\\...")
- * @param valueName - Name of the value to query
- * @returns The registry value as a string, or null if not found
- */
-function queryWindowsRegistry(key: string, valueName: string): string | null {
-  try {
-    const command = `reg query "${key}" /v "${valueName}"`;
-    const output = execSync(command, { encoding: 'utf-8', stdio: 'pipe' });
-
-    // Parse output - format is:
-    // HKEY_LOCAL_MACHINE\...
-    //     ValueName    REG_SZ    Value
-    const lines = output.split('\n');
-    for (const line of lines) {
-      if (line.includes(valueName)) {
-        // Extract value after REG_SZ or REG_DWORD
-        const match = line.match(/REG_\w+\s+(.+)/);
-        if (match) {
-          return match[1].trim();
-        }
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Result of querying the host's Windows build number, or `null` when the
- * registry values are missing or unparseable.
- */
-type WindowsBuild = { major: number; minor: number } | null;
-
-/**
- * Default implementation that reads `CurrentBuild` / `UBR` from the
- * registry. Replaceable via {@link _setWindowsBuildQuery} in tests so we
- * can exercise the IsolationSession version gate deterministically.
- */
-function defaultWindowsBuildQuery(): WindowsBuild {
-  const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
-  const currentBuild = queryWindowsRegistry(registryPath, 'CurrentBuild');
-  const ubrValue = queryWindowsRegistry(registryPath, 'UBR');
-  if (!currentBuild || !ubrValue) {
-    return null;
-  }
-  const major = parseInt(currentBuild, 10);
-  const minor = Number(ubrValue);
-  if (isNaN(major) || isNaN(minor)) {
-    return null;
-  }
-  return { major, minor };
-}
-
-let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
-
-/** @internal Test-only: override the Windows build lookup. */
-export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
-  windowsBuildQuery = fn ?? defaultWindowsBuildQuery;
-}
-
-/**
- * Check whether the host supports the IsolationSession backend.
- * Requires Windows Insider Preview build 26300.8553 or later.
- *
- * No internal cache — `getPlatformSupport` memoizes the full result, and
- * registry reads are cheap relative to the rest of the probe.
- */
-function isIsoSessionSupported(): boolean {
-  const build = windowsBuildQuery();
-  if (!build) {
-    return false;
-  }
-
-  // Pin to the Windows Insider Preview build that introduced IsolationSession
-  // (26300.8553+). Other major builds are not yet supported.
-  return build.major === 26300 && build.minor >= 8553;
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;
@@ -217,11 +137,12 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
 }
 
 /**
- * Run the probe binary and merge its results into `support`. On any
- * failure (binary missing, timeout, malformed JSON, unknown tier), the
- * function silently leaves `support.isolationTier` and
- * `support.isolationWarnings` unset — callers see the same contract as
- * pre-Phase-5 SDKs.
+ * Run the probe binary and merge its results into `support`: the isolation
+ * tier, any warnings, portable UI capabilities, and — when the probe reports
+ * the isolation-session service available — the `isolation_session` method.
+ * On any failure (binary missing, timeout, malformed JSON), the function
+ * silently leaves those fields unset, so callers see the same contract as
+ * pre-probe SDKs.
  */
 function populateIsolationFromProbe(support: PlatformSupport): void {
   try {
@@ -241,6 +162,9 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
       if (facts && typeof facts === 'object') {
         if (isUiCapabilitySupport(facts.uiCapabilities)) {
           support.uiCapabilities = facts.uiCapabilities;
+        }
+        if (facts.isolationSessionAvailable === true) {
+          support.availableMethods.push('isolation_session');
         }
       }
     }
@@ -273,12 +197,22 @@ function computeSupport(): PlatformSupport {
     // are installed; callers pick via the containment field.
     const methods: ContainmentBackend[] = [];
     if (isLxcAvailable()) methods.push('lxc');
-    if (isBubblewrapAvailable()) methods.push('bubblewrap');
+    const bubblewrap = _probeBubblewrap();
+    if (bubblewrap.available) {
+      methods.push('bubblewrap');
+    } else {
+      // Always surface why bwrap is unavailable. When LXC is present the
+      // platform is still supported, so `reason` — documented as why the
+      // platform is *not* supported — must stay unset, and the detail would
+      // otherwise be dropped with no way to diagnose the missing backend.
+      diagLog(`getPlatformSupport: bubblewrap unavailable — ${bubblewrap.reason}`);
+      if (methods.length === 0) {
+        support.reason = `Neither LXC nor Bubblewrap is available on this system (${bubblewrap.reason})`;
+      }
+    }
     if (methods.length > 0) {
       support.isSupported = true;
       support.availableMethods = methods;
-    } else {
-      support.reason = 'Neither LXC nor Bubblewrap is available on this system';
     }
     return support;
   }
@@ -292,9 +226,6 @@ function computeSupport(): PlatformSupport {
   support.availableMethods = ['processcontainer'];
   if (isWindowsSandboxAvailable()) {
     support.availableMethods.push('windows_sandbox');
-  }
-  if (isIsoSessionSupported()) {
-    support.availableMethods.push('isolation_session');
   }
   populateIsolationFromProbe(support);
   return support;
@@ -313,15 +244,225 @@ function isLxcAvailable(): boolean {
 }
 
 /**
- * Check if Bubblewrap (bwrap) is available on the system
+ * Minimum `bwrap` version the Bubblewrap backend supports, as
+ * `[major, minor, patch]`.
+ *
+ * This is the oldest release that has **every** flag the Rust argument builder
+ * emits. `--ro-bind-try` (deny-by-default baseline mounts) landed in bwrap
+ * 0.3.1 and `--clearenv` (minimal sandbox environment) in 0.5.0, so
+ * `--clearenv` sets the floor.
+ *
+ * Mirrors `MIN_BWRAP_VERSION` in
+ * `src/backends/bubblewrap/common/src/bwrap_version.rs` — keep both in sync.
  */
-function isBubblewrapAvailable(): boolean {
+const MIN_BWRAP_VERSION: readonly [number, number, number] = [0, 5, 0];
+
+/** Outcome of the Bubblewrap probe: available, or unavailable with a reason. */
+type BubblewrapProbe = { available: true } | { available: false; reason: string };
+
+/**
+ * Raw result of running `bwrap --version`, normalized across the ways the call
+ * can fail. Mirrors the cases the Rust `probe_bwrap` distinguishes.
+ */
+type BwrapVersionResult =
+  | { kind: 'output'; stdout: string }
+  | { kind: 'notFound' }
+  | { kind: 'failed'; status: number | null; detail: string };
+
+/**
+ * Whether a `bwrap` candidate exists anywhere on `PATH`.
+ *
+ * Linux reports `ENOENT` both for a genuinely absent binary and for one that
+ * exists but cannot be executed (a missing ELF interpreter or script shebang
+ * target), so the spawn error alone cannot tell `notFound` from `failed`. A
+ * candidate on `PATH` means the package is installed and the failure is a
+ * broken install.
+ */
+function bwrapExistsOnPath(): boolean {
+  const pathVar = process.env.PATH;
+  if (!pathVar) return false;
+  return pathVar
+    .split(path.delimiter)
+    .some((dir) => dir !== '' && fs.existsSync(path.join(dir, 'bwrap')));
+}
+
+/**
+ * How long to wait for `bwrap --version` before giving up.
+ *
+ * `getPlatformSupport()` is synchronous, so without a bound a `bwrap` that
+ * hangs — a wrapper script on PATH, a binary on a stalled network mount —
+ * would block the caller indefinitely. Printing a version string is
+ * near-instant, so this is generous.
+ */
+const BWRAP_VERSION_TIMEOUT_MS = 5000;
+
+/**
+ * Default runner for `bwrap --version`. Uses `execFileSync` rather than a
+ * shell so a missing binary surfaces as `ENOENT` instead of the shell's
+ * indistinguishable exit code 127 — that separation is what lets us report
+ * "not installed" and "installed but broken" differently.
+ *
+ * Replaceable in unit tests via {@link _setBwrapVersionRunner}.
+ */
+function defaultBwrapVersionRunner(): BwrapVersionResult {
   try {
-    execSync('bwrap --version', { encoding: 'utf-8', stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
+    return {
+      kind: 'output',
+      stdout: execFileSync('bwrap', ['--version'], {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: BWRAP_VERSION_TIMEOUT_MS,
+      }),
+    };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & {
+      status?: number | null;
+      stderr?: Buffer | string;
+      killed?: boolean;
+    };
+    // `ENOENT` covers both an absent binary and a present-but-unusable one
+    // (missing ELF interpreter / shebang target), so confirm the binary is
+    // really absent before blaming the package manager.
+    if (e.code === 'ENOENT' && !bwrapExistsOnPath()) {
+      return { kind: 'notFound' };
+    }
+    // Timed out: the child was killed, so there is no meaningful exit status.
+    if (e.code === 'ETIMEDOUT' || e.killed) {
+      return {
+        kind: 'failed',
+        status: null,
+        detail: `timed out after ${BWRAP_VERSION_TIMEOUT_MS}ms`,
+      };
+    }
+    return {
+      kind: 'failed',
+      status: e.status ?? null,
+      detail: e.stderr?.toString().trim() || e.message,
+    };
   }
+}
+
+let bwrapVersionRunner: () => BwrapVersionResult = defaultBwrapVersionRunner;
+
+/** @internal Test-only: override the `bwrap --version` runner. */
+export function _setBwrapVersionRunner(fn: (() => BwrapVersionResult) | null): void {
+  bwrapVersionRunner = fn ?? defaultBwrapVersionRunner;
+}
+
+/**
+ * Parse the version out of a `bwrap --version` line such as
+ * `"bubblewrap 0.11.2"`.
+ *
+ * Anchored on the `bubblewrap` package name, which is what makes unrecognized
+ * output fail closed: without it any numeric token in arbitrary output (say
+ * `"some other tool 999"`) would be read as a version and clear the
+ * minimum-version gate.
+ *
+ * Lenient about what *surrounds* each number so distro-patched version strings
+ * (`0.4.1-1`, a bare `0.6`) still resolve: the version token is split on `.`
+ * and each of the (up to three) components contributes its leading digits.
+ * Debian's `+really` marker is honored rather than ignored — see below.
+ *
+ * Strict about components that are *present but not numeric*: only a component
+ * that is genuinely absent defaults to `0`, so `"0.6.invalid"` is rejected
+ * rather than silently read as `0.6.0`.
+ *
+ * @internal Exported for unit tests.
+ * @returns `[major, minor, patch]`, or `null` when the version cannot be determined.
+ */
+export function _parseBwrapVersion(output: string): [number, number, number] | null {
+  // bwrap prints its PACKAGE_STRING, "bubblewrap <version>"; that leading name
+  // has been stable since 0.1.0.
+  const tokens = output.trim().split(/\s+/);
+  if (tokens[0]?.toLowerCase() !== 'bubblewrap' || !tokens[1]) return null;
+  // Debian's `+really` marker means the package ships the version that FOLLOWS
+  // it, so `0.5.0+really0.4.1` is really 0.4.1 — which predates `--clearenv`
+  // and must not clear the gate.
+  const marker = tokens[1].lastIndexOf('+really');
+  const token = marker === -1 ? tokens[1] : tokens[1].slice(marker + '+really'.length);
+  const components: number[] = [];
+  // Every component must be numeric, including ones past the patch: they are
+  // not significant, but `0.5.0.invalid` is an unrecognized banner rather than
+  // 0.5.0. Validating (rather than rejecting on count) keeps a distro
+  // four-part build such as `0.6.0.1` working.
+  for (const part of token.split('.')) {
+    const digits = /^\d+/.exec(part);
+    // Present but non-numeric: fail closed rather than guessing 0.
+    if (!digits) return null;
+    const value = parseInt(digits[0], 10);
+    // Mirror the Rust parser's `u32`: a larger value is not something bwrap
+    // could print, and accepting it would let this gate admit a banner the
+    // backend's gate rejects.
+    if (value > 0xffffffff) return null;
+    components.push(value);
+  }
+  // Only a genuinely absent component defaults to 0, so "0.6" is 0.6.0.
+  return [components[0], components[1] ?? 0, components[2] ?? 0];
+}
+
+/** Compare two `[major, minor, patch]` tuples lexicographically. */
+function compareVersions(
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+/**
+ * Check whether Bubblewrap (bwrap) is installed *and* new enough.
+ *
+ * Presence on PATH is not sufficient: a `bwrap` older than
+ * {@link MIN_BWRAP_VERSION} would reject flags the backend always emits and
+ * fail at spawn time with an opaque "unknown option" error. Unparsable output
+ * fails closed — without a version we cannot assert the required flags exist.
+ *
+ * Mirrors `probe_bwrap` in
+ * `src/backends/bubblewrap/common/src/bwrap_version.rs`, including the
+ * distinction between a missing binary and a present-but-broken one.
+ *
+ * @internal Exported for unit tests.
+ */
+export function _probeBubblewrap(): BubblewrapProbe {
+  const minVersion = MIN_BWRAP_VERSION.join('.');
+  const result = bwrapVersionRunner();
+
+  if (result.kind === 'notFound') {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) is not installed or not on PATH; version ${minVersion} or newer is required`,
+    };
+  }
+  if (result.kind === 'failed') {
+    // Present but broken: do not send the user to their package manager for a
+    // package they already have.
+    // Covers both a spawn failure and termination by a signal, neither of
+    // which yields an exit code.
+    const where =
+      result.status === null ? 'failed without an exit status' : `exited with status ${result.status}`;
+    const detail = result.detail ? `: ${result.detail}` : '';
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) is present but \`bwrap --version\` ${where}${detail}; version ${minVersion} or newer is required`,
+    };
+  }
+
+  const version = _parseBwrapVersion(result.stdout);
+  if (!version) {
+    return {
+      available: false,
+      reason: `could not determine the Bubblewrap (bwrap) version from ${JSON.stringify(result.stdout.trim())}; version ${minVersion} or newer is required`,
+    };
+  }
+  if (compareVersions(version, MIN_BWRAP_VERSION) < 0) {
+    return {
+      available: false,
+      reason: `Bubblewrap (bwrap) ${version.join('.')} is too old; version ${minVersion} or newer is required`,
+    };
+  }
+  return { available: true };
 }
 
 /**

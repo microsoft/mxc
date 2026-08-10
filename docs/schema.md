@@ -55,11 +55,31 @@ production configs and the dev schema when working on experimental features:
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
+                                           // WSLC supports the cooperative proxy too, but only via
+                                           // { "url": "http://proxy.example:8080" } (own-netns:
+                                           //  localhost/builtinTestServer are unreachable, rejected)
+    },
+
+    "ui": {
+        "disable": true,                   // Disable all UI access (default true)
+        "clipboard": "none",               // "none", "read", "write", or "all"
+        "injection": false                 // Allow synthetic input injection
     },
 
     "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
-        "capabilities": ["internetClient"]
+        "capabilities": ["internetClient"],
+        "captureDenials": {                // Windows-only: record the process's access
+            "mode": "block",               // "block" (default): access stays denied and
+                                           // is logged (deny-by-default preserved). "allow":
+                                           // access is allowed and logged (audit; relaxes
+                                           // deny-by-default, emits a security warning).
+            "outputPath": "C:\\logs\\denials.json" // JSON denials file the app reads. The parent
+        }                                  // dir must already exist; a unique per-run id is stamped
+                                           // into the stem (denials.<run-id>.json) and the actual
+                                           // path printed on stderr. Omit outputPath for a managed temp file.
+                                           // captureDenials cannot be combined with leastPrivilege.
+                                           // captureDenials cannot currently be combined with network.proxy.
     },
 
     "lxc": {                               // LXC-specific
@@ -75,7 +95,7 @@ production configs and the dev schema when working on experimental features:
             "memoryMb": 2048,              // Memory in MB for WSLC session
             "gpu": false,                  // GPU passthrough
             "storagePath": "C:\\wslc-storage",  // Image store path
-            "portMappings": [              // Host<->container port forwarding. TCP only -- the vendored WSLC SDK 2.8.1 runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
+            "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
         },
@@ -142,7 +162,36 @@ under `C:\data`.
 #### Upward directory traversal for Windows BaseContainer
 
 Many tools search **upward** from the working directory toward the volume root,
-looking for a marker file that defines their project. With Windows BaseConatainer, When such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. To avoid this error when using BaseContainer and tools with this behavior, grant them the full path from the volume root down to your target.
+looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. To avoid this error when using BaseContainer and tools with this behavior, grant them the full path from the volume root down to your target.
+
+### UI Policy
+
+The `ui` section is the cross-platform UI-restriction policy. Every field is
+default-deny, so on a backend that enforces the section an omitted `ui` is
+equivalent to full lockdown. **That equivalence is per-backend**: a backend that
+does not enforce UI policy applies no restriction whether the section is omitted
+or supplied, so an omitted `ui` there is not lockdown. Check the backend's own
+documentation before relying on the default.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `disable` | boolean | `true` | Disable all UI access. On Windows ProcessContainer this maps to the Win32k system-call disable mitigation, so the process cannot create windows, use GDI, or make `NtUser*` / `NtGdi*` calls. |
+| `clipboard` | enum | `"none"` | Clipboard access level: `"none"`, `"read"`, `"write"`, or `"all"`. |
+| `injection` | boolean | `false` | Whether the process may inject synthetic keyboard/mouse input (`SendInput` and friends). |
+
+**Per-backend support.** `ui` is enforced by the Windows ProcessContainer
+backend (via job-object UI restrictions plus the Win32k mitigation — see
+[`process-container/UIPolicy_Schema.md`](process-container/UIPolicy_Schema.md))
+and by the macOS Seatbelt backend (via the generated sandbox profile). Other
+backends do not implement UI restrictions; each backend's documentation states
+whether it applies, rejects, or ignores the section. **IsolationSession refuses
+any supplied `ui` at every phase on both surfaces** — no `ui` posture is truthful
+for a session-isolated sandbox (see
+[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)) —
+and accepts an omitted one without applying any UI restriction. The Windows
+`processContainer.ui` sub-block carries additional ProcessContainer-only fields
+(`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
+when `containment` is `processcontainer`.
 
 ### Fallback Policy
 
@@ -176,11 +225,14 @@ force a particular backend.
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
+| `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
+| `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session (experimental). Dual-mode: one-shot and state-aware. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt) |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
 
-Only the backend section matching the selected `containment` value is used;
-other backend sections are ignored.
+Only the backend section matching the selected `containment` value is accepted;
+a config that also carries an unrelated backend's section is **rejected** with a
+"Multiple containment backends configured" error rather than silently ignored.
 
 ### State-aware lifecycle envelope
 
@@ -210,7 +262,7 @@ schema:
     // level, exactly as in a one-shot request -- there is no wrapping `config`
     // object. Backend- and phase-specific config, when a phase has any, nests
     // under `experimental.<backendKey>.<phase>`, e.g.:
-    //   "experimental": { "isolation_session": { "start": { "user": { ... } } } }
+    //   "experimental": { "isolation_session": { "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" } } }
 }
 ```
 

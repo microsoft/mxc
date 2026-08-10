@@ -4,6 +4,8 @@
   "private": true,
   "description": "Repository tooling: version-sync and config schema validation gates. Not published.",
   "scripts": {
+    "pretest": "node check-tests-present.js",
+    "test": "node --test tests/*.test.js",
     "check-schema-versions": "node check-schema-versions.js",
     "validate-configs": "node validate-configs.js"
   },

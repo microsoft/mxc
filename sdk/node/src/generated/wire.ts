@@ -38,6 +38,25 @@ export interface BaseProcessUi {
 }
 
 /**
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Capture is incompatible with `processContainer.leastPrivilege` and `network.proxy`. Explicit `filesystem.deniedPaths` requires the host's V2 process security-environment support query to advertise native deny enforcement.
+ */
+export interface CaptureDenials {
+  /**
+   * How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block` when omitted.
+   */
+  mode?: CaptureDenialsMode | null;
+  /**
+   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file that is decoded then deleted.)
+   */
+  outputPath?: string | null;
+}
+
+/**
+ * How `captureDenials` handles each ungranted access check while recording it.
+ */
+export type CaptureDenialsMode = "block" | "allow";
+
+/**
  * Clipboard access level.
  */
 export type ClipboardPolicy = "none" | "read" | "write" | "all";
@@ -107,68 +126,26 @@ export interface Filesystem {
 }
 
 /**
- * IsolationSession sizing profile.
- */
-export type IsolationConfigurationId = "small" | "medium" | "large" | "composable";
-
-/**
- * IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).
+ * IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision`). The one-shot surface takes no backend configuration at all. `start`, `stop`, `deprovision`, and `exec` take no per-phase config payload: `start`, `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.
  */
 export interface IsolationSession {
   /**
-   * Sizing profile (one-shot).
-   */
-  configurationId?: IsolationConfigurationId | null;
-  /**
-   * State-aware deprovision-phase configuration.
-   */
-  deprovision?: IsolationSessionPhase | null;
-  /**
    * State-aware provision-phase configuration.
    */
-  provision?: IsolationSessionPhase | null;
-  /**
-   * State-aware start-phase configuration.
-   */
-  start?: IsolationSessionPhase | null;
-  /**
-   * State-aware stop-phase configuration.
-   */
-  stop?: IsolationSessionPhase | null;
-  /**
-   * Optional Entra cloud-agent user bundle (one-shot).
-   */
-  user?: IsolationUser | null;
+  provision?: IsolationSessionProvisionPhase | null;
   [k: string]: unknown;
 }
 
 /**
- * Per-phase IsolationSession configuration (state-aware lifecycle).
+ * Provision-phase IsolationSession configuration (state-aware lifecycle).
+ * 
+ * The only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
  */
-export interface IsolationSessionPhase {
+export interface IsolationSessionProvisionPhase {
   /**
-   * Sizing profile for this phase.
+   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
-  configurationId?: IsolationConfigurationId | null;
-  /**
-   * Entra cloud-agent user bundle for this phase.
-   */
-  user?: IsolationUser | null;
-  [k: string]: unknown;
-}
-
-/**
- * Entra cloud-agent user bundle. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
- */
-export interface IsolationUser {
-  /**
-   * User principal name.
-   */
-  upn: string;
-  /**
-   * Short-lived WAM bearer token (passed verbatim to the OS service).
-   */
-  wamToken: string;
+  appId?: string | null;
   [k: string]: unknown;
 }
 
@@ -296,11 +273,15 @@ export interface Process {
  */
 export interface ProcessContainer {
   /**
-   * AppContainer capabilities (e.g. `internetClient`, `registryRead`).
+   * AppContainer capabilities (e.g. `internetClient`, `registryRead`). Each array entry must contain exactly one capability name; commas are rejected because BaseContainer uses commas as its wire delimiter. `learningModeLogging` and `permissiveLearningMode` are reserved and rejected here; use `learningMode`, `--audit`, or the dedicated denial capture configuration instead.
    */
   capabilities?: string[] | null;
   /**
-   * AppContainer permissive learning mode.
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
+   */
+  captureDenials?: CaptureDenials | null;
+  /**
+   * AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.
    */
   learningMode?: boolean | null;
   /**
@@ -455,7 +436,7 @@ export interface Wslc {
    */
   memoryMb?: number | null;
   /**
-   * Host → container port forwards. Only TCP is currently supported by the vendored WSLC SDK runtime (Microsoft.WSL.Containers 2.8.1); the parser rejects `udp` because the shipped runtime returns `E_NOTIMPL`.
+   * Host → container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings.
    */
   portMappings?: PortMapping[] | null;
   /**

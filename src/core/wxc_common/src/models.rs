@@ -32,7 +32,7 @@ pub enum ContainmentBackend {
     Hyperlight,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
-    /// Isolation Session — process isolation via IsoEnvBroker Session API (experimental).
+    /// Isolation Session — process isolation via the IsolationSession API (experimental).
     #[serde(rename = "isolation_session")]
     IsolationSession,
     /// macOS Seatbelt sandbox backend.
@@ -253,83 +253,20 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
-/// Session configuration size for the Isolation Session backend.
-/// Maps to `IsoSessionConfigId` in the in-proc `Windows.AI.IsolationSession`
-/// `IsoSessionOps` APIs, whose values must in turn match `ISOLATION_CONFIG_ID`
-/// in `winsta.h`.
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum IsolationSessionConfigurationId {
-    /// `Small` (1) — smallest pre-defined configuration.
-    Small,
-    /// `Medium` (2) — middle pre-defined configuration.
-    Medium,
-    /// `Large` (3) — largest pre-defined configuration.
-    Large,
-    /// `Composable` (4) — lightweight configuration with UI subsystems
-    /// stripped, intended for command-line workloads. The default.
-    #[default]
-    Composable,
-}
-
-impl From<crate::wire::IsolationConfigurationId> for IsolationSessionConfigurationId {
-    fn from(id: crate::wire::IsolationConfigurationId) -> Self {
-        match id {
-            crate::wire::IsolationConfigurationId::Small => Self::Small,
-            crate::wire::IsolationConfigurationId::Medium => Self::Medium,
-            crate::wire::IsolationConfigurationId::Large => Self::Large,
-            crate::wire::IsolationConfigurationId::Composable => Self::Composable,
-        }
-    }
-}
-
-/// Configuration specific to the Isolation Session backend.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct IsolationSessionConfig {
-    /// Session size/weight. Default: Composable.
-    #[serde(rename = "configurationId")]
-    pub configuration_id: IsolationSessionConfigurationId,
-    /// Optional Entra cloud-agent credentials. Honored on the state-aware
-    /// `start` phase; rejected by the one-shot path.
-    pub user: Option<IsolationSessionUser>,
-}
-
-/// Entra cloud-agent credentials. Both fields are required when the bundle
-/// is supplied. `wam_token` is a short-lived bearer token passed verbatim to
-/// the OS-side service; MXC stores nothing.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IsolationSessionUser {
-    pub upn: String,
-    pub wam_token: String,
-}
-
-impl std::fmt::Debug for IsolationSessionUser {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IsolationSessionUser")
-            .field("upn", &self.upn)
-            .field("wam_token", &"<redacted>")
-            .finish()
-    }
-}
-
-impl From<crate::wire::IsolationUser> for IsolationSessionUser {
-    fn from(u: crate::wire::IsolationUser) -> Self {
-        // Destructure (no `..`) so a new wire field fails to compile until mapped.
-        let crate::wire::IsolationUser { upn, wam_token } = u;
-        Self { upn, wam_token }
-    }
-}
-
 /// State-aware provision-phase config for the Isolation Session backend.
-/// Nested under `experimental.isolation_session.provision`. Carries Entra
-/// credentials when the caller wants a cloud-agent sandbox; absent for
-/// local sandboxes.
+/// Nested under `experimental.isolation_session.provision`. The one-shot
+/// surface takes no backend configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
-    pub user: Option<IsolationSessionUser>,
+    /// Optional identifier for the calling application — the Package Family
+    /// Name for a packaged app, any string otherwise. Carried verbatim into
+    /// the `sandboxId`; MXC does not interpret or verify it.
+    ///
+    /// An explicitly-supplied empty string is a **distinct** value from an
+    /// absent one and round-trips as such. A JSON `null` is a second spelling
+    /// of absent.
+    pub app_id: Option<String>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -552,10 +489,99 @@ pub struct ContainerPolicy {
     pub blocked_hosts: Vec<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
+    /// Whether the caller supplied a `network` block on the wire (any field
+    /// present), captured at parse time. Distinguishes an absent network policy
+    /// from an explicit one whose values equal the defaults — the other fields
+    /// here cannot, since `default_network_policy` defaults to `Block` either
+    /// way. Used by backends (e.g. IsolationSession) that must reject a network
+    /// policy supplied on a phase where the posture is immutable. Parse-derived,
+    /// never on the wire.
+    #[serde(skip)]
+    pub network_specified: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
+    /// Whether the caller supplied a `ui` block on the wire (any field
+    /// present), captured at parse time. The twin of `network_specified`, and
+    /// necessary for the same reason: `UiPolicy::default()` is full lockdown,
+    /// so an absent `ui` and an explicitly-supplied lockdown `ui` are
+    /// indistinguishable from the other fields here. Parse-derived, never on
+    /// the wire.
+    ///
+    /// Consumed only by IsolationSession today, which has no UI-restriction
+    /// primitive and refuses a supplied UI policy rather than accepting and
+    /// dropping it. The other backends that do not enforce `policy.ui` — LXC
+    /// and Bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox — still
+    /// accept and ignore it, so this flag being set does not mean a UI policy
+    /// was honored anywhere; it means only that the caller supplied one.
+    #[serde(skip)]
+    pub ui_specified: bool,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+    /// Windows denial capture (from `processContainer.captureDenials`). When
+    /// `Some`, the runner records the sandboxed process's ungranted access
+    /// attempts to a learning-mode ETL trace. `None` disables capture.
+    pub capture_denials: Option<CaptureDenialsConfig>,
+}
+
+/// Do the host lists refine the default egress policy (i.e. require per-host
+/// filtering)? Only the list that can tighten the default matters:
+/// `Block` → allowlist; `Allow` → blocklist. Shared by the config parser and
+/// the WSLc backend so both agree on what "host filtering" means.
+pub fn needs_host_filtering(
+    is_default_block: bool,
+    allowed_hosts: &[String],
+    blocked_hosts: &[String],
+) -> bool {
+    if is_default_block {
+        !allowed_hosts.is_empty()
+    } else {
+        !blocked_hosts.is_empty()
+    }
+}
+
+impl ContainerPolicy {
+    /// True when this policy's host lists require per-host egress filtering.
+    pub fn needs_host_filtering(&self) -> bool {
+        needs_host_filtering(
+            self.default_network_policy == NetworkPolicy::Block,
+            &self.allowed_hosts,
+            &self.blocked_hosts,
+        )
+    }
+}
+
+/// Windows denial-capture settings (from `processContainer.captureDenials`).
+/// The presence of this struct on [`ContainerPolicy::capture_denials`] enables
+/// capture; the runner records the sandboxed process's ungranted access
+/// attempts to a learning-mode ETL trace. [`CaptureDenialsConfig::mode`]
+/// decides whether each recorded access is blocked (default) or allowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureDenialsConfig {
+    /// How each ungranted access check is handled while it is recorded.
+    /// Defaults to [`CaptureDenialsMode::Block`].
+    pub mode: CaptureDenialsMode,
+    /// Absolute path where the JSON denials output file is written — the
+    /// deliverable a consuming application reads. The runner inserts a per-run
+    /// identifier into the file stem (`denials.json` ->
+    /// `denials.<run-id>.json`) so concurrent and sequential captures don't
+    /// collide, and reports the actual path on stderr. When `None`, the runner
+    /// falls back to a managed per-run temporary file and prints its path on
+    /// stderr. (The intermediate ETL trace is an internal runner temp that is
+    /// decoded then deleted.)
+    pub output_path: Option<String>,
+}
+
+/// How `captureDenials` handles each ungranted access check while recording it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CaptureDenialsMode {
+    /// The access stays denied and the denial is recorded; deny-by-default
+    /// containment is preserved. Safe default.
+    #[default]
+    Block,
+    /// The access is allowed and recorded (audit mode); deny-by-default is
+    /// relaxed for the run. Security-sensitive — the runner warns.
+    Allow,
 }
 
 /// Port mapping for host↔container port forwarding.
@@ -654,9 +680,6 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
-    /// Isolation Session backend (experimental).
-    #[serde(rename = "isolation_session")]
-    pub isolation_session: Option<IsolationSessionConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
 }
@@ -705,9 +728,6 @@ pub struct ExecutionRequest {
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
-    /// Audit mode: when true, `permissiveLearningMode` is permitted even in
-    /// release builds (with a security warning). Set by the `--audit` CLI flag.
-    pub audit: bool,
 }
 
 /// Distinguishes whether an error occurred during process creation (launch)
@@ -758,6 +778,9 @@ pub struct ScriptResponse {
     /// Indicates at what phase the failure occurred.
     #[serde(default)]
     pub failure_phase: FailurePhase,
+    /// Structured metadata produced after the sandboxed process exits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_metadata: Option<Box<SandboxOutputMetadata>>,
 }
 
 impl Default for ScriptResponse {
@@ -769,8 +792,40 @@ impl Default for ScriptResponse {
             error_message: String::new(),
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
+            output_metadata: None,
         }
     }
+}
+
+/// Structured outputs produced by optional sandbox features.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxOutputMetadata {
+    /// Location and summary of a captureDenials output document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_denials: Option<CaptureDenialsOutput>,
+}
+
+/// Location and summary of a captureDenials output document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDenialsOutput {
+    /// Discriminator used by line-oriented CLI consumers.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Absolute path to the JSON denials output file.
+    pub output_path: String,
+    /// Exit code of the sandboxed child.
+    pub exit_code: i32,
+    /// Count of unique denials written.
+    pub total_denials: usize,
+    /// Whether the emitted denial set was truncated.
+    pub denied_resources_truncated: bool,
+}
+
+impl CaptureDenialsOutput {
+    /// The fixed `type` discriminator value.
+    pub const KIND: &'static str = "captureDenials";
 }
 
 impl ScriptResponse {
@@ -788,7 +843,6 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn script_response_backend_unavailable_round_trips() {
@@ -821,56 +875,5 @@ mod tests {
             let back: FailurePhase = serde_json::from_str(wire).unwrap();
             assert_eq!(back, variant, "round-trip {wire}");
         }
-    }
-
-    #[test]
-    fn isolation_session_user_serde_round_trips_camel_case() {
-        let wire = json!({"upn": "alice@contoso.com", "wamToken": "tok"});
-        let parsed: IsolationSessionUser = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(parsed.upn, "alice@contoso.com");
-        assert_eq!(parsed.wam_token, "tok");
-        let serialised = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(serialised, wire);
-    }
-
-    #[test]
-    fn isolation_session_user_debug_redacts_wam_token() {
-        let user = IsolationSessionUser {
-            upn: "alice@contoso.com".to_string(),
-            wam_token: "super-secret-token".to_string(),
-        };
-        let s = format!("{:?}", user);
-        assert!(s.contains("alice@contoso.com"), "got {}", s);
-        assert!(s.contains("<redacted>"), "got {}", s);
-        assert!(!s.contains("super-secret-token"), "got {}", s);
-    }
-
-    #[test]
-    fn isolation_session_provision_config_accepts_user_field() {
-        let wire = json!({"user": {"upn": "alice@contoso.com", "wamToken": "tok"}});
-        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(wire).unwrap();
-        let u = parsed.user.unwrap();
-        assert_eq!(u.upn, "alice@contoso.com");
-        assert_eq!(u.wam_token, "tok");
-    }
-
-    #[test]
-    fn isolation_session_provision_config_defaults_to_no_user() {
-        let parsed: IsolationSessionProvisionConfig = serde_json::from_value(json!({})).unwrap();
-        assert!(parsed.user.is_none());
-    }
-
-    #[test]
-    fn isolation_session_config_carries_optional_user() {
-        let wire = json!({
-            "configurationId": "medium",
-            "user": {"upn": "alice@contoso.com", "wamToken": "tok"}
-        });
-        let parsed: IsolationSessionConfig = serde_json::from_value(wire).unwrap();
-        assert_eq!(
-            parsed.configuration_id,
-            IsolationSessionConfigurationId::Medium
-        );
-        assert!(parsed.user.is_some());
     }
 }

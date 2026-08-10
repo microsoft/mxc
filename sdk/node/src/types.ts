@@ -156,7 +156,16 @@ export interface ProcessContainerConfig {
   name?: string;
   /** Use least privilege mode with PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT (default: false) */
   leastPrivilege?: boolean;
-  /** Additional AppContainer capabilities (e.g., "registryRead", "internetClient") */
+  /**
+   * Enable deny-and-record learning mode. Failed access checks are logged while
+   * accesses remain denied and containment remains enforced.
+   */
+  learningMode?: boolean;
+  /**
+   * Additional AppContainer capabilities (e.g., "registryRead", "internetClient").
+   * Each entry must contain one capability name and must not contain a comma.
+   * The reserved learning-mode capability names must not be supplied directly.
+   */
   capabilities?: string[];
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
@@ -201,11 +210,24 @@ export interface NetworkConfig {
   /** Hostnames or IP addresses to block (firewall mode only) */
   blockedHosts?: string[];
   /** Proxy configuration (supported on Windows ProcessContainer, Linux Bubblewrap,
-   *  and macOS Seatbelt). On Bubblewrap/Seatbelt it is a cooperative env-var proxy
-   *  (HTTP_PROXY/HTTPS_PROXY): well-behaved HTTP clients honor it, raw-socket clients
-   *  can bypass it. `builtinTestServer` activates a bundled, testing-only proxy; the
-   *  SDK rejects it unless `allowTestingFeatures: true` is set in SandboxSpawnOptions
-   *  (which maps to the native `--allow-testing-features` flag). */
+   *  macOS Seatbelt, and WSLC). On Bubblewrap/Seatbelt/WSLC it is a cooperative
+   *  env-var proxy (HTTP_PROXY/HTTPS_PROXY): well-behaved HTTP clients honor it,
+   *  raw-socket clients can bypass it. `builtinTestServer` activates a bundled,
+   *  testing-only proxy; the SDK rejects it unless `allowTestingFeatures: true` is
+   *  set in SandboxSpawnOptions (which maps to the native `--allow-testing-features`
+   *  flag).
+   *
+   *  WSLC imposes additional parse-time constraints (a violating config is
+   *  rejected before it runs):
+   *   - Only the `{ url }` form is accepted — its containers run in their own
+   *     network namespace, so the `localhost` / `builtinTestServer` loopback
+   *     forms are unreachable and rejected.
+   *   - The `url` scheme must be `http` or `https`.
+   *   - `defaultPolicy` must be `"allow"` and both `allowedHosts` and
+   *     `blockedHosts` must be empty/unset — WSLC has no in-kernel iptables, so
+   *     it cannot enforce host lists, and the container needs outbound
+   *     networking to reach the proxy at all.
+   *  Enforcement is cooperative (no in-kernel iptables). */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
@@ -232,11 +254,11 @@ export interface WslcConfig {
   /**
    * Host↔container port mappings.
    *
-   * Only TCP is currently supported by the vendored WSLC SDK runtime
-   * (Microsoft.WSL.Containers 2.8.1). UDP is declared in the SDK header
-   * but the shipped runtime returns `E_NOTIMPL` when UDP is actually
-   * requested, so the parser hard-rejects `"udp"` with a clear message at
-   * spawn time. The `protocol` field defaults to `"tcp"` when omitted.
+   * Only TCP is currently supported by the WSLC SDK runtime. UDP is declared
+   * in the SDK header but the shipped runtime returns `E_NOTIMPL` when UDP is
+   * actually requested, so the parser hard-rejects `"udp"` with a clear
+   * message at spawn time. The `protocol` field defaults to `"tcp"` when
+   * omitted.
    */
   portMappings?: PortMapping[];
 }
@@ -251,9 +273,9 @@ export interface PortMapping {
   containerPort: number;
   /**
    * Transport protocol. Only `"tcp"` is currently supported; `"udp"` is
-   * rejected by the parser because the vendored WSLC SDK runtime
-   * (Microsoft.WSL.Containers 2.8.1) returns `E_NOTIMPL` for UDP even
-   * though the header declares it. Defaults to `"tcp"` when omitted.
+   * rejected by the parser because the WSLC SDK runtime returns `E_NOTIMPL`
+   * for UDP even though the header declares it. Defaults to `"tcp"` when
+   * omitted.
    */
   protocol?: 'tcp';
 }

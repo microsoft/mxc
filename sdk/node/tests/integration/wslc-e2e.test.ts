@@ -202,7 +202,7 @@ srv.handle_request()
   });
 
   it('should reject UDP port mapping with a clear SDK-limitation message', { timeout: 60_000 }, async () => {
-    // WSLC SDK 2.8.1 declares WSLC_PORT_PROTOCOL_UDP in its header but its
+    // The WSLC SDK declares WSLC_PORT_PROTOCOL_UDP in its header but its
     // runtime returns E_NOTIMPL (0x80004001) when UDP is actually requested.
     // The parser rejects UDP up front so SDK consumers get a clear error at
     // spawn time rather than a cryptic HRESULT at container-create time. The

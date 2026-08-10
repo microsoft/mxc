@@ -14,6 +14,7 @@ import {
   debugSpawnOptions,
   spawnFromConfigAsync,
   startUnixTestProxy,
+  NETWORK_TEST_URL,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
 
@@ -111,8 +112,9 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
       'bubblewrap',
       'bwrap-external-proxy',
     );
+    // Azure Artifacts feed (NETWORK_TEST_URL)
     config.process!.commandLine =
-      'curl -fsSL https://api.github.com/zen > /dev/null && echo PROXY_OK';
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_OK`;
     config.network = {
       ...(config.network ?? {}),
       defaultPolicy: 'allow',
@@ -131,7 +133,7 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
       'bwrap-builtin-proxy',
     );
     config.process!.commandLine =
-      'curl -fsSL https://api.github.com/zen > /dev/null && echo BUILTIN_OK';
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo BUILTIN_OK`;
     config.network = {
       ...(config.network ?? {}),
       defaultPolicy: 'allow',
@@ -154,7 +156,7 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     // prints BLOCKED_OK so we can assert both signals are present.
     config.process!.commandLine =
       'set -e; ' +
-      'curl -fsSL https://api.github.com/zen > /dev/null && echo SENTINEL_OK; ' +
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo SENTINEL_OK; ` +
       'if curl -fsS --max-time 5 https://example.com > /dev/null 2>&1; then ' +
       '  echo SENTINEL_BAD_LEAK; exit 1; ' +
       'else ' +
@@ -164,7 +166,7 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
       ...(config.network ?? {}),
       defaultPolicy: 'allow',
       proxy: { builtinTestServer: true },
-      allowedHosts: ['api.github.com'],
+      allowedHosts: ['pkgs.dev.azure.com'],
     };
 
     const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true, allowTestingFeatures: true });
