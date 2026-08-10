@@ -99,6 +99,8 @@ impl AuditEventName {
     /// * M-ETW-3 — a stable `policyHash` on the policy event.
     /// * M-ETW-4 — `identity, enforcementMode, defaultPolicy, proxyPort`.
     /// * M-ETW-5 — `identity, status`, and what was released.
+    /// * M-ETW-6 — IsolationSession telemetry coverage. This is a backend
+    ///   emission requirement rather than an extra per-record field contract.
     /// * M-ETW-7 — correlation id (identity is not available on a rejection),
     ///   `rejectedReason`, and the offending field.
     ///

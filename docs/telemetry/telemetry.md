@@ -44,11 +44,11 @@ Rust constants and `write_event!` struct fields.
 
 | Feature | WIL (`wil/TraceLogging.h`) | Rust `tracelogging` crate | MXC approach |
 |---|---|---|---|
-| **Provider group GUID** | `TraceLoggingOptionMicrosoftTelemetry()` | `group_id("...")` in `define_provider!` | `build.rs` generates `provider_def.rs` with/without `group_id` based on env var |
-| **Sampling keywords** | `MICROSOFT_KEYWORD_MEASURES` named constant | Raw `u64` in `keyword(...)` | `const MICROSOFT_KEYWORD_MEASURES: u64 = 0x0000_4000_0000_0000` |
+| **Provider group GUID** | `TraceLoggingOptionMicrosoftTelemetry()` | `group_id("...")` in `define_provider!` | `build.rs` generates `provider_def.rs` with/without `group_id` based on the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` env var; the same signal also selects the keyword/tag constants below, see [Private GUID Substitution](#private-guid-substitution-internal-builds) |
+| **Sampling keywords** | `MICROSOFT_KEYWORD_MEASURES` named constant | Raw `u64` in `keyword(...)` | Generated `MXC_EVENT_KEYWORD` constant — `0x1` (provider-local, no UTC meaning) by default; `MICROSOFT_KEYWORD_MEASURES` only when the build opts into telemetry via the group GUID |
 | **Common event fields** | `_GENERIC_PARTB_FIELDS_ENABLED` pattern | `struct("Name", { ... })` in `write_event!` | `struct("COMMON_MXC_PARAMS", { Version, Channel, IsDebugging, UTCReplace_AppSessionGuid })` |
 | **Provider lifecycle** | `IMPLEMENT_TRACELOGGING_CLASS` singleton | `define_provider!` static + `register()`/`unregister()` | `OnceLock<ProviderState>` for version/channel, manual lifecycle |
-| **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | `PDT_PRODUCT_AND_SERVICE_USAGE` on all events |
+| **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | Generated `MXC_PRIVACY_TAG` constant — `0` (not telemetry-classified) by default; `PDT_PRODUCT_AND_SERVICE_USAGE` only when the build opts into telemetry via the group GUID. The field is always present so the event schema is stable across both modes |
 | **Activity tracking** | `DEFINE_TELEMETRY_ACTIVITY` | Manual `Opcode` | Not needed for current events |
 
 The remaining gap (activity tracking) is not needed for current events.
@@ -77,11 +77,16 @@ does not start a collection session, upload events, contact a network service,
 or create a background process. Events exist only when a local ETW consumer
 enables the provider.
 
-The provider is defined by the name `Microsoft.MXC`. Public/OSS builds omit
-`group_id(...)`; the optional `MXC_TELEMETRY_PROVIDER_GROUP_GUID` build setting
-is reserved for internal builds and is not set by normal development or release
-builds. Without that group routing metadata, events are ordinary local ETW
-events and are not directed to an upload pipeline by MXC.
+The provider is defined by the name `Microsoft.MXC`. A single build-time
+signal (`MXC_TELEMETRY_PROVIDER_GROUP_GUID`) drives whether these events stay
+local-only or opt into Microsoft telemetry routing, and it moves the event
+keyword/privacy-tag metadata in lockstep so a build can never end up
+telemetry-routed-but-untagged or tagged-but-not-routed — see
+[Private GUID Substitution](#private-guid-substitution-internal-builds)
+below. Public/OSS and normal development builds do not set it, so
+`group_id(...)` is omitted, `MXC_EVENT_KEYWORD` is a provider-local bit with
+no UTC meaning, and `MXC_PRIVACY_TAG` is `0`: events are ordinary local ETW
+and are not directed to an upload pipeline by MXC.
 
 The M-ETW scope is Windows `process_container` and `isolation_session`.
 Linux/macOS retain no-op telemetry stubs and are not requirement-behavior
@@ -113,7 +118,9 @@ targets for this work.
   attempt and its requested mode. `MXC.Execution` remains authoritative for
   whether the overall execution succeeded; no network-enforcement semantics are
   changed by this telemetry contract.
-- `MXC_TELEMETRY_PROVIDER_GROUP_GUID` is not set in public/OSS builds.
+- `MXC_TELEMETRY_PROVIDER_GROUP_GUID` is not set in public/OSS builds. When
+  unset, `MXC_EVENT_KEYWORD`/`MXC_PRIVACY_TAG` are the local-only values
+  (see [Private GUID Substitution](#private-guid-substitution-internal-builds)).
 - MXC does not call an uploader, start an ETW session, create a service, or
   create a long-lived process. A human or local diagnostic tool must
   explicitly enable a session such as WPR/WPA or `logman`.
@@ -636,7 +643,14 @@ that is where the real asymmetry lives.
 ## Private GUID Substitution (Internal Builds)
 
 MXC supports an optional Microsoft telemetry group GUID for internal builds.
-The mechanism is public; only the GUID value is private.
+The mechanism is public; only the GUID value is private. This single
+build-time signal is the **only** thing that decides whether
+`Microsoft.MXC` events are local-only ETW or Microsoft-telemetry-routed — it
+drives the provider's `group_id`, the event `keyword`, and the
+`PartA_PrivTags` value together, so a build can never end up
+telemetry-routed-but-untagged (which would break UTC ingestion/governance) or
+tagged-but-not-routed (which would mischaracterise local-only events as
+telemetry).
 
 ### How it works
 
@@ -646,10 +660,17 @@ build.rs execution flow
 
 1. Check MXC_TELEMETRY_PROVIDER_GROUP_GUID env var
    ├── NOT set → generate: define_provider!(MXC_PROVIDER, "Microsoft.MXC");
+   │             MXC_EVENT_KEYWORD = 0x1              (provider-local bit)
+   │             MXC_PRIVACY_TAG   = 0x0               (not telemetry-classified)
    └── SET → generate: define_provider!(MXC_PROVIDER, "Microsoft.MXC",
                             group_id("{guid}"));
+             MXC_EVENT_KEYWORD = MICROSOFT_KEYWORD_MEASURES
+             MXC_PRIVACY_TAG   = PDT_PRODUCT_AND_SERVICE_USAGE
 
-2. lib.rs includes the generated provider_def.rs via include!()
+2. lib.rs includes the generated provider_def.rs via include!() and
+   references MXC_EVENT_KEYWORD / MXC_PRIVACY_TAG from every write_event!
+   call site — the field list (including `PartA_PrivTags`) never changes
+   between modes, only the constant values do.
 ```
 
 The provider GUID is **not** specified in either branch. The `tracelogging`
@@ -661,29 +682,35 @@ name using the standard ETW name-hash algorithm (the same algorithm used by
 this way prevents drift and avoids hard-coding a literal that could collide
 with another team's GUID.
 
+The zero-value default (no group GUID → keyword `0x1`, privacy tag `0`)
+mirrors Microsoft's own public WSL repo, which defines these same telemetry
+constants as literal `0` for non-official builds.
+
 ### CI pipeline steps
 
 Internal Microsoft builds set `MXC_TELEMETRY_PROVIDER_GROUP_GUID` to the real
 Microsoft telemetry group GUID before `cargo build` on Windows, so events route
-through the telemetry pipeline. Community forks that lack access to the private
-GUID do not set this variable - the provider is registered without a group GUID
-(plain ETW only).
+through the telemetry pipeline **and** are correctly tagged with the Measures
+keyword and Product-and-Service-Usage privacy tag for it. Community forks
+that lack access to the private GUID do not set this variable — the provider
+is registered without a group GUID and events use the local-only keyword/tag
+values (plain ETW only).
 
 > **Follow-up:** The provider group GUID is now provided by a secret variable
 > on the official Windows build pipeline, so official builds can route events
 > through the telemetry pipeline. The build has always honored the variable
 > (see *Local developer testing* below); public builds and community forks,
 > which do not have access to the variable, continue to register the provider
-> without a group GUID (plain ETW only).
+> without a group GUID (plain ETW only, local-only keyword/tag values).
 
 ### Local developer testing
 
 ```powershell
-# Test with a dummy group GUID (not the real one)
+# Test with a dummy group GUID (not the real one) — telemetry-mode metadata
 $env:MXC_TELEMETRY_PROVIDER_GROUP_GUID = '00000000-1111-2222-3333-444444444444'
 cargo build -p mxc_telemetry
 
-# Test without (public build)
+# Test without (public build) — local-only metadata
 Remove-Item Env:\MXC_TELEMETRY_PROVIDER_GROUP_GUID
 cargo build -p mxc_telemetry
 ```

@@ -173,7 +173,7 @@ pub fn log_process_event(
 
     if emitted {
         #[cfg(test)]
-        test_sink::record_process(kind, identity, process_id);
+        test_sink::record_process(kind, identity, process_id, data);
     }
 }
 
@@ -295,7 +295,9 @@ pub fn log_config_rejected(
 /// `mxc_telemetry` call regardless.
 #[cfg(test)]
 pub(super) mod test_sink {
-    use super::{ExecutionEvent, FailureReason, ProcessEventKind, TelemetryContext};
+    use super::{
+        ExecutionEvent, FailureReason, ProcessEventData, ProcessEventKind, TelemetryContext,
+    };
     use std::cell::Cell;
     use std::sync::Mutex;
 
@@ -384,22 +386,42 @@ pub(super) mod test_sink {
         }
     }
 
-    pub(super) fn record_process(kind: ProcessEventKind, identity: &str, process_id: u32) {
+    pub(super) fn record_process(
+        kind: ProcessEventKind,
+        identity: &str,
+        process_id: u32,
+        data: ProcessEventData<'_>,
+    ) {
         let name = match kind {
             ProcessEventKind::Exited => "MXC.ProcessExited",
             ProcessEventKind::TimedOut => "MXC.ProcessTimedOut",
             ProcessEventKind::KillFailed => "MXC.ProcessKillFailed",
         };
+        let mut fields = vec![
+            ("identity".to_owned(), identity.to_owned()),
+            ("process_id".to_owned(), process_id.to_string()),
+        ];
+
+        // Add payload-specific fields
+        match data {
+            ProcessEventData::ExitCode(code) => {
+                fields.push(("exit_code".to_owned(), code.to_string()));
+            }
+            ProcessEventData::TimeoutMs(ms) => {
+                fields.push(("timeout_ms".to_owned(), ms.to_string()));
+            }
+            ProcessEventData::KillFailure(reason) => {
+                fields.push(("kill_method".to_owned(), reason.to_owned()));
+            }
+        }
+
         if INSTALLED.with(|f| f.get()) {
             REQUIREMENTS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(CapturedRequirement {
                     name: name.to_owned(),
-                    fields: vec![
-                        ("identity".to_owned(), identity.to_owned()),
-                        ("process_id".to_owned(), process_id.to_string()),
-                    ],
+                    fields,
                 });
         }
     }
@@ -498,22 +520,106 @@ mod tests {
         );
         let events = test_sink::take_requirements();
         test_sink::clear();
-        assert!(events.iter().any(|e| e.name == "MXC.ProcessExited"));
-        assert!(events.iter().any(|e| e.name == "MXC.ProcessTimedOut"));
-        assert!(events.iter().any(|e| e.name == "MXC.ProcessKillFailed"));
+
+        // Validate ProcessExited payload
+        let process_exited = events
+            .iter()
+            .find(|e| {
+                e.name == "MXC.ProcessExited"
+                    && e.fields
+                        .iter()
+                        .any(|(n, v)| n == "identity" && v == "opaque")
+            })
+            .expect("MXC.ProcessExited with opaque identity");
+        assert!(process_exited
+            .fields
+            .iter()
+            .any(|(n, v)| n == "identity" && v == "opaque"));
+        assert!(process_exited
+            .fields
+            .iter()
+            .any(|(n, v)| n == "process_id" && v == "42"));
+        assert!(
+            process_exited
+                .fields
+                .iter()
+                .any(|(n, v)| n == "exit_code" && v == "0"),
+            "ProcessExited must include exit_code field with value 0"
+        );
+
+        // Validate ProcessTimedOut payload
+        let process_timedout = events
+            .iter()
+            .find(|e| e.name == "MXC.ProcessTimedOut")
+            .expect("MXC.ProcessTimedOut");
+        assert!(process_timedout
+            .fields
+            .iter()
+            .any(|(n, v)| n == "identity" && v == "opaque"));
+        assert!(process_timedout
+            .fields
+            .iter()
+            .any(|(n, v)| n == "process_id" && v == "42"));
+        assert!(
+            process_timedout
+                .fields
+                .iter()
+                .any(|(n, v)| n == "timeout_ms" && v == "1000"),
+            "ProcessTimedOut must include timeout_ms field with value 1000"
+        );
+
+        // Validate ProcessKillFailed payload
+        let process_killfailed = events
+            .iter()
+            .find(|e| e.name == "MXC.ProcessKillFailed")
+            .expect("MXC.ProcessKillFailed");
+        assert!(process_killfailed
+            .fields
+            .iter()
+            .any(|(n, v)| n == "identity" && v == "opaque"));
+        assert!(process_killfailed
+            .fields
+            .iter()
+            .any(|(n, v)| n == "process_id" && v == "42"));
+        assert!(
+            process_killfailed
+                .fields
+                .iter()
+                .any(|(n, v)| n == "kill_method" && v == "terminate"),
+            "ProcessKillFailed must include kill_method field"
+        );
+
+        // Reject events with mismatched identity (this identity was paired with wrong payload type)
         assert!(!events.iter().any(|e| {
             e.name == "MXC.ProcessExited"
                 && e.fields
                     .iter()
                     .any(|(name, value)| name == "identity" && value == "mismatch")
         }));
+
+        // Validate EnforcementDegraded payload
         let enforcement = events
             .iter()
             .find(|e| e.name == "MXC.EnforcementDegraded")
             .expect("enforcement event");
         assert!(enforcement
             .fields
+            .iter()
+            .any(|(n, v)| n == "identity" && v == "opaque"));
+        assert!(enforcement.fields.iter().any(|(n, _)| n == "tier"));
+        assert!(enforcement
+            .fields
             .contains(&("needs_dacl_augmentation".to_owned(), "true".to_owned())));
+        assert!(enforcement
+            .fields
+            .iter()
+            .any(|(n, _)| n == "degradation_reasons"));
+        assert!(enforcement
+            .fields
+            .iter()
+            .any(|(n, _)| n == "effective_enforcement_level"));
+
+        // Validate PolicyHash payload
         let policy_hash = events
             .iter()
             .find(|e| e.name == "MXC.PolicyHash")
@@ -527,24 +633,62 @@ mod tests {
         assert!(policy_hash
             .fields
             .contains(&("config_schema_version".to_owned(), "0.8.0-alpha".to_owned())));
+
+        // Validate SandboxNetworkPolicyApplied payload
         let network = events
             .iter()
             .find(|e| e.name == "MXC.SandboxNetworkPolicyApplied")
             .expect("network event");
         assert!(network
             .fields
+            .iter()
+            .any(|(n, v)| n == "identity" && v == "opaque"));
+        assert!(network
+            .fields
+            .iter()
+            .any(|(n, v)| n == "enforcement_mode" && v == "proxy"));
+        assert!(network
+            .fields
+            .iter()
+            .any(|(n, v)| n == "default_policy" && v == "deny"));
+        assert!(network
+            .fields
             .contains(&("proxy_port".to_owned(), "8080".to_owned())));
+
+        // Validate SandboxTornDown payload
         let teardown = events
             .iter()
             .find(|e| e.name == "MXC.SandboxTornDown")
             .expect("teardown event");
         assert!(teardown
             .fields
+            .iter()
+            .any(|(n, v)| n == "identity" && v == "opaque"));
+        assert!(teardown
+            .fields
+            .iter()
+            .any(|(n, v)| n == "status" && v == "success"));
+        assert!(teardown
+            .fields
             .contains(&("released_resources".to_owned(), "released".to_owned())));
+
+        // Validate ConfigRejected payload
         let rejected = events
             .iter()
             .find(|e| e.name == "MXC.ConfigRejected")
             .expect("config rejection event");
+        assert!(rejected
+            .fields
+            .iter()
+            .any(|(n, v)| n == "correlation_id" && v == "corr"));
+        assert!(rejected
+            .fields
+            .iter()
+            .any(|(n, v)| n == "backend" && v == "process_container"));
+        assert!(rejected
+            .fields
+            .iter()
+            .any(|(n, v)| n == "reason" && v == "invalid"));
         assert!(rejected.fields.contains(&(
             "offending_field".to_owned(),
             "process.commandLine".to_owned()
