@@ -47,20 +47,35 @@ blocked.
 
 ### Model 2: proxy-only egress (recommended)
 
+#### Identity-scoped proxy (recommended)
+
 | Item | Requirement |
 |---|---|
 | Client capability | MXC adds `privateNetworkClientServer` for contained-peer proxy mode |
 | Proxy capabilities | `privateNetworkClientServer`; also `internetClient` for external destinations |
-| Peer | Packaged app family or unpackaged AppContainer profile; omit for an unpackaged non-AppContainer proxy |
+| Peer | Package family name for a packaged app or AppContainer profile name for an unpackaged AppContainer |
 | Enforcement | Per-container WinHTTP proxy plus scoped loopback; all direct egress remains blocked |
 
 When `runtimeConfig.networkProxy` is set, MXC adds `privateNetworkClientServer`
-unless `ingress.hostLoopback` is `"allow"`.
+for this path.
 
 MXC does not add capabilities to the proxy. The proxy developer must declare `privateNetworkClientServer` for an
 AppContainer proxy and `internetClient` when the proxy connects to external destinations.
 
-#### Contained AppContainer proxy (recommended)
+AppContainer isolation is recommended for both packaged and unpackaged proxies.
+
+#### Unpackaged non-AppContainer proxy
+
+| Item | Requirement |
+|---|---|
+| Client capability | MXC does not add `privateNetworkClientServer` |
+| Peer | Omit `processContainer.network.allowedProxyPeer` |
+| Network policy | Set `ingress.hostLoopback` to `"allow"` |
+| Enforcement | No proxy-peer identity scoping; direct internet egress remains blocked |
+
+This weaker path is intended primarily for debugging and development.
+
+#### Identity-scoped proxy configuration
 
 ```jsonc
 {
@@ -147,13 +162,14 @@ the strongest usable process-creation contract through runtime probing.
 
 | Current schema 0.8 selection | Downlevel (Windows 23H2) |
 |---|---|
-| Prefer PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support probe succeed. Fall back temporarily to SBOX (`CreateProcessInSandbox`) when PSEC is unavailable, then to AppContainer when neither BaseContainer contract is usable. | Neither PSEC nor SBOX (`CreateProcessInSandbox`) is available, so MXC uses the AppContainer fallback.<br><br>Until downlevel WFP support is implemented, model 1 provides coarse egress and ingress allow/deny postures only. Model 2 provides cooperative proxy routing through environment variables without proxy-only enforcement. |
+| Prefer PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support probe succeed. Fall back temporarily to SBOX (`CreateProcessInSandbox`) when PSEC is unavailable, then to AppContainer when neither BaseContainer contract is usable. | Neither PSEC nor SBOX (`CreateProcessInSandbox`) is available, so MXC uses the AppContainer fallback.<br><br>Until downlevel WFP support is implemented, model 1 provides coarse egress and ingress allow/deny postures only. Proxy-configured requests receive cooperative routing through environment variables; this compatibility behavior is not model 2 enforcement. |
 
 ### 2.1 Fail loud on version skew: never silently downgrade
 
 PSEC and SBOX support varies between Windows builds as the network-policy
 surface grows. Runtime probing selects the contract, but MXC must not silently
-weaken the requested policy.
+weaken the requested policy. The documented downlevel cooperative proxy path
+is the explicit compatibility exception and is not model 2 enforcement.
 
 - Follow the PSEC, SBOX, and AppContainer fallback order only when the next path
   can preserve the requested semantics.
