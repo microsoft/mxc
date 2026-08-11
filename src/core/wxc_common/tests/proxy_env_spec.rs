@@ -835,3 +835,62 @@ fn a_prefix_that_is_not_a_scheme_does_not_invent_a_credential() {
         );
     }
 }
+
+// `url::Url::parse` follows WHATWG and ignores leading and trailing C0
+// controls and spaces, and strips tab, newline, and carriage return from
+// anywhere in the value -- but `ProxyAddress::from_url` stores the string it
+// was given. A guard that reads the raw bytes therefore judges a different
+// URL from the one the rest of the system acts on.
+#[test]
+fn whitespace_around_a_credentialed_url_does_not_hide_it() {
+    for (name, url) in [
+        (
+            "leading space",
+            " http://alice:hunter2@proxy.example.com:3128",
+        ),
+        (
+            "leading tab",
+            "\thttp://alice:hunter2@proxy.example.com:3128",
+        ),
+        (
+            "leading newline",
+            "\nhttp://alice:hunter2@proxy.example.com:3128",
+        ),
+        (
+            "leading crlf",
+            "\r\nhttp://alice:hunter2@proxy.example.com:3128",
+        ),
+        (
+            "trailing space",
+            "http://alice:hunter2@proxy.example.com:3128 ",
+        ),
+        (
+            "interior tab",
+            "ht\ttp://alice:hunter2@proxy.example.com:3128",
+        ),
+    ] {
+        assert!(
+            proxy_url_has_credentials(url),
+            "{name}: the credential is still there once the parser is done with it"
+        );
+        assert!(
+            !redact_proxy_url(url).contains("hunter2"),
+            "{name}: redaction left the password in place"
+        );
+    }
+}
+
+// Whitespace must not invent a credential either.
+#[test]
+fn whitespace_around_a_clean_url_stays_clean() {
+    for url in [
+        " http://proxy.example.com:3128",
+        "http://proxy.example.com:3128\n",
+        "\tproxy.example.com:8080",
+    ] {
+        assert!(
+            !proxy_url_has_credentials(url),
+            "{url:?} names no user and no password"
+        );
+    }
+}

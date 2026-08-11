@@ -30,6 +30,7 @@
 //! platform-agnostic and unit-testable on every host.
 
 use crate::models::ProxyConfig;
+use std::borrow::Cow;
 
 /// Proxy-related env var keys that are *scrubbed* from caller-supplied env so
 /// a sandboxed process cannot override or disable the cooperative proxy.
@@ -94,14 +95,46 @@ pub fn is_managed_proxy_key(key: &str) -> bool {
 /// redacted on the failure path, where it may not be a well-formed absolute
 /// URL. `scheme:opaque` is redacted too, since `url::Url::parse` accepts it and
 /// the resulting error message would otherwise carry the password.
+///
+/// When the value carries a credential the *normalized* form is returned, not
+/// the original, so the whitespace a URL parser ignores cannot be used to smuggle
+/// the secret through the redaction. When it carries none the input is returned
+/// untouched.
 pub fn redact_proxy_url(url: &str) -> String {
-    let parts = split_proxy_authority(url);
+    let normalized = normalize_as_the_url_parser_does(url);
+    let parts = split_proxy_authority(&normalized);
     match credential_userinfo(parts.authority) {
         Some((_userinfo, host)) => format!(
             "{}{}***@{}{}",
             parts.scheme, parts.separator, host, parts.tail
         ),
         None => url.to_string(),
+    }
+}
+
+/// Drop the characters `url::Url::parse` ignores, so this module judges the
+/// same URL the rest of the system acts on.
+///
+/// WHATWG strips leading and trailing C0 controls and spaces, and removes tab,
+/// newline, and carriage return from anywhere in the input. `ProxyAddress::from_url`
+/// stores the string it was given and `to_url` returns it verbatim, so without
+/// this the guard read one URL while `lxc-attach` received another:
+/// `" http://alice:hunter2@host"` has no recognizable scheme once the leading
+/// space is counted, so the authority stopped at the first `/` of `//` and the
+/// `@` after it was never seen. The guard reported no credentials and redaction
+/// returned the password verbatim.
+fn normalize_as_the_url_parser_does(url: &str) -> Cow<'_, str> {
+    let is_trimmed = |c: char| c <= ' ';
+    if url.contains(['\t', '\n', '\r']) {
+        Cow::Owned(
+            url.chars()
+                .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+                .collect::<String>()
+                .trim_matches(is_trimmed)
+                .to_string(),
+        )
+    } else {
+        Cow::Borrowed(url.trim_matches(is_trimmed))
     }
 }
 
@@ -228,7 +261,8 @@ fn credential_userinfo(authority: &str) -> Option<(&str, &str)> {
 /// and returns the input unchanged when the userinfo is already the literal
 /// redaction marker, which would report a credential-bearing URL as clean.
 pub fn proxy_url_has_credentials(url: &str) -> bool {
-    credential_userinfo(split_proxy_authority(url).authority).is_some()
+    let normalized = normalize_as_the_url_parser_does(url);
+    credential_userinfo(split_proxy_authority(&normalized).authority).is_some()
 }
 
 /// Build the effective environment for a sandbox whose egress is routed
