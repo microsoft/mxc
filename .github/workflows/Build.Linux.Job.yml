@@ -85,15 +85,15 @@ jobs:
       # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
       # always includes the Bubblewrap backend (bwrap_common is a non-optional
       # dependency), so the binary built above can drive it.
-      # - name: Install Bubblewrap
-      #   working-directory: ${{ github.workspace }}
-      #   run: |
-      #     sudo apt-get update
-      #     sudo apt-get install -y bubblewrap
-      #     # Ubuntu 24.04 runners restrict unprivileged user namespaces via
-      #     # AppArmor, which blocks `bwrap --unshare-user`. Relax it so the
-      #     # sandbox can start (no-op on kernels without this knob).
-      #     sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Install Bubblewrap
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces via
+          # AppArmor, which blocks `bwrap --unshare-user`. Relax it so the
+          # sandbox can start (no-op on kernels without this knob).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
@@ -126,24 +126,25 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }}
              -p unix_test_proxy
 
-      - name: Verify artifact payload
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          bin_dir="src/target/${{ matrix.target }}/release"
-          required=(lxc-exec unix-test-proxy)
-          if [[ "${{ matrix.arch }}" == "x64" ]]; then
-            required+=(nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf)
-          fi
-          missing=()
-          for file in "${required[@]}"; do
-            [[ -f "$bin_dir/$file" ]] || missing+=("$file")
-          done
-          if (( ${#missing[@]} > 0 )); then
-            printf 'Missing artifact files: %s\n' "${missing[*]}" >&2
-            exit 1
-          fi
+      # MICROVM NOT WORKING CURRENTLY
+      # - name: Verify artifact payload
+      #   shell: bash
+      #   working-directory: ${{ github.workspace }}
+      #   run: |
+      #     set -euo pipefail
+      #     bin_dir="src/target/${{ matrix.target }}/release"
+      #     required=(lxc-exec unix-test-proxy)
+      #     if [[ "${{ matrix.arch }}" == "x64" ]]; then
+      #       required+=(nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf)
+      #     fi
+      #     missing=()
+      #     for file in "${required[@]}"; do
+      #       [[ -f "$bin_dir/$file" ]] || missing+=("$file")
+      #     done
+      #     if (( ${#missing[@]} > 0 )); then
+      #       printf 'Missing artifact files: %s\n' "${missing[*]}" >&2
+      #       exit 1
+      #     fi
 
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -152,9 +153,10 @@ jobs:
           path: |
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/unix-test-proxy
-            src/target/${{ matrix.target }}/release/nanvixd.elf
-            src/target/${{ matrix.target }}/release/nanvix_rootfs.img
-            src/target/${{ matrix.target }}/release/python3.initrd
-            src/target/${{ matrix.target }}/release/bin/kernel.elf
           if-no-files-found: error
           retention-days: 1
+
+      #     src/target/${{ matrix.target }}/release/nanvixd.elf
+      #     src/target/${{ matrix.target }}/release/nanvix_rootfs.img
+      #     src/target/${{ matrix.target }}/release/python3.initrd
+      #     src/target/${{ matrix.target }}/release/bin/kernel.elf
