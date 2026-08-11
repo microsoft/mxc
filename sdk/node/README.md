@@ -445,10 +445,12 @@ emission (never a Windows-level setting like Diagnostics & feedback). See
 for the full design.
 
 Telemetry is additionally off per invocation unless a one-shot
-`ContainerConfig` includes `telemetry: { enabled: true }`, or a state-aware
-call passes `options.telemetry: { enabled: true }`. This stable switch does not
-require `options.experimental` and cannot bypass consent or administrative
-policy.
+`ContainerConfig` includes `telemetry: { enabled: true }`, a one-shot call
+passes `options.telemetry: { enabled: true }`, or a state-aware call passes the
+same option. For `spawnSandboxFromConfig`, an explicitly supplied option
+overrides `config.telemetry`; omitting it preserves the config value. This
+stable switch does not require `options.experimental` and cannot bypass consent
+or administrative policy.
 
 The SDK does not ship a consent UI. It invokes your presenter with the exact
 Rust-owned canonical resource over a private, session-bound child protocol.

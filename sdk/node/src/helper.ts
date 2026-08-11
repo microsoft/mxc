@@ -284,7 +284,10 @@ export function resolveExecutableAndArgs(
     );
   }
 
-  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(config), options);
+  const executionConfig = options.telemetry === undefined
+    ? config
+    : { ...config, telemetry: options.telemetry };
+  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(executionConfig), options);
   if (usesBuiltinTestServer) {
     resolved.args.push('--allow-testing-features');
   }

@@ -407,9 +407,11 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
-   * State-aware lifecycle only: stable per-invocation telemetry configuration.
-   * Telemetry remains off unless `enabled` is explicitly `true`, persisted user
-   * consent is granted, and administrative policy permits collection.
+   * Stable per-invocation telemetry configuration for one-shot and state-aware
+   * calls. On one-shot calls this overrides `ContainerConfig.telemetry` when
+   * provided. Telemetry remains off unless `enabled` is explicitly `true`,
+   * persisted user consent is granted, and administrative policy permits
+   * collection.
    */
   telemetry?: TelemetryConfig;
 
