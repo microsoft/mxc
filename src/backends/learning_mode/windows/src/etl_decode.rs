@@ -28,7 +28,9 @@ use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use learning_mode_core::{AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource};
+use learning_mode_core::{
+    AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, ProcessLifetime,
+};
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, OpenTraceW, ProcessTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW,
@@ -63,6 +65,7 @@ type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> 
 /// during a `ProcessTrace` pass.
 struct Accumulator<'visitor> {
     mode: CollectionMode,
+    process_lifetimes: Option<&'visitor [ProcessLifetime]>,
     denials: Vec<DeniedResource>,
     seen: HashSet<(String, learning_mode_core::AccessType)>,
     truncated: bool,
@@ -80,6 +83,7 @@ impl<'visitor> Accumulator<'visitor> {
     fn analyze() -> Self {
         Self {
             mode: CollectionMode::Analyze,
+            process_lifetimes: None,
             denials: Vec::new(),
             seen: HashSet::new(),
             truncated: false,
@@ -94,9 +98,17 @@ impl<'visitor> Accumulator<'visitor> {
         }
     }
 
+    fn analyze_for_process_lifetimes(process_lifetimes: &'visitor [ProcessLifetime]) -> Self {
+        Self {
+            process_lifetimes: Some(process_lifetimes),
+            ..Self::analyze()
+        }
+    }
+
     fn raw(visitor: &'visitor mut RawEventVisitor<'visitor>) -> Self {
         Self {
             mode: CollectionMode::Raw,
+            process_lifetimes: None,
             denials: Vec::new(),
             seen: HashSet::new(),
             truncated: false,
@@ -112,6 +124,13 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     fn add_raw_denial(&mut self, raw: RawDenial) {
+        if self.process_lifetimes.is_some_and(|lifetimes| {
+            !lifetimes
+                .iter()
+                .any(|lifetime| lifetime.contains(raw.pid, raw.filetime))
+        }) {
+            return;
+        }
         let resource = if raw.resource_type == learning_mode_core::ResourceType::File {
             match path_norm::to_user_visible(&raw.object_name) {
                 Some(resource) if path_norm::is_user_visible_absolute(&resource) => resource,
@@ -203,6 +222,27 @@ impl<'visitor> Accumulator<'visitor> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EtlDenialAnalyzer;
 
+impl EtlDenialAnalyzer {
+    /// Analyzes only events belonging to the supplied process lifetimes.
+    ///
+    /// This is the mandatory decode path for host-wide WPR fallback traces.
+    /// An empty lifetime set intentionally yields an empty analysis rather than
+    /// exposing unscoped host events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnalyzeError`] if the trace cannot be opened or decoded.
+    pub fn analyze_for_process_lifetimes(
+        &self,
+        source_path: &Path,
+        process_lifetimes: &[ProcessLifetime],
+    ) -> Result<AnalysisResult, AnalyzeError> {
+        let mut accumulator = Accumulator::analyze_for_process_lifetimes(process_lifetimes);
+        process_trace_file(source_path, &mut accumulator)?;
+        accumulator.into_analysis()
+    }
+}
+
 impl DenialAnalyzer for EtlDenialAnalyzer {
     fn analyze(&self, source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
         let mut accumulator = Accumulator::analyze();
@@ -219,6 +259,14 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
 /// provider manifests registered on the machine).
 #[cfg(test)]
 fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
+    resources_from_events_for_process_lifetimes(events, None)
+}
+
+#[cfg(test)]
+fn resources_from_events_for_process_lifetimes(
+    events: &[CollectedEvent],
+    process_lifetimes: Option<&[ProcessLifetime]>,
+) -> AnalysisResult {
     let mut raws = Vec::new();
     for event in events {
         if let Some(raw) = extract_denial(&event.parts, event.pid, event.filetime) {
@@ -230,7 +278,19 @@ fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
             event.filetime,
         ));
     }
-    dedup_to_resources(raws)
+    let mut accumulator = match process_lifetimes {
+        Some(lifetimes) => Accumulator::analyze_for_process_lifetimes(lifetimes),
+        None => Accumulator::analyze(),
+    };
+    for raw in raws {
+        accumulator.add_raw_denial(raw);
+        if accumulator.stop_requested {
+            break;
+        }
+    }
+    accumulator
+        .into_analysis()
+        .expect("pure denial accumulation cannot decode-fail")
 }
 
 /// Streams every decoded event in the ETL to `visitor` for schema discovery
@@ -837,6 +897,80 @@ mod tests {
             kernel_event(28, 0, 3, &[("ProcessId", "0x20"), ("Denied", "true")]),
         ];
         assert!(resources_from_events(&events).denials.is_empty());
+    }
+
+    #[test]
+    fn process_lifetimes_filter_unrelated_events_and_pid_reuse() {
+        let events = vec![
+            kernel_event(
+                14,
+                42,
+                99,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\before.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                42,
+                150,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\owned.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                43,
+                150,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\unrelated.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                42,
+                201,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\reused-pid.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+        ];
+        let lifetimes = [ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }];
+
+        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&lifetimes));
+
+        assert_eq!(analysis.denials.len(), 1);
+        assert_eq!(analysis.denials[0].resource, r"C:\owned.txt");
+    }
+
+    #[test]
+    fn empty_process_lifetimes_fail_closed() {
+        let events = vec![kernel_event(
+            14,
+            42,
+            150,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", "\"C:\\host.txt\""),
+                ("AccessMask", "0x1"),
+            ],
+        )];
+
+        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&[]));
+
+        assert!(analysis.denials.is_empty());
     }
 
     /// Non-actionable object types and not-denied capability records are

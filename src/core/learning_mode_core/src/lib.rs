@@ -36,7 +36,7 @@ pub mod emit;
 pub mod model;
 pub mod summary;
 
-pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer};
+pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer, ProcessLifetime};
 pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
 pub use summary::DenialSummary;

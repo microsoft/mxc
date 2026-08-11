@@ -28,6 +28,8 @@
 
 use thiserror::Error;
 
+pub mod guarded_wpr_protocol;
+
 #[cfg(target_os = "windows")]
 mod ffi;
 #[cfg(target_os = "windows")]

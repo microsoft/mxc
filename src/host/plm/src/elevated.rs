@@ -20,6 +20,8 @@ use std::path::Path;
 use std::sync::atomic::AtomicIsize;
 use std::time::{Duration, Instant};
 
+use learning_mode_core::{AnalysisResult, ProcessLifetime};
+use learning_mode_windows::EtlDenialAnalyzer;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_BROKEN_PIPE, ERROR_CANCELLED, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
@@ -44,7 +46,8 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 use crate::elevated_protocol::{
-    read_header, write_header, ResponseKind, HEADER_LEN, MAX_ERROR_BYTES, MAX_TRACE_BYTES,
+    read_header, read_process_lifetimes, write_header, write_process_lifetimes, ResponseKind,
+    HEADER_LEN, MAX_ANALYSIS_BYTES, MAX_ERROR_BYTES, MAX_TRACE_BYTES,
 };
 use crate::secure_scratch::{ProfileGuard, RecoveryMarker, SecureScratch};
 
@@ -55,11 +58,13 @@ const TRANSFER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SW_HIDE: i32 = 0;
 const HANDSHAKE_READY: u8 = 0xa5;
 const CONTROL_STOP: u8 = 1;
+const CONTROL_STOP_AND_ANALYZE: u8 = 2;
 static GUARDIAN_SINGLETON: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuardControl {
     Stop,
+    StopAndAnalyze,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +77,7 @@ enum PipeState {
 fn parse_guard_control(value: u8) -> Result<GuardControl> {
     match value {
         CONTROL_STOP => Ok(GuardControl::Stop),
+        CONTROL_STOP_AND_ANALYZE => Ok(GuardControl::StopAndAnalyze),
         _ => anyhow::bail!("invalid guarded PLM control message {value}"),
     }
 }
@@ -280,7 +286,12 @@ impl GuardedOwner {
             match pipe.read(&mut control) {
                 Ok(1) => match parse_guard_control(control[0]) {
                     Ok(GuardControl::Stop) => {
-                        return run_guarded_stop(pipe, self);
+                        return run_guarded_stop(pipe, self, None);
+                    }
+                    Ok(GuardControl::StopAndAnalyze) => {
+                        let lifetimes = read_process_lifetimes(pipe)
+                            .context("failed to receive guarded WPR process-lifetime scope")?;
+                        return run_guarded_stop(pipe, self, Some(&lifetimes));
                     }
                     Err(error) => {
                         self.preserve_after_pipe_break();
@@ -431,6 +442,46 @@ impl GuardedSession {
             );
             result?;
             wait_result
+        } else {
+            self.pipe = Some(pipe);
+            result
+        }
+    }
+
+    pub fn stop_analyzed(
+        &mut self,
+        process_lifetimes: &[ProcessLifetime],
+    ) -> Result<AnalysisResult> {
+        if self.disarmed {
+            anyhow::bail!("guarded PLM session is already stopped");
+        }
+        let mut pipe = self
+            .pipe
+            .take()
+            .context("guarded PLM control connection is already closed")?;
+        pipe.write_all(&[CONTROL_STOP_AND_ANALYZE])
+            .context("failed to send guarded PLM analyzed STOP")?;
+        write_process_lifetimes(&mut pipe, process_lifetimes)
+            .context("failed to send guarded WPR process-lifetime scope")?;
+        pipe.flush()
+            .context("failed to flush guarded PLM analyzed STOP")?;
+
+        let stopped = std::cell::Cell::new(false);
+        let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
+        let result = read_analysis_response(&mut pipe, self.process.0, deadline, || {
+            stopped.set(true);
+            Ok(())
+        });
+        if stopped.get() {
+            self.disarmed = true;
+            drop(pipe);
+            let wait_result = wait_for_child_exit(
+                self.process.0,
+                deadline.saturating_duration_since(Instant::now()),
+            );
+            let analysis = result?;
+            wait_result?;
+            Ok(analysis)
         } else {
             self.pipe = Some(pipe);
             result
@@ -690,8 +741,12 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
     }
 }
 
-fn run_guarded_stop(pipe: &mut std::fs::File, owner: &mut GuardedOwner) -> Result<()> {
-    let result = run_guarded_stop_with_stopped(pipe, owner);
+fn run_guarded_stop(
+    pipe: &mut std::fs::File,
+    owner: &mut GuardedOwner,
+    process_lifetimes: Option<&[ProcessLifetime]>,
+) -> Result<()> {
+    let result = run_guarded_stop_with_stopped(pipe, owner, process_lifetimes);
     if let Err(error) = result {
         owner.preserve_after_start_error();
         write_error_response(pipe, &error)?;
@@ -700,7 +755,11 @@ fn run_guarded_stop(pipe: &mut std::fs::File, owner: &mut GuardedOwner) -> Resul
     Ok(())
 }
 
-fn run_guarded_stop_with_stopped(pipe: &mut std::fs::File, owner: &mut GuardedOwner) -> Result<()> {
+fn run_guarded_stop_with_stopped(
+    pipe: &mut std::fs::File,
+    owner: &mut GuardedOwner,
+    process_lifetimes: Option<&[ProcessLifetime]>,
+) -> Result<()> {
     crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
     let scratch = SecureScratch::new()?;
     run_monitored_wpr_stop(pipe, owner, scratch.trace_path())?;
@@ -708,7 +767,11 @@ fn run_guarded_stop_with_stopped(pipe: &mut std::fs::File, owner: &mut GuardedOw
     write_header(pipe, ResponseKind::Stopped, 0)
         .and_then(|_| pipe.flush())
         .context("failed to return elevated PLM WPR-stopped milestone")?;
-    write_trace_response(pipe, &scratch)
+    if let Some(lifetimes) = process_lifetimes {
+        write_analysis_response(pipe, &scratch, lifetimes)
+    } else {
+        write_trace_response(pipe, &scratch)
+    }
 }
 
 fn run_monitored_wpr_stop(
@@ -777,9 +840,31 @@ fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Re
             MAX_TRACE_BYTES
         );
     }
+
     write_header(pipe, ResponseKind::Trace, len)?;
     copy_exact_len(&mut trace_file, pipe, len)?;
     pipe.flush().context("failed to flush elevated PLM trace")
+}
+
+fn write_analysis_response(
+    pipe: &mut std::fs::File,
+    scratch: &SecureScratch,
+    process_lifetimes: &[ProcessLifetime],
+) -> Result<()> {
+    let analysis = EtlDenialAnalyzer
+        .analyze_for_process_lifetimes(scratch.trace_path(), process_lifetimes)
+        .context("failed to decode guarded WPR trace for the sandbox process tree")?;
+    let payload =
+        serde_json::to_vec(&analysis).context("failed to serialize guarded WPR analysis")?;
+    let len = payload.len() as u64;
+    if len > MAX_ANALYSIS_BYTES {
+        anyhow::bail!(
+            "guarded WPR analysis is {len} bytes, exceeding the {MAX_ANALYSIS_BYTES} byte limit"
+        );
+    }
+    write_header(pipe, ResponseKind::Analysis, len)?;
+    pipe.write_all(&payload)?;
+    pipe.flush().context("failed to flush guarded WPR analysis")
 }
 
 fn copy_exact_len(reader: &mut impl Read, writer: &mut impl Write, len: u64) -> Result<()> {
@@ -966,6 +1051,9 @@ fn read_response(
             anyhow::bail!("elevated stop returned ETL before the WPR-stopped milestone")
         }
         ResponseKind::Trace => anyhow::bail!("unexpected ETL payload for elevated {operation:?}"),
+        ResponseKind::Analysis => {
+            anyhow::bail!("unexpected filtered-analysis payload for elevated {operation:?}")
+        }
         ResponseKind::Error => {
             let mut message = vec![0u8; header.payload_len as usize];
             read_exact_polling(pipe, &mut message, process, deadline)?;
@@ -973,6 +1061,45 @@ fn read_response(
                 "elevated PLM {operation:?} failed: {}",
                 String::from_utf8_lossy(&message)
             )
+        }
+        ResponseKind::Stopped => unreachable!("duplicate stopped milestone handled above"),
+    }
+}
+
+fn read_analysis_response(
+    pipe: &mut std::fs::File,
+    process: HANDLE,
+    deadline: Instant,
+    on_stopped: impl FnOnce() -> Result<()>,
+) -> Result<AnalysisResult> {
+    let first_header = read_header_polling(pipe, process, deadline)?;
+    let (header, stopped) =
+        accept_response_headers(first_header, Operation::Stop, on_stopped, || {
+            read_header_polling(pipe, process, deadline)
+        })?;
+    match header.kind {
+        ResponseKind::Analysis if stopped => {
+            let mut payload = vec![0u8; header.payload_len as usize];
+            read_exact_polling(pipe, &mut payload, process, deadline)?;
+            serde_json::from_slice(&payload)
+                .context("elevated guarded WPR returned invalid filtered analysis")
+        }
+        ResponseKind::Analysis => {
+            anyhow::bail!("elevated stop returned analysis before the WPR-stopped milestone")
+        }
+        ResponseKind::Error => {
+            let mut message = vec![0u8; header.payload_len as usize];
+            read_exact_polling(pipe, &mut message, process, deadline)?;
+            anyhow::bail!(
+                "elevated guarded WPR analysis failed: {}",
+                String::from_utf8_lossy(&message)
+            )
+        }
+        ResponseKind::Trace => {
+            anyhow::bail!("elevated guarded WPR analysis returned a raw ETL payload")
+        }
+        ResponseKind::Success => {
+            anyhow::bail!("elevated guarded WPR analysis returned no payload")
         }
         ResponseKind::Stopped => unreachable!("duplicate stopped milestone handled above"),
     }
@@ -1478,12 +1605,16 @@ mod tests {
     }
 
     #[test]
-    fn control_protocol_accepts_only_stop() {
+    fn control_protocol_accepts_only_supported_stop_modes() {
         assert_eq!(
             parse_guard_control(CONTROL_STOP).unwrap(),
             GuardControl::Stop
         );
-        for invalid in [0, 2, u8::MAX] {
+        assert_eq!(
+            parse_guard_control(CONTROL_STOP_AND_ANALYZE).unwrap(),
+            GuardControl::StopAndAnalyze
+        );
+        for invalid in [0, 3, u8::MAX] {
             assert!(parse_guard_control(invalid).is_err());
         }
     }
