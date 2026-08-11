@@ -180,16 +180,25 @@ function Initialize-WslcHost {
     Assert-RequiredFeature -Name 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform' `
         -Remedy 'WSL2 must be baked into the runner image; enabling these features requires a host reboot this job cannot take.'
 
-    # The optional features can be enabled while the WSL runtime package itself
-    # is absent. Installing that package needs no reboot once the features are
-    # on, so it is safe to do mid-job.
-    if ((Invoke-Wsl @('--version')) -ne 0) {
-        Write-Host 'WSL runtime not installed; installing (features are already enabled, so no reboot is needed)...'
-        if ((Invoke-Wsl @('--install', '--no-distribution')) -ne 0) {
-            Exit-WithError 'wsl --install failed; the WSL2 runtime could not be installed on this runner.'
+    # The optional features can be enabled while the modern (Store/MSIX) WSL
+    # runtime is absent — the image may still carry only the legacy inbox
+    # wsl.exe. `wsl --version` exists only on the modern runtime, so it doubles
+    # as the presence probe. Installing needs no reboot once the features are on.
+    #
+    # Probe quietly: the legacy wsl.exe answers an unknown switch with its full
+    # usage text, which would bury the real progress messages below.
+    if ((Invoke-Wsl @('--version') -Quiet) -ne 0) {
+        Write-Host 'Modern WSL runtime absent; installing via wsl --update (features are already enabled, so no reboot is needed)...'
+
+        # --web-download avoids the Microsoft Store, which CI images generally
+        # cannot use. Older wsl.exe builds reject the flag, so retry without it.
+        if ((Invoke-Wsl @('--update', '--web-download') -Quiet) -ne 0 -and
+            (Invoke-Wsl @('--update')) -ne 0) {
+            Exit-WithError 'wsl --update failed; the WSL2 runtime could not be installed on this runner.'
         }
+
         if ((Invoke-Wsl @('--version')) -ne 0) {
-            Exit-WithError 'wsl --version still fails after install; the WSL2 runtime is not usable on this runner.'
+            Exit-WithError 'wsl --version still fails after wsl --update; the WSL2 runtime is not usable on this runner.'
         }
     }
 
@@ -199,15 +208,22 @@ function Initialize-WslcHost {
 }
 
 # wsl.exe emits UTF-16LE, which the default console encoding renders as
-# null-separated garbage. Returns the exit code.
+# null-separated garbage. Returns the exit code. -Quiet suppresses output for
+# probes, where the legacy wsl.exe dumps its whole usage text on an unknown
+# switch.
 function Invoke-Wsl {
-    param([Parameter(Mandatory)][string[]]$Arguments)
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [switch]$Quiet
+    )
 
     $previousEncoding = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-        & wsl.exe @Arguments 2>&1 | Write-Host
-        return $LASTEXITCODE
+        $output = & wsl.exe @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        if (-not $Quiet) { $output | Write-Host }
+        return $exitCode
     } catch {
         Write-Host "WARNING: wsl.exe $($Arguments -join ' ') could not be run: $($_.Exception.Message)"
         return 1
