@@ -139,7 +139,7 @@ wxc-exec.exe --telemetry-consent-status
 ```
 
 ```json
-{"action":"status","result":"status","storedState":"granted","effectiveState":"denied","reason":"policy-blocked","policy":"blocked","needsPrompt":false,"prompt":null,"challenge":null}
+{"action":"status","result":"status","storedState":"granted","effectiveState":"granted","reason":null,"policy":"blocked","needsPrompt":false,"prompt":null,"challenge":null}
 ```
 
 The `policy` field is one of `unrestricted`, `allowed`, `blocked`, or
