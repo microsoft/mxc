@@ -229,7 +229,7 @@ wxc-exec.exe --audit policy.json
 
 ## Telemetry
 
-MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`Execution` and `Error`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
+MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
 Telemetry requires:
 1. Top-level `"telemetry": { "enabled": true }` in the JSON config
@@ -273,15 +273,16 @@ consent is not applicable.
 
 #### What official builds send
 
-Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `Execution` and `Error` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
+Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution` and `MXC.Error` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
 
 No PII is collected. Events contain only execution metrics (duration, backend
 type, exit code) and a bounded error category (`error_type`). Free-form error
 message text is never emitted, so paths, usernames, and credentials cannot
-leak through telemetry. The SDKs expose consent status and grant/revoke
-operations but do not render a consent dialog; applications built with the SDK
-are responsible for providing appropriate telemetry notices and consent
-controls to their users.
+leak through telemetry. The SDKs expose presenter-bound consent requests,
+typed consent status, and explicit withdrawal. SDK hosts render the canonical
+MXC consent resource through their native UI and return the user's decision;
+MXC owns persistence. See the normative
+[SDK presenter requirements](docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
 
 Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.
 

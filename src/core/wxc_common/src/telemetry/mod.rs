@@ -330,11 +330,9 @@ pub fn emit_sdk_completion(
     response: &ScriptResponse,
     elapsed: Duration,
 ) {
-    if !invocation_can_emit(active) {
-        return;
-    }
-    emit_completion_event(active, containment, response, elapsed);
-    shutdown();
+    emit_sdk_with_release(active, || {
+        emit_completion_event(active, containment, response, elapsed)
+    });
 }
 
 /// Emit failure telemetry for an early-exit path that terminates **before** a
@@ -390,10 +388,18 @@ fn emit_early_exit_event(active: bool, containment: &ContainmentBackend, reason:
 
 /// Emit an SDK spawn failure without claiming the executable-wide terminal slot.
 pub fn emit_sdk_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
-    if !invocation_can_emit(active) {
+    emit_sdk_with_release(active, || {
+        emit_early_exit_event(active, containment, reason)
+    });
+}
+
+fn emit_sdk_with_release(active: bool, emit: impl FnOnce()) {
+    if !active {
         return;
     }
-    emit_early_exit_event(active, containment, reason);
+    if invocation_can_emit(active) {
+        emit();
+    }
     shutdown();
 }
 
@@ -773,11 +779,9 @@ pub fn emit_sdk_state_aware(
     outcome: &Result<DispatchOutcome, MxcError>,
     elapsed: Duration,
 ) {
-    if !invocation_can_emit(active) {
-        return;
-    }
-    emit_state_aware_event(active, ctx, outcome, elapsed);
-    shutdown();
+    emit_sdk_with_release(active, || {
+        emit_state_aware_event(active, ctx, outcome, elapsed)
+    });
 }
 
 #[cfg(test)]
@@ -1498,6 +1502,22 @@ mod tests {
         assert_eq!(errors[0].phase, "start");
         assert_eq!(errors[0].correlation_vector, "corr-start");
 
+        reset_for_test();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sdk_emit_releases_provider_when_live_authorization_closes() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(false)));
+
+        assert!(mxc_telemetry::init(version(), MXC_CHANNEL));
+        assert!(mxc_telemetry::is_active());
+
+        emit_sdk_with_release(true, || panic!("authorization must suppress the event"));
+
+        assert!(!mxc_telemetry::is_active());
         reset_for_test();
     }
 

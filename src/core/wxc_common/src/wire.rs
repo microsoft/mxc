@@ -644,7 +644,7 @@ pub struct Experimental {
 /// Telemetry configuration (`telemetry`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Telemetry {
     /// Explicit telemetry opt-in for this invocation. `true` = opt in (still
     /// subject to the user's consent and to administrative policy — it can

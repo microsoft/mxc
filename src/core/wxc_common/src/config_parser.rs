@@ -5629,6 +5629,16 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_rejects_unknown_fields() {
+        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enable":true}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+
+        assert!(error.to_string().contains("telemetry.enable"));
+    }
+
+    #[test]
     fn experimental_telemetry_reports_migration() {
         let json = r#"{
             "process":{"commandLine":"echo hi"},

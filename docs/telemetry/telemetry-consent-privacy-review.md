@@ -1,7 +1,7 @@
 # Telemetry consent privacy review package
 
-**Status:** Approval pending. Privacy/legal approval is a merge/release gate
-for consent resource version 1; this document does not record approval.
+**Status:** Approval pending. Privacy/legal approval is a release gate for
+consent resource version 1; this document does not record approval.
 
 ## Product and purpose
 

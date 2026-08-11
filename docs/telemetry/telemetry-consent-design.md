@@ -271,8 +271,8 @@ the consent store itself.
 
 ## Live enforcement and event compatibility
 
-Consent and policy are checked immediately before every `Execution` and
-`Error` event write. A withdrawal or newly blocking policy therefore stops
+Consent and policy are checked immediately before every `MXC.Execution` and
+`MXC.Error` event write. A withdrawal or newly blocking policy therefore stops
 later writes from an already-running process even if the provider was
 registered earlier.
 

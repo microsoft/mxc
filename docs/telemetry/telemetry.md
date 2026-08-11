@@ -62,10 +62,11 @@ shared Part C custom event fields:
 ## Events
 
 The provider-qualified uploaded event identities are
-`Microsoft.MXC/Execution` and `Microsoft.MXC/Error`. `Microsoft.MXC` is the
-TraceLogging provider name; `Execution` and `Error` are the event names.
+`Microsoft.MXC/MXC.Execution` and `Microsoft.MXC/MXC.Error`. `Microsoft.MXC`
+is the TraceLogging provider name; `MXC.Execution` and `MXC.Error` are the
+event names.
 
-### Execution
+### MXC.Execution
 
 Emitted when a one-shot execution completes (success or failure). It is also
 emitted on early-exit failures in the one-shot executors — configuration,
@@ -74,9 +75,9 @@ result (with `mxc.exit_code` = 1 and `mxc.outcome` = `failure`).
 
 The state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `deprovision`) is also instrumented: each dispatched phase emits one
-`Execution` tagged with `mxc.phase`. Non-`exec` phases and `exec` dry-runs
+`MXC.Execution` tagged with `mxc.phase`. Non-`exec` phases and `exec` dry-runs
 report success with `mxc.exit_code` = 0; a completed `exec` reports the sandbox
-process exit code; a dispatch error reports `failure` plus an `Error`. As in
+process exit code; a dispatch error reports `failure` plus an `MXC.Error`. As in
 the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
 
 | Field | Type | Description |
@@ -89,6 +90,8 @@ the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
 | `mxc.phase` | string | State-aware lifecycle phase (`provision`\|`start`\|`exec`\|`stop`\|`deprovision`); empty for one-shot executions |
 | `__TlgCV__` | string | Microsoft Correlation Vector (MS-CV) — the lifecycle correlation key (see [Correlating a lifecycle](#correlating-a-lifecycle)); empty for one-shot executions |
 
+### MXC.Error
+
 Emitted on execution errors.
 
 | Field | Type | Description |
@@ -100,7 +103,7 @@ Emitted on execution errors.
 | `__TlgCV__` | string | Microsoft Correlation Vector (MS-CV) — the lifecycle correlation key (see [Correlating a lifecycle](#correlating-a-lifecycle)); empty for one-shot executions |
 
 > **No free-form error text is emitted.** Error messages can contain paths,
-> usernames, or credentials, so `Error` deliberately carries only the
+> usernames, or credentials, so `MXC.Error` deliberately carries only the
 > bounded `error_type` category and the numeric `exit_code` — never the
 > message string itself.
 
@@ -192,7 +195,7 @@ per-phase executor processes, which otherwise share no state.
 When telemetry is active, the executors install a global
 [`std::panic::set_hook`] handler — both the one-shot executors and the
 state-aware path (`run_state_aware_main`). If any thread panics, the hook emits
-a failure `Execution` plus an `Error` categorised as `internal_error`
+a failure `MXC.Execution` plus an `MXC.Error` categorised as `internal_error`
 (with `mxc.exit_code` = 101, the conventional Rust panic/abort exit code),
 attributed to the containment backend recorded at telemetry init and, on the
 state-aware path, the `mxc.phase` in progress. Consistent
@@ -209,7 +212,7 @@ hook, so the default stderr backtrace still prints.
 > runner does this for container-cleanup safety), the panic hook still fires
 > during unwinding and records the crash event with the `101` sentinel exit
 > code, then claims the exactly-once terminal-emit slot. The recovered
-> `Execution` completion event is therefore suppressed, so telemetry reports
+> `MXC.Execution` completion event is therefore suppressed, so telemetry reports
 > `mxc.exit_code` = 101 even though the recovered process ultimately exits with a
 > different code (`-1`). The `101` here is a "a panic occurred" sentinel, not a
 > claim about the observed process exit code; `outcome` and `error_type` remain
@@ -219,7 +222,7 @@ hook, so the default stderr backtrace still prints.
 ### Cancellation telemetry (console control handler)
 
 On Windows, when telemetry is active, `wxc-exec`'s console control handler emits
-a failure `Execution` plus an `Error` categorised as `cancelled` when the
+a failure `MXC.Execution` plus an `MXC.Error` categorised as `cancelled` when the
 operator interrupts a run (Ctrl-C, console close, or a system shutdown/logoff).
 The reported `mxc.exit_code` is 130 (the conventional "terminated by Ctrl-C"
 code, 128 + SIGINT) — a bounded attribution sentinel, since the OS ultimately
