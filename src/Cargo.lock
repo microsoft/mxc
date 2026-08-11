@@ -1490,6 +1490,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc_config_contract"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mxc_darwin"
 version = "0.7.0"
 dependencies = [
