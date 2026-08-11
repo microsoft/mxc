@@ -417,6 +417,12 @@
     "weekly": [],
     "enabled": [
       {
+        "os": "windows-prerelease-process-container",
+        "backends": [
+          "wslc"
+        ]
+      },
+      {
         "os": "windows-25h2",
         "backends": [
           "wslc"
