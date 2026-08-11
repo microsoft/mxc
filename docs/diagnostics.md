@@ -14,7 +14,7 @@ All layers stream into a single `mxc-diagnostic-console.exe` window in real time
 ## Quick Start
 
 ```powershell
-# Terminal 1: choose one token and start the diagnostic console
+# Terminal 1: generate one token and start the diagnostic console
 $env:MXC_DIAG_PIPE_TOKEN = [guid]::NewGuid().ToString("N")
 $env:MXC_DIAG_PIPE_TOKEN
 mxc-diagnostic-console.exe
@@ -24,6 +24,11 @@ $env:MXC_DIAG_CONSOLE = "1"
 $env:MXC_DIAG_PIPE_TOKEN = "<the same token as Terminal 1>"
 wxc-exec.exe --experimental my-config.json
 ```
+
+The token is intentionally generated and supplied by the caller rather than
+created implicitly by the console. Both processes must receive the same value
+before they start so they select the same pipe and establish the intended
+local diagnostic session.
 
 ## Configuration
 
