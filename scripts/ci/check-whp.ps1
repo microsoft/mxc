@@ -14,3 +14,4 @@ Write-Host "WHP is enabled and hypervisor is present."
 if ($env:GITHUB_OUTPUT) {
   Add-Content -Path $env:GITHUB_OUTPUT -Value "whp_available=true"
 }
+
