@@ -115,6 +115,8 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/wslcsdk.dll
+            src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
+            src/target/${{ matrix.target }}/release/wxc-test-driver.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -124,5 +126,3 @@ jobs:
             # src/target/${{ matrix.target }}/release/bin/kernel.elf
             # src/target/${{ matrix.target }}/release/snapshots/kernel.vmem
             # src/target/${{ matrix.target }}/release/snapshots/kernel.whp.cbor
-            # src/target/${{ matrix.target }}/release/wxc-test-driver.exe
-            # src/target/${{ matrix.target }}/release/wxc-ui-probe.exe

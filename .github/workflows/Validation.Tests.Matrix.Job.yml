@@ -24,7 +24,7 @@ jobs:
       has_linux: ${{ steps.matrix.outputs.has_linux }}
       has_macos: ${{ steps.matrix.outputs.has_macos }}
     steps:
-      - uses: actions/checkout@v3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Resolve test combinations
         id: matrix
@@ -40,10 +40,10 @@ jobs:
     runs-on: [ self-hosted, "1ES.Pool=${{ matrix.pool }}", "JobId=mxc-e2e-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Download ${{ matrix.target }} artifact
-        uses: actions/download-artifact@v3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: ${{ matrix.artifact }}
           path: artifacts/bin
@@ -77,7 +77,7 @@ jobs:
 
       - name: Upload failure logs
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
           path: |
@@ -98,10 +98,10 @@ jobs:
     runs-on: [ self-hosted, "1ES.Pool=${{ matrix.pool }}", "JobId=mxc-e2e-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Download ${{ matrix.target }} artifact
-        uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: ${{ matrix.artifact }}
           path: artifacts/bin
@@ -130,7 +130,7 @@ jobs:
 
       - name: Upload failure logs
         if: failure() || cancelled()
-        uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mxc-ci.log
@@ -147,10 +147,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Download ${{ matrix.target }} artifact
-        uses: actions/download-artifact@v3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: ${{ matrix.artifact }}
           path: artifacts/bin
@@ -166,7 +166,7 @@ jobs:
 
       - name: Upload failure logs
         if: failure() || cancelled()
-        uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mxc-ci.log

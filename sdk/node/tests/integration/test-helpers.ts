@@ -48,6 +48,8 @@ export function getSdkBinDir(): string {
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
   'wxc-host-prep.exe',
+  'wxc-ui-probe.exe',
+  'wxc-test-driver.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
