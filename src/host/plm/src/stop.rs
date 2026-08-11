@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use chrono::Local;
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
@@ -43,13 +44,24 @@ pub struct StopResult {
     pub adjusted_config_path: Option<PathBuf>,
 }
 
-pub fn default_log_dir(exe_dir: &Path) -> PathBuf {
+pub fn default_log_dir() -> PathBuf {
+    default_log_dir_with_local_app_data(std::env::var_os("LOCALAPPDATA").as_deref())
+}
+
+fn default_log_dir_with_local_app_data(local_app_data: Option<&OsStr>) -> PathBuf {
     let stamp = format!(
         "{}_pid{}",
         Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
         std::process::id()
     );
-    exe_dir.join("logs").join(stamp)
+    local_app_data
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Microsoft")
+        .join("MXC")
+        .join("PLM")
+        .join("logs")
+        .join(stamp)
 }
 
 #[derive(Debug)]
@@ -176,10 +188,10 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
+    // $LogDir defaults to the caller-writable per-user local data directory.
     // Including PID + sub-second component avoids collisions when
     // parallel PLM tasks finish in the same second.
-    let log_dir = opts.log_dir.unwrap_or_else(|| default_log_dir(exe_dir));
+    let log_dir = opts.log_dir.unwrap_or_else(default_log_dir);
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
@@ -425,6 +437,19 @@ mod tests {
         let (p, warn) = resolve_bin_path(None, &exe);
         assert_eq!(p, exe);
         assert!(warn.is_none(), "no operator intent means no warning");
+    }
+
+    #[test]
+    fn default_log_dir_uses_per_user_local_app_data() {
+        let root = Path::new(r"C:\Users\caller\AppData\Local");
+        let log_dir = default_log_dir_with_local_app_data(Some(root.as_os_str()));
+        assert!(log_dir.starts_with(root.join(r"Microsoft\MXC\PLM\logs")));
+    }
+
+    #[test]
+    fn default_log_dir_falls_back_to_temp_directory() {
+        let log_dir = default_log_dir_with_local_app_data(None);
+        assert!(log_dir.starts_with(std::env::temp_dir().join(r"Microsoft\MXC\PLM\logs")));
     }
 
     #[test]

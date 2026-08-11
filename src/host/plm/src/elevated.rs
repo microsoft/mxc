@@ -23,16 +23,16 @@ use std::time::{Duration, Instant};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_CANCELLED, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_BROKEN_PIPE, ERROR_CANCELLED, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+    ERROR_PIPE_LISTENING, ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE,
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
-    SetNamedPipeHandleState, NAMED_PIPE_MODE, PIPE_NOWAIT, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    PeekNamedPipe, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
 };
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, OpenProcess,
@@ -48,14 +48,21 @@ use crate::secure_scratch::{ProfileGuard, RecoveryMarker, SecureScratch};
 const PIPE_PREFIX: &str = r"\\.\pipe\mxc-plm-elevated-";
 const WAIT_TIMEOUT_DURATION: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
-const ERROR_NO_DATA: i32 = 232;
 const SW_HIDE: i32 = 0;
+const HANDSHAKE_READY: u8 = 0xa5;
 const CONTROL_STOP: u8 = 1;
 static GUARDIAN_SINGLETON: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuardControl {
     Stop,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PipeState {
+    Data(u32),
+    Empty,
+    Closed(u32),
 }
 
 fn parse_guard_control(value: u8) -> Result<GuardControl> {
@@ -252,6 +259,20 @@ impl GuardedOwner {
                 anyhow::bail!("guarded PLM owner exited before stop");
             }
 
+            match pipe_state(pipe)? {
+                PipeState::Empty => {
+                    std::thread::sleep(POLL_INTERVAL);
+                    continue;
+                }
+                PipeState::Closed(error) => {
+                    self.cancel_for_pipe_break()?;
+                    anyhow::bail!(
+                        "guarded PLM control pipe closed before stop (PeekNamedPipe error {error})"
+                    );
+                }
+                PipeState::Data(_) => {}
+            }
+
             let mut control = [0u8; 1];
             match pipe.read(&mut control) {
                 Ok(1) => match parse_guard_control(control[0]) {
@@ -264,13 +285,9 @@ impl GuardedOwner {
                     }
                 },
                 Ok(0) => {
-                    self.cancel_for_pipe_break()?;
-                    anyhow::bail!("guarded PLM control pipe closed before stop");
-                }
-                Ok(_) => unreachable!("one-byte control read returned too many bytes"),
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {
                     std::thread::sleep(POLL_INTERVAL);
                 }
+                Ok(_) => unreachable!("one-byte control read returned too many bytes"),
                 Err(error) => {
                     self.cancel_for_pipe_break()?;
                     return Err(error).context("guarded PLM control pipe failed before stop");
@@ -511,7 +528,11 @@ fn launch_connected_child(
     // from closing it a second time after File assumes ownership.
     let pipe_raw = pipe.0 .0;
     std::mem::forget(pipe);
-    let pipe_file = unsafe { std::fs::File::from_raw_handle(pipe_raw) };
+    let mut pipe_file = unsafe { std::fs::File::from_raw_handle(pipe_raw) };
+    pipe_file
+        .write_all(&[HANDSHAKE_READY])
+        .and_then(|_| pipe_file.flush())
+        .context("failed to complete PLM control-pipe readiness handshake")?;
     Ok((pipe_file, process, deadline))
 }
 
@@ -554,7 +575,12 @@ pub fn run_child(
         .open(pipe_name)
         .with_context(|| format!("failed to connect to PLM control pipe {pipe_name}"))?;
     authenticate_server(&pipe, server_pid)?;
-    set_pipe_nowait(&pipe)?;
+    let mut ready = [0u8; 1];
+    pipe.read_exact(&mut ready)
+        .context("failed to receive PLM control-pipe readiness")?;
+    if ready[0] != HANDSHAKE_READY {
+        anyhow::bail!("invalid PLM control-pipe readiness byte");
+    }
     if operation != Operation::Start || owner_pid.is_none() {
         anyhow::bail!("elevated start requires a guarded owner PID");
     }
@@ -611,12 +637,10 @@ fn run_guarded_start_child(pipe: &mut std::fs::File, owner_pid: u32) -> Result<(
         write_error_response(pipe, &error)?;
         return Err(error);
     }
-    set_pipe_mode(pipe, PIPE_WAIT)?;
     if let Err(error) = write_header(pipe, ResponseKind::Success, 0).and_then(|_| pipe.flush()) {
         let _ = owner.cancel_for_pipe_break();
         return Err(error).context("failed to return guarded PLM start success");
     }
-    set_pipe_mode(pipe, PIPE_NOWAIT)?;
     owner.wait_for_control(pipe)
 }
 
@@ -657,7 +681,6 @@ fn run_guarded_stop_with_stopped(pipe: &mut std::fs::File, owner: &mut GuardedOw
     let scratch = SecureScratch::new()?;
     run_monitored_wpr_stop(pipe, owner, scratch.trace_path())?;
     owner.mark_stopped()?;
-    set_pipe_mode(pipe, PIPE_WAIT)?;
     write_header(pipe, ResponseKind::Stopped, 0)
         .and_then(|_| pipe.flush())
         .context("failed to return elevated PLM WPR-stopped milestone")?;
@@ -712,12 +735,9 @@ fn run_monitored_wpr_stop(
                 Err(_) => stop_unattended = true,
             }
 
-            let mut control = [0u8; 1];
-            match pipe.read(&mut control) {
-                Ok(0 | 1) => stop_unattended = true,
-                Ok(_) => unreachable!("one-byte control read returned too many bytes"),
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {}
-                Err(_) => stop_unattended = true,
+            match pipe_state(pipe) {
+                Ok(PipeState::Empty) => {}
+                Ok(PipeState::Data(_) | PipeState::Closed(_)) | Err(_) => stop_unattended = true,
             }
         }
         if Instant::now() >= deadline {
@@ -770,7 +790,6 @@ fn terminate_child(child: &mut std::process::Child) {
 }
 
 fn write_error_response(pipe: &mut std::fs::File, error: &anyhow::Error) -> Result<()> {
-    set_pipe_mode(pipe, PIPE_WAIT)?;
     let message = format!("{error:#}");
     let bytes = message.as_bytes();
     let len = (bytes.len() as u64).min(MAX_ERROR_BYTES);
@@ -828,13 +847,31 @@ fn authenticate_server(pipe: &std::fs::File, expected_pid: u32) -> Result<()> {
     Ok(())
 }
 
-fn set_pipe_nowait(pipe: &std::fs::File) -> Result<()> {
-    set_pipe_mode(pipe, PIPE_NOWAIT)
-}
-
-fn set_pipe_mode(pipe: &std::fs::File, mode: NAMED_PIPE_MODE) -> Result<()> {
-    unsafe { SetNamedPipeHandleState(HANDLE(pipe.as_raw_handle()), Some(&mode), None, None) }
-        .context("failed to set guarded PLM control pipe mode")
+fn pipe_state(pipe: &std::fs::File) -> Result<PipeState> {
+    let mut available = 0u32;
+    match unsafe {
+        PeekNamedPipe(
+            HANDLE(pipe.as_raw_handle()),
+            None,
+            0,
+            None,
+            Some(&mut available),
+            None,
+        )
+    } {
+        Ok(()) if available == 0 => Ok(PipeState::Empty),
+        Ok(()) => Ok(PipeState::Data(available)),
+        Err(error) => {
+            let raw = (error.code().0 as u32) & 0xffff;
+            if raw == ERROR_NO_DATA.0 {
+                Ok(PipeState::Empty)
+            } else if raw == ERROR_BROKEN_PIPE.0 || raw == ERROR_PIPE_NOT_CONNECTED.0 {
+                Ok(PipeState::Closed(raw))
+            } else {
+                Err(error).context("failed to inspect guarded PLM control pipe")
+            }
+        }
+    }
 }
 
 fn is_process_elevated() -> Result<bool> {
@@ -1001,13 +1038,23 @@ fn read_some_polling(
     deadline: Instant,
 ) -> Result<usize> {
     loop {
-        match pipe.read(buffer) {
-            Ok(read) => return Ok(read),
-            Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {
+        match pipe_state(pipe)? {
+            PipeState::Empty => {
                 ensure_child_running(process, deadline)?;
                 std::thread::sleep(POLL_INTERVAL);
             }
-            Err(error) => return Err(error).context("failed to read elevated PLM response"),
+            PipeState::Closed(_) => return Ok(0),
+            PipeState::Data(available) => {
+                let amount = buffer.len().min(available as usize);
+                let read = pipe
+                    .read(&mut buffer[..amount])
+                    .context("failed to read elevated PLM response")?;
+                if read != 0 {
+                    return Ok(read);
+                }
+                ensure_child_running(process, deadline)?;
+                std::thread::sleep(POLL_INTERVAL);
+            }
         }
     }
 }
@@ -1393,6 +1440,63 @@ mod tests {
         for invalid in [0, 2, u8::MAX] {
             assert!(parse_guard_control(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn empty_connected_pipe_is_not_reported_as_closed() {
+        let pipe_name = new_pipe_name().unwrap();
+        let server = OwnedHandle(create_pipe(&pipe_name).unwrap());
+        let client_name = pipe_name.clone();
+        let client_thread = std::thread::spawn(move || {
+            for _ in 0..100 {
+                match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&client_name)
+                {
+                    Ok(client) => return client,
+                    Err(_) => std::thread::sleep(POLL_INTERVAL),
+                }
+            }
+            panic!("client did not connect to test pipe");
+        });
+
+        for _ in 0..100 {
+            match unsafe { ConnectNamedPipe(server.0, None) } {
+                Ok(()) => break,
+                Err(error) => {
+                    let raw = (error.code().0 as u32) & 0xffff;
+                    if raw == ERROR_PIPE_CONNECTED.0 {
+                        break;
+                    }
+                    assert_eq!(raw, ERROR_PIPE_LISTENING.0);
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
+
+        let mut client = client_thread.join().unwrap();
+        assert_eq!(pipe_state(&client).unwrap(), PipeState::Empty);
+
+        let raw = server.0 .0;
+        std::mem::forget(server);
+        let mut server_file = unsafe { std::fs::File::from_raw_handle(raw) };
+        server_file.write_all(&[CONTROL_STOP]).unwrap();
+        server_file.flush().unwrap();
+        assert_eq!(pipe_state(&client).unwrap(), PipeState::Data(1));
+
+        let mut control = [0u8; 1];
+        client.read_exact(&mut control).unwrap();
+        assert_eq!(control[0], CONTROL_STOP);
+
+        drop(server_file);
+        for _ in 0..100 {
+            if matches!(pipe_state(&client).unwrap(), PipeState::Closed(_)) {
+                return;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        panic!("closed test pipe remained connected");
     }
 
     fn armed_lifecycle() -> GuardLifecycle {

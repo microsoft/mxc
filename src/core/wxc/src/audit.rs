@@ -39,11 +39,7 @@ pub fn capture_and_stop(
 ) -> Result<CapturedAudit, String> {
     use std::fmt::Write as _;
 
-    let plm = plm_exe_path().ok_or_else(|| "could not resolve plm.exe path".to_string())?;
-    let exe_dir = plm
-        .parent()
-        .ok_or_else(|| "plm.exe path has no parent directory".to_string())?;
-    let log_dir = plm::stop::default_log_dir(exe_dir);
+    let log_dir = plm::stop::default_log_dir();
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| format!("failed to create audit log directory: {error}"))?;
     let trace_path = log_dir.join("trace.etl");
