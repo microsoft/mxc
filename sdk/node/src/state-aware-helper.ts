@@ -10,6 +10,12 @@ import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
 
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
+// WSLc's state-aware surface shipped at a later schema version than the
+// isolation_session default above. It is intentionally NOT gate-locked to the
+// canonical `stateAware` constant (which tracks isolation_session): the two
+// backends were promoted independently. See `DEFAULT_STATE_AWARE_VERSION`.
+export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
+
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
@@ -21,12 +27,24 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] a
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
 export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
+export const WSLC_ID_PREFIX = 'wslc';
+
+// Per-backend default schema version stamped onto an envelope when the caller
+// supplies none. Each backend's state-aware surface was promoted at its own
+// schema version, so the default is backend-specific rather than a single
+// global constant.
+const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> = {
+  isolation_session: STATE_AWARE_VERSION,
+  windows_sandbox: STATE_AWARE_VERSION,
+  wslc: WSLC_STATE_AWARE_VERSION,
+};
 
 // Mapping from a sandboxId's leading prefix segment to the wire-format
 // backend key. Extended as more state-aware backends opt in.
 export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
   [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
   [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
+  [WSLC_ID_PREFIX]: 'wslc',
 };
 
 /**
@@ -67,7 +85,8 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
-  const version = (typeof backendSpecific.version === 'string' && backendSpecific.version) || STATE_AWARE_VERSION;
+  const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
+  const version = (typeof backendSpecific.version === 'string' && backendSpecific.version) || defaultVersion;
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };

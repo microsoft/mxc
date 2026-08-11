@@ -232,7 +232,7 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session` and `windows_sandbox` (both Windows-only; both still experimental, so every call must pass `{ experimental: true }`). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only; all still experimental, so every call must pass `{ experimental: true }`). The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
 
 ```typescript
 import {
@@ -264,6 +264,8 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 > **Correlating telemetry across phases:** when experimental telemetry is enabled, `provisionSandbox` returns a `correlationVector` (a Microsoft Correlation Vector). Relay it verbatim as `options.correlationVector` on every later phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The client relays the value unchanged; the executor validates it on each phase and derives that phase's own vector from it (spinning a fresh child element off a mutable base, or reseeding if it is missing or malformed). It is `undefined` when telemetry is off, and safe to omit otherwise.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
+
+`wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. WSLc state-aware requests default to schema `0.8.0-alpha`. See [`docs/wsl/`](https://github.com/microsoft/mxc/tree/main/docs/wsl/) for details.
 
 **Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first; when the failure came from an underlying platform API, the error also carries discrete diagnostic fields rather than a prose blob:
 
@@ -397,10 +399,10 @@ spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | Chi
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
-// State-aware lifecycle (currently `isolation_session` and `windows_sandbox` — both Windows-only)
+// State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
 // `config` on provisionSandbox is required for backends whose provision config
 // has a required member (isolation_session: the network acknowledgment) and
-// optional otherwise (windows_sandbox).
+// optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)       → IPty             // streaming
